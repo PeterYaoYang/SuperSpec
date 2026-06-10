@@ -1,17 +1,17 @@
 # Review Disclosure Fixed-Point 修订与实施交接 2026-06-10
 
-> 用途：本文档是 disclosure 工作流的交接指令。与 `FIX_HANDOFF_2026-06-10.md`（基础 guard 修复）是两条独立工作线。
+> 用途：本文档是 disclosure 工作流的交接指令。与 `docs/plans/FIX_HANDOFF_2026-06-10.md`（基础 guard 修复）是两条独立工作线。
 > **要解决的原始痛点**：子代理（reviewer）返回的 blocker / scope risk / open question / assumption 中，凡是需要用户裁决的内容，当前可以被主线程静默消化——主线程自行修改 artifact、重跑 reviewer 到 pass，用户从头到尾没见过原始问题和可选项就"被推进"了。隐藏手法有三种（见审查文档）：改分类降级（P0-2）、转述洗白（P1-1）、伪造用户决策（P0-1）。本工作线的全部产出都服务于：**需要用户确认的内容必须原文披露给用户、用户裁决必须被结构化记录并驱动重审，且历史 blocker 不可被重跑抹掉。**
 > **前置依赖**：基础修复的 FIX-11（review_scope 合同）、FIX-12（悬空引用检查）应先落地或至少同会话先行实现——它们是本设计的地基。
 > 必读输入（按顺序）：
-> 1. `docs/proposals/superspec/REVIEW_DISCLOSURE_FIXED_POINT_DESIGN.md`——原设计稿（codex 起草，**含已知缺陷，不得直接实施**）。
-> 2. `docs/proposals/superspec/REVIEW_DISCLOSURE_FIXED_POINT_REVIEW_2026-06-10.md`（v2）——对设计稿的专项审查：2 个 P0、6 个 P1、5 个 P2、轮次经济五规则（R1-R5）、可追溯性检查方法。**本文档是修订的权威依据。**
-> 3. `docs/proposals/superspec/WORKFLOW_FULL_AUDIT_2026-06-10.md` 的 §9（实证审计）——特别是 H-1（omnibus refresh）与 H-2（批量补票），设计必须吸收这两个实证形态。
-> 4. `docs/proposals/superspec/SPEC.md`——v1 audit-only 定位红线。
+> 1. `docs/designs/REVIEW_DISCLOSURE_FIXED_POINT_DESIGN.md`——原设计稿（codex 起草，**含已知缺陷，不得直接实施**）。
+> 2. `docs/audits/REVIEW_DISCLOSURE_FIXED_POINT_REVIEW_2026-06-10.md`（v2）——对设计稿的专项审查：2 个 P0、6 个 P1、5 个 P2、轮次经济五规则（R1-R5）、可追溯性检查方法。**本文档是修订的权威依据。**
+> 3. `docs/audits/WORKFLOW_FULL_AUDIT_2026-06-10.md` 的 §9（实证审计）——特别是 H-1（omnibus refresh）与 H-2（批量补票），设计必须吸收这两个实证形态。
+> 4. `docs/SPEC.md`——v1 audit-only 定位红线。
 
 ## Stage A：修订设计文档（纯文档工作，先于一切代码）
 
-按 REVIEW 文档 §6 的清单逐项修订 `REVIEW_DISCLOSURE_FIXED_POINT_DESIGN.md`：
+按 REVIEW 文档 §6 的清单逐项修订 `docs/designs/REVIEW_DISCLOSURE_FIXED_POINT_DESIGN.md`：
 
 **"Phase 1 动工前必须完成"的 9 项**：
 

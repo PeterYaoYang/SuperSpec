@@ -32,11 +32,11 @@ description: "3.在 SuperSpec RED/GREEN guard 检查下执行 tasks，并从 Ope
 1. 对 apply isolation 和 execution mode 使用 AskUserQuestion，并等待明确选择。
 2. 当 dirty worktree、untracked files 或 branch state 需要决策时，使用 AskUserQuestion 处理 branch handling。
 3. 验证 apply readiness：
-   ```bash
-   "${SUPERSPEC_GUARD:-./node_modules/.bin/superspec-guard}" check-apply-ready --change "<change>"
+   ```text
+   superspec guard check-apply-ready --change "<change>"
    ```
 4. 获取 native apply context 和 task list：
-   ```bash
+   ```text
    openspec instructions apply --change "<change>" --json
    ```
    读取 `contextFiles` 下的每个路径，遵守 `openspec-apply-change` 的要求。把返回的 task list、progress 和 dynamic instruction 作为实现 source of truth，并按 `tasks.md` 的结构化字段（`dependencies`、`parallel_group`、`read_scope`、`write_scope`、`test_refs`、`invariant_refs`）判断串行/并行顺序。
@@ -44,22 +44,22 @@ description: "3.在 SuperSpec RED/GREEN guard 检查下执行 tasks，并从 Ope
    - 如果 native apply 返回 `state:"all_done"`，但当前 change 仍有 live/pass 的 `kind:"main_adjudication"` 且 `review_decision:"request_changes"`，或已经存在 unresolved `task_reopen`，不要把它当成“可归档”。
    - 若 `request_changes_route:"reopen_tasks"`，读取 `reopen_task_ids`，逐个判断当前 task 所处阶段：
      - 如果该 task 仍是 `[x]`，说明还处于首次回退前；先由主线程基于本轮 review 的结构化 output 写出该 task 的 `task_reopen` evidence 与配套 `status:"superseded"` evidence，形成完整 reopen package，再执行：
-     ```bash
-     "${SUPERSPEC_GUARD:-./node_modules/.bin/superspec-guard}" check-task-reopen --change "<change>" --task-id "<task-id>"
+     ```text
+     superspec guard check-task-reopen --change "<change>" --task-id "<task-id>"
      ```
        只有该 guard `allow` 后，才允许把对应 task 从 `- [x]` 改为 `- [ ]`，并把它重新纳入本轮 apply。
      - 如果该 task 已经是 `[ ]`，且当前 `tasks.md` 已匹配授权后的 `after_tasks_sha256`，说明它已经处于合法 reopened apply；此时直接续跑 `check-task-edit -> RED/GREEN -> check-task-complete`，不要重复创建 `task_reopen`，也不要再次执行 pre-revert `check-task-reopen`。
    - 若 `request_changes_route:"change_update"`，停止 apply，回 propose / change update；不要试图通过 reopen 继续实现。
 6. 对每个 pending task（包括刚刚合法 reopen 的 task），在任何实现编辑前执行：
-   ```bash
-   "${SUPERSPEC_GUARD:-./node_modules/.bin/superspec-guard}" check-task-edit --change "<change>" --task-id "<task-id>"
+   ```text
+   superspec guard check-task-edit --change "<change>" --task-id "<task-id>"
    ```
 7. 在 runtime/business implementation edits 前产出 RED evidence，除非有允许的 `no_tdd_reason` 或处于 characterization mode。RED/GREEN evidence 必须引用 task 的 `test_refs`，并在 task 声明 `invariant_refs` 时同步记录 `invariant_refs`。若 task 来自 reopen，本轮 successor GREEN / alternative verification / manual verification 必须携带同一 `reopen_id`。
 8. 按 native dynamic instruction 和 `contextFiles` 指引，实现最小 task scope。
 9. 产出 GREEN evidence，保留 `test_id`、`invariant_refs`、命令、输出摘要和 raw log ref。
 10. 勾选 task 前执行：
-   ```bash
-   "${SUPERSPEC_GUARD:-./node_modules/.bin/superspec-guard}" check-task-complete --change "<change>" --task-id "<task-id>"
+   ```text
+   superspec guard check-task-complete --change "<change>" --task-id "<task-id>"
    ```
    然后按 native apply semantics 将 task 从 `- [ ]` 改为 `- [x]`。
 11. 如果该 task 来自 reopen，在重新勾回 `[x]` 后写入 `kind:"task_reopen_resolved"` evidence，关闭本轮 reopen 授权；不要复用旧 reopen 生命周期。reopen 只授权：

@@ -3,7 +3,7 @@
 > 状态：Audit findings / 2026-06-10
 > 审计范围：SPEC.md v0.4 全文、`scripts/superspec/src/*`（gates/evidence/state/core/openspec/tasks/invariants/archive/git/paths/util/workflow_loop/project_init）、5 个 skill 模板与已安装副本、`scripts/superspec/tests/*`、分发层（adapters/schemas/README/DISTRIBUTION.md）、既有 7 篇审计/设计文档；另含**实证审计**：真实 change `refactor-vacation-duration-api` 的完整 `.superspec/` 轨迹（76 条 ledger、200+ evidence/raw 文件、state、reports）。
 > 审计方法：主线程精读 SPEC.md 与关键代码段 + 4 个并行 subagent 全文扫描（状态机拓扑 / evidence 校验 / skill 合同与分发 / 测试覆盖），关键发现经主线程抽查代码核实；实证部分由主线程直接解析 ledger 时间线、比对 evidence blob 指纹与当前文件、抽查证据原文。SPEC 只代表"应然"，§9 实证部分专门记录"实然"与应然的偏差。
-> 关联文档：`REVIEW_DISCLOSURE_FIXED_POINT_REVIEW_2026-06-10.md`（针对 review disclosure 设计稿的专项审查，其 P0/P1 发现此处不重复展开，仅交叉引用）。
+> 关联文档：`docs/audits/REVIEW_DISCLOSURE_FIXED_POINT_REVIEW_2026-06-10.md`（针对 review disclosure 设计稿的专项审查，其 P0/P1 发现此处不重复展开，仅交叉引用）。
 
 ## 0. 总评
 

@@ -32,16 +32,16 @@ description: "2.生成 SuperSpec propose 包，将 artifact 编写委托给 Open
 ## 步骤 / Steps
 
 1. 验证 explore completion：
-   ```bash
-   "${SUPERSPEC_GUARD:-./node_modules/.bin/superspec-guard}" check-enter --change "<change>" --gate explore_complete
+   ```text
+   superspec guard check-enter --change "<change>" --gate explore_complete
    ```
 2. 从 OpenSpec 获取 artifact build order：
-   ```bash
+   ```text
    openspec status --change "<change>" --json
    ```
    按 `openspec-propose` 的说明解析 `applyRequires`、`artifacts`（status + dependencies）、`planningHome`、`changeRoot`、`artifactPaths` 和 `actionContext`。按依赖顺序编写 artifacts（proposal -> specs -> design -> tasks）。
 3. 对每个状态为 `ready` 的 OpenSpec artifact，都通过 native engine 编写：
-   ```bash
+   ```text
    openspec instructions <artifact-id> --change "<change>" --json
    ```
    - 读取 `dependencies` artifacts 和 `.superspec/artifacts/discovery.md` 作为上下文。
@@ -51,29 +51,29 @@ description: "2.生成 SuperSpec propose 包，将 artifact 编写委托给 Open
    - 启动 `critic` native-subagent review，范围限定在 proposal 的 scope / intent / non-goals / hidden assumptions；evidence 必须带 `review_round_id`（`proposal_reviewed-r<N>`）、`findings[]` 和 pinned `target_refs`（`proposal.md` + `.superspec/artifacts/discovery.md`）。
    - 主线程记录 `main_review_digest`，给每个 finding 写处置：material findings（scope / non_goal / acceptance / business_semantics / design_boundary）必须 `needs_user_decision` 并停下来，用 AskUserQuestion 把原文和 A/B/C/D 选项抛给用户，拿到 `user_review_decision` 后才能继续；发现 discovery 不完整时 route 用 `return_explore` 回 explore，不得自行补范围。
    - 修订 `proposal.md` 后必须重跑 `critic`（新一轮 round），直到 clean round + digest 通过，然后验证：
-   ```bash
-   "${SUPERSPEC_GUARD:-./node_modules/.bin/superspec-guard}" check-enter --change "<change>" --gate propose.proposal_reviewed
+   ```text
+   superspec guard check-enter --change "<change>" --gate propose.proposal_reviewed
    ```
    guard 未放行前不要开始编写 `specs/**` 或 `design.md`（两者的 artifact entry gate 都是 `proposal_reviewed`）。
 5. `design.md` 编写后：获取 `architect`、`critic`、`test-engineer` 的 native-subagent review evidence（带 `review_round_id` `design_complete-r<N>` + `findings[]` + 全量 pinned target：`proposal.md` + `design.md` + `specs/**/*.md` + discovery）。主线程记录 `main_review_digest`；material findings 必须停下来向用户披露并等待 `user_review_decision`，按裁决改 design/specs 后 supersede 旧轮并重审。对于 design option selection 和 final design confirmation，使用 AskUserQuestion 并等待明确选择；记录 human-confirmation evidence，然后验证：
-   ```bash
-   "${SUPERSPEC_GUARD:-./node_modules/.bin/superspec-guard}" check-enter --change "<change>" --gate propose.design_reviewed
+   ```text
+   superspec guard check-enter --change "<change>" --gate propose.design_reviewed
    ```
 6. `specs/**` 和 `design.md` 编写后、`test-contract.md` 编写前：起草 `.superspec/artifacts/business-invariants.md`。每条 `INV-*` 必须有 statement、scope、source anchors、acceptance_refs、risk_refs、confidence、enforcement_level、test_refs_or_review_only_reason；记录 rejected candidates，防止把当前实现习惯误升格为业务真相。获取 `critic` + `test-engineer` review evidence（带 `review_round_id` `invariants_reviewed-r<N>` + `findings[]` + pinned target：business-invariants + design + specs glob）。主线程记录 `main_review_digest`；material 业务语义 finding 必须 `needs_user_decision` 并等待用户裁决，不得把实现习惯静默升格为 invariant 真相。然后验证：
-   ```bash
-   "${SUPERSPEC_GUARD:-./node_modules/.bin/superspec-guard}" check-enter --change "<change>" --gate propose.invariants_reviewed
+   ```text
+   superspec guard check-enter --change "<change>" --gate propose.invariants_reviewed
    ```
 7. `business-invariants.md` 完成后、`tasks.md` 编写前：起草 `.superspec/artifacts/test-contract.md`，覆盖 specs 中每个 `#### Scenario` 和命中本 change scope 的 hard `INV-*`，包含 TEST ids、关联 INV ids、预期 RED reasons、预期 GREEN criteria 和 commands。获取 `test-engineer` + `critic` review evidence（带 `review_round_id` `test_contract_drafted-r<N>` + `findings[]` + pinned target：test-contract + invariants + design + specs glob）。主线程记录 `main_review_digest`；验收口径变更等 material finding 必须用户裁决。然后验证：
-   ```bash
-   "${SUPERSPEC_GUARD:-./node_modules/.bin/superspec-guard}" check-enter --change "<change>" --gate propose.test_plan_drafted
+   ```text
+   superspec guard check-enter --change "<change>" --gate propose.test_plan_drafted
    ```
 8. 通过 `openspec instructions tasks` 编写 `tasks.md` 时：为每个 task 补充 `requirement_refs`、`invariant_refs`（必须是 business-invariants `INV-*` ids 的子集）、`test_refs`（必须是 test-contract TEST ids 的子集）、`read_scope`、`write_scope`、dependencies、TDD metadata，以及需要时的 parallel group。若 reviewer 对 task 映射提出 round-tagged findings，走 `tasks_complete-r<N>` 披露循环（pinned target：tasks + test-contract + invariants + design + specs glob）；验收口径问题 route 用 `return_test_contract_drafted`，映射问题用 `stay_same_gate_fix`。对于 tasks review confirmation，使用 AskUserQuestion 并等待明确选择；记录 human-confirmation evidence，然后验证：
-   ```bash
-   "${SUPERSPEC_GUARD:-./node_modules/.bin/superspec-guard}" check-enter --change "<change>" --gate propose.tasks_mapped
+   ```text
+   superspec guard check-enter --change "<change>" --gate propose.tasks_mapped
    ```
 9. 验证 apply readiness：
-   ```bash
-   "${SUPERSPEC_GUARD:-./node_modules/.bin/superspec-guard}" check-apply-ready --change "<change>"
+   ```text
+   superspec guard check-apply-ready --change "<change>"
    ```
 
 遇到任何 guard `block` 就停止。

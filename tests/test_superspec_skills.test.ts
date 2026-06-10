@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 function findRepoRoot(start: string): string {
   let dir = resolve(start);
   while (true) {
-    if (existsSync(join(dir, "package.json")) && existsSync(join(dir, ".codex")) && existsSync(join(dir, "docs", "proposals", "superspec"))) return dir;
+    if (existsSync(join(dir, "package.json")) && existsSync(join(dir, "templates")) && existsSync(join(dir, "docs", "DISTRIBUTION.md"))) return dir;
     const parent = dirname(dir);
     if (parent === dir) return resolve(start);
     dir = parent;
@@ -16,7 +16,6 @@ function findRepoRoot(start: string): string {
 }
 
 const REPO = findRepoRoot(dirname(fileURLToPath(import.meta.url)));
-const SKILL_DIR = join(REPO, ".codex", "skills");
 const PACKAGE_ROOT = REPO;
 const TEMPLATE_ROOT = join(PACKAGE_ROOT, "templates");
 const ADAPTER_ROOT = join(PACKAGE_ROOT, "adapters", "codex");
@@ -45,61 +44,95 @@ const REQUIRED_ROLES = [
   "verifier",
 ] as const;
 
-function skillText(name: string): string {
-  return readFileSync(join(SKILL_DIR, name, "SKILL.md"), "utf8");
-}
-
 function templateSkillText(name: string): string {
   return readFileSync(join(TEMPLATE_ROOT, "workflow", "skills", name, "SKILL.md"), "utf8");
 }
 
 function proposalDocText(relPath: string): string {
-  return readFileSync(join(REPO, "docs", "proposals", "superspec", relPath), "utf8");
+  return readFileSync(join(REPO, "docs", relPath), "utf8");
 }
 
 function repoText(relPath: string): string {
   return readFileSync(join(REPO, relPath), "utf8");
 }
 
+function npmCommand(): string {
+  return process.platform === "win32" ? "npm.cmd" : "npm";
+}
+
 test("superspec package declares workflow payload surface", () => {
   const pkg = JSON.parse(repoText("package.json"));
-  assert.equal(pkg.name, "@irenshi/superspec");
+  assert.equal(pkg.name, "superspec");
+  assert.equal(pkg.private, false);
   assert.equal(pkg.type, "module");
-  assert.equal(pkg.engines.node, ">=24");
-  assert.equal(pkg.bin["superspec-guard"], "./superspec_guard.ts");
-  assert.equal(pkg.bin["superspec-init"], "./superspec_init.ts");
+  assert.equal(pkg.engines.node, ">=20.19.0");
+  assert.equal(pkg.bin.superspec, "./bin/superspec.js");
+  assert.equal(pkg.bin["superspec-guard"], "./bin/superspec-guard.js");
+  assert.equal(pkg.bin["superspec-init"], "./bin/superspec-init.js");
+  assert.equal(pkg.exports["."].default, "./dist/superspec.js");
+  assert.equal(pkg.exports["./superspec_guard"].default, "./dist/superspec_guard.js");
+  assert.equal(pkg.exports["./superspec_init"].default, "./dist/superspec_init.js");
+  assert.equal(pkg.scripts.build, "node build.js");
+  assert.equal(pkg.scripts.prepack, "npm run build");
+  assert.equal(pkg.scripts.prepublishOnly, "npm run build");
+  assert.ok(pkg.files.includes("bin"));
+  assert.ok(pkg.files.includes("dist"));
   assert.ok(pkg.files.includes("templates"));
   assert.ok(pkg.files.includes("adapters"));
   assert.ok(pkg.files.includes("schemas"));
-  assert.ok(pkg.files.includes("src"));
+  assert.equal(pkg.files.includes("src"), false);
+  assert.equal(pkg.files.includes("superspec.ts"), false);
+  assert.equal(pkg.files.includes("tests"), false);
+});
+
+test("compiled runtime resolves package payload from the package root", () => {
+  const build = spawnSync(npmCommand(), ["run", "build"], { cwd: REPO, encoding: "utf8" });
+  assert.equal(build.status, 0, build.stderr || build.stdout);
+  const proc = spawnSync(process.execPath, [
+    "-e",
+    [
+      "const m = await import('./dist/src/install_engine.js');",
+      "const result = m.load_install_map();",
+      "if (result.problems.length) throw new Error(result.problems.join('\\n'));",
+      "if (!m.PACKAGE_ROOT.endsWith('SuperSpec')) throw new Error(`bad package root: ${m.PACKAGE_ROOT}`);",
+      "process.stdout.write(String(result.mappings.length));",
+    ].join("\n"),
+  ], { cwd: REPO, encoding: "utf8" });
+  assert.equal(proc.status, 0, proc.stderr || proc.stdout);
+  assert.equal(proc.stdout.trim(), "15");
+});
+
+test("bin launchers report unsupported Node versions before loading compiled runtime", () => {
+  const proc = spawnSync(process.execPath, [
+    "-e",
+    "import('./bin/launch.js').then((m) => process.stdout.write([m.nodeVersionError('20.18.0') ?? 'ok', m.nodeVersionError('20.19.0') ?? 'ok'].join('\\n')))",
+  ], { cwd: REPO, encoding: "utf8" });
+  assert.equal(proc.status, 0);
+  assert.match(proc.stdout, /requires Node\.js >=20\.19\.0/);
+  assert.match(proc.stdout, /20\.18\.0/);
+  assert.match(proc.stdout, /\nok$/);
 });
 
 test("all superspec skills exist", () => {
   for (const name of REQUIRED_SKILLS) {
-    assert.equal(existsSync(join(SKILL_DIR, name, "SKILL.md")), true, name);
+    assert.equal(existsSync(join(TEMPLATE_ROOT, "workflow", "skills", name, "SKILL.md")), true, name);
   }
 });
 
-test("package templates mirror repo-local superspec skills", () => {
+test("install map carries every package skill template", () => {
+  const installMap = JSON.parse(repoText("adapters/codex/install-map.json"));
+  const sources = new Set(installMap.mappings.map((item: Record<string, string>) => item.source));
   for (const name of REQUIRED_SKILLS) {
-    assert.equal(templateSkillText(name), skillText(name), name);
+    assert.ok(sources.has(`templates/workflow/skills/${name}/SKILL.md`), name);
   }
 });
 
-test("package templates mirror repo-local superspec roles", () => {
+test("package carries repo-local superspec roles", () => {
   for (const name of REQUIRED_ROLES) {
-    const agentRel = `.codex/agents/${name}.toml`;
-    const promptRel = `.codex/prompts/${name}.md`;
-    assert.equal(
-      readFileSync(join(ADAPTER_ROOT, "agents", `${name}.toml`), "utf8"),
-      repoText(agentRel),
-      agentRel,
-    );
-    assert.equal(
-      readFileSync(join(TEMPLATE_ROOT, "workflow", "prompts", `${name}.md`), "utf8"),
-      repoText(promptRel),
-      promptRel,
-    );
+    const agent = readFileSync(join(ADAPTER_ROOT, "agents", `${name}.toml`), "utf8");
+    const prompt = readFileSync(join(TEMPLATE_ROOT, "workflow", "prompts", `${name}.md`), "utf8");
+    assert.ok(agent.includes(`name = "${name}"`), name);
+    assert.ok(prompt.trim().length > 0, name);
   }
 });
 
@@ -110,7 +143,7 @@ test("codex adapter maps generic workflow templates to repo-local surfaces", () 
   assert.ok(mappings.includes("skill:templates/workflow/skills/superspec-review/SKILL.md->.codex/skills/superspec-review/SKILL.md"));
   assert.ok(mappings.includes("prompt:templates/workflow/prompts/critic.md->.codex/prompts/critic.md"));
   assert.ok(mappings.includes("agent:adapters/codex/agents/critic.toml->.codex/agents/critic.toml"));
-  assert.ok(mappings.includes("wrapper:adapters/codex/wrappers/superspec_guard->scripts/superspec_guard"));
+  assert.equal(mappings.some((item: string) => item.startsWith("wrapper:")), false);
   for (const item of installMap.mappings) {
     assert.equal(existsSync(join(PACKAGE_ROOT, item.source)), true, item.source);
   }
@@ -133,12 +166,12 @@ test("package carries sidecar templates and install manifest schema", () => {
 
 test("script-only and internal stages are not user visible skills", () => {
   for (const name of REMOVED_STAGE_SKILLS) {
-    assert.equal(existsSync(join(SKILL_DIR, name, "SKILL.md")), false, name);
+    assert.equal(existsSync(join(TEMPLATE_ROOT, "workflow", "skills", name, "SKILL.md")), false, name);
   }
 });
 
 test("distribution doc matches visible superspec skill set", () => {
-  const actual = readdirSync(SKILL_DIR).filter((name) => name.startsWith("superspec-")).sort();
+  const actual = readdirSync(join(TEMPLATE_ROOT, "workflow", "skills")).filter((name) => name.startsWith("superspec-")).sort();
   assert.deepEqual(actual, [...REQUIRED_SKILLS].sort());
 
   const text = proposalDocText("DISTRIBUTION.md");
@@ -152,6 +185,11 @@ test("distribution doc matches visible superspec skill set", () => {
 test("superspec distribution files are not gitignored", () => {
   const checked = [
     "package.json",
+    "bin/launch.js",
+    "bin/superspec.js",
+    "bin/superspec-guard.js",
+    "bin/superspec-init.js",
+    "build.js",
     "src/core.ts",
     "tests/test_superspec_guard.test.ts",
     "templates/workflow/skills/superspec-review/SKILL.md",
@@ -160,11 +198,8 @@ test("superspec distribution files are not gitignored", () => {
     "adapters/codex/install-map.json",
     "templates/sidecar/test-contract.md",
     "schemas/install-manifest.schema.json",
-    "adapters/codex/wrappers/superspec_guard",
-    "adapters/codex/wrappers/superspec_init",
-    ".codex/skills/superspec-review/SKILL.md",
-    ".codex/agents/critic.toml",
-    ".codex/prompts/critic.md",
+    "superspec.ts",
+    "tsconfig.build.json",
   ];
   for (const path of checked) {
     const proc = spawnSync("git", ["check-ignore", "-q", path], { cwd: REPO });
@@ -172,29 +207,39 @@ test("superspec distribution files are not gitignored", () => {
   }
 });
 
-test("superspec CI watches wrappers and distribution ignore rules", () => {
+test("superspec CI watches package distribution inputs", () => {
   const workflow = repoText(".github/workflows/superspec.yml");
   assert.ok(workflow.includes('"src/**"'));
   assert.ok(workflow.includes('"tests/**"'));
   assert.ok(workflow.includes('"templates/**"'));
   assert.ok(workflow.includes('"adapters/**"'));
+  assert.ok(workflow.includes('"bin/**"'));
+  assert.ok(workflow.includes('"build.js"'));
+  assert.ok(workflow.includes('"tsconfig.build.json"'));
   assert.ok(workflow.includes('"superspec_guard.ts"'));
   assert.ok(workflow.includes('"superspec_init.ts"'));
+  assert.ok(workflow.includes('"superspec.ts"'));
   assert.ok(workflow.includes('".gitignore"'));
 });
 
 test("skills call guard before advancing", () => {
   for (const name of REQUIRED_SKILLS) {
     const text = templateSkillText(name);
-    assert.ok(text.includes("SUPERSPEC_GUARD"), name);
-    assert.ok(text.includes("./node_modules/.bin/superspec-guard"), name);
+    assert.ok(text.includes("superspec"), name);
+    assert.ok(text.includes(" guard "), name);
+    assert.equal(text.includes("SUPERSPEC_CLI"), false, name);
+    assert.equal(text.includes("./node_modules/.bin/superspec-guard"), false, name);
+    assert.equal(text.includes("SUPERSPEC_GUARD"), false, name);
     assert.equal(text.includes("${SUPERSPEC_GUARD:-./scripts/superspec_guard}"), false, name);
+    assert.equal(text.includes("${"), false, name);
+    assert.equal(text.includes("test -f "), false, name);
+    assert.equal(text.includes("```bash"), false, name);
     assert.ok(text.includes("guard `block`"), name);
     assert.ok(text.includes("## 语言规则 / Language"), name);
     assert.ok(text.includes("默认使用简体中文"), name);
   }
-  assert.ok(templateSkillText("superspec-explore").includes("SUPERSPEC_INIT"));
-  assert.ok(templateSkillText("superspec-explore").includes("./node_modules/.bin/superspec-init"));
+  assert.ok(templateSkillText("superspec-explore").includes("init --scope project"));
+  assert.equal(templateSkillText("superspec-explore").includes("SUPERSPEC_INIT"), false);
 });
 
 test("propose owns openspec package and sidecar gates", () => {

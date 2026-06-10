@@ -957,7 +957,8 @@ test("standalone init help emits init-specific usage", () => {
   const proc = spawnSync(process.execPath, [INIT_TS, "--help"], { encoding: "utf8" });
   assert.equal(proc.status, 0);
   assert.equal(proc.stderr, "");
-  assert.ok(proc.stdout.includes("usage: superspec_init [-h] [--path PATH] [--create]"));
+  assert.ok(proc.stdout.includes("usage: superspec init [-h] [--scope {project,user}]"));
+  assert.ok(proc.stdout.includes("--user"));
 });
 
 test("openspec status golden fixture matches 1.4.1 shape", () => {

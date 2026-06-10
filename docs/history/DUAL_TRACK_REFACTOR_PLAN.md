@@ -1,10 +1,10 @@
 # SuperSpec 双轨同步改造方案
 
-> Historical note: 本文是早期 refactor 草案，保留用于设计取舍追溯。当前实现规范以 `docs/proposals/superspec/SPEC.md` 为准。本文中把 `test-contract.md` 作为 OpenSpec 自定义 artifact 的方案已经被 v0.4 sidecar overlay 方案取代，请勿按本文实现。
+> Historical note: 本文是早期 refactor 草案，保留用于设计取舍追溯。当前实现规范以 `docs/SPEC.md` 为准。本文中把 `test-contract.md` 作为 OpenSpec 自定义 artifact 的方案已经被 v0.4 sidecar overlay 方案取代，请勿按本文实现。
 
 ## 0. 文档状态
 
-本文是历史改造方案，不覆盖、不修改 `docs/proposals/superspec/DESIGN.md`，也不再作为当前实现依据。当前实现、修改和审查必须以 `docs/proposals/superspec/SPEC.md` 为准。
+本文是历史改造方案，不覆盖、不修改 `docs/history/DESIGN.md`，也不再作为当前实现依据。当前实现、修改和审查必须以 `docs/SPEC.md` 为准。
 
 历史状态：
 
@@ -16,9 +16,9 @@
 
 当前已知冲突：
 
-- `DESIGN.md` 倾向把 `review.md` / `verification.md` 放入 OpenSpec artifact graph。
+- `docs/history/DESIGN.md` 倾向把 `review.md` / `verification.md` 放入 OpenSpec artifact graph。
 - 本文要求 `review` / `verification` 固定为 post-apply evidence gates，不作为普通 pre-apply OpenSpec artifact。
-- `DESIGN.md` 倾向零平行状态机。
+- `docs/history/DESIGN.md` 倾向零平行状态机。
 - 本文要求引入受 OpenSpec 同步约束的 `guard_route_phase`。
 
 历史风险：若脱离顶部 historical note 阅读本文，执行者可能按旧“零状态”或旧 review/verification artifact graph 理解早期方案；当前不得据此覆盖 `SPEC.md`。

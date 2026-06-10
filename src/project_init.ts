@@ -1,6 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { spawnSync } from "node:child_process";
 import {
   REQUIRED_SUPERSPEC_AGENT_ROLES,
   REQUIRED_OPENSPEC_CODEX_SKILLS,
@@ -9,6 +8,8 @@ import {
   reason,
   read_agent_toml_name,
   read_skill_frontmatter_name,
+  commandExists,
+  runCommand,
 } from "./core.ts";
 import { install_workflow } from "./install_engine.ts";
 
@@ -27,23 +28,8 @@ const ROLE_DESCRIPTIONS: Record<string, string> = {
   verifier: "Final completion evidence and verification review",
 };
 
-function runCommand(cmd: string, args: string[], cwd: string): { status: number | null; stdout: string; stderr: string; error?: Error } {
-  const proc = spawnSync(cmd, args, { cwd, encoding: "utf8", timeout: 60_000 });
-  return {
-    status: proc.status,
-    stdout: typeof proc.stdout === "string" ? proc.stdout : "",
-    stderr: typeof proc.stderr === "string" ? proc.stderr : "",
-    error: proc.error,
-  };
-}
-
 function commandFailure(proc: { stdout: string; stderr: string; error?: Error }): string {
   return (proc.error?.message ?? (proc.stderr || proc.stdout)).trim();
-}
-
-function commandExists(cmd: string, cwd: string): boolean {
-  const proc = runCommand("sh", ["-c", `command -v ${cmd}`], cwd);
-  return !proc.error && proc.status === 0;
 }
 
 function openspecSkillProblems(repoRoot: string): string[] {
@@ -103,7 +89,7 @@ function writeSuperSpecPrompt(repoRoot: string, name: string): string {
 }
 
 function ensureOpenSpecCodex(repoRoot: string, actions: Action[]): string[] {
-  if (!commandExists("openspec", repoRoot)) return ["openspec CLI is not available in PATH"];
+  if (!commandExists("openspec", { cwd: repoRoot })) return ["openspec CLI is not available in PATH"];
 
   let problems = openspecSkillProblems(repoRoot);
   if (problems.length === 0) {
@@ -111,7 +97,7 @@ function ensureOpenSpecCodex(repoRoot: string, actions: Action[]): string[] {
     return [];
   }
 
-  const init = runCommand("openspec", ["init", "--tools", "codex", "."], repoRoot);
+  const init = runCommand("openspec", ["init", "--tools", "codex", "."], { cwd: repoRoot, timeout: 60_000 });
   actions.push({
     action: "openspec init --tools codex .",
     status: init.status === 0 ? "updated" : "failed",
@@ -123,7 +109,7 @@ function ensureOpenSpecCodex(repoRoot: string, actions: Action[]): string[] {
   problems = openspecSkillProblems(repoRoot);
   if (problems.length === 0) return [];
 
-  const update = runCommand("openspec", ["update", "--force", "."], repoRoot);
+  const update = runCommand("openspec", ["update", "--force", "."], { cwd: repoRoot, timeout: 60_000 });
   actions.push({
     action: "openspec update --force .",
     status: update.status === 0 ? "updated" : "failed",
@@ -165,7 +151,7 @@ function ensureSuperSpecRoles(repoRoot: string, actions: Action[]): string[] {
 // D4 (audit G-1): SuperSpec's own surfaces are installed manifest-driven from the install map;
 // it runs before the role fallback generator so canonical templates win on fresh installs.
 function ensureSuperSpecWorkflow(repoRoot: string, actions: Action[], force: boolean): string[] {
-  const result = install_workflow(repoRoot, { force });
+  const result = install_workflow(repoRoot, { force, scope: "project" });
   for (const item of result.actions) {
     actions.push({
       action: item.action,
@@ -192,7 +178,7 @@ export function project_init(repoRootRaw = process.cwd(), opts: { force?: boolea
       ...decision,
       project_root: repoRoot,
       actions,
-      next_allowed_actions: ["fix project_init_failed reasons, then rerun superspec-init (or this repository's superspec_init.ts)"],
+      next_allowed_actions: ["fix project_init_failed reasons, then rerun superspec init --scope project"],
     };
   }
 

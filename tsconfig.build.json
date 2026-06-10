@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "dist",
+    "rootDir": ".",
+    "declaration": true,
+    "rewriteRelativeImportExtensions": true
+  },
+  "include": ["superspec.ts", "superspec_guard.ts", "superspec_init.ts", "src/**/*.ts"],
+  "exclude": ["tests/**"]
+}

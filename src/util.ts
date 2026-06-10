@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { spawnSync } from "node:child_process";
 
 export const SCHEMA_VERSION = 1;
@@ -317,8 +317,14 @@ export function printDecision(decision: JsonMap): void {
   process.stdout.write(`${JSON.stringify(decision, null, 2)}\n`);
 }
 
-export function runCommand(cmd: string, args: string[], opts: { cwd?: string; timeout?: number } = {}): { status: number | null; stdout: string; stderr: string; error?: Error } {
-  const result = spawnSync(cmd, args, {
+export function runCommand(
+  cmd: string,
+  args: string[],
+  opts: { cwd?: string; timeout?: number; platform?: NodeJS.Platform } = {},
+): { status: number | null; stdout: string; stderr: string; error?: Error } {
+  const platform = opts.platform ?? process.platform;
+  const invocation = platform === "win32" ? windowsCommandInvocation(cmd, args, opts.cwd) : { cmd, args };
+  const result = spawnSync(invocation.cmd, invocation.args, {
     cwd: opts.cwd,
     encoding: "utf8",
     timeout: opts.timeout,
@@ -426,8 +432,51 @@ export function toPosix(pathValue: string): string {
   return pathValue.split(sep).join("/");
 }
 
-export function commandExists(cmd: string): boolean {
-  const proc = runCommand("sh", ["-c", `command -v ${cmd}`], { timeout: 5_000 });
+export function commandLookupInvocation(cmd: string, platform: NodeJS.Platform = process.platform): { cmd: string; args: string[]; shell: boolean } {
+  if (platform === "win32") return { cmd: "where.exe", args: [cmd], shell: false };
+  return { cmd: "sh", args: ["-c", `command -v ${cmd}`], shell: false };
+}
+
+function resolveWindowsCommand(cmd: string, cwd?: string): string {
+  if (cmd.includes("\\") || cmd.includes("/") || extname(cmd)) return cmd;
+  const lookup = spawnSync("where.exe", [cmd], {
+    cwd,
+    encoding: "utf8",
+    timeout: 5_000,
+  });
+  if (lookup.status !== 0 || typeof lookup.stdout !== "string") return cmd;
+  return lookup.stdout.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? cmd;
+}
+
+export function windowsShellEscapeArg(arg: string): string {
+  let escaped = String(arg);
+  escaped = escaped.replace(/(\\*)"/g, "$1$1\\\"");
+  escaped = escaped.replace(/(\\*)$/g, "$1$1");
+  escaped = `"${escaped}"`;
+  return escaped.replace(/([()[\]{}^=;!'+,`~&|<>%" *?])/g, "^$1");
+}
+
+export function windowsCmdShimInvocation(cmdPath: string, args: string[], comspec = "cmd.exe"): { cmd: string; args: string[] } {
+  return {
+    cmd: comspec,
+    args: ["/d", "/s", "/c", [windowsShellEscapeArg(cmdPath), ...args.map(windowsShellEscapeArg)].join(" ")],
+  };
+}
+
+function windowsCommandInvocation(cmd: string, args: string[], cwd?: string): { cmd: string; args: string[] } {
+  const resolved = resolveWindowsCommand(cmd, cwd);
+  if (/\.(?:cmd|bat)$/i.test(resolved)) return windowsCmdShimInvocation(resolved, args);
+  return { cmd: resolved, args };
+}
+
+export function commandExists(cmd: string, opts: { cwd?: string; platform?: NodeJS.Platform } = {}): boolean {
+  const lookup = commandLookupInvocation(cmd, opts.platform);
+  const proc = spawnSync(lookup.cmd, lookup.args, {
+    cwd: opts.cwd,
+    encoding: "utf8",
+    timeout: 5_000,
+    shell: lookup.shell,
+  });
   return !proc.error && proc.status === 0;
 }
 

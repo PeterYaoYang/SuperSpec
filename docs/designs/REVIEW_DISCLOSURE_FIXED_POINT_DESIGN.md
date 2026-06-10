@@ -1,6 +1,6 @@
 # SuperSpec review disclosure fixed-point 设计
 
-> 状态：**Revised / 2026-06-10**（按 `REVIEW_DISCLOSURE_FIXED_POINT_REVIEW_2026-06-10.md` v2 审查结论修订；**Stage A 完成，待用户确认后进入 Stage B 实施**）
+> 状态：**Revised / 2026-06-10**（按 `docs/audits/REVIEW_DISCLOSURE_FIXED_POINT_REVIEW_2026-06-10.md` v2 审查结论修订；**Stage A 完成，待用户确认后进入 Stage B 实施**）
 > 目标：修复多角色交叉审查中 reviewer blocker、scope risk、open question、agent assumption 可被主线程静默吸收、重跑到 pass 后继续推进的问题。
 > 前置地基（已落地）：基础 guard 修复 FIX-11（propose 期 `review_scope[]` 合同）、FIX-12（全局 `dangling_evidence_ref` 悬空引用检查）。
 
@@ -715,7 +715,7 @@ Route evidence 必须记录在 disclosure evidence 的 `finding_dispositions[].r
 
 - 将 proposal advisory review 转为 internal gate。
 - `proposal_reviewed` 必须在 specs/design/tasks 前运行，并加入 `propose_complete` subgate list。
-- 更新 canonical state surfaces：`ARTIFACT_ENTER_GATE`、`GATE_ROUTE` / aliases、`propose_complete` subgate list、`docs/proposals/superspec/SPEC.md`、`scripts/superspec/templates/workflow/skills/superspec-propose/SKILL.md`、安装后的 `.codex/skills/superspec-propose/SKILL.md`。
+- 更新 canonical state surfaces：`ARTIFACT_ENTER_GATE`、`GATE_ROUTE` / aliases、`propose_complete` subgate list、`docs/SPEC.md`、`scripts/superspec/templates/workflow/skills/superspec-propose/SKILL.md`、安装后的 `.codex/skills/superspec-propose/SKILL.md`。
 - 更新 predecessor checks：`design_complete` 直接 require `proposal_reviewed`；`invariants_reviewed` 直接 require `design_complete`；`test_contract_drafted` 直接 require `invariants_reviewed`；`tasks_complete` 直接 require `test_contract_drafted`，或显式 require `proposal_reviewed`、`design_complete`、`invariants_reviewed`、`test_contract_drafted` 全链。
 - 为 design gate 增加 target map 和 finding ledger。
 - 测试 proposal blocker 不能被主线程静默修掉。

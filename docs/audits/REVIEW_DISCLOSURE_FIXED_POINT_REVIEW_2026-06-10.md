@@ -1,7 +1,7 @@
 # REVIEW_DISCLOSURE_FIXED_POINT_DESIGN 审查结论与修复方案
 
 > 状态：Review findings / 2026-06-10（v2：同日深查修订——推广 P0-1 至全部证据通道，新增 P1-6、P2-5，为 R3 增加锚定风险对策）
-> 审查对象：`docs/proposals/superspec/REVIEW_DISCLOSURE_FIXED_POINT_DESIGN.md`（下称"设计文档"）
+> 审查对象：`docs/designs/REVIEW_DISCLOSURE_FIXED_POINT_DESIGN.md`（下称"设计文档"）
 > 审查方式：设计文档逐节审查 + 对照 `scripts/superspec/src/gates.ts`、`scripts/superspec/src/evidence.ts` 实现核实
 > 结论：问题诊断准确、方向正确、落地顺序合理。但存在 2 个 P0 信任漏洞、6 个 P1 问题、5 个 P2 问题和一组成本/退化风险。全部问题均有明确修复方案，绝大多数是设计文档层面的文字改动，应在 Phase 1 动工前完成。
 

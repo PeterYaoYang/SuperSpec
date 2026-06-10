@@ -39,7 +39,7 @@ critic 初审结论：本改造可以纳入 SuperSpec，但必须作为 propose 
 
 ## 3. 与现有 SuperSpec 边界的关系
 
-必须保持 `docs/proposals/superspec/SPEC.md` v0.4 的边界：
+必须保持 `docs/SPEC.md` v0.4 的边界：
 
 - 不 fork OpenSpec schema。
 - 不把 `business-invariants` 放进 OpenSpec artifact graph。
@@ -54,7 +54,7 @@ critic 初审结论：本改造可以纳入 SuperSpec，但必须作为 propose 
 新增模板源：
 
 ```text
-docs/proposals/superspec/templates/business-invariants.md
+docs/templates/business-invariants.md
 ```
 
 运行时路径：
@@ -276,8 +276,8 @@ v2 hook 可进一步把 `business-invariants` 的 fingerprint 绑定到第一次
 建议分四步落地：
 
 1. 文档与模板
-   - 新增 `docs/proposals/superspec/templates/business-invariants.md`。
-   - 将本 RFC 审查通过后的核心条款合入 `docs/proposals/superspec/SPEC.md`。
+   - 新增 `docs/templates/business-invariants.md`。
+   - 将本 RFC 审查通过后的核心条款合入 `docs/SPEC.md`。
 
 2. Skill
    - `superspec-explore`：在 discovery 中收集 candidate invariants。

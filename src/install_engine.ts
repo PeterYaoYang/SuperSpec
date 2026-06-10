@@ -20,11 +20,22 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SCHEMA_VERSION, type JsonMap, isObject, sha256_file } from "./util.ts";
 
-export const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+function find_package_root(moduleUrl: string): string {
+  const moduleDir = dirname(fileURLToPath(moduleUrl));
+  for (const candidate of [resolve(moduleDir, ".."), resolve(moduleDir, "..", "..")]) {
+    if (existsSync(join(candidate, "package.json")) && existsSync(join(candidate, INSTALL_MAP_REL))) return candidate;
+  }
+  return resolve(moduleDir, "..");
+}
+
 export const INSTALL_MAP_REL = join("adapters", "codex", "install-map.json");
-export const INSTALL_MANIFEST_REL = join(".codex", "superspec", "install-manifest.json");
+export const PACKAGE_ROOT = find_package_root(import.meta.url);
+export const PROJECT_INSTALL_MANIFEST_REL = join(".codex", "superspec", "install-manifest.json");
+export const USER_INSTALL_MANIFEST_REL = join("superspec", "install-manifest.json");
+export const INSTALL_MANIFEST_REL = PROJECT_INSTALL_MANIFEST_REL;
 
 export type InstallMapping = { kind: string; source: string; target: string };
+export type InstallScope = "project" | "user";
 export type ManifestFileEntry = { path: string; sha256: string; managed: boolean; preexisting: boolean };
 export type EngineAction = {
   action: string;
@@ -81,7 +92,8 @@ export function manifest_shape_problems(manifest: any): string[] {
   if (typeof manifest.superspecVersion !== "string" || !manifest.superspecVersion) problems.push("superspecVersion missing");
   if (typeof manifest.installedAt !== "string" || Number.isNaN(Date.parse(manifest.installedAt))) problems.push("installedAt missing or not a date-time");
   if (!Number.isInteger(manifest.guardSchemaVersion) || manifest.guardSchemaVersion < 1) problems.push("guardSchemaVersion missing");
-  if (!["npm-bin", "repo-wrapper"].includes(manifest.guardWiring)) problems.push("guardWiring must be npm-bin or repo-wrapper");
+  if (!["global-bin", "npm-bin", "repo-wrapper"].includes(manifest.guardWiring)) problems.push("guardWiring must be global-bin, npm-bin, or repo-wrapper");
+  if (manifest.installScope !== undefined && !["project", "user"].includes(manifest.installScope)) problems.push("installScope must be project or user");
   if (!Array.isArray(manifest.createdDirs) || manifest.createdDirs.some((item: any) => typeof item !== "string" || !item)) problems.push("createdDirs malformed");
   if (!Array.isArray(manifest.dataGlobs) || manifest.dataGlobs.some((item: any) => typeof item !== "string" || !item)) problems.push("dataGlobs malformed");
   if (!Array.isArray(manifest.files)) {
@@ -98,8 +110,8 @@ export function manifest_shape_problems(manifest: any): string[] {
   return problems;
 }
 
-export function read_install_manifest(repoRoot: string): { manifest: JsonMap | null; problems: string[] } {
-  const manifestPath = join(repoRoot, INSTALL_MANIFEST_REL);
+export function read_install_manifest(repoRoot: string, opts: { scope?: InstallScope } = {}): { manifest: JsonMap | null; problems: string[] } {
+  const manifestPath = join(repoRoot, install_manifest_rel(opts.scope ?? "project"));
   if (!existsSync(manifestPath)) return { manifest: null, problems: [] };
   let parsed: any;
   try {
@@ -112,17 +124,39 @@ export function read_install_manifest(repoRoot: string): { manifest: JsonMap | n
   return { manifest: parsed, problems: [] };
 }
 
-function write_install_manifest(repoRoot: string, packageRoot: string, files: ManifestFileEntry[], createdDirs: string[]): JsonMap {
+export function install_manifest_rel(scope: InstallScope = "project"): string {
+  return scope === "user" ? USER_INSTALL_MANIFEST_REL : PROJECT_INSTALL_MANIFEST_REL;
+}
+
+function scoped_mapping(mapping: InstallMapping, scope: InstallScope): InstallMapping | null {
+  if (scope === "project") return mapping;
+  if (mapping.kind === "wrapper") return null;
+  const prefix = ".codex/";
+  return {
+    ...mapping,
+    target: mapping.target.startsWith(prefix) ? mapping.target.slice(prefix.length) : mapping.target,
+  };
+}
+
+function scoped_mappings(mappings: InstallMapping[], scope: InstallScope): InstallMapping[] {
+  return mappings.flatMap((mapping) => {
+    const scoped = scoped_mapping(mapping, scope);
+    return scoped === null ? [] : [scoped];
+  });
+}
+
+function write_install_manifest(repoRoot: string, packageRoot: string, files: ManifestFileEntry[], createdDirs: string[], scope: InstallScope): JsonMap {
   const manifest: JsonMap = {
     superspecVersion: package_version(packageRoot),
     installedAt: new Date().toISOString(),
     guardSchemaVersion: SCHEMA_VERSION,
-    guardWiring: "repo-wrapper",
+    guardWiring: "global-bin",
+    installScope: scope,
     files,
     createdDirs: [...new Set(createdDirs)].sort(),
     dataGlobs: ["**/.superspec"],
   };
-  const manifestPath = join(repoRoot, INSTALL_MANIFEST_REL);
+  const manifestPath = join(repoRoot, install_manifest_rel(scope));
   mkdirSync(dirname(manifestPath), { recursive: true });
   writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
   return manifest;
@@ -155,9 +189,12 @@ function install_one(repoRoot: string, packageRoot: string, mapping: InstallMapp
   };
 }
 
-export function install_workflow(repoRoot: string, opts: { force?: boolean; packageRoot?: string } = {}): EngineResult {
+export function install_workflow(repoRoot: string, opts: { force?: boolean; packageRoot?: string; scope?: InstallScope } = {}): EngineResult {
   const packageRoot = opts.packageRoot ?? PACKAGE_ROOT;
-  const { mappings, problems } = load_install_map(packageRoot);
+  const scope = opts.scope ?? "project";
+  const loaded = load_install_map(packageRoot);
+  const mappings = scoped_mappings(loaded.mappings, scope);
+  const problems = loaded.problems;
   const actions: EngineAction[] = [];
   if (problems.length > 0) return { actions, problems, manifest: null };
 
@@ -188,17 +225,20 @@ export function install_workflow(repoRoot: string, opts: { force?: boolean; pack
       actions.push({ action: `install ${mapping.target}`, status: "skipped", detail: "pre-existing file with different content kept; rerun with --force to overwrite (backs up *.bak)" });
     }
   }
-  const manifest = write_install_manifest(repoRoot, packageRoot, files, createdDirs);
+  const manifest = write_install_manifest(repoRoot, packageRoot, files, createdDirs, scope);
   return { actions, problems: [], manifest };
 }
 
-export function update_workflow(repoRoot: string, opts: { packageRoot?: string } = {}): EngineResult {
+export function update_workflow(repoRoot: string, opts: { packageRoot?: string; scope?: InstallScope } = {}): EngineResult {
   const packageRoot = opts.packageRoot ?? PACKAGE_ROOT;
+  const scope = opts.scope ?? "project";
   const actions: EngineAction[] = [];
-  const { manifest: previous, problems: manifestProblems } = read_install_manifest(repoRoot);
+  const { manifest: previous, problems: manifestProblems } = read_install_manifest(repoRoot, { scope });
   if (manifestProblems.length > 0) return { actions, problems: manifestProblems, manifest: null };
-  if (previous === null) return { actions, problems: ["install manifest missing; run superspec_init (install) before --update"], manifest: null };
-  const { mappings, problems } = load_install_map(packageRoot);
+  if (previous === null) return { actions, problems: ["install manifest missing; run superspec init before --update"], manifest: null };
+  const loaded = load_install_map(packageRoot);
+  const mappings = scoped_mappings(loaded.mappings, scope);
+  const problems = loaded.problems;
   if (problems.length > 0) return { actions, problems, manifest: null };
 
   const prevByPath = new Map<string, ManifestFileEntry>(
@@ -257,7 +297,7 @@ export function update_workflow(repoRoot: string, opts: { packageRoot?: string }
     }
   }
 
-  const manifest = write_install_manifest(repoRoot, packageRoot, files, createdDirs);
+  const manifest = write_install_manifest(repoRoot, packageRoot, files, createdDirs, scope);
   return { actions, problems: [], manifest };
 }
 
@@ -272,9 +312,10 @@ function remove_empty_created_dirs(repoRoot: string, createdDirs: string[], acti
   }
 }
 
-export function uninstall_workflow(repoRoot: string, opts: { dryRun?: boolean } = {}): EngineResult {
+export function uninstall_workflow(repoRoot: string, opts: { dryRun?: boolean; scope?: InstallScope } = {}): EngineResult {
+  const scope = opts.scope ?? "project";
   const actions: EngineAction[] = [];
-  const { manifest, problems: manifestProblems } = read_install_manifest(repoRoot);
+  const { manifest, problems: manifestProblems } = read_install_manifest(repoRoot, { scope });
   if (manifestProblems.length > 0) return { actions, problems: manifestProblems, manifest: null };
   if (manifest === null) return { actions, problems: ["install manifest missing; nothing to uninstall (manifest is the only removal authority)"], manifest: null };
 
@@ -303,10 +344,11 @@ export function uninstall_workflow(repoRoot: string, opts: { dryRun?: boolean } 
 
   if (!opts.dryRun) {
     remove_empty_created_dirs(repoRoot, manifest.createdDirs as string[], actions);
-    const manifestPath = join(repoRoot, INSTALL_MANIFEST_REL);
+    const manifestRel = install_manifest_rel(scope);
+    const manifestPath = join(repoRoot, manifestRel);
     if (existsSync(manifestPath)) {
       unlinkSync(manifestPath);
-      actions.push({ action: `uninstall ${INSTALL_MANIFEST_REL}`, status: "removed" });
+      actions.push({ action: `uninstall ${manifestRel}`, status: "removed" });
     }
     const manifestDir = dirname(manifestPath);
     if (existsSync(manifestDir) && readdirSync(manifestDir).length === 0) rmdirSync(manifestDir);

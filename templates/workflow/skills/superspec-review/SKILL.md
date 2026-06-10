@@ -34,23 +34,17 @@ description: "4.在 review 阶段完成 SuperSpec implementation review 和 fina
 
 Review 前必须确认这些 SuperSpec distribution files 存在；缺失、无效或当前 Codex surface 无法从它们启动 native subagents 时，review gate 必须 block：
 
-```bash
-"${SUPERSPEC_GUARD:-./node_modules/.bin/superspec-guard}" check-init --change "<change>"
-test -f .codex/agents/code-reviewer.toml
-test -f .codex/prompts/code-reviewer.md
-test -f .codex/agents/architect.toml
-test -f .codex/prompts/architect.md
-test -f .codex/agents/critic.toml
-test -f .codex/prompts/critic.md
-test -f .codex/agents/verifier.toml
-test -f .codex/prompts/verifier.md
+```text
+superspec guard check-init --change "<change>"
 ```
+
+Required project-scope files: `.codex/agents/code-reviewer.toml`、`.codex/prompts/code-reviewer.md`、`.codex/agents/architect.toml`、`.codex/prompts/architect.md`、`.codex/agents/critic.toml`、`.codex/prompts/critic.md`、`.codex/agents/verifier.toml`、`.codex/prompts/verifier.md`。
 
 ## 执行步骤
 
 1. 检查 review readiness：
-   ```bash
-   "${SUPERSPEC_GUARD:-./node_modules/.bin/superspec-guard}" check-review-ready --change "<change>"
+   ```text
+   superspec guard check-review-ready --change "<change>"
    ```
 2. 从 `git diff`、OpenSpec artifacts、tasks、business invariants、test contract、red/green evidence 和 `.superspec` evidence 构建审查范围。
 3. 运行 repo-local review guidance：
@@ -74,7 +68,7 @@ test -f .codex/prompts/verifier.md
      - 不调用 `check-review-complete`
      - 不生成面向 allow 的 `verification_review` / `final_test` evidence
 6. 仅在 allow 评估 path 执行 final verification：
-   ```bash
+   ```text
    openspec validate "<change>"
    ```
    - 运行 test contract 要求的项目/test commands，并记录 `kind:"final_test"` evidence；最小字段为 `gate:"review_complete"`、`test_command`、可读的 `output_ref`，并依赖 canonical evidence `status:"pass"` 作为通过状态。
@@ -90,8 +84,8 @@ test -f .codex/prompts/verifier.md
      - `change_update`：显式说明需要回 propose / change update；此时 `reopen_task_ids` 必须为空。
    - `request_changes` 只负责给出结构化回退方向，不直接修改 task checkbox。
 8. 仅在 allow path 检查 review completion：
-   ```bash
-   "${SUPERSPEC_GUARD:-./node_modules/.bin/superspec-guard}" check-review-complete --change "<change>"
+   ```text
+   superspec guard check-review-complete --change "<change>"
    ```
    - 只有终局 allow path 才应执行并通过这一步。
    - 如果本轮 `main_adjudication.review_decision:"request_changes"`，则本轮 review 的正确出口是停止并回到对应路由；不要把 `request_changes` 轮次伪装成 `review_complete`。

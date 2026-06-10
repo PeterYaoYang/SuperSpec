@@ -9,11 +9,11 @@ SuperSpec（OpenSpec overlay 工作流：guard CLI + 5 skill + sidecar evidence�
 
 | 文档 | 内容 | 在本计划中的角色 |
 |---|---|---|
-| `WORKFLOW_FULL_AUDIT_2026-06-10.md` | 全面审计：静态 23 项（A-1~G-3）+ 实证 8 项（H-1~H-8） | 问题清单与证据（file:line） |
-| `REVIEW_DISCLOSURE_FIXED_POINT_REVIEW_2026-06-10.md` | disclosure 设计稿专项审查：13 项 + 轮次经济 R1-R5 | Phase 3 修订设计稿的权威依据 |
-| `REVIEW_DISCLOSURE_FIXED_POINT_DESIGN.md` | disclosure 机制设计本体（**含已知缺陷，未经 Phase 3 修订不得实施**） | Phase 3 的修订对象、Phase 4 的实施依据 |
-| `FIX_HANDOFF_2026-06-10.md` | 基础修复的逐项实施细节（FIX-1~13） | Phase 1/2 的操作手册 |
-| `DISCLOSURE_IMPL_HANDOFF_2026-06-10.md` | disclosure 工作线的逐项实施细节（A1-A13、B1-B6） | Phase 3/4 的操作手册 |
+| `docs/audits/WORKFLOW_FULL_AUDIT_2026-06-10.md` | 全面审计：静态 23 项（A-1~G-3）+ 实证 8 项（H-1~H-8） | 问题清单与证据（file:line） |
+| `docs/audits/REVIEW_DISCLOSURE_FIXED_POINT_REVIEW_2026-06-10.md` | disclosure 设计稿专项审查：13 项 + 轮次经济 R1-R5 | Phase 3 修订设计稿的权威依据 |
+| `docs/designs/REVIEW_DISCLOSURE_FIXED_POINT_DESIGN.md` | disclosure 机制设计本体（**含已知缺陷，未经 Phase 3 修订不得实施**） | Phase 3 的修订对象、Phase 4 的实施依据 |
+| `docs/plans/FIX_HANDOFF_2026-06-10.md` | 基础修复的逐项实施细节（FIX-1~13） | Phase 1/2 的操作手册 |
+| `docs/plans/DISCLOSURE_IMPL_HANDOFF_2026-06-10.md` | disclosure 工作线的逐项实施细节（A1-A13、B1-B6） | Phase 3/4 的操作手册 |
 | `SPEC.md` | 规范源 | 红线约束：v1 audit-only、不 fork OpenSpec schema、guard 唯一状态写入器、fail-closed |
 
 代码：`scripts/superspec/`（TypeScript，`npm test`）。~~真实 change `refactor-vacation-duration-api` 的 `.superspec/` 是历史现场，**任何 Phase 都不得修改其 evidence 文件**。~~
@@ -31,7 +31,7 @@ SuperSpec（OpenSpec overlay 工作流：guard CLI + 5 skill + sidecar evidence�
 
 ## Phase 1：基础红线修复
 
-按 `FIX_HANDOFF_2026-06-10.md` 第一批执行 **FIX-1 ~ FIX-5**：
+按 `docs/plans/FIX_HANDOFF_2026-06-10.md` 第一批执行 **FIX-1 ~ FIX-5**：
 
 1. FIX-1 state 损坏 fail-closed（`state_corrupt` block + 显式重建确认）
 2. FIX-2 `design_complete` require `explore_complete`
@@ -43,7 +43,7 @@ SuperSpec（OpenSpec overlay 工作流：guard CLI + 5 skill + sidecar evidence�
 
 ## Phase 2：机制收紧
 
-按 `FIX_HANDOFF_2026-06-10.md` 第二批执行 **FIX-6 ~ FIX-13**：
+按 `docs/plans/FIX_HANDOFF_2026-06-10.md` 第二批执行 **FIX-6 ~ FIX-13**：
 
 supersede 授权（6）、kind 白名单 + human_confirmation schema（7）、四个人审阻塞点补 evidence（8）、prompt_ref/evidence_id 校验（9）、test_run 按运行建档（10）、propose 期 output_ref 查重 / review_scope 合同（11）、全局悬空引用检查（12）、50 个未测 reason code 补测（13）。
 
@@ -53,7 +53,7 @@ supersede 授权（6）、kind 白名单 + human_confirmation schema（7）、�
 
 ## Phase 3：修订 disclosure 设计文档（纯文档，不写代码）
 
-按 `DISCLOSURE_IMPL_HANDOFF_2026-06-10.md` Stage A 执行 **A1 ~ A13**，对 `REVIEW_DISCLOSURE_FIXED_POINT_DESIGN.md` 逐项修订。修订依据是审查文档的 13 项 finding + 轮次经济 R1-R5 + 实证 H-1/H-2。
+按 `docs/plans/DISCLOSURE_IMPL_HANDOFF_2026-06-10.md` Stage A 执行 **A1 ~ A13**，对 `docs/designs/REVIEW_DISCLOSURE_FIXED_POINT_DESIGN.md` 逐项修订。修订依据是审查文档的 13 项 finding + 轮次经济 R1-R5 + 实证 H-1/H-2。
 
 完成后输出修订摘要（逐项对照 A1-A13 的勾选 + 关键改动点）。
 
@@ -61,7 +61,7 @@ supersede 授权（6）、kind 白名单 + human_confirmation schema（7）、�
 
 ## Phase 4：实施 disclosure Phase 1（仅 `explore_complete`）
 
-按 `DISCLOSURE_IMPL_HANDOFF_2026-06-10.md` Stage B 执行 **B1 ~ B6**：三种新 evidence kind 的 schema、target map 与集合 stale、finding ledger + `review_disclosure_complete` guard、`superspec-explore` skill 的 digest/checkpoint/rerun 流程、Phase 1 全部测试、真实 change grandfathering 验证。
+按 `docs/plans/DISCLOSURE_IMPL_HANDOFF_2026-06-10.md` Stage B 执行 **B1 ~ B6**：三种新 evidence kind 的 schema、target map 与集合 stale、finding ledger + `review_disclosure_complete` guard、`superspec-explore` skill 的 digest/checkpoint/rerun 流程、Phase 1 全部测试、真实 change grandfathering 验证。
 
 范围红线：只做 `explore_complete`；Phase 2-5（proposal/design/invariants/tasks/final review/backfill）不做；v2 可信通道只留文档预留。
 
@@ -107,7 +107,7 @@ supersede 授权（6）、kind 白名单 + human_confirmation schema（7）、�
 全部 Phase 完成后，以下问题集得到解决：
 
 - 审计 31 项中除"明确归 v2"外的全部（A-1~H-7 的可修项）；
-- disclosure 痛点（子代理待确认内容必须原文披露用户、裁决结构化记录、历史 blocker 不可抹）已在 propose 期六个 gate 落地（disclosure Phase 1-3：explore/proposal/design 强制或激活式 + invariants/test-contract/tasks 激活式，见 `DISCLOSURE_IMPL_HANDOFF_2026-06-10.md`）；disclosure Phase 4（final review/`main_adjudication` 接入）与 Phase 5（backfill/grandfathering 工具）留待另立计划；
+- disclosure 痛点（子代理待确认内容必须原文披露用户、裁决结构化记录、历史 blocker 不可抹）已在 propose 期六个 gate 落地（disclosure Phase 1-3：explore/proposal/design 强制或激活式 + invariants/test-contract/tasks 激活式，见 `docs/plans/DISCLOSURE_IMPL_HANDOFF_2026-06-10.md`）；disclosure Phase 4（final review/`main_adjudication` 接入）与 Phase 5（backfill/grandfathering 工具）留待另立计划；
 - 三份审计文档中标注的修复项可逐一回溯勾销。
 
 **已知不解决（设计性接受，勿尝试）**：evidence 伪造防御、subagent 真实性验证、测试 exit code 验真、动作-allow 时序绑定——全部属于 v2 hook（前置 R-1 spike），SPEC §6.6 已声明 v1 天花板。

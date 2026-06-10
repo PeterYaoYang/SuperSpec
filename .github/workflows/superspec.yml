@@ -7,15 +7,19 @@ on:
       - "tests/**"
       - "templates/**"
       - "adapters/**"
+      - "bin/**"
       - "schemas/**"
       - "superspec_guard.ts"
       - "superspec_init.ts"
+      - "superspec.ts"
+      - "build.js"
+      - "tsconfig.build.json"
       - "package.json"
       - "package-lock.json"
       - ".codex/skills/superspec-*/**"
       - ".codex/agents/**"
       - ".codex/prompts/**"
-      - "docs/proposals/superspec/**"
+      - "docs/**"
       - ".gitignore"
       - ".github/workflows/superspec.yml"
   push:
@@ -24,15 +28,19 @@ on:
       - "tests/**"
       - "templates/**"
       - "adapters/**"
+      - "bin/**"
       - "schemas/**"
       - "superspec_guard.ts"
       - "superspec_init.ts"
+      - "superspec.ts"
+      - "build.js"
+      - "tsconfig.build.json"
       - "package.json"
       - "package-lock.json"
       - ".codex/skills/superspec-*/**"
       - ".codex/agents/**"
       - ".codex/prompts/**"
-      - "docs/proposals/superspec/**"
+      - "docs/**"
       - ".gitignore"
       - ".github/workflows/superspec.yml"
   # Opt-in real OpenSpec CLI smoke (audit F-4 / decision D5): manual trigger + weekly drift watch.
@@ -65,6 +73,9 @@ jobs:
 
       - name: Typecheck
         run: npm run typecheck
+
+      - name: Build package
+        run: npm run build
 
       - name: Test
         run: npm test

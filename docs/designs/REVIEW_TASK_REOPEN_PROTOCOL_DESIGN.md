@@ -290,7 +290,7 @@ v1 明确采用单根策略：
 - 仅对 reopened task 增加 reopen-aware 完成规则，强制 `violated_test_ids` 的 successor 覆盖。
 - 未对非 reopen task 的 declared test coverage 做全局逐项要求，以避免扩大当时实现的行为改变范围。
 
-当前状态：上述第二条已被 `GUARD_PROOF_GAPS_AUDIT.md` / `SPEC.md` supersede。当前 guard 要求 task 声明的每个 `test_refs` 在对应 apply gate 中逐项兑现：`task_edit` 的 RED/characterization 必须来自 `gate:"task_edit"`，`task_complete` 的 GREEN 必须来自 `gate:"task_complete"`。reopen successor 仍额外要求匹配 `reopen_id`。
+当前状态：上述第二条已被 `docs/audits/GUARD_PROOF_GAPS_AUDIT.md` / `SPEC.md` supersede。当前 guard 要求 task 声明的每个 `test_refs` 在对应 apply gate 中逐项兑现：`task_edit` 的 RED/characterization 必须来自 `gate:"task_edit"`，`task_complete` 的 GREEN 必须来自 `gate:"task_complete"`。reopen successor 仍额外要求匹配 `reopen_id`。
 
 ### 7.4 review evidence 结构化扩展
 

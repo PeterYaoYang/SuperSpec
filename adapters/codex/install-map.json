@@ -76,16 +76,6 @@
       "kind": "agent",
       "source": "adapters/codex/agents/verifier.toml",
       "target": ".codex/agents/verifier.toml"
-    },
-    {
-      "kind": "wrapper",
-      "source": "adapters/codex/wrappers/superspec_guard",
-      "target": "scripts/superspec_guard"
-    },
-    {
-      "kind": "wrapper",
-      "source": "adapters/codex/wrappers/superspec_init",
-      "target": "scripts/superspec_init"
     }
   ]
 }

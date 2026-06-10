@@ -2,9 +2,9 @@
 
 > 用途：本文档是给修复会话的工作指令。审计已完成，无需重新审计；按本文档顺序执行修复。
 > 必读输入（按顺序）：
-> 1. `docs/proposals/superspec/WORKFLOW_FULL_AUDIT_2026-06-10.md`——主审计报告，31 项发现（A-1~H-8），每条带 file:line 证据与修复方案。
-> 2. `docs/proposals/superspec/REVIEW_DISCLOSURE_FIXED_POINT_REVIEW_2026-06-10.md`——disclosure 设计稿专项审查（本次修复**不实施**该设计稿，仅在修复与其交叉的项时参考，如 D-3 悬空引用）。
-> 3. `docs/proposals/superspec/SPEC.md`——规范源，修复不得违背其 v1 audit-only 定位与红线（不 fork OpenSpec schema、guard 唯一状态写入器、fail-closed）。
+> 1. `docs/audits/WORKFLOW_FULL_AUDIT_2026-06-10.md`——主审计报告，31 项发现（A-1~H-8），每条带 file:line 证据与修复方案。
+> 2. `docs/audits/REVIEW_DISCLOSURE_FIXED_POINT_REVIEW_2026-06-10.md`——disclosure 设计稿专项审查（本次修复**不实施**该设计稿，仅在修复与其交叉的项时参考，如 D-3 悬空引用）。
+> 3. `docs/SPEC.md`——规范源，修复不得违背其 v1 audit-only 定位与红线（不 fork OpenSpec schema、guard 唯一状态写入器、fail-closed）。
 
 ## 工作范围与边界
 
@@ -86,6 +86,6 @@
 ## 明确不做
 
 - 第三批全部（H-3 git 跟踪、E-1 preset、G-1/G-2 安装引擎、D-2 archive 锚点、F-4 真实 CLI 冒烟、H-7 route 语义）——需用户决策。
-- REVIEW_DISCLOSURE_FIXED_POINT 设计稿的实施——独立工作线，见 `DISCLOSURE_IMPL_HANDOFF_2026-06-10.md`（其 Stage B 依赖本文档的 FIX-11/FIX-12 先落地）。
+- REVIEW_DISCLOSURE_FIXED_POINT 设计稿的实施——独立工作线，见 `docs/plans/DISCLOSURE_IMPL_HANDOFF_2026-06-10.md`（其 Stage B 依赖本文档的 FIX-11/FIX-12 先落地）。
 - 任何 v2 hook 相关内容。
 - 修改真实 change `refactor-vacation-duration-api` 的历史 evidence 文件。

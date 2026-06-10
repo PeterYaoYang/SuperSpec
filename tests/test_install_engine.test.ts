@@ -40,16 +40,53 @@ function createEngineFixture(): EngineFixture {
 }
 
 const SKILL_TARGET = ".codex/skills/superspec-demo/SKILL.md";
+const USER_SKILL_TARGET = "skills/superspec-demo/SKILL.md";
 const WRAPPER_TARGET = "scripts/superspec_demo";
 
 test("real install map loads and every source file exists", () => {
   const { mappings, problems } = guard.load_install_map();
   assert.deepEqual(problems, []);
-  assert.ok(mappings.length >= 17, `expected full codex install map, got ${mappings.length}`);
+  assert.equal(mappings.length, 15, `expected 5 skills, 5 prompts, and 5 agents, got ${mappings.length}`);
   const targets = mappings.map((item) => item.target);
   for (const name of guard.REQUIRED_SUPERSPEC_WORKFLOW_SKILLS) {
     assert.ok(targets.includes(`.codex/skills/${name}/SKILL.md`), name);
   }
+});
+
+test("command lookup is platform-aware and does not use sh on Windows", () => {
+  const win = guard.commandLookupInvocation("openspec", "win32");
+  assert.equal(win.cmd, "where.exe");
+  assert.deepEqual(win.args, ["openspec"]);
+  assert.equal(win.shell, false);
+
+  const unix = guard.commandLookupInvocation("openspec", "linux");
+  assert.equal(unix.cmd, "sh");
+  assert.deepEqual(unix.args, ["-c", "command -v openspec"]);
+});
+
+test("windows cmd shim invocation escapes shell metacharacters per argument", () => {
+  const invocation = guard.windowsCmdShimInvocation("C:\\Program Files\\nodejs\\openspec.cmd", [
+    "demo change",
+    "x&y",
+    "pipe|value",
+    "out>file",
+    "quote\" & calc & \"value",
+  ]);
+  assert.equal(invocation.cmd, "cmd.exe");
+  assert.deepEqual(invocation.args.slice(0, 3), ["/d", "/s", "/c"]);
+  const commandLine = invocation.args[3];
+  assert.match(commandLine, /Program\^ Files/);
+  assert.match(commandLine, /x\^&y/);
+  assert.match(commandLine, /pipe\^\|value/);
+  assert.match(commandLine, /out\^>file/);
+  assert.match(commandLine, /quote/);
+  for (let idx = commandLine.indexOf('"'); idx !== -1; idx = commandLine.indexOf('"', idx + 1)) {
+    assert.equal(commandLine[idx - 1], "^", `raw quote at index ${idx}: ${commandLine}`);
+  }
+  assert.doesNotMatch(commandLine, / x&y /);
+  assert.doesNotMatch(commandLine, / pipe\|value /);
+  assert.doesNotMatch(commandLine, / out>file /);
+  assert.doesNotMatch(commandLine, / & calc & /);
 });
 
 test("fresh install copies files, sets wrapper exec bit, and writes a schema-valid manifest", () => {
@@ -71,6 +108,23 @@ test("fresh install copies files, sets wrapper exec bit, and writes a schema-val
     const again = guard.install_workflow(fx.repo, { packageRoot: fx.packageRoot });
     assert.deepEqual(again.problems, []);
     assert.ok(again.actions.every((item) => item.status === "ok"), JSON.stringify(again.actions));
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("user-scope install targets Codex home surfaces and skips project wrappers", () => {
+  const fx = createEngineFixture();
+  try {
+    const result = guard.install_workflow(fx.repo, { packageRoot: fx.packageRoot, scope: "user" });
+    assert.deepEqual(result.problems, []);
+    assert.equal(readFileSync(join(fx.repo, USER_SKILL_TARGET), "utf8").includes("v1"), true);
+    assert.equal(existsSync(join(fx.repo, WRAPPER_TARGET)), false, "user scope must not install project wrapper scripts");
+    assert.equal(existsSync(join(fx.repo, guard.USER_INSTALL_MANIFEST_REL)), true, "user manifest location");
+    assert.equal(existsSync(join(fx.repo, guard.PROJECT_INSTALL_MANIFEST_REL)), false, "project manifest must not be written");
+    assert.equal(result.manifest!.installScope, "user");
+    assert.equal(result.manifest!.files.length, 1);
+    assert.equal((result.manifest!.files as any[])[0].path, USER_SKILL_TARGET);
   } finally {
     fx.cleanup();
   }

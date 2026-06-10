@@ -3,7 +3,7 @@
 > Status: review snapshot
 > Date: 2026-06-09
 > Scope: 工作流设计、guard/evidence 管控、skills 编排、规范与实现一致性、外部框架对标
-> Authority: 本文是审查意见，不是规范源；当前规范源仍是 `docs/proposals/superspec/SPEC.md`。
+> Authority: 本文是审查意见，不是规范源；当前规范源仍是 `docs/SPEC.md`。
 
 ## 1. 结论
 
@@ -179,10 +179,10 @@ openspec instructions apply
 
 证据：
 
-- `docs/proposals/superspec/SPEC.md:135`
-- `docs/proposals/superspec/SPEC.md:426`
-- `docs/proposals/superspec/SPEC.md:437`
-- `docs/proposals/superspec/SPEC.md:796`
+- `docs/SPEC.md:135`
+- `docs/SPEC.md:426`
+- `docs/SPEC.md:437`
+- `docs/SPEC.md:796`
 
 建议：
 
@@ -204,8 +204,8 @@ openspec instructions apply
 
 证据：
 
-- `docs/proposals/superspec/SPEC.md:399`
-- `docs/proposals/superspec/SPEC.md:625`
+- `docs/SPEC.md:399`
+- `docs/SPEC.md:625`
 - `scripts/superspec/src/evidence.ts:288`
 - `scripts/superspec/src/gates.ts:406`
 
@@ -254,7 +254,7 @@ openspec instructions apply
 
 证据：
 
-- `docs/proposals/superspec/SPEC.md:652`
+- `docs/SPEC.md:652`
 - `scripts/superspec/src/gates.ts:1409`
 - `.codex/skills/superspec-review/SKILL.md:60`
 
@@ -316,7 +316,7 @@ openspec instructions apply
 
 现状：
 
-- `DESIGN.md` 顶部标注历史草案，但正文仍有 custom schema、`test-contract` OpenSpec artifact、`review`/`verification` artifact 等旧方案。
+- `docs/history/DESIGN.md` 顶部标注历史草案，但正文仍有 custom schema、`test-contract` OpenSpec artifact、`review`/`verification` artifact 等旧方案。
 - `docs/project-insights/inbox/2026-06-08-superspec-review-roles.md` 仍写 v1 review gate 收敛为 `code-reviewer + critic`。
 - 当前 `SPEC.md`、skills、guard 实际要求 `code-reviewer + architect + critic`。
 
@@ -327,17 +327,17 @@ openspec instructions apply
 
 证据：
 
-- `docs/proposals/superspec/DESIGN.md:1`
-- `docs/proposals/superspec/DESIGN.md:46`
+- `docs/history/DESIGN.md:1`
+- `docs/history/DESIGN.md:46`
 - `docs/project-insights/inbox/2026-06-08-superspec-review-roles.md:15`
-- `docs/proposals/superspec/SPEC.md:617`
+- `docs/SPEC.md:617`
 - `scripts/superspec/src/util.ts:84`
 
 建议：
 
 - 给历史文档文件名加 `HISTORICAL_` 或移动到 `archive/`。
 - 对 inbox 记忆补一条 superseded note。
-- 在 `docs/proposals/superspec/README.md` 或 index 中声明当前阅读顺序。
+- 在 `docs/README.md` 或 index 中声明当前阅读顺序。
 
 ### P2. Role distribution 完整性不足
 
@@ -354,7 +354,7 @@ openspec instructions apply
 证据：
 
 - `scripts/superspec/src/gates.ts:406`
-- `docs/proposals/superspec/DISTRIBUTION.md`
+- `docs/DISTRIBUTION.md`
 
 建议：
 
@@ -376,8 +376,8 @@ openspec instructions apply
 
 证据：
 
-- `docs/proposals/superspec/SPEC.md:629`
-- `docs/proposals/superspec/SPEC.md:635`
+- `docs/SPEC.md:629`
+- `docs/SPEC.md:635`
 - `.codex/skills/superspec-propose/SKILL.md:37`
 - `.codex/skills/superspec-apply/SKILL.md:38`
 - `scripts/superspec/tests/test_superspec_skills.test.ts:188`
@@ -402,8 +402,8 @@ openspec instructions apply
 
 证据：
 
-- `docs/proposals/superspec/SPEC.md:384`
-- `docs/proposals/superspec/SPEC.md:391`
+- `docs/SPEC.md:384`
+- `docs/SPEC.md:391`
 - `scripts/superspec/src/git.ts:51`
 
 建议：
@@ -428,7 +428,7 @@ openspec instructions apply
 
 - `scripts/superspec/src/git.ts:74`
 - `scripts/superspec/src/gates.ts:1228`
-- `docs/proposals/superspec/SPEC.md:562`
+- `docs/SPEC.md:562`
 
 建议：
 
@@ -453,7 +453,7 @@ openspec instructions apply
 - `scripts/superspec/src/evidence.ts:288`
 - `scripts/superspec/src/evidence.ts:297`
 - `scripts/superspec/src/gates.ts:1256`
-- `docs/proposals/superspec/SPEC.md:621`
+- `docs/SPEC.md:621`
 
 建议：
 
@@ -477,7 +477,7 @@ openspec instructions apply
 
 | 位置 | 问题 | 影响 |
 |---|---|---|
-| `DESIGN.md` | 历史草案仍详细描述 custom schema 方案 | 可能误导实现者回到已否决方向 |
+| `docs/history/DESIGN.md` | 历史草案仍详细描述 custom schema 方案 | 可能误导实现者回到已否决方向 |
 | `docs/project-insights/inbox/2026-06-08-superspec-review-roles.md` | 写 review gate 是 `code-reviewer + critic` | 与当前 `code-reviewer + architect + critic` 不一致 |
 | skills 文案 | 使用强硬 `must/block` 语言 | 与 v1 audit-only 强制力边界容易混淆 |
 | verification evidence | 规范说引用本次 validate 输出 | 实现主要验证 ref 可读，缺运行绑定 |

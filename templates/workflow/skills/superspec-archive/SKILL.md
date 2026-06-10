@@ -25,17 +25,17 @@ description: "5.通过原生 `openspec archive` 归档 SuperSpec OpenSpec change
 
 1. 对 final `archive_ready` confirmation 使用 AskUserQuestion，等待明确选择。记录 archive-scoped human-confirmation evidence。当前 v1 不询问也不使用 `--skip-specs`；若 change 不应同步 specs，应先回到 propose/change update 调整 OpenSpec 包，而不是在 archive 阶段跳过。
 2. 检查 archive readiness 并生成 preservation manifest：
-   ```bash
-   "${SUPERSPEC_GUARD:-./node_modules/.bin/superspec-guard}" check-archive-ready --change "<change>"
+   ```text
+   superspec guard check-archive-ready --change "<change>"
    ```
    生成的 manifest 是 archive 前证据快照，必须能追踪 business-invariants、test-contract 和对应 invariant review evidence 的 sha256。
 3. 运行 native OpenSpec archive（移动 change、同步 delta->main specs、执行 validation）：
-   ```bash
+   ```text
    openspec archive -y "<change>"
    ```
 4. 根据 manifest 验证 archived `.superspec/` preservation：
-   ```bash
-   "${SUPERSPEC_GUARD:-./node_modules/.bin/superspec-guard}" check-archived --change "<change>"
+   ```text
+   superspec guard check-archived --change "<change>"
    ```
 
 遇到任何 guard `block` 就停止。

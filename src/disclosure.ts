@@ -1,4 +1,4 @@
-// Disclosure fixed-point loop (REVIEW_DISCLOSURE_FIXED_POINT_DESIGN.md, Phases 1-3:
+// Disclosure fixed-point loop (docs/designs/REVIEW_DISCLOSURE_FIXED_POINT_DESIGN.md, Phases 1-3:
 // explore_complete, proposal_reviewed, design_complete, invariants_reviewed,
 // test_contract_drafted, tasks_complete).
 // Material findings (scope / non_goal / acceptance / business_semantics / design_boundary) raised by

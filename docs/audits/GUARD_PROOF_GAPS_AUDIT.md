@@ -1,6 +1,6 @@
 # SuperSpec Guard 证明力缺口审计
 
-> 历史快照提示：本文记录的是 2026-06-09 早期审计过程中的问题清单，部分结论已被后续实现和测试修正。当前权威源是 `docs/proposals/superspec/SPEC.md`、`scripts/superspec/src/*` 和 `scripts/superspec/tests/*`。不要把本文后续章节中的旧“未解决/当前行为”表述当作当前待办；涉及 GPG-001 / 002 / 003 / 008 / 009 / 010 时，以当前测试输出为准。
+> 历史快照提示：本文记录的是 2026-06-09 早期审计过程中的问题清单，部分结论已被后续实现和测试修正。当前权威源是 `docs/SPEC.md`、`scripts/superspec/src/*` 和 `scripts/superspec/tests/*`。不要把本文后续章节中的旧“未解决/当前行为”表述当作当前待办；涉及 GPG-001 / 002 / 003 / 008 / 009 / 010 时，以当前测试输出为准。
 
 > 审计日期：2026-06-09
 >
@@ -18,7 +18,7 @@
 | GPG-004 | 中风险 | 真实存在，属于策略过严 | `gates.ts` / `invariants.ts` | 需要 |
 | GPG-005 | 中风险 | 基本不成立，当前已覆盖主要场景 | `evidence.ts` | 暂不需要，保留回归测试即可 |
 | GPG-006 | 中风险 | 部分成立，属于策略一致性问题 | `invariants.ts` / `gates.ts` | 建议 |
-| GPG-007 | 中风险 | 真实存在，文档误导风险 | `DUAL_TRACK_REFACTOR_PLAN.md` | 建议 |
+| GPG-007 | 中风险 | 真实存在，文档误导风险 | `docs/history/DUAL_TRACK_REFACTOR_PLAN.md` | 建议 |
 | GPG-008 | 阻断 | 已修复：普通 supersede 不再隐藏 task_reopen history | `evidence.ts` / `gates.ts` / tests | 保留回归测试 |
 | GPG-009 | 阻断 | 已修复：deleted/replaced task 的 resolved reopen 已全局语义校验 | `evidence.ts` / `gates.ts` / tests | 保留回归测试 |
 | GPG-010 | 中风险 | 已修复：v1 单次 reopen history 约束已有负例覆盖 | `gates.ts` / tests | 保留回归测试 |
@@ -29,7 +29,7 @@
 | GPG-015 | 阻断 | 已修复，archive preservation transaction rollback 非 fail-closed | `archive.ts` / `core.ts` | 已修复 |
 | GPG-016 | 阻断 | 已修复，archive readback 接受空 manifest / unsafe path / symlink archive dir | `archive.ts` | 已修复 |
 | GPG-017 | 中风险 | 已修复，`next_allowed_actions` 与真实 blocker 脱节 | `gates.ts` / `core.ts` | 已修复 |
-| GPG-018 | 低风险 | 已修复，hardening 设计文档与当前实现状态不一致 | `WORKFLOW_HARDENING_234_DESIGN.md` | 已修复 |
+| GPG-018 | 低风险 | 已修复，hardening 设计文档与当前实现状态不一致 | `docs/designs/WORKFLOW_HARDENING_234_DESIGN.md` | 已修复 |
 | GPG-019 | 低风险 | 低风险观察，`file_overrides` 未来扩展时应显式校验 key | `archive.ts` | 建议 |
 | GPG-020 | 阻断 | 已修复，`request_changes(reopen_tasks)` 错误要求重 reopen lifecycle 字段 | `gates.ts` / `test_superspec_guard.test.ts` | 已修复 |
 | GPG-021 | 阻断 | 已修复，allow path 接受 unknown/non-live evidence refs | `gates.ts` / `SPEC.md` | 已修复 |
@@ -60,7 +60,7 @@
 | GPG-010 | 中风险 | 已修复：同一 task 多 reopen history 在 v1 下会 block | 保留 multiple resolved task_reopen histories 负例 |
 | GPG-004 | 中风险 | 未解决：review/human hard invariant 被强制进入 TEST 矩阵，策略过严 | 拆分 automated / review-checklist / human-confirmation 的兑现路径 |
 | GPG-006 | 中风险 | 未解决：post-implementation invariant 引用策略不够一致 | 明确 late invariant 能否参与 coverage、RED/GREEN、final matrix 的规则 |
-| GPG-007 | 中风险 | 未解决：历史文档仍有误导性实施优先级表述 | 清理 `DUAL_TRACK_REFACTOR_PLAN.md` 中与当前 `SPEC.md` 冲突的实施口径 |
+| GPG-007 | 中风险 | 未解决：历史文档仍有误导性实施优先级表述 | 清理 `docs/history/DUAL_TRACK_REFACTOR_PLAN.md` 中与当前 `SPEC.md` 冲突的实施口径 |
 | GPG-019 | 低风险 | 未解决观察：`file_overrides` 未来扩展缺 key 级校验 | 当前不阻断；未来扩展前补 key 安全校验和负例 |
 | GPG-033 | 低风险 | 未解决测试 backlog：已知覆盖缺口已记录但未全部补测 | 按 `SPEC.md` §17.1 逐项补 focused guard/skill smoke tests |
 
@@ -280,7 +280,7 @@ if (green.length === 0) reasons.push(reason("missing_green_evidence", ...));
 
 - `scripts/superspec/src/evidence.ts`
 - `scripts/superspec/src/gates.ts`
-- 规范依据：`docs/proposals/superspec/SPEC.md`
+- 规范依据：`docs/SPEC.md`
 
 ### 使用步骤
 
@@ -402,7 +402,7 @@ verifier 或 critic 提交：
 
 - `scripts/superspec/src/invariants.ts`
 - `scripts/superspec/src/gates.ts`
-- 相关设计文档：`docs/proposals/superspec/INVARIANT_REVIEW_RETROFIT.md`
+- 相关设计文档：`docs/designs/INVARIANT_REVIEW_RETROFIT.md`
 
 ### 使用步骤
 
@@ -443,7 +443,7 @@ propose 阶段执行：
 
 ### 为什么这是问题
 
-`INVARIANT_REVIEW_RETROFIT.md` 已经承认存在 `review-checklist` / `human-confirmation`：
+`docs/designs/INVARIANT_REVIEW_RETROFIT.md` 已经承认存在 `review-checklist` / `human-confirmation`：
 
 - 它们可以是强约束。
 - 但它们不一定能通过 `TEST-*` 自动化覆盖。
@@ -637,14 +637,14 @@ hard post-implementation invariant 当前会被挡住：
 
 ### 发生位置
 
-- `docs/proposals/superspec/DUAL_TRACK_REFACTOR_PLAN.md`
+- `docs/history/DUAL_TRACK_REFACTOR_PLAN.md`
 
 ### 当前状态
 
 文件顶部已经写明：
 
 ```md
-Historical note: 本文是早期 refactor 草案，保留用于设计取舍追溯。当前实现规范以 `docs/proposals/superspec/SPEC.md` 为准。
+Historical note: 本文是早期 refactor 草案，保留用于设计取舍追溯。当前实现规范以 `docs/SPEC.md` 为准。
 ```
 
 但正文仍保留旧表述：
@@ -1432,7 +1432,7 @@ review/archive action planner 改为 reason-driven：
 
 ### 发生位置
 
-- `docs/proposals/superspec/WORKFLOW_HARDENING_234_DESIGN.md`
+- `docs/designs/WORKFLOW_HARDENING_234_DESIGN.md`
 
 ### 当前状态
 
@@ -1515,7 +1515,7 @@ SuperSpec workflow 依赖 agent 读取文档执行。如果文档把已实现约
 - `scripts/superspec/src/gates.ts`
 - `scripts/superspec/tests/test_superspec_guard.test.ts`
 - `.codex/skills/superspec-review/SKILL.md`
-- `docs/proposals/superspec/REVIEW_TASK_REOPEN_PROTOCOL_DESIGN.md`
+- `docs/designs/REVIEW_TASK_REOPEN_PROTOCOL_DESIGN.md`
 
 ### 使用步骤
 
@@ -1592,7 +1592,7 @@ v1 guard / apply 真正消费的 reopen authorization 最小面只有：
 
 - `scripts/superspec/src/gates.ts`
 - `scripts/superspec/tests/test_superspec_guard.test.ts`
-- `docs/proposals/superspec/SPEC.md`
+- `docs/SPEC.md`
 
 ### 使用步骤
 
@@ -1902,7 +1902,7 @@ live_pass(evidences, { gate: "review_complete", kind: "source_guidance" })
 
 本轮目标文件在当前 worktree 中显示为 untracked：
 
-- `docs/proposals/superspec/SPEC.md`
+- `docs/SPEC.md`
 - `scripts/superspec/src/gates.ts`
 - `scripts/superspec/tests/test_superspec_guard.test.ts`
 
@@ -1935,7 +1935,7 @@ live_pass(evidences, { gate: "review_complete", kind: "source_guidance" })
 
 ### 发生位置
 
-- `docs/proposals/superspec/SPEC.md`
+- `docs/SPEC.md`
 - `scripts/superspec/src/cli_args.ts`
 - `scripts/superspec/tests/test_superspec_guard.test.ts`
 
@@ -1984,7 +1984,7 @@ SuperSpec 的流程安全很依赖“显式命令 surface”。文档漏列命�
 
 ### 发生位置
 
-- `docs/proposals/superspec/SPEC.md`
+- `docs/SPEC.md`
 - `scripts/superspec/src/state.ts`
 - `scripts/superspec/tests/test_superspec_guard.test.ts`
 
@@ -2034,7 +2034,7 @@ SuperSpec 的流程安全很依赖“显式命令 surface”。文档漏列命�
 
 ### 发生位置
 
-- `docs/proposals/superspec/SPEC.md`
+- `docs/SPEC.md`
 - `scripts/superspec/src/core.ts`
 - `scripts/superspec/src/state.ts`
 - `scripts/superspec/src/archive.ts`
@@ -2078,7 +2078,7 @@ SuperSpec 的流程安全很依赖“显式命令 surface”。文档漏列命�
 
 ### 发生位置
 
-- `docs/proposals/superspec/SPEC.md`
+- `docs/SPEC.md`
 - `scripts/superspec/src/openspec.ts`
 - `scripts/superspec/src/core.ts`
 - `scripts/superspec/tests/test_superspec_guard.test.ts`
@@ -2126,7 +2126,7 @@ SuperSpec 的流程安全很依赖“显式命令 surface”。文档漏列命�
 ### 发生位置
 
 - `.codex/skills/superspec-archive/SKILL.md`
-- `docs/proposals/superspec/SPEC.md`
+- `docs/SPEC.md`
 - `scripts/superspec/tests/test_superspec_skills.test.ts`
 
 ### 原始缺口
@@ -2176,7 +2176,7 @@ skill smoke test 已覆盖：
 ### 发生位置
 
 - `.codex/skills/superspec-propose/SKILL.md`
-- `docs/proposals/superspec/SPEC.md`
+- `docs/SPEC.md`
 - `scripts/superspec/tests/test_superspec_skills.test.ts`
 
 ### 原始缺口
@@ -2227,7 +2227,7 @@ skill smoke test 已锁定：
 
 ### 发生位置
 
-- `docs/proposals/superspec/SPEC.md`
+- `docs/SPEC.md`
 - `scripts/superspec/tests/*`
 
 ### 原始缺口

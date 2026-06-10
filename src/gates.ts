@@ -488,7 +488,7 @@ export function superspec_workflow_skill_reasons(repoRoot: string): Reason[] {
   if (missing.length > 0) {
     reasons.push(reason(
       "superspec_init_missing",
-      "SuperSpec workflow skills are missing; run superspec-init (or this repository's superspec_init.ts) to (re)install them",
+      "SuperSpec workflow skills are missing; run superspec init --scope project to (re)install them",
       missing,
     ));
   }

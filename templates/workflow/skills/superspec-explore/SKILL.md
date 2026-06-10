@@ -43,13 +43,13 @@ description: "1.探索并澄清需求，进入 SuperSpec propose 前完成 OpenS
 ## 步骤 / Steps
 
 1. 确保项目级 SuperSpec surfaces 已存在：
-   ```bash
-   "${SUPERSPEC_INIT:-./node_modules/.bin/superspec-init}"
+   ```text
+   superspec init --scope project
    ```
 2. 创建或打开 native OpenSpec change root，然后确认 change-scoped guard readiness 并拉取 native context：
-   ```bash
+   ```text
    openspec new change "<change>"   # 仅当该 change 不存在时执行
-   "${SUPERSPEC_GUARD:-./node_modules/.bin/superspec-guard}" check-init --change "<change>"
+   superspec guard check-init --change "<change>"
    openspec list --json
    openspec status --change "<change>" --json   # changeRoot / artifactPaths / actionContext for grounding
    ```
@@ -63,8 +63,8 @@ description: "1.探索并澄清需求，进入 SuperSpec propose 前完成 OpenS
 7. 在 `.superspec/evidence/discovery/` 记录 critic evidence，包含 `execution_mode:"native_subagent"`、`agent_role`、`agent_id`、`output_ref`、`source_anchors` 和 `target_refs`。
 8. 按披露循环处理 findings：写本轮 `main_review_digest`；存在 material finding 时**停下来向用户披露并等待 `user_review_decision`**，再按裁决更新 discovery / 重跑 critic / 写新一轮 digest，直到最新轮 clean 且 ledger 无未终态 finding。
 9. 验证 explore completion：
-   ```bash
-   "${SUPERSPEC_GUARD:-./node_modules/.bin/superspec-guard}" check-enter --change "<change>" --gate explore_complete
+   ```text
+   superspec guard check-enter --change "<change>" --gate explore_complete
    ```
 
 遇到任何 guard `block` 就停止。disclosure 相关 block（`missing_review_digest`、`needs_user_decision_pending`、`finding_unresolved`、`user_decision_unbound`、`ledger_injection_missing`、`round_budget_exhausted` 等）的唯一合法出路是回到披露循环或升级给用户，不允许绕过。

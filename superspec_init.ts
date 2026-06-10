@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 
 export * from "./src/init_cli.ts";
 
-import { main_init } from "./src/init_cli.ts";
+import { main_init_async } from "./src/init_cli.ts";
 
 function realpathMaybe(filePath: string): string {
   try {
@@ -16,5 +16,5 @@ function realpathMaybe(filePath: string): string {
 
 const currentFile = realpathMaybe(process.argv[1] ?? "");
 if (currentFile === realpathMaybe(new URL(import.meta.url).pathname)) {
-  process.exitCode = main_init();
+  process.exitCode = await main_init_async();
 }

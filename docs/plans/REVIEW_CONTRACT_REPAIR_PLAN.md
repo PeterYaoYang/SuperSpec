@@ -9,7 +9,7 @@
 
 1. `review_complete` 可能误放行非终局裁决。
 2. `main_adjudication` 的 canonical 主线程作者边界没有被 guard 机检。
-3. `SPEC.md`、`superspec-review` skill、`REVIEW_TASK_REOPEN_PROTOCOL_DESIGN.md` 对 `request_changes` / reopen 的关系没有单一答案。
+3. `SPEC.md`、`superspec-review` skill、`docs/designs/REVIEW_TASK_REOPEN_PROTOCOL_DESIGN.md` 对 `request_changes` / reopen 的关系没有单一答案。
 
 结果是：
 
@@ -62,7 +62,7 @@
 
 ### 3.3 reopen 详细生命周期继续放在专门协议里，但 canonical schema 保留当前消费者真正需要的最小字段
 
-本次不把 `REVIEW_TASK_REOPEN_PROTOCOL_DESIGN.md` 的全部生命周期细节抄进 `SPEC.md`。
+本次不把 `docs/designs/REVIEW_TASK_REOPEN_PROTOCOL_DESIGN.md` 的全部生命周期细节抄进 `SPEC.md`。
 
 canonical 文档只保留当前 guard / apply 消费端必须知道的最小字段：
 
@@ -76,7 +76,7 @@ canonical 文档只保留当前 guard / apply 消费端必须知道的最小字�
 - `request_changes_route:"reopen_tasks"` 时，`blocking_source_evidence_refs` 必须包含能够授权本次 reopen 的 `code-reviewer source_guidance` evidence；
 - `source_guidance.blocking_findings[*].affected_task_ids` 必须显式列出受影响 task，供 apply 把单个 `task_reopen` package 绑定到一个具体的 `source_guidance_evidence_id`。
 
-其余 reopen 生命周期、supersede 时序、successor evidence 规则，继续留在 `REVIEW_TASK_REOPEN_PROTOCOL_DESIGN.md` 里做详细设计。
+其余 reopen 生命周期、supersede 时序、successor evidence 规则，继续留在 `docs/designs/REVIEW_TASK_REOPEN_PROTOCOL_DESIGN.md` 里做详细设计。
 
 ### 3.4 `main_adjudication` 的作者边界要硬校验
 
@@ -132,7 +132,7 @@ canonical 文档只保留当前 guard / apply 消费端必须知道的最小字�
    - 不补 allow 向 `verification_review` / `final_test`
 3. 明确 skill 只写 canonical 最小字段，不重复 reopen 设计文档里更长的生命周期细节。
 
-### 4.3 `REVIEW_TASK_REOPEN_PROTOCOL_DESIGN.md`
+### 4.3 `docs/designs/REVIEW_TASK_REOPEN_PROTOCOL_DESIGN.md`
 
 只做对齐，不做大改：
 
@@ -240,9 +240,9 @@ canonical 文档只保留当前 guard / apply 消费端必须知道的最小字�
 
 本次预计只改这些面：
 
-- `docs/proposals/superspec/SPEC.md`
+- `docs/SPEC.md`
 - `.codex/skills/superspec-review/SKILL.md`
-- `docs/proposals/superspec/REVIEW_TASK_REOPEN_PROTOCOL_DESIGN.md`
+- `docs/designs/REVIEW_TASK_REOPEN_PROTOCOL_DESIGN.md`
 - `scripts/superspec/src/util.ts`
 - `scripts/superspec/src/evidence.ts`
 - `scripts/superspec/src/gates.ts`
@@ -255,7 +255,7 @@ canonical 文档只保留当前 guard / apply 消费端必须知道的最小字�
 
 以下条件同时满足才算完成：
 
-1. `SPEC.md`、`superspec-review` skill、`REVIEW_TASK_REOPEN_PROTOCOL_DESIGN.md` 三者对 `review_decision` / `request_changes_route` / `verification_evidence_refs` / canonical 作者边界口径一致
+1. `SPEC.md`、`superspec-review` skill、`docs/designs/REVIEW_TASK_REOPEN_PROTOCOL_DESIGN.md` 三者对 `review_decision` / `request_changes_route` / `verification_evidence_refs` / canonical 作者边界口径一致
 2. `check_review_complete` 只会在 allow path 返回 allow
 3. `main_adjudication` 的 canonical 作者边界被 schema guard 机检
 4. request-changes path 与 allow path 不再共用一套 gate 语义，也不会误入 archive-ready

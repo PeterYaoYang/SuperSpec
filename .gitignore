@@ -2,6 +2,7 @@
 .idea/
 .omx/
 node_modules/
+/dist/
 *.tsbuildinfo
 *.log
 /.omc/

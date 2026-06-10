@@ -1,6 +1,6 @@
 # SuperSpec 设计文档（历史草案，请勿实现）
 
-> Historical note: 本文是早期 v0.1 草案，保留用于设计取舍追溯。当前实现规范以 `docs/proposals/superspec/SPEC.md` 为准。本文中的 custom OpenSpec schema、`test-contract` OpenSpec artifact、`review`/`verification` artifact 等方案已经被 v0.4 sidecar overlay 方案取代，请勿按本文实现。
+> Historical note: 本文是早期 v0.1 草案，保留用于设计取舍追溯。当前实现规范以 `docs/SPEC.md` 为准。本文中的 custom OpenSpec schema、`test-contract` OpenSpec artifact、`review`/`verification` artifact 等方案已经被 v0.4 sidecar overlay 方案取代，请勿按本文实现。
 
 > 状态：草案 v0.1（待评审定稿）
 > 名称 `superspec` 为占位代号，可改（全局替换即可）。
@@ -137,7 +137,7 @@ guard 的**输入是 `openspec status --json` + change 目录下的证据文件*
 ## 10. 目录与文件布局
 
 ```text
-docs/proposals/superspec/            # 规范源（本目录）
+docs/            # 规范源（本目录）
   DESIGN.md                        # 本文
   schema/schema.yaml               # schema 规范源
   schema/templates/*.md            # artifact 模板规范源

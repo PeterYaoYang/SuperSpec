@@ -1,8 +1,8 @@
 # SuperSpec 外部评审发现清单（交付 Codex 执行）
 
 - 评审日期：2026-06-09
-- 评审范围：`scripts/superspec/`（guard 实现 + 测试）、`docs/proposals/superspec/`（全部设计/分发/审计文档）、`.codex/skills/superspec-*`、`.codex/{agents,prompts}/*`
-- 评审方式：独立代码级审计（不信任既有 `GUARD_PROOF_GAPS_AUDIT.md`，从代码重新找洞）+ 实跑测试/类型检查 + 对标 comet / spec-kit / Veath + **critic 子代理对抗复核**
+- 评审范围：`scripts/superspec/`（guard 实现 + 测试）、`docs/`（全部设计/分发/审计文档）、`.codex/skills/superspec-*`、`.codex/{agents,prompts}/*`
+- 评审方式：独立代码级审计（不信任既有 `docs/audits/GUARD_PROOF_GAPS_AUDIT.md`，从代码重新找洞）+ 实跑测试/类型检查 + 对标 comet / spec-kit / Veath + **critic 子代理对抗复核**
 - 实测基线：`tests 202 / pass 202 / fail 0`，`tsc --noEmit` 零错误，测试总耗时 **~93.5s–142s（随负载波动）**，仓库**无 CI**。
 - **本文档已纳入 critic 对抗裁决（见 §8）**：严重度已重排、若干量化/绝对化表述已修正、新增 A-7/A-8/A-9 三条更根本的问题。交给 codex 时以本（修订后）版本为准。
 
@@ -39,7 +39,7 @@
 | A-4 | 🟡 P2 | CODE-FIX | (a)event_id 碰撞[cosmetic] (b)ledger/state 非联合原子 (c)created_at 可被 caller 覆盖 | `src/state.ts` |
 | A-5 | 🟡 P2 | CODE-FIX | 覆盖逻辑 DRY 近乎逐行重复 + pinned_ref_key 重复定义 3 次 | `src/gates.ts`,`src/evidence.ts` |
 | A-6 | 🟡 P2 | CODE-FIX | blob_sha 受 autocrlf/clean filter，跨平台假阳性 | `src/git.ts` |
-| P0-1 | 🟡 P2 | DOC-FIX | 自审文档把已修的 GPG 标成"未解决"（真实但无引用触发器，故下调） | `GUARD_PROOF_GAPS_AUDIT.md` |
+| P0-1 | 🟡 P2 | DOC-FIX | 自审文档把已修的 GPG 标成"未解决"（真实但无引用触发器，故下调） | `docs/audits/GUARD_PROOF_GAPS_AUDIT.md` |
 | T-2 | 🟡 P2 | CODE-FIX | 测试 ~93.5s（大量真实 subprocess）；仅 DX 摩擦，与 doc drift 无因果 | `tests/` |
 | A-10 | 🟠 P1 | DESIGN+CODE | OpenSpec 多面深耦合；R-3 兼容层只防 status，`instructions` 产出引擎无兜底 | `src/openspec.ts` + 设计 |
 | P0-3 | 🟠 P1 | DESIGN-DECISION | 缺单一同步机制，规范被实现倒逼漂移 | 全局 |
@@ -53,26 +53,26 @@
 
 ### P0-1 — 自审文档严重落后于代码 `DOC-FIX`
 
-- **现象**：`docs/proposals/superspec/GUARD_PROOF_GAPS_AUDIT.md` §1.1「当前未解决问题快照」把 **GPG-001 / 002 / 003 / 008 / 009 / 010** 标为"阻断级未解决"，并称测试 180 个。
+- **现象**：`docs/audits/GUARD_PROOF_GAPS_AUDIT.md` §1.1「当前未解决问题快照」把 **GPG-001 / 002 / 003 / 008 / 009 / 010** 标为"阻断级未解决"，并称测试 180 个。
 - **实测真相**：这 6 条**已全部实现并有测试**，当前测试 **202 个全绿**。证据：
   - GPG-001：`src/tasks.ts` `task_test_evidence(..., gate)` 接受 gate 参数；`src/gates.ts` `check_task_edit` 传 `"task_edit"`、`check_task_complete` 传 `"task_complete"`。
   - GPG-002：`src/gates.ts` 调 `declared_test_evidence_reasons`（逐项校验每个 declared `TEST-*`）。
   - GPG-003：`src/invariants.ts` `invariant_matrix_coverage_reasons` 已校验 hard INV 覆盖 + status + 引用 live evidence；`src/gates.ts:1319` 调用。
   - GPG-008/009/010：`src/evidence.ts` `unresolved_live_task_reopens` 用 `pass_task_reopens`（含 superseded，防隐藏）；`src/gates.ts` 全局 reopen 生命周期校验含 `unknown_task` / `reopen_lifecycle_exhausted`。
-- **危害（已按 critic 降级）**：理论上 agent 读这份审计会误判 → 重复"修复"或对 guard 失去信任。**但 critic 全仓 grep 确认：无任何 SKILL.md/guard 代码引用 `GUARD_PROOF_GAPS_AUDIT.md`，该文件 git 未跟踪、属 `proposals/` 草稿，权威源 `SPEC.md` 准确。** 故危害是假设性的（缺触发器），严重度从"最严重"下调为 P2 文档清理。仍应修，因为它是 P0-3（无同步机制）的症状样本。
+- **危害（已按 critic 降级）**：理论上 agent 读这份审计会误判 → 重复"修复"或对 guard 失去信任。**但 critic 全仓 grep 确认：无任何 SKILL.md/guard 代码引用 `docs/audits/GUARD_PROOF_GAPS_AUDIT.md`，该文件现归档为审计文档且非规范源，权威源 `SPEC.md` 准确。** 故危害是假设性的（缺触发器），严重度从"最严重"下调为 P2 文档清理。仍应修，因为它是 P0-3（无同步机制）的症状样本。
 - **修复**：将 §1.1 / §35 / §36-38 与代码对齐——把这 6 条标为"已修复（由测试 X 守护）"，测试计数 180 改为以 `npm test` 实际输出为准；或将整份文档降级为顶部硬标「本快照可能落后，以测试为准」的历史快照。GPG-010 应标"中风险"而非阻断。
 - **验收**：文档不再出现与 `npm test` 结果矛盾的"未解决/计数"陈述；最好由 P0-3 的一致性测试自动守护。
 
 ### P0-2 — 分发文档 skill 数量错误 `DOC-FIX`
 
-- **现象**：`docs/proposals/superspec/DISTRIBUTION.md` §1 / §3 列 7 个 skill，含 `superspec-init`、`superspec-verify`。
+- **现象**：`docs/DISTRIBUTION.md` §1 / §3 列 7 个 skill，含 `superspec-init`、`superspec-verify`。
 - **真相**：实际 `.codex/skills/` 下只有 **5 个用户可见 skill**：`superspec-explore / propose / apply / review / archive`。`init` 已改为脚本 `scripts/superspec_init`，`verify` 已并入 `review`。
 - **修复**：`DISTRIBUTION.md` 改为 5 个，删除 `superspec-init` / `superspec-verify` 条目及其安装清单；同步检查 install-manifest 相关描述。
 - **验收**：文档列出的 skill 集合 == 文件系统实际集合（建议由 P0-3 的一致性测试守护）。
 
 ### P0-3 — 缺少"单一同步机制"，规范被实现倒逼漂移 `DESIGN-DECISION`
 
-- **现象**：`SPEC.md` / `GUARD_PROOF_GAPS_AUDIT.md` / 代码 / 5 个 skill / `DISTRIBUTION.md` 五处各自维护"当前状态"，无同步约束。`SPEC.md` 内部充斥"当前 v1 floor route…""当前实现只持久化 fresh|recomputed"等补丁式追述，说明规范在被动追代码。
+- **现象**：`SPEC.md` / `docs/audits/GUARD_PROOF_GAPS_AUDIT.md` / 代码 / 5 个 skill / `DISTRIBUTION.md` 五处各自维护"当前状态"，无同步约束。`SPEC.md` 内部充斥"当前 v1 floor route…""当前实现只持久化 fresh|recomputed"等补丁式追述，说明规范在被动追代码。
 - **目标**：让"可执行测试"成为唯一真相源，文档只引用测试。
 - **建议实现（即评审里的"选项 b"）**：
   1. **GPG ↔ 测试名映射**：每个 GPG 编号对应一个命名锚点测试；文档不再写"已修复/未解决"，只引用测试名。
@@ -265,7 +265,7 @@ critic 子代理独立复核了 §3 每条结论（重跑测试、逐行核对�
 
 ### 逐条裁决
 
-- **结论 1（文档陈旧 = 最严重）→ 事实成立，定级夸大。** 6 条 GPG 确已实现（独立核对：`task_test_evidence` 已加 `gate` 形参 `tasks.ts:185`、RED 绑 `task_edit`/GREEN 绑 `task_complete`、`invariant_matrix_coverage_reasons` `invariants.ts:330-367`、`pass_task_reopens` 用 `find_pass` `evidence.ts:584-608`）；doc 自述 180/180、实测 202。**但**：该文件 git 未跟踪、在 `proposals/` 草稿目录，**全仓 grep 无任何 SKILL.md/guard 代码引用它** → "agent 误读"的危害链缺触发器，是假设性危害。权威源是 `SPEC.md`（准确，明示 v1=audit-only）。**故 P0-1 从"最严重"下调。** 另：GPG-010 是中风险非阻断（我原表述不精确）。
+- **结论 1（文档陈旧 = 最严重）→ 事实成立，定级夸大。** 6 条 GPG 确已实现（独立核对：`task_test_evidence` 已加 `gate` 形参 `tasks.ts:185`、RED 绑 `task_edit`/GREEN 绑 `task_complete`、`invariant_matrix_coverage_reasons` `invariants.ts:330-367`、`pass_task_reopens` 用 `find_pass` `evidence.ts:584-608`）；doc 自述 180/180、实测 202。**但**：该文件现归档为审计文档且非规范源，**全仓 grep 无任何 SKILL.md/guard 代码引用它** → "agent 误读"的危害链缺触发器，是假设性危害。权威源是 `SPEC.md`（准确，明示 v1=audit-only）。**故 P0-1 从"最严重"下调。** 另：GPG-010 是中风险非阻断（我原表述不精确）。
 
 - **结论 2（强制力空头/成本收益倒挂）→ 核心成立，三处夸大。** 角色证据无 subagent 运行证明（对）。**但**："完全无运行时强制"**事实错误**——`pinned_ref` 新鲜度（重算 blob_sha，`evidence.ts:108-134`）和 main_adjudication 处置完整性（每个 claim/finding 恰好覆盖一次，残留 needs_fix 直接 block）**确实是运行时强制的非自报项**；"写 JSON 即可"夸大——伪造一个**有实质 findings 的通过** adjudication 工作量≈真做；"成本收益倒挂"用错威胁模型（cooperative 下价值是强制产出+审计轨迹+新鲜度+角色分离，非防篡改）。
 

@@ -32,7 +32,11 @@
     },
     "guardWiring": {
       "type": "string",
-      "enum": ["npm-bin", "repo-wrapper"]
+      "enum": ["global-bin", "npm-bin", "repo-wrapper"]
+    },
+    "installScope": {
+      "type": "string",
+      "enum": ["project", "user"]
     },
     "files": {
       "type": "array",
