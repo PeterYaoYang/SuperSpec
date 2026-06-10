@@ -1,3 +1,5 @@
+import { command_zh } from "./i18n.ts";
+
 export type ParsedArgs = {
   command: string;
   change: string;
@@ -53,7 +55,11 @@ function rootUsage(): string {
 }
 
 function rootHelp(): string {
-  return `${rootUsage()}\nsuperspec Sync Guard (v1)\n\npositional arguments:\n  {${COMMAND_LIST}}\n\noptional arguments:\n  -h, --help            show this help message and exit\n`;
+  const commandLines = COMMANDS.map((command) => {
+    const zh = command_zh(command);
+    return `  ${command.padEnd(22, " ")} ${zh.label_zh} / ${zh.hint_zh}\n`;
+  }).join("");
+  return `${rootUsage()}\nSuperSpec 守护检查（v1）\n\n位置参数：\n  {${COMMAND_LIST}}\n\n命令：\n${commandLines}\n可选参数：\n  -h, --help            显示帮助并退出\n`;
 }
 
 function commandUsage(command: string): string {
@@ -67,7 +73,8 @@ function commandUsage(command: string): string {
 }
 
 function commandHelp(command: string): string {
-  const lines = [commandUsage(command), "\noptional arguments:\n", "  -h, --help           show this help message and exit\n"];
+  const zh = command_zh(command);
+  const lines = [commandUsage(command), `\n${zh.label_zh}：${zh.hint_zh}\n`, "\n可选参数：\n", "  -h, --help           显示帮助并退出\n"];
   for (const flag of requiredValueFlags(command)) {
     const metavariable = flag.slice(2).replace(/-/g, "_").toUpperCase();
     lines.push(`  ${flag} ${metavariable}\n`);
@@ -91,7 +98,7 @@ function missingRequiredFlags(command: string, args: string[]): string[] {
 
 export function emitArgparsePreamble(argv: string[]): number | null {
   if (argv.length === 0) {
-    process.stderr.write(`${rootUsage()}superspec_guard: error: the following arguments are required: command\n`);
+    process.stderr.write(`${rootUsage()}superspec_guard：错误：缺少必填参数：command\n`);
     return 2;
   }
   const command = argv[0];
@@ -100,7 +107,7 @@ export function emitArgparsePreamble(argv: string[]): number | null {
     return 0;
   }
   if (!COMMANDS.includes(command as any)) {
-    process.stderr.write(`${rootUsage()}superspec_guard: error: argument command: invalid choice: '${command}' (choose from ${COMMAND_CHOICES})\n`);
+    process.stderr.write(`${rootUsage()}superspec_guard：错误：命令无效：'${command}'；可选值：${COMMAND_CHOICES}\n`);
     return 2;
   }
   const args = argv.slice(1);
@@ -110,14 +117,14 @@ export function emitArgparsePreamble(argv: string[]): number | null {
   }
   const missing = missingRequiredFlags(command, args);
   if (missing.length > 0) {
-    process.stderr.write(`${commandUsage(command)}superspec_guard ${command}: error: the following arguments are required: ${missing.join(", ")}\n`);
+    process.stderr.write(`${commandUsage(command)}superspec_guard ${command}：错误：缺少必填参数：${missing.join(", ")}\n`);
     return 2;
   }
   return null;
 }
 
 export function parse_argv(argv: string[]): ParsedArgs {
-  if (argv.length === 0) throw new Error("missing command");
+  if (argv.length === 0) throw new Error("缺少命令");
   const command = argv[0];
   const args = argv.slice(1);
   const getValue = (flag: string): string | undefined => {
@@ -126,28 +133,28 @@ export function parse_argv(argv: string[]): ParsedArgs {
     return args[idx + 1];
   };
   const change = getValue("--change");
-  if (!change) throw new Error("missing required --change");
+  if (!change) throw new Error("缺少必填参数 --change");
   if (command === "init") {
-    if (!hasFlag(args, "--create")) throw new Error("missing required --create");
+    if (!hasFlag(args, "--create")) throw new Error("缺少必填参数 --create");
     return { command, change, create: true };
   }
   if (command === "check-artifact") {
     const artifact = getValue("--artifact");
-    if (!artifact) throw new Error("missing required --artifact");
+    if (!artifact) throw new Error("缺少必填参数 --artifact");
     return { command, change, artifact };
   }
   if (command === "check-enter") {
     const gate = getValue("--gate");
-    if (!gate) throw new Error("missing required --gate");
+    if (!gate) throw new Error("缺少必填参数 --gate");
     return { command, change, gate };
   }
   if (command === "check-task-reopen" || command === "check-task-edit" || command === "check-task-complete") {
     const taskId = getValue("--task-id");
-    if (!taskId) throw new Error("missing required --task-id");
+    if (!taskId) throw new Error("缺少必填参数 --task-id");
     return { command, change, task_id: taskId };
   }
   const simple = new Set<string>(SIMPLE_COMMANDS);
-  if (!simple.has(command)) throw new Error(`unknown command: ${command}`);
+  if (!simple.has(command)) throw new Error(`未知命令：${command}`);
   return {
     command,
     change,

@@ -991,9 +991,9 @@ keep old flows only as negative fixtures until SuperSpec E2E passes
 then remove or quarantine old yourflow/workflow skills
 ```
 
-## 12. Comet 借鉴边界
+## 12. 外部工作流借鉴边界
 
-Comet 的长期扩展性来自 phase authority、central transition writer、guard、handoff、recover 和 archive sync。SuperSpec 应借鉴这些控制面，但必须加强同步约束。
+成熟工作流的长期扩展性通常来自 phase authority、central transition writer、guard、handoff、recover 和 archive sync。SuperSpec 可以借鉴这些控制面，但必须加强同步约束。
 
 可以借鉴：
 

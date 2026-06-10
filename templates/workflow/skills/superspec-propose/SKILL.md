@@ -10,6 +10,8 @@ description: "2.生成 SuperSpec propose 包，将 artifact 编写委托给 Open
 - 默认使用简体中文撰写所有人类可读产物、分析、报告、说明和 OpenSpec 文档正文。
 - 保留命令、路径、JSON 字段、gate 名、task/test id、代码标识符和外部 API 名称的原文。
 - 当 OpenSpec 模板要求固定标题或字段时，保留模板结构，只将正文内容写成中文。
+- 对话窗口里的解释、披露、总结、提问和下一步说明必须使用中文；除命令、路径、字段名、代码标识符外，不要夹带英文说明词。
+- 向用户转述 guard / review 输出时，不要直接贴英文 `message`、`next_allowed_actions` 或英文模板标题；应改写为中文，并仅在需要定位内部协议时保留英文 code/command 于反引号中。
 
 在 explore 完成后使用本 skill，用于生成完整 OpenSpec planning package。Artifact 编写必须委托给 OpenSpec native instruction engine（`openspec instructions`）；SuperSpec 只在其外层增加 adversarial review gates、sidecar business invariants、sidecar test contract 和 tasks metadata。
 
@@ -23,15 +25,15 @@ description: "2.生成 SuperSpec propose 包，将 artifact 编写委托给 Open
 - `proposal_reviewed` 是硬性 internal gate（DISC Phase 2），不是 advisory note：`proposal.md` 完成后必须运行带 `review_round_id`（`proposal_reviewed-r<N>`）和 `findings[]` 的 `critic` review，并由主线程记录 `main_review_digest`。guard 对该 gate 不提供 legacy 豁免——没有 round-tagged review + digest 一律 block。审查披露循环规则（material findings 必须经 `user_review_decision` 用户裁决、findings ledger 不可抹除、digest 链与轮次连续性）与 `superspec-explore` skill 的「审查披露循环 / Review Disclosure Loop」一节完全一致。
 - `design_complete`、`invariants_reviewed`、`test_contract_drafted` 在出现 round-tagged review evidence 后进入同一披露循环（DISC Phase 3）；旧式无 `review_round_id`/`findings[]` 的 review evidence 维持 grandfathered 口径（P2-3），但**新写的 review 必须走完整披露**。
 - `tasks_complete` 仅在新增 round-tagged role review 后才纳入披露循环（本 gate 本身不强制 role review；一旦 agent 为 tasks 写了带 findings 的 review，就必须 digest + 用户裁决闭环）。
-- proposal review 的 route 约束：若 finding 证明 discovery 本身不完整或 scope 不清，处置 route 必须是 `return_explore`（回 `superspec-explore` 补事实层），不得在 proposal 内静默补范围；仅措辞/意图不一致且不改 scope 时才可 `stay_same_gate_fix`。
+- proposal review 的 route 约束：若 finding 证明 discovery 本身不完整或范围（`scope`）不清，处置 route 必须是 `return_explore`（回 `superspec-explore` 补事实层），不得在 proposal 内静默补范围；仅措辞/意图不一致且不改范围时才可 `stay_same_gate_fix`。
 - design review 的 route 约束：scope / non-goal 与上游不一致时用 `return_explore_or_proposal_reviewed`；设计边界/架构取舍用 `stay_same_gate_user_decision`。
-- invariants / test-contract review 的 route 约束：业务语义/不变量真相不确定、验收口径变更等 material finding 用 `stay_same_gate_user_decision`；若需回改 spec/design 表达，用 `return_explore_or_proposal_reviewed`。
+- invariants / test-contract review 的 route 约束：业务语义/不变量真相不确定、验收口径（`acceptance`）变更等 material finding 用 `stay_same_gate_user_decision`；若需回改 spec/design 表达，用 `return_explore_or_proposal_reviewed`。
 - tasks review 的 route 约束：task 映射 / test_refs / read-write scope 问题用 `stay_same_gate_fix`；若验收口径本身错了，用 `return_test_contract_drafted` 回 test-contract gate，不得静默改 tasks 消化 material acceptance 问题。
 - Role-gate evidence 必须来自 native subagents。v1 evidence 是 audit-only/self-reported；除非有 OpenSpec facts 支撑，不要把它描述成强制运行时事实。
 
 ## 步骤 / Steps
 
-1. 验证 explore completion：
+1. 运行前置门禁检查（`check-enter`），验证 explore completion：
    ```text
    superspec guard check-enter --change "<change>" --gate explore_complete
    ```
@@ -49,7 +51,7 @@ description: "2.生成 SuperSpec propose 包，将 artifact 编写委托给 Open
    - 重新运行 `openspec status --change "<change>" --json`，确认 artifact 变为 `done`，再执行对应 SuperSpec 层。
 4. `proposal.md` 编写并经 `openspec status` 确认为 `done` 后、开始 `specs/**`/`design.md` 前：执行 `proposal_reviewed` 披露循环：
    - 启动 `critic` native-subagent review，范围限定在 proposal 的 scope / intent / non-goals / hidden assumptions；evidence 必须带 `review_round_id`（`proposal_reviewed-r<N>`）、`findings[]` 和 pinned `target_refs`（`proposal.md` + `.superspec/artifacts/discovery.md`）。
-   - 主线程记录 `main_review_digest`，给每个 finding 写处置：material findings（scope / non_goal / acceptance / business_semantics / design_boundary）必须 `needs_user_decision` 并停下来，用 AskUserQuestion 把原文和 A/B/C/D 选项抛给用户，拿到 `user_review_decision` 后才能继续；发现 discovery 不完整时 route 用 `return_explore` 回 explore，不得自行补范围。
+   - 主线程记录 `main_review_digest`，给每个 finding 写处置：material findings（范围、非目标、验收口径、业务语义、设计边界）必须 `needs_user_decision` 并停下来，用 AskUserQuestion 把原文和 A/B/C/D 选项抛给用户，拿到 `user_review_decision` 后才能继续；发现 discovery 不完整时 route 用 `return_explore` 回 explore，不得自行补范围。
    - 修订 `proposal.md` 后必须重跑 `critic`（新一轮 round），直到 clean round + digest 通过，然后验证：
    ```text
    superspec guard check-enter --change "<change>" --gate propose.proposal_reviewed

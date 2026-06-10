@@ -521,9 +521,9 @@ SuperSpec 的劣势：
 
 - https://github.com/obra/superpowers
 
-### 5.3 Comet
+### 5.3 组合型整合工作流
 
-Comet 的公开定位是把 OpenSpec 和 Superpowers 组合成工作流：OpenSpec 管 WHAT，Superpowers 管 HOW，Comet 管 WHEN/NEXT。
+这类工作流通常会把 OpenSpec 和 Superpowers 组合起来：OpenSpec 管 WHAT，Superpowers 管 HOW，整合层负责 WHEN / NEXT。
 
 SuperSpec 的优势：
 
@@ -532,12 +532,8 @@ SuperSpec 的优势：
 
 SuperSpec 的劣势：
 
-- Comet 更像可安装产品化 workflow；SuperSpec 当前更像严谨但重的本地实验框架。
-- Comet 的 preset/状态推进心智更轻；SuperSpec 的 gate 面板更强但更难上手。
-
-参考：
-
-- https://github.com/rpamis/comet
+- 这类整合型 workflow 更像可安装产品化 workflow；SuperSpec 当前更像严谨但重的本地实验框架。
+- 这类整合型 workflow 的 preset/状态推进心智更轻；SuperSpec 的 gate 面板更强但更难上手。
 
 ### 5.4 GSD
 

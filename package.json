@@ -1,6 +1,6 @@
 {
-  "name": "superspec",
-  "version": "0.1.0",
+  "name": "@peterxiaoyang/superspec",
+  "version": "0.1.1",
   "description": "SuperSpec workflow package: guard runtime, generic workflow templates, and Codex adapter payload.",
   "repository": {
     "type": "git",
@@ -12,13 +12,16 @@
   "homepage": "https://github.com/PeterYaoYang/SuperSpec#readme",
   "private": false,
   "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
   "engines": {
     "node": ">=20.19.0"
   },
   "bin": {
-    "superspec": "./bin/superspec.js",
-    "superspec-guard": "./bin/superspec-guard.js",
-    "superspec-init": "./bin/superspec-init.js"
+    "superspec": "bin/superspec.js",
+    "superspec-guard": "bin/superspec-guard.js",
+    "superspec-init": "bin/superspec-init.js"
   },
   "exports": {
     ".": {

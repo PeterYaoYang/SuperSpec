@@ -22,7 +22,7 @@
    - 前置：`.codex/skills/{openspec-explore,openspec-propose,openspec-apply-change,openspec-archive-change}/SKILL.md` 存在且 frontmatter `name` 正确 → 由 `openspec init --tools codex .` 产出。
    - SuperSpec payload：5 个用户可见 skill（explore/propose/apply/review/archive）+ 5 个 role agent/prompt。project scope 时安装到 `.codex/agents/{architect,critic,test-engineer,code-reviewer,verifier}.toml` + `.codex/prompts/{同 5 名}.md` + `.codex/skills/superspec-{explore,propose,apply,review,archive}/`；user scope 时安装到 Codex user home 的 `agents/`、`prompts/`、`skills/`。`init` 由全局 npm bin `superspec init` 承担，`verify` 已合并进 `review`。
 2. **命令入口约束**：
-   - 包本体通过 GitHub Release tarball 或 npm registry 全局安装；当前内测主路径是 `npm install -g https://github.com/PeterYaoYang/SuperSpec/releases/download/v0.1.0/superspec-0.1.0.tgz`，正式 npm 发布后是 `npm install -g superspec`。workflow skills 直接调用 `superspec guard ...` / `superspec init --scope project`，不依赖目标仓库的 `node_modules/.bin` 或 POSIX shell 环境变量展开。
+  - 包本体通过 GitHub Release tarball 或 npm registry 全局安装；当前内测主路径是 `npm install -g https://github.com/PeterYaoYang/SuperSpec/releases/download/v0.1.0/superspec-0.1.0.tgz`，正式 npm 发布后是 `npm install -g @peterxiaoyang/superspec`。workflow skills 直接调用 `superspec guard ...` / `superspec init --scope project`，不依赖目标仓库的 `node_modules/.bin` 或 POSIX shell 环境变量展开。
    - 不安装 project-local wrapper script；正式入口只依赖 npm 生成的跨平台 bin（Unix shim + Windows `.cmd`/PowerShell shim）。
    - 环境假设：Node ≥ 20.19.0（运行编译后的 ESM JavaScript）、openspec 必须先 init。
 3. **没有 git 安全网**：
@@ -40,7 +40,7 @@
 | GitHub Release tarball | `npm i -g https://github.com/PeterYaoYang/SuperSpec/releases/download/v0.1.0/superspec-0.1.0.tgz` 后 `superspec init` | 当前推荐；公开 GitHub，不发 npm registry，安装已构建包 |
 | tarball（发文件） | `npm pack` 出 `superspec-x.y.z.tgz` → 对方 `npm i -g ./superspec-x.y.z.tgz` 后 `superspec init` | 直接把东西给个人或上传到 Release |
 | git 直装（SSH/私有） | `npm i -g git+ssh://git@host/org/superspec.git#v1.0.0` | 私有仓库或团队内测 |
-| npm registry / 私有 registry | GitHub Packages / Verdaccio / npmjs → `npm i -g superspec` | 长期分发 + 自动 `update` |
+| npm registry / 私有 registry | GitHub Packages / Verdaccio / npmjs → `npm i -g @peterxiaoyang/superspec` | 长期分发 + 自动 `update` |
 | 本地路径 / link | `npm i -g /abs/path`；开发期 `npm link` | 本机 / 同机调试 |
 
 **当前推荐主路径：公开 GitHub + Release tarball，全局安装 CLI，`superspec init` 交互选择 scope** —— 默认 `project`，写入当前项目 `.codex/`，适合随仓库协作；`user` 写入 Codex user home，适合个人默认 workflow。两者都由 manifest 记录归属，支持 update/uninstall。`dist/` 不提交到 git，Release tarball 由维护者运行 `npm pack` 生成并上传。
@@ -101,7 +101,7 @@ superspec init --scope project
 ```json
 {
   "superspecVersion": "1.0.0",
-  "packageSpec": "@org/superspec@1.0.0",
+  "packageSpec": "@peterxiaoyang/superspec@1.0.0",
   "installedAt": "2026-06-08T06:00:00Z",
   "guardSchemaVersion": 1,
   "guardWiring": "global-bin",
@@ -126,7 +126,7 @@ superspec init --scope project
 ### 6.1 两个互不等价的层级（必须文档化）
 | 层级 | 命令 | 作用 |
 |---|---|---|
-| npm 层 | `npm rm -g superspec` | 仅卸 CLI/包本体，**不清理任何 project/user Codex surfaces** |
+| npm 层 | `npm rm -g @peterxiaoyang/superspec` | 仅卸 CLI/包本体，**不清理任何 project/user Codex surfaces** |
 | init scope 层 | `superspec uninstall --scope project` / `superspec uninstall --scope user` | 移除对应 scope 的 manifest-managed surfaces |
 
 ### 6.2 `superspec init`
@@ -170,7 +170,7 @@ superspec init --scope project
 1. **通用角色名碰撞**：guard 的 `REQUIRED_SUPERSPEC_AGENT_ROLES` 用裸名（architect/critic/…），与用户既有同名文件可能撞 → 靠 `preexisting` 检测 + checksum 兜住。**后续可考虑**让 guard 支持角色名前缀/配置化（属 guard 改动，Codex 负责，列为 follow-up）。
 2. **数据丢失**：`.superspec/` 默认保留、`--purge` 才删且先打包 —— 最高优先级红线。
 3. **monorepo / 多 openspec home**：init/uninstall 以「当前仓库根（openspec planningHome）」为作用域；多 home 需分别执行。
-4. **CI 可复现**：CI 可 `npm i -g superspec` 后执行 `superspec init --scope project` 与 `superspec guard check-init` 校验脚手架完整。
+4. **CI 可复现**：CI 可 `npm i -g @peterxiaoyang/superspec` 后执行 `superspec init --scope project` 与 `superspec guard check-init` 校验脚手架完整。
 5. **状态 schema 迁移**：`update` 跨 `SCHEMA_VERSION` 时必须处理 `.superspec/state.json`。
 
 ## 9. 与 guard 契约的依赖（single source of truth）

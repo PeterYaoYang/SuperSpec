@@ -48,6 +48,10 @@ function templateSkillText(name: string): string {
   return readFileSync(join(TEMPLATE_ROOT, "workflow", "skills", name, "SKILL.md"), "utf8");
 }
 
+function templatePromptText(name: string): string {
+  return readFileSync(join(TEMPLATE_ROOT, "workflow", "prompts", `${name}.md`), "utf8");
+}
+
 function proposalDocText(relPath: string): string {
   return readFileSync(join(REPO, "docs", relPath), "utf8");
 }
@@ -62,13 +66,13 @@ function npmCommand(): string {
 
 test("superspec package declares workflow payload surface", () => {
   const pkg = JSON.parse(repoText("package.json"));
-  assert.equal(pkg.name, "superspec");
+  assert.equal(pkg.name, "@peterxiaoyang/superspec");
   assert.equal(pkg.private, false);
   assert.equal(pkg.type, "module");
   assert.equal(pkg.engines.node, ">=20.19.0");
-  assert.equal(pkg.bin.superspec, "./bin/superspec.js");
-  assert.equal(pkg.bin["superspec-guard"], "./bin/superspec-guard.js");
-  assert.equal(pkg.bin["superspec-init"], "./bin/superspec-init.js");
+  assert.equal(pkg.bin.superspec, "bin/superspec.js");
+  assert.equal(pkg.bin["superspec-guard"], "bin/superspec-guard.js");
+  assert.equal(pkg.bin["superspec-init"], "bin/superspec-init.js");
   assert.equal(pkg.exports["."].default, "./dist/superspec.js");
   assert.equal(pkg.exports["./superspec_guard"].default, "./dist/superspec_guard.js");
   assert.equal(pkg.exports["./superspec_init"].default, "./dist/superspec_init.js");
@@ -356,6 +360,16 @@ test("review requires repo-local native agents", () => {
   assert.ok(text.includes("source_evidence_refs"));
   assert.ok(text.includes("loaded_refs"));
   assert.ok(text.includes("不要用 main-thread self-review"));
+});
+
+test("review prompts require Chinese-only user-visible prose outside code identifiers", () => {
+  for (const name of REQUIRED_ROLES) {
+    const text = templatePromptText(name);
+    assert.ok(text.includes("所有用户可见输出必须使用简体中文。"), name);
+    assert.equal(text.includes("All user-visible output must be Simplified Chinese."), false, name);
+    assert.equal(text.includes("Do not use English section headers"), false, name);
+    assert.equal(text.includes("**Good:**"), false, name);
+  }
 });
 
 test("business skills use positive overlay instructions", () => {

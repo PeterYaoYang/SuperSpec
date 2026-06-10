@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { spawnSync } from "node:child_process";
+import { action_detail_zh, action_label_zh, action_status_zh, command_zh, decision_zh, gate_zh, reason_message_zh, reason_zh, translate_action_zh, trust_warning_zh, workflow_terms_zh_for, type WorkflowTermHint } from "./i18n.ts";
 
 export const SCHEMA_VERSION = 1;
 export const GUARD_VERSION = "superspec-guard@1";
@@ -43,7 +44,7 @@ export const REQUIRED_SIDECAR_DIRS = [
 ] as const;
 
 export type JsonMap = Record<string, any>;
-export type Reason = { code: string; message: string; refs: string[] };
+export type Reason = { code: string; message: string; refs: string[]; label_zh?: string; hint_zh?: string; message_zh?: string };
 export type Decision = {
   allowed: boolean;
   decision: "allow" | "block" | "status";
@@ -55,6 +56,16 @@ export type Decision = {
   block_reasons: Reason[];
   next_allowed_actions: string[];
   trust_warnings: string[];
+  actions?: JsonMap[];
+  decision_zh?: string;
+  gate_label_zh?: string;
+  gate_hint_zh?: string;
+  command?: string;
+  command_label_zh?: string;
+  command_hint_zh?: string;
+  next_allowed_actions_zh?: string[];
+  trust_warnings_zh?: string[];
+  workflow_terms_zh?: WorkflowTermHint[];
 };
 export type TaskInfo = { task_id: string; checked: boolean; desc: string; attrs: Record<string, string> };
 
@@ -255,7 +266,8 @@ export class GuardError extends Error {}
 export const runtime: JsonMap = {};
 
 export function reason(code: string, message: string, refs: string[] | null = null): Reason {
-  return { code, message, refs: refs ?? [] };
+  const zh = reason_zh(code);
+  return { code, message, refs: refs ?? [], label_zh: zh.label_zh, hint_zh: zh.hint_zh };
 }
 
 export function pinned_ref_key(item: JsonMap): string {
@@ -313,8 +325,88 @@ export function block(
   };
 }
 
-export function printDecision(decision: JsonMap): void {
-  process.stdout.write(`${JSON.stringify(decision, null, 2)}\n`);
+export function decorateDecision(decision: JsonMap, opts: { command?: string } = {}): JsonMap {
+  const gateInfo = gate_zh(String(decision.gate ?? ""));
+  const command = opts.command ?? (typeof decision.command === "string" ? String(decision.command) : "");
+  const commandInfo = command ? command_zh(command) : null;
+  const reasons = Array.isArray(decision.block_reasons)
+    ? decision.block_reasons.map((item: unknown) => {
+      const base = item && typeof item === "object" ? { ...(item as JsonMap) } : { code: String(item), message: "", refs: [] };
+      const zh = reason_zh(String(base.code ?? ""));
+      return { ...base, label_zh: zh.label_zh, hint_zh: zh.hint_zh };
+    })
+    : [];
+  const nextActions = Array.isArray(decision.next_allowed_actions) ? decision.next_allowed_actions.map((item: unknown) => String(item)) : [];
+  return {
+    ...decision,
+    command: command || decision.command,
+    decision_zh: decision_zh(String(decision.decision ?? "")),
+    gate_label_zh: gateInfo.label_zh,
+    gate_hint_zh: gateInfo.hint_zh,
+    command_label_zh: commandInfo?.label_zh,
+    command_hint_zh: commandInfo?.hint_zh,
+    block_reasons: reasons,
+    next_allowed_actions_zh: nextActions.map((item) => translate_action_zh(item)),
+    trust_warnings_zh: Array.isArray(decision.trust_warnings) ? decision.trust_warnings.map((item: unknown) => trust_warning_zh(String(item))) : [],
+    workflow_terms_zh: workflow_terms_zh_for(command || undefined, String(decision.gate ?? ""), reasons.map((item: JsonMap) => String(item.code ?? ""))),
+  };
+}
+
+function sanitizeReasonForOutput(item: JsonMap): JsonMap {
+  const refs = Array.isArray(item.refs) ? item.refs.map((ref: unknown) => String(ref)) : [];
+  return {
+    ...item,
+    refs,
+    message: String(item.message ?? ""),
+    message_zh: reason_message_zh(String(item.code ?? ""), String(item.message ?? ""), refs),
+  };
+}
+
+function sanitizeDecisionForOutput(decision: JsonMap): JsonMap {
+  const reasons = Array.isArray(decision.block_reasons) ? decision.block_reasons.map((item: unknown) => sanitizeReasonForOutput(item as JsonMap)) : [];
+  const nextActions = Array.isArray(decision.next_allowed_actions)
+    ? decision.next_allowed_actions.map((item: unknown) => String(item))
+    : [];
+  const nextActionsZh = Array.isArray(decision.next_allowed_actions_zh)
+    ? decision.next_allowed_actions_zh.map((item: unknown) => String(item))
+    : [];
+  const trustWarnings = Array.isArray(decision.trust_warnings)
+    ? decision.trust_warnings.map((item: unknown) => String(item))
+    : [];
+  const trustWarningsZh = Array.isArray(decision.trust_warnings_zh)
+    ? decision.trust_warnings_zh.map((item: unknown) => String(item))
+    : [];
+  const actions = Array.isArray(decision.actions)
+    ? decision.actions.map((item: unknown) => {
+      const base: JsonMap = item && typeof item === "object" ? { ...(item as JsonMap) } : { action: String(item) };
+      const action = String(base.action ?? "");
+      const status = typeof base.status === "string" ? String(base.status) : "";
+      const detail = typeof base.detail === "string" ? String(base.detail) : "";
+      return {
+        ...base,
+        action,
+        status: status || base.status,
+        detail: detail || base.detail,
+        action_zh: action_label_zh(action),
+        status_zh: status ? action_status_zh(status) : undefined,
+        detail_zh: detail ? action_detail_zh(detail) : undefined,
+      };
+    })
+    : decision.actions;
+  return {
+    ...decision,
+    block_reasons: reasons,
+    next_allowed_actions: nextActions,
+    next_allowed_actions_zh: nextActionsZh,
+    trust_warnings: trustWarnings,
+    trust_warnings_zh: trustWarningsZh,
+    actions,
+  };
+}
+
+export function printDecision(decision: JsonMap, opts: { command?: string } = {}): void {
+  const decorated = decorateDecision(decision, opts);
+  process.stdout.write(`${JSON.stringify(sanitizeDecisionForOutput(decorated), null, 2)}\n`);
 }
 
 export function runCommand(

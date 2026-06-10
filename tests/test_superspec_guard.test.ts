@@ -22,6 +22,7 @@ import { fileURLToPath } from "node:url";
 
 import * as guard from "../superspec_guard.ts";
 import { main_init } from "../src/init_cli.ts";
+import { reason_message_zh, translate_action_zh } from "../src/i18n.ts";
 import { project_init } from "../src/project_init.ts";
 
 type JsonMap = Record<string, any>;
@@ -58,6 +59,90 @@ function readJson(path: string): JsonMap {
 function codes(items: JsonMap[] | undefined): string[] {
   return (items ?? []).map((item) => String(item.code));
 }
+
+function captureStdoutJson(run: () => void): JsonMap {
+  const writes: string[] = [];
+  const savedWrite = process.stdout.write;
+  process.stdout.write = ((chunk: any) => {
+    writes.push(String(chunk));
+    return true;
+  }) as typeof process.stdout.write;
+  try {
+    run();
+  } finally {
+    process.stdout.write = savedWrite;
+  }
+  return JSON.parse(writes.join(""));
+}
+
+test("decorateDecision adds Chinese workflow labels without changing reason codes", () => {
+  const raw = guard.block("demo-change", "explore_complete", [
+    guard.reason("needs_user_decision_pending", "explore_complete: finding is waiting for the user's A/B/C/D decision"),
+  ], {
+    next_actions: ["rerun check-enter --change demo-change --gate explore_complete"],
+  });
+  const decorated = guard.decorateDecision(raw, { command: "check-enter" });
+  assert.equal(decorated.command_label_zh, "前置门禁检查");
+  assert.equal(decorated.gate_label_zh, "探索完成");
+  assert.equal(decorated.decision_zh, "阻塞");
+  assert.equal(decorated.block_reasons[0].code, "needs_user_decision_pending");
+  assert.equal(decorated.block_reasons[0].label_zh, "等待用户裁决");
+  assert.equal(decorated.next_allowed_actions_zh[0], "重新运行前置门禁检查。");
+  assert.ok(Array.isArray(decorated.workflow_terms_zh));
+  assert.ok(decorated.workflow_terms_zh.some((item: JsonMap) => item.term === "check-enter"));
+  assert.ok(decorated.workflow_terms_zh.some((item: JsonMap) => item.term === "acceptance"));
+});
+
+test("printDecision adds Chinese display fields while preserving machine-readable fields", () => {
+  const raw = guard.block("demo-change", "explore_complete", [
+    guard.reason("needs_user_decision_pending", "explore_complete: finding is waiting for the user's A/B/C/D decision"),
+  ], {
+    next_actions: ["fix project_init_failed reasons, then rerun superspec init --scope project"],
+  });
+  raw.actions = [
+    {
+      action: "install .codex/skills/superspec-explore/SKILL.md",
+      status: "updated",
+      detail: "existing file backed up to .codex/skills/superspec-explore/SKILL.md.bak",
+    },
+  ];
+  const printed = captureStdoutJson(() => {
+    guard.printDecision(raw, { command: "check-enter" });
+  });
+  assert.equal(printed.block_reasons[0].code, "needs_user_decision_pending");
+  assert.match(printed.block_reasons[0].message, /finding is waiting for the user's A\/B\/C\/D decision/u);
+  assert.equal(printed.block_reasons[0].message_zh, "等待用户裁决：当前问题已经进入用户检查点，必须先由用户在 A/B/C/D 中拍板。");
+  assert.equal(printed.next_allowed_actions[0], "fix project_init_failed reasons, then rerun superspec init --scope project");
+  assert.equal(printed.next_allowed_actions_zh[0], "先处理项目初始化失败对应问题，然后重新运行相关命令。");
+  assert.match(printed.trust_warnings[0], /audit-only\/self-reported/u);
+  assert.match(printed.trust_warnings_zh[0], /审计参考|自报信息/u);
+  assert.equal(printed.actions[0].action, "install .codex/skills/superspec-explore/SKILL.md");
+  assert.equal(printed.actions[0].action_zh, "安装 .codex/skills/superspec-explore/SKILL.md");
+  assert.equal(printed.actions[0].status, "updated");
+  assert.equal(printed.actions[0].status_zh, "已更新");
+  assert.equal(printed.actions[0].detail, "existing file backed up to .codex/skills/superspec-explore/SKILL.md.bak");
+  assert.equal(printed.actions[0].detail_zh, "已有文件已备份到 .codex/skills/superspec-explore/SKILL.md.bak。");
+});
+
+test("reason_message_zh rewrites workflow-internal review terms into Chinese explanation", () => {
+  const rendered = reason_message_zh("missing_source_guidance", "review_complete requires critic source_guidance evidence");
+  assert.match(rendered, /缺少审查指导证据/u);
+  assert.match(rendered, /审查完成/u);
+  assert.match(rendered, /对抗审查/u);
+  assert.equal(rendered.includes("source_guidance"), false);
+  assert.equal(rendered.includes("review_complete"), false);
+});
+
+test("translate_action_zh hides workflow-internal terms in review completion actions", () => {
+  assert.equal(
+    translate_action_zh("collect review_complete source_guidance from missing roles: critic, verifier"),
+    "补齐审查完成所缺的审查指导证据（角色：对抗审查、验证审查）。",
+  );
+  assert.equal(
+    translate_action_zh("record final_test pass evidence and reference it from verification_review"),
+    "记录最终测试通过证据，并在验证审查证据中引用它。",
+  );
+});
 
 function walkFiles(root: string): string[] {
   const out: string[] = [];
@@ -924,9 +1009,10 @@ test("cli root help matches argparse-style surface", () => {
   assert.equal(proc.status, 0);
   assert.equal(proc.stderr, "");
   assert.ok(proc.stdout.includes("usage: superspec_guard [-h]"));
-  assert.ok(proc.stdout.includes("superspec Sync Guard (v1)"));
+  assert.ok(proc.stdout.includes("SuperSpec 守护检查（v1）"));
   assert.ok(proc.stdout.includes("check-task-complete"));
   assert.ok(proc.stdout.includes("check-task-reopen"));
+  assert.equal(proc.stdout.includes("show this help message and exit"), false);
 });
 
 test("cli missing command emits usage to stderr", () => {
@@ -934,16 +1020,18 @@ test("cli missing command emits usage to stderr", () => {
   assert.equal(proc.status, 2);
   assert.equal(proc.stdout, "");
   assert.ok(proc.stderr.includes("usage: superspec_guard [-h]"));
-  assert.ok(proc.stderr.includes("the following arguments are required: command"));
+  assert.ok(proc.stderr.includes("缺少必填参数：command"));
   assert.equal(proc.stderr.includes("guard_error"), false);
+  assert.equal(proc.stderr.includes("the following arguments are required"), false);
 });
 
 test("cli unknown command emits argparse-style invalid choice", () => {
   const proc = spawnSync(process.execPath, [GUARD_TS, "nope"], { encoding: "utf8" });
   assert.equal(proc.status, 2);
   assert.equal(proc.stdout, "");
-  assert.ok(proc.stderr.includes("argument command: invalid choice: 'nope'"));
+  assert.ok(proc.stderr.includes("命令无效：'nope'"));
   assert.equal(proc.stderr.includes("guard_error"), false);
+  assert.equal(proc.stderr.includes("invalid choice"), false);
 });
 
 test("cli subcommand help emits usage to stdout", () => {
@@ -958,7 +1046,9 @@ test("standalone init help emits init-specific usage", () => {
   assert.equal(proc.status, 0);
   assert.equal(proc.stderr, "");
   assert.ok(proc.stdout.includes("usage: superspec init [-h] [--scope {project,user}]"));
+  assert.ok(proc.stdout.includes("可选参数："));
   assert.ok(proc.stdout.includes("--user"));
+  assert.equal(proc.stdout.includes("show this help message and exit"), false);
 });
 
 test("openspec status golden fixture matches 1.4.1 shape", () => {
@@ -1091,6 +1181,7 @@ test("standalone project init creates missing project surfaces without a change"
     summary = JSON.parse(writes.join(""));
     assert.equal(summary.allowed, true, JSON.stringify(summary));
     assert.equal(summary.gate, "project_init");
+    assert.equal(summary.gate_label_zh, "项目初始化");
     assert.equal(summary.change_id, null);
     for (const name of guard.REQUIRED_OPENSPEC_CODEX_SKILLS) {
       assert.equal(existsSync(join(tmp, ".codex", "skills", name, "SKILL.md")), true, name);
@@ -4378,6 +4469,7 @@ withFixture("FIX-13 missing openspec CLI defenses", (fx) => {
     const summary = project_init(fx.repo);
     assert.equal(summary.allowed, false);
     assert.ok(codes(summary.block_reasons).includes("project_init_failed"), JSON.stringify(summary.block_reasons));
+    assert.match(String(summary.block_reasons[0].message), /OpenSpec CLI/);
   } finally {
     process.env.PATH = savedPath;
   }

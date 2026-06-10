@@ -10,6 +10,8 @@ description: "5.通过原生 `openspec archive` 归档 SuperSpec OpenSpec change
 - 默认使用简体中文撰写所有人类可读产物、分析、报告、说明和 OpenSpec 文档正文。
 - 保留命令、路径、JSON 字段、gate 名、task/test id、代码标识符和外部 API 名称的原文。
 - 当 OpenSpec 模板要求固定标题或字段时，保留模板结构，只将正文内容写成中文。
+- 对话窗口里的解释、确认、总结和下一步说明必须使用中文；除命令、路径、字段名、代码标识符外，不要夹带英文说明词。
+- 向用户转述 guard / archive 输出时，不要直接贴英文 `message`、`next_allowed_actions` 或英文模板标题；应改写为中文，并仅在需要定位内部协议时保留英文 code/command 于反引号中。
 
 仅在 `review_complete` passes（其中已经包含 final verification）后使用本 skill。
 

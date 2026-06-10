@@ -1,9 +1,10 @@
-import { block, GuardError, printDecision, reason } from "./core.ts";
-import { project_init } from "./project_init.ts";
+import { block, commandExists, GuardError, printDecision, reason, runCommand } from "./core.ts";
+import { project_init, recommended_openspec_install_plan } from "./project_init.ts";
 import { install_workflow, uninstall_workflow, update_workflow, type EngineResult, type InstallScope } from "./install_engine.ts";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
+import { system_failure_zh } from "./i18n.ts";
 
 type InitArgs = {
   path: string;
@@ -19,7 +20,7 @@ function usage(): string {
 }
 
 function help(): string {
-  return `${usage()}\noptional arguments:\n  -h, --help             show this help message and exit\n  --scope {project,user} install into this project's .codex directory or into the Codex user home (default: project)\n  --project              shortcut for --scope project\n  --user                 shortcut for --scope user\n  --global               compatibility alias for --user\n  --path PATH            project root for --scope project (default: current directory)\n  --codex-home PATH      Codex user home for --scope user (default: $CODEX_HOME or ~/.codex)\n  --create               accepted for compatibility; init creates missing surfaces by default\n  --update               manifest-driven update of managed SuperSpec surfaces (user-modified files kept, new version written to *.new)\n  --uninstall            manifest-driven removal of managed SuperSpec surfaces (.superspec data and preexisting/user-modified files are kept)\n  --dry-run              with --uninstall: print what would be removed without touching files\n  --force                with install: overwrite pre-existing different files (backs up *.bak)\n`;
+  return `${usage()}\n可选参数：\n  -h, --help             显示帮助并退出\n  --scope {project,user} 安装到当前项目的 .codex 目录，或安装到用户级 Codex 目录（默认：project）\n  --project              等价于 --scope project\n  --user                 等价于 --scope user\n  --global               兼容别名，等价于 --user\n  --path PATH            --scope project 时使用的项目根目录（默认：当前目录）\n  --codex-home PATH      --scope user 时使用的 Codex 用户目录（默认：$CODEX_HOME 或 ~/.codex）\n  --create               兼容参数；init 默认就会创建缺失内容\n  --update               按 manifest 更新受管 SuperSpec 内容；用户改动文件保留，新的版本写入 *.new\n  --uninstall            按 manifest 卸载受管 SuperSpec 内容；.superspec 数据与既有/用户改动文件会保留\n  --dry-run              配合 --uninstall 时只预览将删除的文件，不实际修改\n  --force                安装时覆盖已有且内容不同的文件，并保留 *.bak 备份\n`;
 }
 
 function parse_init_argv(argv: string[]): InitArgs {
@@ -27,16 +28,16 @@ function parse_init_argv(argv: string[]): InitArgs {
     const idx = argv.indexOf(flag);
     if (idx === -1) return undefined;
     const value = argv[idx + 1];
-    if (value === undefined || value.startsWith("--")) throw new GuardError(`${flag} requires a value`);
+    if (value === undefined || value.startsWith("--")) throw new GuardError(`${flag} 缺少取值`);
     return value;
   };
   const update = argv.includes("--update");
   const uninstall = argv.includes("--uninstall");
-  if (update && uninstall) throw new GuardError("--update and --uninstall are mutually exclusive");
+  if (update && uninstall) throw new GuardError("--update 与 --uninstall 不能同时使用");
   const scopeFlag = getValue("--scope");
-  if (scopeFlag !== undefined && !["project", "user", "global"].includes(scopeFlag)) throw new GuardError("--scope must be project or user");
+  if (scopeFlag !== undefined && !["project", "user", "global"].includes(scopeFlag)) throw new GuardError("--scope 只能是 project 或 user");
   const userShortcut = argv.includes("--user") || argv.includes("--global");
-  if (userShortcut && argv.includes("--project")) throw new GuardError("--user/--global and --project are mutually exclusive");
+  if (userShortcut && argv.includes("--project")) throw new GuardError("--user/--global 与 --project 不能同时使用");
   let scope: InstallScope | null = scopeFlag === "global" ? "user" : (scopeFlag as InstallScope | undefined) ?? null;
   if (userShortcut) scope = "user";
   if (argv.includes("--project")) scope = "project";
@@ -52,6 +53,13 @@ function parse_init_argv(argv: string[]): InitArgs {
 
 function joinHomeCodex(): string {
   return `${homedir()}/.codex`;
+}
+
+function commandFailure(proc: { stdout: string; stderr: string; error?: Error; status: number | null }): string {
+  const output = (proc.error?.message ?? (proc.stderr || proc.stdout)).trim();
+  if (output) return system_failure_zh(output, `安装命令执行失败（退出状态码 ${proc.status ?? "未知"}）。`);
+  if (proc.status !== null) return `安装命令执行失败（退出状态码 ${proc.status}）。`;
+  return "安装命令执行失败，请查看终端日志后重试。";
 }
 
 function engineDecision(gate: string, projectRoot: string, result: EngineResult, nextActions: string[]): { allowed: boolean; [key: string]: any } {
@@ -76,10 +84,10 @@ async function promptInstallScope(): Promise<InstallScope> {
   const rl = createInterface({ input: process.stdin, output: process.stderr });
   try {
     for (;;) {
-      const answer = (await rl.question("Install SuperSpec Codex surfaces to project or user? [project] ")).trim().toLowerCase();
-      if (answer === "" || answer === "project" || answer === "p" || answer === "1") return "project";
-      if (answer === "user" || answer === "u" || answer === "2" || answer === "global" || answer === "g") return "user";
-      process.stderr.write("Please answer project or user.\n");
+      const answer = (await rl.question("请选择安装范围：project 还是 user？[project] ")).trim().toLowerCase();
+      if (answer === "" || answer === "project" || answer === "p" || answer === "1" || answer === "项目") return "project";
+      if (answer === "user" || answer === "u" || answer === "2" || answer === "global" || answer === "g" || answer === "用户") return "user";
+      process.stderr.write("请输入 project 或 user。\n");
     }
   } finally {
     rl.close();
@@ -88,6 +96,61 @@ async function promptInstallScope(): Promise<InstallScope> {
 
 function canPrompt(): boolean {
   return Boolean(process.stdin.isTTY && process.stderr.isTTY);
+}
+
+async function promptYesNo(question: string, defaultYes = true): Promise<boolean> {
+  const rl = createInterface({ input: process.stdin, output: process.stderr });
+  const suffix = defaultYes ? "[Y/n]" : "[y/N]";
+  try {
+    for (;;) {
+      const answer = (await rl.question(`${question} ${suffix} `)).trim().toLowerCase();
+      if (answer === "") return defaultYes;
+      if (["y", "yes", "是", "好", "确认"].includes(answer)) return true;
+      if (["n", "no", "否", "不", "取消"].includes(answer)) return false;
+      process.stderr.write("请输入 y / n，或输入 是 / 否。\n");
+    }
+  } finally {
+    rl.close();
+  }
+}
+
+export async function maybe_install_missing_openspec(opts: {
+  cwd: string;
+  scope: InstallScope;
+  mode: InitArgs["mode"];
+  interactive?: boolean;
+  commandExistsFn?: (cmd: string, meta?: { cwd?: string }) => boolean;
+  confirm?: (question: string) => Promise<boolean>;
+  run?: typeof runCommand;
+  writeStderr?: (text: string) => void;
+}): Promise<"not-needed" | "installed" | "skipped" | "failed"> {
+  const commandExistsFn = opts.commandExistsFn ?? ((cmd: string, meta?: { cwd?: string }) => commandExists(cmd, { cwd: meta?.cwd }));
+  if (opts.scope !== "project" || opts.mode !== "install") return "not-needed";
+  if (commandExistsFn("openspec", { cwd: opts.cwd })) return "not-needed";
+  if (!(opts.interactive ?? canPrompt())) return "skipped";
+
+  const plan = recommended_openspec_install_plan({ cwd: opts.cwd, commandExistsFn });
+  if (plan === null) return "skipped";
+
+  const confirm = opts.confirm ?? ((question: string) => promptYesNo(question));
+  const accepted = await confirm(`未检测到 openspec CLI。是否现在尝试自动安装？\n将执行：${plan.rendered}`);
+  if (!accepted) return "skipped";
+
+  const writeStderr = opts.writeStderr ?? ((text: string) => {
+    process.stderr.write(text);
+  });
+  writeStderr(`正在安装 OpenSpec CLI：${plan.rendered}\n`);
+  const proc = (opts.run ?? runCommand)(plan.cmd, plan.args, { cwd: opts.cwd, timeout: 300_000 });
+  if (proc.error || proc.status !== 0) {
+    writeStderr(`自动安装 OpenSpec CLI 失败：${commandFailure(proc)}\n`);
+    return "failed";
+  }
+  if (!commandExistsFn("openspec", { cwd: opts.cwd })) {
+    writeStderr("安装命令已完成，但当前 PATH 里仍未检测到 `openspec`。请重新打开终端或确认全局 bin 已在 PATH 中，然后重新运行 superspec init。\n");
+    return "failed";
+  }
+  writeStderr("OpenSpec CLI 安装完成，继续执行 superspec init。\n");
+  return "installed";
 }
 
 function run_init(args: InitArgs, scope: InstallScope): number {
@@ -111,7 +174,7 @@ function run_init(args: InitArgs, scope: InstallScope): number {
   }
   summary.install_scope = scope;
   summary.install_root = targetRoot;
-  printDecision(summary);
+  printDecision(summary, { command: "init" });
   return summary.allowed ? 0 : 1;
 }
 
@@ -126,7 +189,7 @@ export function main_init(argv: string[] = process.argv.slice(2)): number {
   } catch (err) {
     const change = "project";
     const errReason = err instanceof GuardError ? reason("guard_error", err.message) : reason("guard_internal_error", `${(err as Error).name}: ${(err as Error).message}`);
-    printDecision(block(change, "guard_error", [errReason]));
+    printDecision(block(change, "guard_error", [errReason]), { command: "init" });
     return 2;
   }
 }
@@ -139,11 +202,12 @@ export async function main_init_async(argv: string[] = process.argv.slice(2)): P
     }
     const args = parse_init_argv(argv);
     const scope = args.scope ?? (canPrompt() ? await promptInstallScope() : "project");
+    await maybe_install_missing_openspec({ cwd: args.path, scope, mode: args.mode });
     return run_init(args, scope);
   } catch (err) {
     const change = "project";
     const errReason = err instanceof GuardError ? reason("guard_error", err.message) : reason("guard_internal_error", `${(err as Error).name}: ${(err as Error).message}`);
-    printDecision(block(change, "guard_error", [errReason]));
+    printDecision(block(change, "guard_error", [errReason]), { command: "init" });
     return 2;
   }
 }

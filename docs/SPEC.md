@@ -18,7 +18,7 @@
 0. **明确 v1 定位**：v1 是 `audit-only discipline layer` / `cooperative agent discipline`，不是机械强制层；`must` / `block` / `不得` 等词在 v1 语境下表示 guard 结构判定与流程纪律，不表示运行时不可绕过。
 1. **翻案"零平行状态机"**：v0.1 主张 SuperSpec 完全不持有状态、全靠 `openspec status` 现场推导，导致流程把控力不足。v0.2 引入 **guard-owned 受控状态**（来自双轨方案），区分"可被重新校验的受控状态"（合法）与"可覆盖 OpenSpec 事实的漂移状态"（非法）。
 2. **规划 L4 Codex Hook 强制层（v2）**：已确认 Codex CLI 0.136.0 支持 hooks 框架与 `PreToolUse` deny 接口；真实物理 deny、绕过率和时延必须等 v1 跑通后做 R-1 spike，再决定是否升级为"物理拦截 + 运行时取证 + 事后稽核"三道防线。
-3. **吸收 comet（854★，OpenSpec+Superpowers 框架）的成熟控制面**：规模分级（hotfix/tweak preset）、脏工作区协议、人审阻塞点、单一 transition writer、fingerprint 防漂移。
+3. **补入成熟控制面**：规模分级（hotfix/tweak preset）、脏工作区协议、人审阻塞点、单一 transition writer、fingerprint 防漂移。
 4. **纠正 schema 扩展边界**：不再把 `test-contract` 做成 OpenSpec custom artifact；OpenSpec 继续使用默认 `proposal/specs/design/tasks` 流程，`test-contract`、多角色审查、红绿灯证据作为 SuperSpec sidecar gate。
 5. **补齐 critic 对抗审查的剩余 blocker/major**：M5 红绿灯适配、test-contract 兑现校验、§8.4 diff 机制、guard fail-closed、evidence 内容指纹。
 6. **纠正阶段划分**：`design` / `test-contract` / `tasks` 不再作为用户可见主阶段；它们统一收进 `propose` 内部 gate，避免 SuperSpec 阶段名和 OpenSpec artifact 名互相误导。
@@ -459,7 +459,7 @@ v1 不含 L4，**没有任何模型写不了的运行时取证源**（PostToolUs
 | 结构/映射/覆盖矩阵/脏工作区纪律/规模分级/人审阻塞 | 有效 **当且仅当** 合作型 agent 遵守 |
 | RED/GREEN、subagent 审查、human confirmation 真伪 | `self-reported / forgeable`（v1 无法机械防伪；判定矩阵里标 `runtime-verified` 的项在 v1 **实际退化为 self-reported**） |
 
-**定位结论（红线）**：**v1 = audit-only discipline layer / cooperative agent discipline（对标 comet 同级纪律层），不是"防抄近路的严格强制"。** 用户#1 诉求"机械强制、不靠模型自觉"由 **v2 hook** 兑现（且 gated on R-1 spike）。**批准 v1 = 接受该诉求在 v1 阶段不被满足**，仅获得"合作型 agent 的规范化 + OpenSpec 原生硬约束 + 可审计 evidence"。严禁把 v1 对外宣称为"严格强制"、"mechanical enforcement" 或 "runtime-verified"。
+**定位结论（红线）**：**v1 = audit-only discipline layer / cooperative agent discipline，不是"防抄近路的严格强制"。** 用户#1 诉求"机械强制、不靠模型自觉"由 **v2 hook** 兑现（且 gated on R-1 spike）。**批准 v1 = 接受该诉求在 v1 阶段不被满足**，仅获得"合作型 agent 的规范化 + OpenSpec 原生硬约束 + 可审计 evidence"。严禁把 v1 对外宣称为"严格强制"、"mechanical enforcement" 或 "runtime-verified"。
 
 ---
 
@@ -584,9 +584,9 @@ v1 只有防线3。防线1/2 是 v2 overlay，只有在 R-1 spike 通过并完�
 
 > 修正前稿反例：`Extract duration service`（抽取服务、保持行为）应标 `tdd_mode: behavior-preserving-refactor`，而非强制 `new-behavior` 的 RED-first。
 
-### 9.5 diff 检测：采用 comet 脏工作区协议（替换三点语法，补 critic 3.1）
+### 9.5 diff 检测：采用当前脏工作区协议（替换三点语法，补 critic 3.1）
 
-放弃有缺陷的 `git diff base_ref...head_ref` 三点语法（脏工作区不是 commit、untracked 丢失、并行 task_start_ref 失管）。改用 comet 协议：
+放弃有缺陷的 `git diff base_ref...head_ref` 三点语法（脏工作区不是 commit、untracked 丢失、并行 task_start_ref 失管）。改用当前协议：
 
 ```bash
 git status --short
@@ -722,7 +722,7 @@ review-phase native-subagent evidence 统一使用 `kind:"source_guidance"`。`c
 
 ---
 
-## 13. 规模分级（补 critic M6，采 comet preset）
+## 13. 规模分级（补 critic M6）
 
 > **v1 实然声明（审计 E-1，用户裁决 2026-06-10）**：v1 的 gate 面板是 **full-only**——`hotfix`/`tweak` preset 当前**不放宽任何 gate**，guard 对非 full preset 只做"变更规模超标 → 强制升级确认"（`preset_upgrade_requires_human_confirmation`），不提供精简流程。下表的精简语义是**未来设计目标**，需另立设计稿（gate 子集、披露循环在精简面板下的语义、与 §6.5 判定矩阵的交互）后才可实施；在那之前选择 `hotfix`/`tweak` 的唯一实际效果是声明意图 + 触发升级闸门。
 
@@ -743,7 +743,7 @@ preset 与升级写入 `superspec-state.json` 的 `superspec` 节，由 guard �
 
 ---
 
-## 14. 人审阻塞点（采 comet，回应"不能单纯靠模型控制"）
+## 14. 人审阻塞点（回应"不能单纯靠模型控制"）
 
 以下节点 guard 判定后，skill **必须用 AskUserQuestion 暂停等待用户显式选择**，不得用推荐/默认/历史偏好替代，不得只输出文字提示就继续：
 
@@ -833,7 +833,7 @@ openspec/changes/<change>/         # 运行时（OpenSpec 正本，spec-driven�
 
 **架构一次到位，实现分两期。** v1 必须先把 OpenSpec 默认流程、Sync Guard、skills、sidecar artifacts 和一个真实 change 跑稳；hook/L4 只能在 v1 验收后进入 v2。v1 的 Sync Guard 只需保持 **hook-compatible** 边界：命令参数稳定、输出 `allow/block` JSON、evidence schema 预留 `trust`/`agent_id`/`tool_response_ref` 等字段、失败时可映射为 `exit 2`。v1 **不**定义或 stub hook stdin adapter，不解析待应用 patch，不摄取 PostToolUse `tool_response`，不写 SubagentStart/SubagentStop runlog。
 
-### v1（MVP，定位 = `audit-only discipline layer`，对标 comet 同级纪律层）
+### v1（MVP，定位 = `audit-only discipline layer`）
 
 > **强制力天花板（见 §6.6）：v1 所有 SuperSpec 证据可被伪造闭环，真实净强制 = OpenSpec 原生硬约束 + 合作型 agent 纪律 + 事后审计。v1 不满足"防抄近路"诉求——那是 v2 的事。**
 
@@ -861,8 +861,8 @@ openspec/changes/<change>/         # 运行时（OpenSpec 正本，spec-driven�
 
 - **D-1 命名**：正式定为 **SuperSpec**（技术标识小写 `superspec`），原占位代号 `irsflow` 已全局替换。
 - **D-2 需求澄清形态**：默认不单独成 OpenSpec artifact（用 skill prompt + `.superspec/artifacts/discovery.md` + guard 现状调查门禁）；备选独立 sidecar `discovery` artifact。
-- **D-3 state 边界**：采纳 comet 受控状态 + gpt5.5 指纹对账（已定）。
-- **D-4 强制力（分期）**：v1 定位 = `audit-only discipline layer`（不依赖 hook，对标 comet 纪律层）；v2 必须在 v1 跑通并完成 R-1 spike 后才加 L4 hook 升 `mechanical` / `runtime-verified`。v1 guard 接口保持 hook-compatible，但不实现 hook adapter；无 hook 环境永久停留 v1 并显式告警。
+- **D-3 state 边界**：采纳受控状态 + gpt5.5 指纹对账（已定）。
+- **D-4 强制力（分期）**：v1 定位 = `audit-only discipline layer`（不依赖 hook）；v2 必须在 v1 跑通并完成 R-1 spike 后才加 L4 hook 升 `mechanical` / `runtime-verified`。v1 guard 接口保持 hook-compatible，但不实现 hook adapter；无 hook 环境永久停留 v1 并显式告警。
 - **D-5 OpenSpec 边界**：v1 固定默认 `spec-driven`，不 fork schema、不新增 OpenSpec artifact、不把 SuperSpec gate 写进 OpenSpec requires 链。
 
 ### 19.2 待验证

@@ -8,12 +8,12 @@ export function main(argv: string[] = process.argv.slice(2)): number {
     if (argparseExit !== null) return argparseExit;
     args = parse_argv(argv);
     const [decision] = dispatch(args);
-    printDecision(decision);
+    printDecision(decision, { command: args.command });
     return decision.allowed ? 0 : 1;
   } catch (err) {
     const change = args?.change ?? "?";
     const errReason = err instanceof GuardError ? reason("guard_error", err.message) : reason("guard_internal_error", `${(err as Error).name}: ${(err as Error).message}`);
-    printDecision(block(change, "guard_error", [errReason]));
+    printDecision(block(change, "guard_error", [errReason]), { command: args?.command });
     return 2;
   }
 }

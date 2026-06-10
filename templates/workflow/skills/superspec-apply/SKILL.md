@@ -10,6 +10,8 @@ description: "3.在 SuperSpec RED/GREEN guard 检查下执行 tasks，并从 Ope
 - 默认使用简体中文撰写所有人类可读产物、分析、报告、说明和 OpenSpec 文档正文。
 - 保留命令、路径、JSON 字段、gate 名、task/test id、代码标识符和外部 API 名称的原文。
 - 当 OpenSpec 模板要求固定标题或字段时，保留模板结构，只将正文内容写成中文。
+- 对话窗口里的解释、总结、提问和下一步说明必须使用中文；除命令、路径、字段名、代码标识符外，不要夹带英文说明词。
+- 向用户转述 guard / review 输出时，不要直接贴英文 `message`、`next_allowed_actions` 或英文模板标题；应改写为中文，并仅在需要定位内部协议时保留英文 code/command 于反引号中。
 
 在 propose package 完成后使用本 skill 执行实现任务。**Task context、ordering 和 progress 来自 OpenSpec native apply instructions**（`openspec instructions apply`）；SuperSpec 为每个 task 包上一层 RED/GREEN guard checks。
 
@@ -50,14 +52,14 @@ description: "3.在 SuperSpec RED/GREEN guard 检查下执行 tasks，并从 Ope
        只有该 guard `allow` 后，才允许把对应 task 从 `- [x]` 改为 `- [ ]`，并把它重新纳入本轮 apply。
      - 如果该 task 已经是 `[ ]`，且当前 `tasks.md` 已匹配授权后的 `after_tasks_sha256`，说明它已经处于合法 reopened apply；此时直接续跑 `check-task-edit -> RED/GREEN -> check-task-complete`，不要重复创建 `task_reopen`，也不要再次执行 pre-revert `check-task-reopen`。
    - 若 `request_changes_route:"change_update"`，停止 apply，回 propose / change update；不要试图通过 reopen 继续实现。
-6. 对每个 pending task（包括刚刚合法 reopen 的 task），在任何实现编辑前执行：
+6. 对每个 pending task（包括刚刚合法 reopen 的 task），在任何实现编辑前执行任务编辑前检查（`check-task-edit`）：
    ```text
    superspec guard check-task-edit --change "<change>" --task-id "<task-id>"
    ```
-7. 在 runtime/business implementation edits 前产出 RED evidence，除非有允许的 `no_tdd_reason` 或处于 characterization mode。RED/GREEN evidence 必须引用 task 的 `test_refs`，并在 task 声明 `invariant_refs` 时同步记录 `invariant_refs`。若 task 来自 reopen，本轮 successor GREEN / alternative verification / manual verification 必须携带同一 `reopen_id`。
+7. 在 runtime/business implementation edits 前产出 RED evidence，除非有允许的 `no_tdd_reason` 或处于现状锁定测试模式（`characterization mode`）。这里的 `characterization` 指“先把当前真实行为测出来并锁住，重构后保持一致”。RED/GREEN evidence 必须引用 task 的 `test_refs`，并在 task 声明 `invariant_refs` 时同步记录 `invariant_refs`。若 task 来自 reopen，本轮 successor GREEN / alternative verification / manual verification 必须携带同一 `reopen_id`。
 8. 按 native dynamic instruction 和 `contextFiles` 指引，实现最小 task scope。
 9. 产出 GREEN evidence，保留 `test_id`、`invariant_refs`、命令、输出摘要和 raw log ref。
-10. 勾选 task 前执行：
+10. 勾选 task 前执行任务完成检查（`check-task-complete`）：
    ```text
    superspec guard check-task-complete --change "<change>" --task-id "<task-id>"
    ```

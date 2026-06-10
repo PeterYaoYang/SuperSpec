@@ -10,6 +10,8 @@ description: "1.探索并澄清需求，进入 SuperSpec propose 前完成 OpenS
 - 默认使用简体中文撰写所有人类可读产物、分析、报告、说明和 OpenSpec 文档正文。
 - 保留命令、路径、JSON 字段、gate 名、task/test id、代码标识符和外部 API 名称的原文。
 - 当 OpenSpec 模板要求固定标题或字段时，保留模板结构，只将正文内容写成中文。
+- 对话窗口里的解释、披露、总结、提问和下一步说明必须使用中文；除命令、路径、字段名、代码标识符外，不要夹带英文说明词。
+- 向用户转述 guard / review 输出时，不要直接贴英文 `message`、`next_allowed_actions` 或英文模板标题；应改写为中文，并仅在需要定位内部协议时保留英文 code/command 于反引号中。
 
 在 init 之后、编写 OpenSpec proposal package 之前使用本 skill。
 
@@ -30,11 +32,11 @@ description: "1.探索并澄清需求，进入 SuperSpec propose 前完成 OpenS
 
 ## 审查披露循环 / Review Disclosure Loop（DISC Phase 1）
 
-多角色审查发现的问题**不允许主线程自行消化**。material 问题（`scope` / `non_goal` / `acceptance` / `business_semantics` / `design_boundary`）必须以原文披露给用户，拿到用户裁决后才能继续。
+多角色审查发现的问题**不允许主线程自行消化**。material 问题包括：范围（`scope`）、非目标（`non_goal`）、验收口径（`acceptance`）、业务语义（`business_semantics`）、设计边界（`design_boundary`）。这些问题必须以原文披露给用户，拿到用户裁决后才能继续。
 
 - critic review evidence 必须携带 `review_round_id`（形如 `explore_complete-r<N>`，从 r1 连续编号）和结构化 `findings[]`：每条 finding 含 `finding_id`、`finding_uid`（`<gate>:<evidence_id>:<finding_id>`）、`finding_type`（`blocker|scope_risk|open_question|agent_assumption|non_blocking_finding`）、`category`、`material_categories[]`、material 时的 `decision_scope_key`，以及 reviewer 原话 `summary`。分类字段的 producer 是 reviewer，主线程不得改写（P0-2）。
 - 每轮审查后主线程写 `kind:"main_review_digest"` evidence（`created_by:"main-thread"`），逐条覆盖该轮所有 findings：身份字段与 `summary` **逐字拷贝** origin finding，给出 `disposition`（`fixed|false_positive|accepted_deviation|user_decided|needs_user_decision`）、`rationale`、`route`/`route_reason` 和 per-disposition proof；`target_refs` 钉住当前 discovery blob；`source_review_evidence_refs` 引用本轮全部 role review；round>1 时 `previous_digest_refs` 串接上一轮 digest。
-- **material finding 一律走用户 checkpoint**：digest 先以 `status:"blocked"` + `needs_user_decision` 记录，然后把 finding 原文 + A/B/C/D 选项 +（每个选项对 scope / non-goals / acceptance / tests 的影响面）呈现给用户。用户裁决记录为 `kind:"user_review_decision"`（`created_by:"user"`，`finding_uids` 精确到 `finding_uid`，`decision_scope_key`、`material_categories[]`、`confirmed_refs` 钉住用户看到的 blob）。D 选项必须保留 `user_text` 原文并填 `structured_decision`（scope/non_goals/acceptance_impact/test_impact + requires_artifact_update/requires_rereview 布尔值）。
+- **material finding 一律走用户 checkpoint**：digest 先以 `status:"blocked"` + `needs_user_decision` 记录，然后把 finding 原文 + A/B/C/D 选项 +（每个选项对范围、非目标、验收口径、测试边界的影响面）呈现给用户。用户裁决记录为 `kind:"user_review_decision"`（`created_by:"user"`，`finding_uids` 精确到 `finding_uid`，`decision_scope_key`、`material_categories[]`、`confirmed_refs` 钉住用户看到的 blob）。D 选项必须保留 `user_text` 原文并填 `structured_decision`（scope/non_goals/acceptance_impact/test_impact + requires_artifact_update/requires_rereview 布尔值）。
 - 用户裁决导致 discovery 修改后：更新 artifact → supersede 过期的旧轮 review → 重跑 critic（round k>1 的 prompt **必须**内嵌工具渲染的 finding ledger，由 `render_finding_ledger` 生成，guard 逐字校验）→ 写新一轮 digest（终态 disposition 引用 `user_decision_refs`，artifact 修改时附 `artifact_update_refs`）。
 - material finding 的任何终态 disposition（含 `fixed`/`false_positive`）必须引用 `user_decision_refs[]`、有效 `standing_authorization_refs[]` 或 `baseline_decision_refs[]`；standing authorization 只能由用户创建、按 category 授权、永不覆盖 blocker。
 - finding history 是 append-only：旧 blocker 不会因 clean 重审而消失，必须拿到终态 disposition；同 gate 超过 3 轮仍未收敛时停止迭代，把未决 findings 整体升级给用户（`escalate_round_budget`）。
@@ -62,9 +64,9 @@ description: "1.探索并澄清需求，进入 SuperSpec propose 前完成 OpenS
    ```
 7. 在 `.superspec/evidence/discovery/` 记录 critic evidence，包含 `execution_mode:"native_subagent"`、`agent_role`、`agent_id`、`output_ref`、`source_anchors` 和 `target_refs`。
 8. 按披露循环处理 findings：写本轮 `main_review_digest`；存在 material finding 时**停下来向用户披露并等待 `user_review_decision`**，再按裁决更新 discovery / 重跑 critic / 写新一轮 digest，直到最新轮 clean 且 ledger 无未终态 finding。
-9. 验证 explore completion：
+9. 运行前置门禁检查（`check-enter`），验证 explore completion：
    ```text
    superspec guard check-enter --change "<change>" --gate explore_complete
    ```
 
-遇到任何 guard `block` 就停止。disclosure 相关 block（`missing_review_digest`、`needs_user_decision_pending`、`finding_unresolved`、`user_decision_unbound`、`ledger_injection_missing`、`round_budget_exhausted` 等）的唯一合法出路是回到披露循环或升级给用户，不允许绕过。
+遇到任何 guard `block` 就停止。披露相关阻塞码包括：缺少审查披露记录（`missing_review_digest`）、等待用户裁决（`needs_user_decision_pending`）、历史 finding 未收口（`finding_unresolved`）、用户裁决未绑定（`user_decision_unbound`）、缺少 finding 台账注入（`ledger_injection_missing`）、审查轮次预算耗尽（`round_budget_exhausted`）等。它们的唯一合法出路是回到披露循环或升级给用户，不允许绕过。

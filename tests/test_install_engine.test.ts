@@ -9,7 +9,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import * as guard from "../superspec_guard.ts";
-import { main_init } from "../src/init_cli.ts";
+import { main_init, maybe_install_missing_openspec } from "../src/init_cli.ts";
+import { missing_openspec_cli_message, OPENSPEC_INSTALL_DOC_URL, recommended_openspec_install_plan } from "../src/project_init.ts";
 
 function writeText(path: string, text: string): void {
   mkdirSync(dirname(path), { recursive: true });
@@ -247,7 +248,8 @@ test("init cli rejects --update together with --uninstall", () => {
     assert.equal(main_init(["--update", "--uninstall"]), 2);
     const summary = JSON.parse(writes.join(""));
     assert.equal(summary.block_reasons[0].code, "guard_error");
-    assert.match(summary.block_reasons[0].message, /mutually exclusive/);
+    assert.equal(summary.gate_label_zh, "命令执行异常");
+    assert.match(summary.block_reasons[0].message, /不能同时使用/u);
   } finally {
     process.stdout.write = savedWrite;
   }
@@ -266,10 +268,115 @@ test("init cli --uninstall surfaces engine problems as a block decision", () => 
     const summary = JSON.parse(writes.join(""));
     assert.equal(summary.allowed, false);
     assert.equal(summary.block_reasons[0].code, "project_uninstall_failed");
+    assert.equal(summary.gate_label_zh, "项目级卸载");
   } finally {
     process.stdout.write = savedWrite;
     fx.cleanup();
   }
+});
+
+test("openspec install plan prefers npm-compatible global installers in stable order", () => {
+  const seen: string[] = [];
+  const plan = recommended_openspec_install_plan({
+    cwd: "/repo",
+    commandExistsFn: (cmd, meta) => {
+      seen.push(`${cmd}@${meta?.cwd ?? ""}`);
+      return cmd === "pnpm";
+    },
+  });
+  assert.deepEqual(seen, ["npm@/repo", "pnpm@/repo"]);
+  assert.ok(plan);
+  assert.equal(plan.manager, "pnpm");
+  assert.equal(plan.rendered, "pnpm add -g @fission-ai/openspec@latest");
+});
+
+test("missing openspec message falls back to docs when no supported package manager is available", () => {
+  const message = missing_openspec_cli_message({
+    commandExistsFn: () => false,
+  });
+  assert.match(message, /PATH 中缺少 openspec CLI/u);
+  assert.match(message, new RegExp(OPENSPEC_INSTALL_DOC_URL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+});
+
+test("interactive init can offer to install openspec automatically", async () => {
+  const prompts: string[] = [];
+  const writes: string[] = [];
+  const runs: Array<{ cmd: string; args: string[] }> = [];
+  let openspecInstalled = false;
+  const result = await maybe_install_missing_openspec({
+    cwd: "/repo",
+    scope: "project",
+    mode: "install",
+    interactive: true,
+    commandExistsFn: (cmd) => {
+      if (cmd === "npm") return true;
+      if (cmd === "openspec") return openspecInstalled;
+      return false;
+    },
+    confirm: async (question) => {
+      prompts.push(question);
+      return true;
+    },
+    run: (cmd, args) => {
+      runs.push({ cmd, args });
+      openspecInstalled = true;
+      return { status: 0, stdout: "", stderr: "" };
+    },
+    writeStderr: (text) => {
+      writes.push(text);
+    },
+  });
+  assert.equal(result, "installed");
+  assert.equal(runs.length, 1);
+  assert.deepEqual(runs[0], {
+    cmd: "npm",
+    args: ["install", "-g", "@fission-ai/openspec@latest"],
+  });
+  assert.match(prompts[0], /是否现在尝试自动安装/u);
+  assert.match(prompts[0], /npm install -g @fission-ai\/openspec@latest/);
+  assert.ok(writes.some((item) => item.includes("OpenSpec CLI 安装完成")));
+});
+
+test("interactive init leaves installation to the user when declined", async () => {
+  let ran = false;
+  const result = await maybe_install_missing_openspec({
+    cwd: "/repo",
+    scope: "project",
+    mode: "install",
+    interactive: true,
+    commandExistsFn: (cmd) => cmd === "npm",
+    confirm: async () => false,
+    run: () => {
+      ran = true;
+      return { status: 0, stdout: "", stderr: "" };
+    },
+  });
+  assert.equal(result, "skipped");
+  assert.equal(ran, false);
+});
+
+test("interactive init surfaces install failures in Chinese without leaking raw shell text", async () => {
+  const writes: string[] = [];
+  const result = await maybe_install_missing_openspec({
+    cwd: "/repo",
+    scope: "project",
+    mode: "install",
+    interactive: true,
+    commandExistsFn: (cmd) => cmd === "npm",
+    confirm: async () => true,
+    run: () => ({
+      status: 1,
+      stdout: "",
+      stderr: "permission denied",
+    }),
+    writeStderr: (text) => {
+      writes.push(text);
+    },
+  });
+  assert.equal(result, "failed");
+  assert.ok(writes.some((item) => item.includes("自动安装 OpenSpec CLI 失败：权限不足")));
+  assert.equal(writes.some((item) => item.includes("permission denied")), false);
+  assert.equal(writes.some((item) => item.includes("exit status")), false);
 });
 
 test("templates and guard constants stay consistent (install map covers all workflow skills and roles)", () => {

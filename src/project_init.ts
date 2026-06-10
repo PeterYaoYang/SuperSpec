@@ -12,6 +12,17 @@ import {
   runCommand,
 } from "./core.ts";
 import { install_workflow } from "./install_engine.ts";
+import { system_failure_zh } from "./i18n.ts";
+
+export const OPENSPEC_NPM_PACKAGE = "@fission-ai/openspec";
+export const OPENSPEC_INSTALL_DOC_URL = "https://github.com/Fission-AI/OpenSpec#readme";
+
+export type OpenspecInstallPlan = {
+  manager: "npm" | "pnpm" | "yarn" | "bun";
+  cmd: string;
+  args: string[];
+  rendered: string;
+};
 
 type Action = {
   action: string;
@@ -21,15 +32,53 @@ type Action = {
 };
 
 const ROLE_DESCRIPTIONS: Record<string, string> = {
-  architect: "System design, boundaries, interfaces, and long-horizon tradeoffs",
-  critic: "Critical review of plans, evidence, assumptions, and scope drift",
-  "test-engineer": "Test strategy, coverage, and RED/GREEN evidence review",
-  "code-reviewer": "Code/spec/security review lane for the code-review workflow",
-  verifier: "Final completion evidence and verification review",
+  architect: "系统设计、边界、接口与长期取舍",
+  critic: "对计划、证据、假设与范围漂移做对抗审查",
+  "test-engineer": "测试策略、覆盖率与 RED/GREEN 证据审查",
+  "code-reviewer": "代码 / 规格 / 安全审查",
+  verifier: "最终完成证据与验证审查",
 };
 
-function commandFailure(proc: { stdout: string; stderr: string; error?: Error }): string {
-  return (proc.error?.message ?? (proc.stderr || proc.stdout)).trim();
+function commandFailure(proc: { stdout: string; stderr: string; error?: Error; status?: number | null }): string {
+  return system_failure_zh((proc.error?.message ?? (proc.stderr || proc.stdout)).trim(), proc.status !== null && proc.status !== undefined ? `命令执行失败（退出状态码 ${proc.status}）。` : "命令执行失败，请查看终端日志后重试。");
+}
+
+function renderCommand(cmd: string, args: string[]): string {
+  return [cmd, ...args].join(" ");
+}
+
+export function recommended_openspec_install_plan(
+  opts: {
+    cwd?: string;
+    commandExistsFn?: (cmd: string, meta?: { cwd?: string }) => boolean;
+  } = {},
+): OpenspecInstallPlan | null {
+  const commandExistsFn = opts.commandExistsFn ?? ((cmd: string, meta?: { cwd?: string }) => commandExists(cmd, { cwd: meta?.cwd }));
+  const versionedPackage = `${OPENSPEC_NPM_PACKAGE}@latest`;
+  const candidates: Array<Omit<OpenspecInstallPlan, "rendered">> = [
+    { manager: "npm", cmd: "npm", args: ["install", "-g", versionedPackage] },
+    { manager: "pnpm", cmd: "pnpm", args: ["add", "-g", versionedPackage] },
+    { manager: "yarn", cmd: "yarn", args: ["global", "add", versionedPackage] },
+    { manager: "bun", cmd: "bun", args: ["add", "-g", versionedPackage] },
+  ];
+  for (const candidate of candidates) {
+    if (!commandExistsFn(candidate.cmd, { cwd: opts.cwd })) continue;
+    return { ...candidate, rendered: renderCommand(candidate.cmd, candidate.args) };
+  }
+  return null;
+}
+
+export function missing_openspec_cli_message(
+  opts: {
+    cwd?: string;
+    commandExistsFn?: (cmd: string, meta?: { cwd?: string }) => boolean;
+  } = {},
+): string {
+  const plan = recommended_openspec_install_plan(opts);
+  if (plan) {
+    return `PATH 中缺少 openspec CLI。可先运行 \`${plan.rendered}\` 安装，然后重新运行 superspec init --scope project。`;
+  }
+  return `PATH 中缺少 openspec CLI。请先安装 OpenSpec CLI（${OPENSPEC_INSTALL_DOC_URL}），然后重新运行 superspec init --scope project。`;
 }
 
 function openspecSkillProblems(repoRoot: string): string[] {
@@ -56,9 +105,9 @@ function writeSuperSpecAgent(repoRoot: string, name: string): string {
       `description = "${ROLE_DESCRIPTIONS[name] ?? `superspec ${name} role`}"`,
       'model_reasoning_effort = "high"',
       'developer_instructions = """',
-      `You are the repo-local superspec ${name} native subagent.`,
-      "Follow the assigned superspec gate evidence task, cite concrete files, and report blockers upward.",
-      "Do not substitute main-thread self-review for required role evidence.",
+      `你是仓库本地的 superspec ${name} native subagent。`,
+      "遵循分配给你的 superspec gate 证据任务，引用具体文件，并把阻塞点上报主线程。",
+      "不要用主线程自审替代必须的角色证据。",
       '"""',
       "",
     ].join("\n"),
@@ -78,9 +127,9 @@ function writeSuperSpecPrompt(repoRoot: string, name: string): string {
       'argument-hint: "superspec gate evidence task"',
       "---",
       "",
-      `You are the repo-local superspec ${name} role.`,
+      `你是仓库本地的 superspec ${name} 角色。`,
       "",
-      "Review the provided superspec gate context with concrete file-backed evidence. Produce a concise pass/block report, cite source anchors and target refs, and do not replace required native-subagent evidence with main-thread self-review.",
+      "请基于具体文件证据审查提供的 superspec gate 上下文，输出简洁的通过 / 阻塞报告，引用 source anchors 与 target refs，并且不要用主线程自审替代必须的 native-subagent 证据。",
       "",
     ].join("\n"),
     "utf8",
@@ -89,7 +138,7 @@ function writeSuperSpecPrompt(repoRoot: string, name: string): string {
 }
 
 function ensureOpenSpecCodex(repoRoot: string, actions: Action[]): string[] {
-  if (!commandExists("openspec", { cwd: repoRoot })) return ["openspec CLI is not available in PATH"];
+  if (!commandExists("openspec", { cwd: repoRoot })) return [missing_openspec_cli_message({ cwd: repoRoot })];
 
   let problems = openspecSkillProblems(repoRoot);
   if (problems.length === 0) {
@@ -102,9 +151,9 @@ function ensureOpenSpecCodex(repoRoot: string, actions: Action[]): string[] {
     action: "openspec init --tools codex .",
     status: init.status === 0 ? "updated" : "failed",
     refs: problems,
-    detail: init.status === 0 ? undefined : (init.stderr || init.stdout).trim(),
+    detail: init.status === 0 ? undefined : commandFailure(init),
   });
-  if (init.error || init.status !== 0) return [`openspec init failed: ${commandFailure(init)}`];
+  if (init.error || init.status !== 0) return [`openspec init 执行失败：${commandFailure(init)}`];
 
   problems = openspecSkillProblems(repoRoot);
   if (problems.length === 0) return [];
@@ -114,12 +163,12 @@ function ensureOpenSpecCodex(repoRoot: string, actions: Action[]): string[] {
     action: "openspec update --force .",
     status: update.status === 0 ? "updated" : "failed",
     refs: problems,
-    detail: update.status === 0 ? undefined : (update.stderr || update.stdout).trim(),
+    detail: update.status === 0 ? undefined : commandFailure(update),
   });
-  if (update.error || update.status !== 0) return [`openspec update failed: ${commandFailure(update)}`];
+  if (update.error || update.status !== 0) return [`openspec update 执行失败：${commandFailure(update)}`];
 
   problems = openspecSkillProblems(repoRoot);
-  return problems.length === 0 ? [] : [`OpenSpec Codex skills remain missing/invalid: ${problems.join(", ")}`];
+  return problems.length === 0 ? [] : [`OpenSpec 配套技能文件仍然缺失或无效：${problems.join(", ")}`];
 }
 
 function ensureSuperSpecRoles(repoRoot: string, actions: Action[]): string[] {
@@ -130,14 +179,14 @@ function ensureSuperSpecRoles(repoRoot: string, actions: Action[]): string[] {
     if (!existsSync(agentPath) || !statSync(agentPath).isFile()) {
       created.push(writeSuperSpecAgent(repoRoot, name));
     } else if (read_agent_toml_name(agentPath) !== name) {
-      problems.push(`invalid agent ${agentPath}`);
+      problems.push(`agent 文件无效：${agentPath}`);
     }
 
     const promptPath = join(repoRoot, ".codex", "prompts", `${name}.md`);
     if (!existsSync(promptPath) || !statSync(promptPath).isFile()) {
       created.push(writeSuperSpecPrompt(repoRoot, name));
     } else if (!readFileSync(promptPath, "utf8").trim()) {
-      problems.push(`empty prompt ${promptPath}`);
+      problems.push(`prompt 文件为空：${promptPath}`);
     }
   }
   actions.push({

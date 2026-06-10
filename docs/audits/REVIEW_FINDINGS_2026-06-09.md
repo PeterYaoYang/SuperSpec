@@ -2,7 +2,7 @@
 
 - 评审日期：2026-06-09
 - 评审范围：`scripts/superspec/`（guard 实现 + 测试）、`docs/`（全部设计/分发/审计文档）、`.codex/skills/superspec-*`、`.codex/{agents,prompts}/*`
-- 评审方式：独立代码级审计（不信任既有 `docs/audits/GUARD_PROOF_GAPS_AUDIT.md`，从代码重新找洞）+ 实跑测试/类型检查 + 对标 comet / spec-kit / Veath + **critic 子代理对抗复核**
+- 评审方式：独立代码级审计（不信任既有 `docs/audits/GUARD_PROOF_GAPS_AUDIT.md`，从代码重新找洞）+ 实跑测试/类型检查 + 对标同类 workflow / spec-kit / Veath + **critic 子代理对抗复核**
 - 实测基线：`tests 202 / pass 202 / fail 0`，`tsc --noEmit` 零错误，测试总耗时 **~93.5s–142s（随负载波动）**，仓库**无 CI**。
 - **本文档已纳入 critic 对抗裁决（见 §8）**：严重度已重排、若干量化/绝对化表述已修正、新增 A-7/A-8/A-9 三条更根本的问题。交给 codex 时以本（修订后）版本为准。
 
@@ -210,14 +210,14 @@
 ### S-2 — 分发目前做不到（DISTRIBUTION 仅设计、未实施） `DESIGN-DECISION`（架构 critic MINOR）
 
 - `DISTRIBUTION.md` 全是设计（P0-P4 未实施），且已实测三个写死耦合点：wrapper 写死 `scripts/superspec/` 布局、skill 假设 CWD=repo root、`.codex/` 被 gitignore 无 git 兜底。
-- **后果**：当前**直接 copy 到别人仓库会失效**，"对标 comet 同级传播力"暂时只在 PPT。
+- **后果**：当前**直接 copy 到别人仓库会失效**，"对标同类轻量 workflow 的传播力"暂时只在 PPT。
 - **建议**：把这三个写死点列为分发 P0；在能一键装进任意仓库前，不对外宣称"可分发/给团队用"。
 
 ### S-3 — L4 机械强制未实测 + 实验顺序倒置（决定 v2 生死） `DESIGN-DECISION`（架构 critic BLOCKER-2）
 
-- v1 真实净强制力 = OpenSpec 原生硬约束 + 合作 agent 自觉 = **comet 同级**；项目头号目标 G6"机械强制"完全押注 V2 的 L4 hook，而 R-1（Codex `PreToolUse` 对 `apply_patch` 的真实 deny、`unified_exec` 绕过率、guard-as-hook 时延）**一项都未实测**。
-- **顺序倒置（核心缺陷）**：决定整个项目是否有差异化的 R-1 spike（真跑一次 deny 即可验证、成本极低）被排在 v1 全部工程（含 9400 行 guard）**之后**。若 R-1 失败 → 永久停 audit-only → **用 ~10 倍 comet 复杂度换 comet 同级强制力**。
-- **建议（强烈）**：**把 R-1 spike 提到最前，先验证再决定要不要继续加码这套复杂度**；在跑通前，所有对外材料严格只说"audit-only / comet 级纪律框架"，不宣称"机械强制"。
+- v1 真实净强制力 = OpenSpec 原生硬约束 + 合作 agent 自觉 = **同类轻量纪律框架级别**；项目头号目标 G6"机械强制"完全押注 V2 的 L4 hook，而 R-1（Codex `PreToolUse` 对 `apply_patch` 的真实 deny、`unified_exec` 绕过率、guard-as-hook 时延）**一项都未实测**。
+- **顺序倒置（核心缺陷）**：决定整个项目是否有差异化的 R-1 spike（真跑一次 deny 即可验证、成本极低）被排在 v1 全部工程（含 9400 行 guard）**之后**。若 R-1 失败 → 永久停 audit-only → **用更高复杂度换来同级强制力**。
+- **建议（强烈）**：**把 R-1 spike 提到最前，先验证再决定要不要继续加码这套复杂度**；在跑通前，所有对外材料严格只说"audit-only / 纪律框架"，不宣称"机械强制"。
 
 ---
 
@@ -245,15 +245,15 @@
 
 ## 7. 对标结论（供决策背景，非待办）
 
-| 维度 | SuperSpec | comet (633★) | spec-kit (官方) | Veath/opsx-superpowers |
+| 维度 | SuperSpec | 轻量整合型 workflow | spec-kit (官方) | Veath/opsx-superpowers |
 |---|---|---|---|---|
-| 状态机哲学 | 可重算受控状态，**禁止**平行状态机 | **显式相位状态机** `.comet.yaml` | 无 | OpenSpec 原生拥有 |
-| guard | TS + 指纹CAS + 证据schema + pinned_ref | bash + YAML 校验 | 无 | 无（schema/模板） |
-| 证据强度 | **内容寻址（blob_sha）** | 存在性（报告文件存在即可） | 无 | 无 |
-| 多agent对抗审查 | **导游/裁决分离（独有最深）** | 无 | 无 | superpowers 纪律 |
-| 上手/采用 | 高门槛 / 自用 | 中 / 633★ 社区验证 | 低 / 广泛 | 中 / 小众 |
+| 状态机哲学 | 可重算受控状态，**禁止**平行状态机 | **显式相位状态机** | 无 | OpenSpec 原生拥有 |
+| guard | TS + 指纹CAS + 证据schema + pinned_ref | bash / YAML 级校验 | 无 | 无（schema/模板） |
+| 证据强度 | **内容寻址（blob_sha）** | 以存在性为主 | 无 | 无 |
+| 多agent对抗审查 | **导游/裁决分离（独有最深）** | 通常较轻 | 无 | superpowers 纪律 |
+| 上手/采用 | 高门槛 / 自用 | 中 / 单入口 UX 更顺 | 低 / 广泛 | 中 / 小众 |
 
-- **vs comet**：SuperSpec 严格一个量级（内容寻址证据、真多agent协议、状态防漂移更彻底），但 comet 已被 633 用户验证、更轻、`/comet` 单入口 UX 更顺。两者都经历过"状态从 openspec 子树解耦出去"的同一次进化。
+- **vs 轻量整合型 workflow**：SuperSpec 严格一个量级（内容寻址证据、真多agent协议、状态防漂移更彻底），但轻量方案通常更轻、单入口 UX 更顺。两者都经历过"状态从 openspec 子树解耦出去"的同类进化。
 - **vs spec-kit**：不同物种。spec-kit 是纯脚手架（无 guard/证据/强制），漂移靠社区外挂 reconcile/archive。SuperSpec 重几十倍、方向相反。
 - **vs Veath**：哲学最近（overlay 不 fork + graceful degrade），但它 schema+模板级（轻），你 TS guard + 202 测试级（重）——印证方向正确，也反衬"重量差"值得持续自问。
 
