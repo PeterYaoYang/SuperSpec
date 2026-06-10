@@ -1,0 +1,39 @@
+{
+  "name": "@irenshi/superspec",
+  "version": "0.1.0",
+  "description": "SuperSpec workflow package: guard runtime, generic workflow templates, and Codex adapter payload.",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "superspec-guard": "./superspec_guard.ts",
+    "superspec-init": "./superspec_init.ts"
+  },
+  "exports": {
+    "./superspec_guard": "./superspec_guard.ts",
+    "./superspec_init": "./superspec_init.ts",
+    "./templates/*": "./templates/*",
+    "./adapters/*": "./adapters/*",
+    "./schemas/*": "./schemas/*"
+  },
+  "files": [
+    "README.md",
+    "superspec_guard.ts",
+    "superspec_init.ts",
+    "src",
+    "templates",
+    "adapters",
+    "schemas"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test tests/*.test.ts",
+    "pack:dry-run": "npm pack --dry-run"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.1",
+    "typescript": "^6.0.3"
+  }
+}

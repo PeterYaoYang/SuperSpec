@@ -1,0 +1,8 @@
+.DS_Store
+.idea/
+.omx/
+node_modules/
+*.tsbuildinfo
+*.log
+/.omc/
+/.codex/

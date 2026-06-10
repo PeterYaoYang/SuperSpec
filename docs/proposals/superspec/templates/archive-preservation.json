@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "change_id": "<change>",
+  "kind": "superspec_archive_preservation",
+  "entries": [
+    {
+      "path": ".superspec/config.yaml",
+      "sha256": "sha256:<digest>"
+    }
+  ]
+}

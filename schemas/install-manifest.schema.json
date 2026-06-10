@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://irenshi.local/superspec/install-manifest.schema.json",
+  "title": "SuperSpec install manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "superspecVersion",
+    "installedAt",
+    "guardSchemaVersion",
+    "guardWiring",
+    "files",
+    "createdDirs",
+    "dataGlobs"
+  ],
+  "properties": {
+    "superspecVersion": {
+      "type": "string",
+      "minLength": 1
+    },
+    "packageSpec": {
+      "type": "string",
+      "minLength": 1
+    },
+    "installedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "guardSchemaVersion": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "guardWiring": {
+      "type": "string",
+      "enum": ["npm-bin", "repo-wrapper"]
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "sha256", "managed", "preexisting"],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "managed": {
+            "type": "boolean"
+          },
+          "preexisting": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "createdDirs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "dataGlobs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  }
+}

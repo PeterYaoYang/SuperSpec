@@ -1,0 +1,3 @@
+# Legacy Discovery
+
+Fixture content.

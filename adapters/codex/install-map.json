@@ -1,0 +1,91 @@
+{
+  "adapter": "codex",
+  "version": 1,
+  "mappings": [
+    {
+      "kind": "skill",
+      "source": "templates/workflow/skills/superspec-explore/SKILL.md",
+      "target": ".codex/skills/superspec-explore/SKILL.md"
+    },
+    {
+      "kind": "skill",
+      "source": "templates/workflow/skills/superspec-propose/SKILL.md",
+      "target": ".codex/skills/superspec-propose/SKILL.md"
+    },
+    {
+      "kind": "skill",
+      "source": "templates/workflow/skills/superspec-apply/SKILL.md",
+      "target": ".codex/skills/superspec-apply/SKILL.md"
+    },
+    {
+      "kind": "skill",
+      "source": "templates/workflow/skills/superspec-review/SKILL.md",
+      "target": ".codex/skills/superspec-review/SKILL.md"
+    },
+    {
+      "kind": "skill",
+      "source": "templates/workflow/skills/superspec-archive/SKILL.md",
+      "target": ".codex/skills/superspec-archive/SKILL.md"
+    },
+    {
+      "kind": "prompt",
+      "source": "templates/workflow/prompts/architect.md",
+      "target": ".codex/prompts/architect.md"
+    },
+    {
+      "kind": "prompt",
+      "source": "templates/workflow/prompts/code-reviewer.md",
+      "target": ".codex/prompts/code-reviewer.md"
+    },
+    {
+      "kind": "prompt",
+      "source": "templates/workflow/prompts/critic.md",
+      "target": ".codex/prompts/critic.md"
+    },
+    {
+      "kind": "prompt",
+      "source": "templates/workflow/prompts/test-engineer.md",
+      "target": ".codex/prompts/test-engineer.md"
+    },
+    {
+      "kind": "prompt",
+      "source": "templates/workflow/prompts/verifier.md",
+      "target": ".codex/prompts/verifier.md"
+    },
+    {
+      "kind": "agent",
+      "source": "adapters/codex/agents/architect.toml",
+      "target": ".codex/agents/architect.toml"
+    },
+    {
+      "kind": "agent",
+      "source": "adapters/codex/agents/code-reviewer.toml",
+      "target": ".codex/agents/code-reviewer.toml"
+    },
+    {
+      "kind": "agent",
+      "source": "adapters/codex/agents/critic.toml",
+      "target": ".codex/agents/critic.toml"
+    },
+    {
+      "kind": "agent",
+      "source": "adapters/codex/agents/test-engineer.toml",
+      "target": ".codex/agents/test-engineer.toml"
+    },
+    {
+      "kind": "agent",
+      "source": "adapters/codex/agents/verifier.toml",
+      "target": ".codex/agents/verifier.toml"
+    },
+    {
+      "kind": "wrapper",
+      "source": "adapters/codex/wrappers/superspec_guard",
+      "target": "scripts/superspec_guard"
+    },
+    {
+      "kind": "wrapper",
+      "source": "adapters/codex/wrappers/superspec_init",
+      "target": "scripts/superspec_init"
+    }
+  ]
+}

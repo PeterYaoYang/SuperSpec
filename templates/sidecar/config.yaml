@@ -1,0 +1,13 @@
+# superspec config.yaml template
+# Project path: .superspec/config.yaml
+# Change path: openspec/changes/<change>/.superspec/config.yaml
+
+preset: full
+commands:
+  validate: openspec validate <change>
+  test: ""
+roles: {}
+rules: {}
+trust:
+  v1_evidence: audit-only
+archive: {}
