@@ -2,196 +2,243 @@
 
 [![npm version](https://img.shields.io/npm/v/@peterxiaoyang/superspec?style=flat-square)](https://www.npmjs.com/package/@peterxiaoyang/superspec)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D20.19.0-brightgreen?style=flat-square)](https://nodejs.org)
-[![OpenSpec overlay](https://img.shields.io/badge/OpenSpec-overlay-6f42c1?style=flat-square)](https://github.com/Fission-AI/OpenSpec)
+[![OpenSpec](https://img.shields.io/badge/OpenSpec-compatible-6f42c1?style=flat-square)](https://github.com/Fission-AI/OpenSpec)
 
-> 面向 Codex 的 OpenSpec 增强工作流约束层。
+> SuperSpec 是一套“先想清楚，再动手”的工作流。
 
-SuperSpec 是一个已经发布的 npm 包，适合已经认可 OpenSpec，但觉得默认流程在执行层还不够严格的团队。
+它解决的是一个很常见的问题：AI 编程工具写代码很快，但有时候还没搞清楚需求、现有代码和测试边界，就已经开始改文件了。
 
-它不替换 OpenSpec，也不改 OpenSpec 的工件关系。  
-它做的是在 OpenSpec 现有变更生命周期之上，再加一层更强的执行纪律：
+SuperSpec 会把一次需求变更拆成 5 步：
 
-- 先做现状调研，再谈设计是否站得住
-- 先明确业务不变量，再做实现
-- 先写清测试约束，再避免流于表面的测试
-- 先经过多角色审查，再允许宣布“完成”
-- 先确认归档保全完整，再真正归档
+```text
+探索需求 -> 写方案 -> 做实现 -> 做审查 -> 归档收尾
+```
 
-如果你只想用最原生、最轻量的 OpenSpec，而不想增加审查、测试、归档这些额外门禁，那你大概率不需要 SuperSpec。
+这样做的目的很简单：
 
-SuperSpec 的核心定位是：
+- 改代码前先弄清楚现状
+- 写实现前先有方案和任务
+- 任务完成前先有测试或验证记录
+- 宣布完成前先经过审查
+- 归档时保留关键过程记录
 
-- **保留 OpenSpec 作为主流程**
-- **把执行约束收敛成可复用的叠加层**
-- **让阶段推进依赖证据，而不是模型一句“done”**
+## 适合谁
 
-## 为什么会有 SuperSpec
+适合已经在用 AI 编程工具或命令行代理做项目开发，并希望流程更稳一点的团队或个人。
 
-很多团队在把 OpenSpec 和编码代理结合起来之后，真正出问题的地方往往不是“没有文档”，而是“有流程形状，但没有流程纪律”。
+如果你遇到过这些情况，SuperSpec 会有帮助：
 
-常见问题是：
+- 需求还没说清楚，AI 就开始写代码
+- 方案写得很粗，后面实现时靠猜
+- 测试只跑了命令，但没人说明它证明了什么
+- 代码写完后缺少真正的审查
+- 过几天想回看当时为什么这么改，却找不到过程记录
 
-- 设计文档在，但不够细，指导不了后续实现
-- 测试在，但没有证明真正重要的东西
-- 任务打勾了，但缺少强校验
-- 主线程自己写、自己审、自己宣布通过
-- 归档做了，但辅助证据已经散了
+如果你只是想让 AI 快速改一个很小的文件，且不需要完整方案、审查和记录，那 SuperSpec 可能会显得偏重。
 
-SuperSpec 解决的不是“再造一套 OpenSpec”，而是把这些执行层的薄弱点补上。
+## 和 OpenSpec 有什么区别
 
-## SuperSpec 增加了什么
+一句话区别：
 
-### 1. 更严格的 propose 阶段
+```text
+OpenSpec 管“这次要改什么”。
+SuperSpec 管“AI 应该怎样把这次改动做稳”。
+```
 
-SuperSpec 保留 OpenSpec 的原生四件套工件：
+更具体一点：
 
-- `proposal`
-- `specs`
-- `design`
-- `tasks`
+| 问题 | OpenSpec 主要负责 | SuperSpec 额外补上 |
+|---|---|---|
+| 这次变更是什么 | 方案、规格、设计、任务和归档 | 要求 AI 在写方案前先调查现状 |
+| 方案怎么写 | 提供标准的变更文档结构 | 要求方案前后有范围、风险、业务约束和测试思路 |
+| 代码怎么做 | 记录任务清单和完成状态 | 要求按任务实现，并留下测试或验证记录 |
+| 做完怎么算稳 | 可以校验规格和归档 | 增加代码审查、架构审查、反方审查和最终验证 |
+| 以后怎么追溯 | 保留 OpenSpec 的变更文档 | 额外保留探索、测试、审查和收尾记录 |
 
-同时补三类辅助产物：
+举个例子：
 
-- `discovery.md`：记录现状调研结果、已有行为、约束边界和需要先确认的问题
-- `business-invariants.md`：整理这次变更必须守住的业务不变量，避免实现时把关键业务语义改丢
-- `test-contract.md`：把测试覆盖范围、测试编号、约束映射和验证责任提前写清楚
+OpenSpec 会帮你记录“要增加登录功能、需要哪些规格、设计和任务”。
+SuperSpec 会进一步要求 AI 先看看现有登录/权限代码在哪里、哪些业务规则不能破坏、哪些场景必须测试、实现后要经过哪些审查，最后再归档。
 
-这样 `propose` 阶段就不只是“把文档写出来”，而是真正把设计、约束和测试责任提前收拢。
-
-### 2. 显式的多角色审查分工
-
-SuperSpec 会安装这些项目内角色：
-
-- `architect`
-- `critic`
-- `test-engineer`
-- `code-reviewer`
-- `verifier`
-
-这意味着审查在 SuperSpec 里是一个正式阶段，不是实现完成后的附带动作。
-
-### 3. 基于证据的门禁
-
-SuperSpec 的 guard 会检查：
-
-- 阶段进入条件
-- 任务修改 / 任务完成 条件
-- 审查完成 条件
-- 可归档条件与归档保全条件
-
-目标很直接：**阶段推进必须依赖证据，而不是靠模型自述。**
-
-### 4. 更完整的辅助目录与归档保全
-
-每个变更下都会有 `.superspec/` 辅助运行目录，用于保存：
-
-- 辅助产物：补足 OpenSpec 原生工件之外的调研、约束和测试文档
-- 证据：保存 RED/GREEN、审查、验证、确认等过程证据
-- 审查输出：保存各角色的审查结果和主线程的汇总结论
-- 状态文件：保存当前 gate、指纹和阶段状态，便于恢复和重算
-- ledger：保存关键事件记录，方便追溯流程推进过程
-- 归档保全元数据：确保归档前后能核对辅助目录是否完整保留
-
-这让长任务恢复、阶段审计和归档后追溯更稳定。
+所以 SuperSpec 不是 OpenSpec 的替代品。它更像是 OpenSpec 外面的一层执行纪律，专门约束 AI 编程工具不要跳过关键步骤。
 
 ## 快速开始
 
-### 环境要求
-
-- Node.js `>= 20.19.0`
-- 本机 `PATH` 上可用兼容官方 `@fission-ai/openspec` 的 CLI，版本 `>= 1.4.1`，并支持 SuperSpec 依赖的 OpenSpec native surface
-- 目标项目准备使用 OpenSpec + Codex 工作流入口
-
-执行 `superspec init` 时，无论选择 `project` 还是 `user` scope，如果未检测到 `openspec`、检测到 `openspec-chinese` 或其他不兼容变体，或版本低于 `1.4.1`，SuperSpec 都会自动尝试安装 / 升级官方 OpenSpec CLI；遇到全局 bin 被不兼容变体占用时会用覆盖模式重试。
-
-Windows PowerShell 中如果遇到 npm 全局 bin 的 `.ps1` 执行策略报错，请显式使用 `.cmd` shim，例如 `superspec.cmd init --scope project`、`superspec.cmd guard check-init --change <change>`、`openspec.cmd status --change <change> --json`。
-
-### 安装
-
-优先走 npm：
+### 1. 安装
 
 ```bash
-npm install -g @peterxiaoyang/superspec
+npm install -g @peterxiaoyang/superspec@latest
 ```
 
+需要 Node.js `>= 20.19.0`。
 
-如果你要固定到 GitHub release tarball，也可以：
+### 2. 初始化当前项目
 
-```bash
-npm install -g https://github.com/PeterYaoYang/SuperSpec/releases/download/v0.1.0/superspec-0.1.0.tgz
-```
-
-### 初始化
-
-在项目目录里执行：
+进入你的项目根目录，然后运行：
 
 ```bash
 superspec init --scope project
 ```
 
-如果你就在项目目录里直接运行下面这条，通常也够了：
+这条命令的意思是：把 SuperSpec 当前可用的工作流入口安装到项目里。
 
-```bash
-superspec init
+Windows PowerShell 如果拦截 npm 的 `.ps1` 脚本，请改用：
+
+```powershell
+superspec.cmd init --scope project
 ```
 
-如果你要装到用户级目录，而不是当前项目：
+### 3. 按步骤使用
 
-```bash
-superspec init --scope user
-```
+在你使用的 AI 编程工具或 CLI 里，按下面的阶段入口推进。不同工具的触发方式可以不同，但入口名和顺序保持一致。
 
-`superspec init` 会安装 SuperSpec 的工作流入口，并校验主路径需要的 OpenSpec Codex 入口。  
-如果项目里还没有对应的 OpenSpec 初始化内容，且本机可用 `openspec` CLI，SuperSpec 会自动尝试执行：
-
-- `openspec init --tools codex .`
-- 必要时再执行 `openspec update --force .`
-
-也就是说，普通使用场景下，你不需要先手动跑一遍 `openspec init`，直接运行 `superspec init` 就可以。
-
-## 用户可见的工作流入口
-
-SuperSpec 当前暴露的工作流入口是：
-
-- `superspec-explore`
-- `superspec-propose`
-- `superspec-apply`
-- `superspec-review`
-- `superspec-archive`
-
-## 安装后会落什么东西
-
-项目级安装时，SuperSpec 会把项目内入口写到 `.codex/`，把变更级运行数据写到 `.superspec/`。
-
-主要辅助目录内容包括：
-
-- `.superspec/artifacts/discovery.md`：记录现状调研、边界澄清和上游事实
-- `.superspec/artifacts/business-invariants.md`：记录本次变更必须守住的业务不变量
-- `.superspec/artifacts/test-contract.md`：记录测试覆盖矩阵、测试编号和约束映射
-- `.superspec/evidence/...`：保存测试、审查、验证、用户确认等证据文件
-- `.superspec/superspec-state.json`：保存 guard 重算后的状态摘要和指纹
-- `.superspec/ledger.jsonl`：保存关键流程事件，便于审计和追溯
-
-SuperSpec 支持：
-
-- `project` scope
-- `user` scope
-- 基于清单的 `update`
-- 基于清单的 `uninstall`
-
-## 设计原则
+开始时先探索需求：
 
 ```text
-→ 叠加，不是替代
-→ 证据，不是感觉
-→ 审查，不是自我批准
-→ 保全，不是归档后失忆
-→ 更严格，但不过度做重
+使用 superspec-explore，帮我梳理这个需求：……
 ```
 
-## 致谢与灵感来源
+探索完成后，写正式方案：
 
-SuperSpec 的思路不是凭空长出来的。它明显受这些项目影响：
+```text
+使用 superspec-propose，把刚才的探索结果整理成方案。
+```
+
+方案确认后，开始实现：
+
+```text
+使用 superspec-apply，按任务实现。
+```
+
+实现完成后，审查：
+
+```text
+使用 superspec-review，检查实现、测试和风险。
+```
+
+审查通过后，归档：
+
+```text
+使用 superspec-archive，归档这个变更。
+```
+
+## 五个入口分别做什么
+
+| 入口 | 什么时候用 | 它会要求做什么 |
+|---|---|---|
+| `superspec-explore` | 需求刚开始时 | 读代码、查现状、整理范围和风险；这一步不改业务代码 |
+| `superspec-propose` | 需求已经清楚后 | 写正式方案、规格、设计和任务，并提前规划测试 |
+| `superspec-apply` | 方案通过后 | 按任务实现代码，记录测试或验证结果 |
+| `superspec-review` | 实现完成后 | 做代码审查、架构审查、反方审查和最终验证 |
+| `superspec-archive` | 审查通过后 | 用 OpenSpec 完成归档，并检查关键记录是否保留 |
+
+你日常主要记住这五个入口就够了。
+
+## 它会多保存哪些记录
+
+SuperSpec 会在每次变更下面保存一些辅助记录，方便后续追溯。
+
+主要包括：
+
+- 探索记录：这次需求是什么、当前代码是什么情况、有哪些风险
+- 业务约束：哪些业务规则不能被改坏
+- 测试约定：哪些场景必须验证
+- 实现记录：每个任务怎么验证通过
+- 审查记录：谁检查了什么、发现了什么、最后为什么通过或退回
+
+这些记录默认放在：
+
+```text
+openspec/changes/<变更ID>/.superspec/
+```
+
+这里的 `<变更ID>` 就是一次需求变更的名字。
+
+`.superspec/` 要不要提交到 git，由你的团队决定。
+如果不提交，删掉后就没有 git 历史可以恢复。
+
+## 重要边界
+
+SuperSpec 能让流程更规范，但它不是安全锁。
+
+它能帮助你：
+
+- 减少 AI 还没想清楚就改代码的情况
+- 让测试、审查和用户确认留下记录
+- 在进入下一步前提醒缺少什么
+- 让一次变更之后更容易回看原因
+
+它不能保证：
+
+- 阻止人手动绕过流程直接改文件
+- 阻止人删除过程记录
+- 阻止恶意伪造记录
+- 替代正式的安全审计、合规审计或法律证明
+
+也就是说，SuperSpec v1 是“流程纪律工具”，不是“强制安全系统”。
+
+## 常用命令
+
+安装到当前项目：
+
+```bash
+superspec init --scope project
+```
+
+更新当前项目里的 SuperSpec 入口：
+
+```bash
+superspec update --scope project
+```
+
+卸载当前项目里的 SuperSpec 入口：
+
+```bash
+superspec uninstall --scope project
+```
+
+这些命令默认不会删除已经生成的 `.superspec/` 过程记录。
+
+## 进阶信息
+
+以当前内置的 Codex 适配器为例，初始化后项目里会出现这些入口文件：
+
+```text
+.codex/
+  skills/superspec-explore/
+  skills/superspec-propose/
+  skills/superspec-apply/
+  skills/superspec-review/
+  skills/superspec-archive/
+```
+
+SuperSpec 内部还有一些检查命令，例如：
+
+```bash
+superspec guard check-init --change <变更ID>
+superspec guard check-apply-ready --change <变更ID>
+superspec guard check-review-ready --change <变更ID>
+superspec guard check-archive-ready --change <变更ID>
+```
+
+普通使用者通常不需要手动运行这些命令；对应的阶段入口会在需要时使用它们。
+
+如果你要开发 SuperSpec 本身：
+
+```bash
+npm run build
+npm run typecheck
+npm test
+npm run pack:dry-run
+```
+
+更多细节见：
+
+- `docs/SPEC.md`：完整设计和规则
+- `docs/DISTRIBUTION.md`：安装、升级、卸载和分发说明
+- `.codex/skills/superspec-*/SKILL.md`：当前 Codex 适配器使用的阶段入口说明
+
+## 致谢与灵感来源
 
 - [OpenSpec](https://github.com/Fission-AI/OpenSpec)
 - [oh-my-codex](https://github.com/Yeachan-Heo/oh-my-codex)
