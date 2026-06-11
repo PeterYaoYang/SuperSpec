@@ -2,17 +2,122 @@ import { dirname, join, resolve, sep } from "node:path";
 import { existsSync } from "node:fs";
 import type { JsonMap, Reason } from "./util.ts";
 import {
+  REQUIRED_OPENSPEC_CLI_SURFACES,
   GATE_ALIASES,
   GATE_ROUTE,
   GuardError,
   ROUTE_ALIASES,
   ROUTE_ORDER,
+  commandExists,
   fingerprint_obj,
   isObject,
   reason,
   repr,
   runCommand,
 } from "./util.ts";
+
+export const REQUIRED_OPENSPEC_MIN_VERSION = "1.4.1";
+
+export type OpenspecCliProbe = {
+  ok: boolean;
+  state: "ok" | "missing" | "invalid" | "too_old";
+  version: string | null;
+  message: string;
+};
+
+export function parse_openspec_version(raw: string): string | null {
+  const match = raw.match(/\b(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?\b/);
+  return match ? `${match[1]}.${match[2]}.${match[3]}` : null;
+}
+
+export function compare_versions(actual: string, required: string): number {
+  const actualParts = actual.split(".").map((part) => Number.parseInt(part, 10));
+  const requiredParts = required.split(".").map((part) => Number.parseInt(part, 10));
+  for (let index = 0; index < Math.max(actualParts.length, requiredParts.length); index += 1) {
+    const actualPart = actualParts[index] ?? 0;
+    const requiredPart = requiredParts[index] ?? 0;
+    if (!Number.isFinite(actualPart)) return -1;
+    if (!Number.isFinite(requiredPart)) return 1;
+    if (actualPart > requiredPart) return 1;
+    if (actualPart < requiredPart) return -1;
+  }
+  return 0;
+}
+
+export function openspec_cli_probe(opts: {
+  cwd?: string;
+  commandExistsFn?: (cmd: string, meta?: { cwd?: string }) => boolean;
+  run?: typeof runCommand;
+} = {}): OpenspecCliProbe {
+  const commandExistsFn = opts.commandExistsFn ?? ((cmd: string, meta?: { cwd?: string }) => commandExists(cmd, { cwd: meta?.cwd }));
+  const run = opts.run ?? runCommand;
+  if (!commandExistsFn("openspec", { cwd: opts.cwd })) {
+    return {
+      ok: false,
+      state: "missing",
+      version: null,
+      message: "PATH 中缺少 OpenSpec CLI（openspec）",
+    };
+  }
+
+  const versionProc = run("openspec", ["--version"], { cwd: opts.cwd, timeout: 15_000 });
+  if (versionProc.error || versionProc.status !== 0) {
+    const output = (versionProc.error?.message ?? (versionProc.stderr || versionProc.stdout)).trim();
+    return {
+      ok: false,
+      state: "invalid",
+      version: null,
+      message: `\`openspec --version\` 执行失败：${output}`,
+    };
+  }
+
+  const rawVersion = `${versionProc.stdout}${versionProc.stderr}`.trim();
+  if (/openspec[-_\s]*chinese/iu.test(rawVersion)) {
+    return {
+      ok: false,
+      state: "invalid",
+      version: null,
+      message: "PATH 上的 openspec 来自 openspec-chinese，不是受支持的 @fission-ai/openspec CLI",
+    };
+  }
+  const version = parse_openspec_version(rawVersion);
+  if (version === null) {
+    return {
+      ok: false,
+      state: "invalid",
+      version: null,
+      message: "PATH 上的 OpenSpec CLI（openspec）无法报告语义版本，可能不是受支持的 @fission-ai/openspec",
+    };
+  }
+
+  if (compare_versions(version, REQUIRED_OPENSPEC_MIN_VERSION) < 0) {
+    return {
+      ok: false,
+      state: "too_old",
+      version,
+      message: `openspec ${version} 低于 SuperSpec 要求的最低版本 ${REQUIRED_OPENSPEC_MIN_VERSION}`,
+    };
+  }
+
+  for (const args of REQUIRED_OPENSPEC_CLI_SURFACES) {
+    const proc = run("openspec", [...args], { cwd: opts.cwd, timeout: 15_000 });
+    if (proc.error || proc.status !== 0) {
+      return {
+        ok: false,
+        state: "invalid",
+        version,
+        message: `openspec ${version} 缺少必需的原生能力：\`openspec ${args.join(" ")}\` 执行失败`,
+      };
+    }
+  }
+
+  return {
+    ok: true,
+    state: "ok",
+    version,
+    message: `openspec ${version} satisfies SuperSpec requirements`,
+  };
+}
 
 export function openspec_status(change: string): JsonMap {
   const proc = runCommand("openspec", ["status", "--change", change, "--json"], { timeout: 30_000 });
@@ -41,8 +146,7 @@ export function openspec_version(): string {
   const proc = runCommand("openspec", ["--version"], { timeout: 15_000 });
   if (proc.error || proc.status !== 0) return "unknown";
   const raw = (proc.stdout || proc.stderr).trim();
-  const match = raw.match(/\d+\.\d+\.\d+/);
-  return match ? match[0] : raw || "unknown";
+  return (parse_openspec_version(raw) ?? raw) || "unknown";
 }
 
 export function openspec_status_shape_reasons(status: JsonMap): Reason[] {

@@ -10,7 +10,6 @@ import {
   FINAL_VERIFICATION_ROLES,
   REQUIRED_SUPERSPEC_AGENT_ROLES,
   REQUIRED_SUPERSPEC_WORKFLOW_SKILLS,
-  REQUIRED_OPENSPEC_CLI_SURFACES,
   REQUIRED_OPENSPEC_CODEX_SKILLS,
   REVIEW_GUIDANCE_ROLES,
   REVIEW_EVIDENCE_REQUIRED_FIELDS,
@@ -18,19 +17,17 @@ import {
   VERIFY_EVIDENCE_REQUIRED_FIELDS,
   allow,
   block,
-  commandExists,
   isObject,
   reason,
   renderList,
   repr,
   pinned_ref_key,
   safe_within,
-  runCommand,
   sha256_text,
   runtime,
   toPosix,
 } from "./util.ts";
-import { all_done, artifact_status_map, get_repo_root, is_done, normalize_gate } from "./openspec.ts";
+import { all_done, artifact_status_map, get_repo_root, is_done, normalize_gate, openspec_cli_probe } from "./openspec.ts";
 import { read_agent_toml_name, read_skill_frontmatter_name, sidecar_business_invariants_path, sidecar_discovery_path, sidecar_test_contract_path } from "./paths.ts";
 import {
   business_invariant_ids,
@@ -488,7 +485,7 @@ export function superspec_workflow_skill_reasons(repoRoot: string): Reason[] {
   if (missing.length > 0) {
     reasons.push(reason(
       "superspec_init_missing",
-      "SuperSpec workflow skills are missing; run superspec init --scope project to (re)install them",
+      "SuperSpec workflow skills are missing; run `superspec init --scope project` to (re)install them",
       missing,
     ));
   }
@@ -542,17 +539,11 @@ export function superspec_agent_reasons(repoRoot: string): Reason[] {
 }
 
 export function openspec_cli_capability_reasons(): Reason[] {
-  if (!commandExists("openspec")) return [reason("openspec_cli_unavailable", "openspec CLI is not available in PATH")];
-  const problems: Reason[] = [];
-  for (const args of REQUIRED_OPENSPEC_CLI_SURFACES) {
-    const proc = runCommand("openspec", [...args], { timeout: 15_000 });
-    if (proc.error) {
-      problems.push(reason("openspec_native_surface_missing", `\`openspec ${args.join(" ")}\` failed: ${proc.error.message}`));
-    } else if (proc.status !== 0) {
-      problems.push(reason("openspec_native_surface_missing", `\`openspec ${args.join(" ")}\` failed: ${(proc.stderr || proc.stdout).trim()}`));
-    }
-  }
-  return problems;
+  const probe = openspec_cli_probe();
+  if (probe.ok) return [];
+  if (probe.state === "missing") return [reason("openspec_cli_unavailable", probe.message)];
+  if (probe.state === "too_old") return [reason("openspec_cli_too_old", probe.message)];
+  return [reason("openspec_native_surface_missing", probe.message)];
 }
 
 export function evidence_schema_guard(change: string, changeRoot: string, repoRoot: string, evidences: JsonMap[]): Reason[] {

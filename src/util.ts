@@ -337,6 +337,10 @@ export function decorateDecision(decision: JsonMap, opts: { command?: string } =
     })
     : [];
   const nextActions = Array.isArray(decision.next_allowed_actions) ? decision.next_allowed_actions.map((item: unknown) => String(item)) : [];
+  const windowsPowerShellHints = windowsPowerShellCommandHints([
+    ...nextActions,
+    ...reasons.map((item: JsonMap) => String(item.message ?? "")),
+  ]);
   return {
     ...decision,
     command: command || decision.command,
@@ -347,9 +351,22 @@ export function decorateDecision(decision: JsonMap, opts: { command?: string } =
     command_hint_zh: commandInfo?.hint_zh,
     block_reasons: reasons,
     next_allowed_actions_zh: nextActions.map((item) => translate_action_zh(item)),
+    windows_powershell_command_hints: windowsPowerShellHints.length > 0 ? windowsPowerShellHints : undefined,
     trust_warnings_zh: Array.isArray(decision.trust_warnings) ? decision.trust_warnings.map((item: unknown) => trust_warning_zh(String(item))) : [],
     workflow_terms_zh: workflow_terms_zh_for(command || undefined, String(decision.gate ?? ""), reasons.map((item: JsonMap) => String(item.code ?? ""))),
   };
+}
+
+function windowsPowerShellCommandHints(texts: string[]): string[] {
+  const hints = new Set<string>();
+  for (const text of texts) {
+    for (const match of text.matchAll(/`((?:superspec|openspec)\s+[^`]+)`/giu)) {
+      const command = match[1]?.trim();
+      if (!command) continue;
+      hints.add(`Windows PowerShell: use \`${command.replace(/^(superspec|openspec)\b/iu, "$1.cmd")}\``);
+    }
+  }
+  return [...hints];
 }
 
 function sanitizeReasonForOutput(item: JsonMap): JsonMap {
@@ -529,6 +546,11 @@ export function commandLookupInvocation(cmd: string, platform: NodeJS.Platform =
   return { cmd: "sh", args: ["-c", `command -v ${cmd}`], shell: false };
 }
 
+export function selectWindowsCommandCandidate(cmd: string, whereStdout: string): string {
+  const candidates = whereStdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  return candidates.find((candidate) => /\.(?:cmd|bat)$/i.test(candidate)) ?? candidates[0] ?? cmd;
+}
+
 function resolveWindowsCommand(cmd: string, cwd?: string): string {
   if (cmd.includes("\\") || cmd.includes("/") || extname(cmd)) return cmd;
   const lookup = spawnSync("where.exe", [cmd], {
@@ -537,7 +559,7 @@ function resolveWindowsCommand(cmd: string, cwd?: string): string {
     timeout: 5_000,
   });
   if (lookup.status !== 0 || typeof lookup.stdout !== "string") return cmd;
-  return lookup.stdout.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? cmd;
+  return selectWindowsCommandCandidate(cmd, lookup.stdout);
 }
 
 export function windowsShellEscapeArg(arg: string): string {
@@ -551,7 +573,7 @@ export function windowsShellEscapeArg(arg: string): string {
 export function windowsCmdShimInvocation(cmdPath: string, args: string[], comspec = "cmd.exe"): { cmd: string; args: string[] } {
   return {
     cmd: comspec,
-    args: ["/d", "/s", "/c", [windowsShellEscapeArg(cmdPath), ...args.map(windowsShellEscapeArg)].join(" ")],
+    args: ["/d", "/c", cmdPath, ...args],
   };
 }
 

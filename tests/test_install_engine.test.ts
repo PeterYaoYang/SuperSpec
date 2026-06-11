@@ -4,9 +4,9 @@
 // preexisting files plus .superspec runtime data are never overwritten or deleted.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 
 import * as guard from "../superspec_guard.ts";
 import { main_init, maybe_install_missing_openspec } from "../src/init_cli.ts";
@@ -44,6 +44,65 @@ const SKILL_TARGET = ".codex/skills/superspec-demo/SKILL.md";
 const USER_SKILL_TARGET = "skills/superspec-demo/SKILL.md";
 const WRAPPER_TARGET = "scripts/superspec_demo";
 
+function installFakeNpmThatInstallsOpenSpec(binDir: string): void {
+  mkdirSync(binDir, { recursive: true });
+  const openspecPath = join(binDir, "openspec");
+  const npmPath = join(binDir, "npm");
+  writeText(
+    npmPath,
+    [
+      `#!${process.execPath}`,
+      "import { chmodSync, writeFileSync } from 'node:fs';",
+      "import { join } from 'node:path';",
+      `const binDir = ${JSON.stringify(binDir)};`,
+      `const openspecPath = ${JSON.stringify(openspecPath)};`,
+      `const skills = ${JSON.stringify([...guard.REQUIRED_OPENSPEC_CODEX_SKILLS])};`,
+      "const openspecSource = [",
+      `  ${JSON.stringify(`#!${process.execPath}`)},`,
+      "  \"import { mkdirSync, writeFileSync } from 'node:fs';\",",
+      "  \"import { join } from 'node:path';\",",
+      `  ${JSON.stringify(`const skills = ${JSON.stringify([...guard.REQUIRED_OPENSPEC_CODEX_SKILLS])};`)},`,
+      "  'const args = process.argv.slice(2);',",
+      "  \"if (args[0] === '--version') { console.log('OpenSpec 1.4.1'); process.exit(0); }\",",
+      "  \"if (args[1] === '--help' && ['instructions', 'archive', 'validate', 'status'].includes(args[0] ?? '')) process.exit(0);\",",
+      "  \"if (args[0] === 'init' || args[0] === 'update') {\",",
+      "  \"  for (const name of skills) {\",",
+      "  \"    const dir = join(process.cwd(), '.codex', 'skills', name);\",",
+      "  \"    mkdirSync(dir, { recursive: true });\",",
+      "  \"    writeFileSync(join(dir, 'SKILL.md'), `---\\\\nname: ${name}\\\\n---\\\\n`, 'utf8');\",",
+      "  '  }',",
+      "  '  process.exit(0);',",
+      "  '}',",
+      "  'process.exit(0);',",
+      "].join('\\n');",
+      "writeFileSync(openspecPath, openspecSource, 'utf8');",
+      "chmodSync(openspecPath, 0o755);",
+      "writeFileSync(join(binDir, 'openspec.cmd'), '@echo off\\r\\nnode \"%~dp0openspec\" %*\\r\\n', 'utf8');",
+      "writeFileSync(join(binDir, 'npm-installed-openspec.txt'), process.argv.slice(2).join(' '), 'utf8');",
+      "",
+    ].join("\n"),
+  );
+  chmodSync(npmPath, 0o755);
+  writeText(join(binDir, "npm.cmd"), `@echo off\r\n"${process.execPath}" "%~dp0npm" %*\r\n`);
+}
+
+function installFakeOpenSpecVersion(binDir: string, version: string): void {
+  mkdirSync(binDir, { recursive: true });
+  const openspecPath = join(binDir, "openspec");
+  writeText(
+    openspecPath,
+    [
+      `#!${process.execPath}`,
+      "const args = process.argv.slice(2);",
+      `if (args[0] === '--version') { console.log('OpenSpec ${version}'); process.exit(0); }`,
+      "process.exit(0);",
+      "",
+    ].join("\n"),
+  );
+  chmodSync(openspecPath, 0o755);
+  writeText(join(binDir, "openspec.cmd"), `@echo off\r\n"${process.execPath}" "%~dp0openspec" %*\r\n`);
+}
+
 test("real install map loads and every source file exists", () => {
   const { mappings, problems } = guard.load_install_map();
   assert.deepEqual(problems, []);
@@ -65,7 +124,26 @@ test("command lookup is platform-aware and does not use sh on Windows", () => {
   assert.deepEqual(unix.args, ["-c", "command -v openspec"]);
 });
 
-test("windows cmd shim invocation escapes shell metacharacters per argument", () => {
+test("windows command selection prefers cmd and bat shims from where.exe output", () => {
+  assert.equal(
+    guard.selectWindowsCommandCandidate("openspec", [
+      "C:\\Users\\me\\AppData\\Roaming\\npm\\openspec",
+      "C:\\Users\\me\\AppData\\Roaming\\npm\\openspec.cmd",
+      "",
+    ].join("\r\n")),
+    "C:\\Users\\me\\AppData\\Roaming\\npm\\openspec.cmd",
+  );
+  assert.equal(
+    guard.selectWindowsCommandCandidate("openspec", [
+      "C:\\tools\\openspec",
+      "C:\\tools\\openspec.bat",
+    ].join("\n")),
+    "C:\\tools\\openspec.bat",
+  );
+  assert.equal(guard.selectWindowsCommandCandidate("openspec", "C:\\tools\\openspec\n"), "C:\\tools\\openspec");
+});
+
+test("windows cmd shim invocation passes the shim path and args separately", () => {
   const invocation = guard.windowsCmdShimInvocation("C:\\Program Files\\nodejs\\openspec.cmd", [
     "demo change",
     "x&y",
@@ -74,20 +152,16 @@ test("windows cmd shim invocation escapes shell metacharacters per argument", ()
     "quote\" & calc & \"value",
   ]);
   assert.equal(invocation.cmd, "cmd.exe");
-  assert.deepEqual(invocation.args.slice(0, 3), ["/d", "/s", "/c"]);
-  const commandLine = invocation.args[3];
-  assert.match(commandLine, /Program\^ Files/);
-  assert.match(commandLine, /x\^&y/);
-  assert.match(commandLine, /pipe\^\|value/);
-  assert.match(commandLine, /out\^>file/);
-  assert.match(commandLine, /quote/);
-  for (let idx = commandLine.indexOf('"'); idx !== -1; idx = commandLine.indexOf('"', idx + 1)) {
-    assert.equal(commandLine[idx - 1], "^", `raw quote at index ${idx}: ${commandLine}`);
-  }
-  assert.doesNotMatch(commandLine, / x&y /);
-  assert.doesNotMatch(commandLine, / pipe\|value /);
-  assert.doesNotMatch(commandLine, / out>file /);
-  assert.doesNotMatch(commandLine, / & calc & /);
+  assert.deepEqual(invocation.args, [
+    "/d",
+    "/c",
+    "C:\\Program Files\\nodejs\\openspec.cmd",
+    "demo change",
+    "x&y",
+    "pipe|value",
+    "out>file",
+    "quote\" & calc & \"value",
+  ]);
 });
 
 test("fresh install copies files, sets wrapper exec bit, and writes a schema-valid manifest", () => {
@@ -294,12 +368,25 @@ test("missing openspec message falls back to docs when no supported package mana
   const message = missing_openspec_cli_message({
     commandExistsFn: () => false,
   });
-  assert.match(message, /PATH 中缺少 openspec CLI/u);
+  assert.match(message, /PATH 中缺少 OpenSpec CLI/u);
   assert.match(message, new RegExp(OPENSPEC_INSTALL_DOC_URL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 });
 
-test("interactive init can offer to install openspec automatically", async () => {
-  const prompts: string[] = [];
+test("openspec probe rejects openspec-chinese even when it reports a compatible version", () => {
+  const probe = guard.openspec_cli_probe({
+    commandExistsFn: () => true,
+    run: (cmd, args) => {
+      assert.equal(cmd, "openspec");
+      if (args[0] === "--version") return { status: 0, stdout: "openspec-chinese 1.4.1\n", stderr: "" };
+      return { status: 0, stdout: "", stderr: "" };
+    },
+  });
+  assert.equal(probe.ok, false);
+  assert.equal(probe.state, "invalid");
+  assert.match(probe.message, /openspec-chinese/u);
+});
+
+test("init automatically installs openspec when it is missing", async () => {
   const writes: string[] = [];
   const runs: Array<{ cmd: string; args: string[] }> = [];
   let openspecInstalled = false;
@@ -307,19 +394,18 @@ test("interactive init can offer to install openspec automatically", async () =>
     cwd: "/repo",
     scope: "project",
     mode: "install",
-    interactive: true,
     commandExistsFn: (cmd) => {
       if (cmd === "npm") return true;
       if (cmd === "openspec") return openspecInstalled;
       return false;
     },
-    confirm: async (question) => {
-      prompts.push(question);
-      return true;
-    },
     run: (cmd, args) => {
-      runs.push({ cmd, args });
-      openspecInstalled = true;
+      if (cmd === "npm") {
+        runs.push({ cmd, args });
+        openspecInstalled = true;
+        return { status: 0, stdout: "", stderr: "" };
+      }
+      if (cmd === "openspec" && args[0] === "--version") return { status: 0, stdout: "OpenSpec 1.4.1\n", stderr: "" };
       return { status: 0, stdout: "", stderr: "" };
     },
     writeStderr: (text) => {
@@ -332,27 +418,359 @@ test("interactive init can offer to install openspec automatically", async () =>
     cmd: "npm",
     args: ["install", "-g", "@fission-ai/openspec@latest"],
   });
-  assert.match(prompts[0], /是否现在尝试自动安装/u);
-  assert.match(prompts[0], /npm install -g @fission-ai\/openspec@latest/);
-  assert.ok(writes.some((item) => item.includes("OpenSpec CLI 安装完成")));
+  assert.ok(writes.some((item) => item.includes("将自动安装或升级")));
+  assert.ok(writes.some((item) => item.includes("npm install -g @fission-ai/openspec@latest")));
+  assert.ok(writes.some((item) => item.includes("OpenSpec CLI 安装或升级完成")));
 });
 
-test("interactive init leaves installation to the user when declined", async () => {
-  let ran = false;
+test("init reports skipped when no supported package manager can install openspec", async () => {
+  const writes: string[] = [];
+  const result = await maybe_install_missing_openspec({
+    cwd: "/repo",
+    scope: "user",
+    mode: "install",
+    commandExistsFn: () => false,
+    run: () => {
+      throw new Error("run should not be called");
+    },
+    writeStderr: (text) => {
+      writes.push(text);
+    },
+  });
+  assert.equal(result, "skipped");
+  assert.ok(writes.some((item) => item.includes("未找到 npm、pnpm、yarn 或 bun")));
+});
+
+test("init automatically upgrades openspec when the installed version is too old", async () => {
+  const writes: string[] = [];
+  const runs: Array<{ cmd: string; args: string[] }> = [];
+  let upgraded = false;
   const result = await maybe_install_missing_openspec({
     cwd: "/repo",
     scope: "project",
     mode: "install",
-    interactive: true,
-    commandExistsFn: (cmd) => cmd === "npm",
-    confirm: async () => false,
-    run: () => {
-      ran = true;
+    commandExistsFn: (cmd) => cmd === "npm" || cmd === "openspec",
+    run: (cmd, args) => {
+      if (cmd === "npm") {
+        runs.push({ cmd, args });
+        upgraded = true;
+        return { status: 0, stdout: "", stderr: "" };
+      }
+      if (cmd === "openspec" && args[0] === "--version") {
+        return { status: 0, stdout: upgraded ? "OpenSpec 1.4.1\n" : "OpenSpec 1.3.0\n", stderr: "" };
+      }
       return { status: 0, stdout: "", stderr: "" };
     },
+    writeStderr: (text) => {
+      writes.push(text);
+    },
   });
-  assert.equal(result, "skipped");
-  assert.equal(ran, false);
+  assert.equal(result, "installed");
+  assert.deepEqual(runs, [{ cmd: "npm", args: ["install", "-g", "@fission-ai/openspec@latest"] }]);
+  assert.ok(writes.some((item) => /1\.3\.0 低于 SuperSpec 要求的最低版本 1\.4\.1/u.test(item)));
+  assert.ok(writes.some((item) => item.includes("将自动安装或升级")));
+});
+
+test("init automatically replaces unsupported openspec variants even when openspec exists", async () => {
+  const writes: string[] = [];
+  const runs: Array<{ cmd: string; args: string[] }> = [];
+  let installedOfficial = false;
+  const result = await maybe_install_missing_openspec({
+    cwd: "/repo",
+    scope: "project",
+    mode: "install",
+    commandExistsFn: (cmd) => cmd === "npm" || cmd === "openspec",
+    run: (cmd, args) => {
+      if (cmd === "npm") {
+        runs.push({ cmd, args });
+        installedOfficial = true;
+        return { status: 0, stdout: "", stderr: "" };
+      }
+      if (cmd === "openspec" && args[0] === "--version") return { status: 0, stdout: "OpenSpec 1.4.1\n", stderr: "" };
+      if (cmd === "openspec" && !installedOfficial) return { status: 1, stdout: "", stderr: "unknown command" };
+      return { status: 0, stdout: "", stderr: "" };
+    },
+    writeStderr: (text) => {
+      writes.push(text);
+    },
+  });
+  assert.equal(result, "installed");
+  assert.deepEqual(runs, [{ cmd: "npm", args: ["install", "-g", "@fission-ai/openspec@latest"] }]);
+  assert.ok(writes.some((item) => item.includes("缺少必需的原生能力")));
+  assert.ok(writes.some((item) => item.includes("将自动安装或升级")));
+});
+
+test("init retries openspec install with force when an incompatible global bin blocks install", async () => {
+  const writes: string[] = [];
+  const runs: Array<{ cmd: string; args: string[] }> = [];
+  let installedOfficial = false;
+  let installAttempts = 0;
+  const result = await maybe_install_missing_openspec({
+    cwd: "/repo",
+    scope: "project",
+    mode: "install",
+    commandExistsFn: (cmd) => cmd === "npm" || cmd === "openspec",
+    run: (cmd, args) => {
+      if (cmd === "npm") {
+        runs.push({ cmd, args });
+        installAttempts += 1;
+        if (installAttempts === 1) return { status: 1, stdout: "", stderr: "npm ERR! EEXIST: file already exists, symlink 'openspec'" };
+        installedOfficial = true;
+        return { status: 0, stdout: "", stderr: "" };
+      }
+      if (cmd === "openspec" && args[0] === "--version") {
+        return { status: 0, stdout: installedOfficial ? "OpenSpec 1.4.1\n" : "openspec-chinese 1.4.1\n", stderr: "" };
+      }
+      return { status: 0, stdout: "", stderr: "" };
+    },
+    writeStderr: (text) => {
+      writes.push(text);
+    },
+  });
+  assert.equal(result, "installed");
+  assert.deepEqual(runs, [
+    { cmd: "npm", args: ["install", "-g", "@fission-ai/openspec@latest"] },
+    { cmd: "npm", args: ["install", "-g", "--force", "@fission-ai/openspec@latest"] },
+  ]);
+  assert.ok(writes.some((item) => item.includes("覆盖重试")));
+});
+
+test("init does not force retry openspec install for unrelated global bin conflicts", async () => {
+  const writes: string[] = [];
+  const runs: Array<{ cmd: string; args: string[] }> = [];
+  const result = await maybe_install_missing_openspec({
+    cwd: "/repo",
+    scope: "project",
+    mode: "install",
+    commandExistsFn: (cmd) => cmd === "npm",
+    run: (cmd, args) => {
+      if (cmd === "npm") {
+        runs.push({ cmd, args });
+        return { status: 1, stdout: "", stderr: "npm ERR! EEXIST: file already exists, symlink 'other-tool'" };
+      }
+      return { status: 0, stdout: "", stderr: "" };
+    },
+    writeStderr: (text) => {
+      writes.push(text);
+    },
+  });
+  assert.equal(result, "failed");
+  assert.deepEqual(runs, [{ cmd: "npm", args: ["install", "-g", "@fission-ai/openspec@latest"] }]);
+  assert.equal(writes.some((item) => item.includes("覆盖重试")), false);
+});
+
+test("non-interactive init also installs openspec automatically", async () => {
+  const runs: Array<{ cmd: string; args: string[] }> = [];
+  let openspecInstalled = false;
+  const result = await maybe_install_missing_openspec({
+    cwd: "/repo",
+    scope: "project",
+    mode: "install",
+    interactive: false,
+    commandExistsFn: (cmd) => {
+      if (cmd === "npm") return true;
+      if (cmd === "openspec") return openspecInstalled;
+      return false;
+    },
+    run: (cmd, args) => {
+      if (cmd === "npm") {
+        runs.push({ cmd, args });
+        openspecInstalled = true;
+      }
+      if (cmd === "openspec" && args[0] === "--version") return { status: 0, stdout: "OpenSpec 1.4.1\n", stderr: "" };
+      return { status: 0, stdout: "", stderr: "" };
+    },
+    writeStderr: () => {},
+  });
+  assert.equal(result, "installed");
+  assert.deepEqual(runs, [{ cmd: "npm", args: ["install", "-g", "@fission-ai/openspec@latest"] }]);
+});
+
+test("update and uninstall do not trigger openspec installation preflight", async () => {
+  for (const mode of ["update", "uninstall"] as const) {
+    let probed = false;
+    let ran = false;
+    const result = await maybe_install_missing_openspec({
+      cwd: "/repo",
+      scope: "user",
+      mode,
+      probeOpenspecFn: () => {
+        probed = true;
+        return { ok: false, state: "missing", version: null, message: "missing" };
+      },
+      run: () => {
+        ran = true;
+        return { status: 0, stdout: "", stderr: "" };
+      },
+      writeStderr: () => {},
+    });
+    assert.equal(result, "not-needed", mode);
+    assert.equal(probed, false, mode);
+    assert.equal(ran, false, mode);
+  }
+});
+
+test("main init with explicit project scope upgrades openspec before project setup", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "superspec-scope-init-"));
+  const repo = join(tmp, "repo");
+  const bin = join(tmp, "bin");
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+  const savedStdout = process.stdout.write;
+  const savedStderr = process.stderr.write;
+  const savedPath = process.env.PATH;
+  const savedPathAlt = process.env.Path;
+  mkdirSync(repo, { recursive: true });
+  installFakeNpmThatInstallsOpenSpec(bin);
+  installFakeOpenSpecVersion(bin, "1.3.0");
+  process.env.PATH = [bin, savedPath ?? savedPathAlt ?? ""].filter(Boolean).join(delimiter);
+  if (process.platform === "win32") process.env.Path = process.env.PATH;
+  process.stdout.write = ((chunk: any) => {
+    stdout.push(String(chunk));
+    return true;
+  }) as typeof process.stdout.write;
+  process.stderr.write = ((chunk: any) => {
+    stderr.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    const exitCode = main_init(["--scope", "project", "--path", repo]);
+    assert.equal(exitCode, 0, stderr.join(""));
+    assert.equal(existsSync(join(bin, "npm-installed-openspec.txt")), true, "explicit --scope project must trigger OpenSpec upgrade");
+    const summary = JSON.parse(stdout.join(""));
+    assert.equal(summary.allowed, true, JSON.stringify(summary.block_reasons));
+    assert.equal(existsSync(join(repo, ".codex", "skills", "openspec-explore", "SKILL.md")), true);
+    assert.equal(existsSync(join(repo, ".codex", "skills", "superspec-explore", "SKILL.md")), true);
+  } finally {
+    process.stdout.write = savedStdout;
+    process.stderr.write = savedStderr;
+    process.env.PATH = savedPath;
+    if (savedPathAlt === undefined) delete process.env.Path;
+    else process.env.Path = savedPathAlt;
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("init automatically installs openspec for user scope too", async () => {
+  const runs: Array<{ cmd: string; args: string[] }> = [];
+  let openspecInstalled = false;
+  const result = await maybe_install_missing_openspec({
+    cwd: "/repo",
+    scope: "user",
+    mode: "install",
+    commandExistsFn: (cmd) => {
+      if (cmd === "npm") return true;
+      if (cmd === "openspec") return openspecInstalled;
+      return false;
+    },
+    run: (cmd, args) => {
+      if (cmd === "npm") {
+        runs.push({ cmd, args });
+        openspecInstalled = true;
+        return { status: 0, stdout: "", stderr: "" };
+      }
+      if (cmd === "openspec" && args[0] === "--version") return { status: 0, stdout: "OpenSpec 1.4.1\n", stderr: "" };
+      return { status: 0, stdout: "", stderr: "" };
+    },
+    writeStderr: () => {},
+  });
+  assert.equal(result, "installed");
+  assert.deepEqual(runs, [{ cmd: "npm", args: ["install", "-g", "@fission-ai/openspec@latest"] }]);
+});
+
+test("main init with user scope blocks when openspec auto install fails", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "superspec-user-init-fail-"));
+  const repo = join(tmp, "repo");
+  const codexHome = join(tmp, "codex-home");
+  const bin = join(tmp, "bin");
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+  const savedStdout = process.stdout.write;
+  const savedStderr = process.stderr.write;
+  const savedPath = process.env.PATH;
+  const savedPathAlt = process.env.Path;
+  mkdirSync(repo, { recursive: true });
+  installFakeOpenSpecVersion(bin, "1.3.0");
+  writeText(
+    join(bin, "npm"),
+    [
+      `#!${process.execPath}`,
+      "console.error('permission denied');",
+      "process.exit(1);",
+      "",
+    ].join("\n"),
+  );
+  chmodSync(join(bin, "npm"), 0o755);
+  process.env.PATH = [bin, savedPath ?? savedPathAlt ?? ""].filter(Boolean).join(delimiter);
+  if (process.platform === "win32") process.env.Path = process.env.PATH;
+  process.stdout.write = ((chunk: any) => {
+    stdout.push(String(chunk));
+    return true;
+  }) as typeof process.stdout.write;
+  process.stderr.write = ((chunk: any) => {
+    stderr.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    const exitCode = main_init(["--scope", "user", "--path", repo, "--codex-home", codexHome]);
+    assert.equal(exitCode, 1);
+    const summary = JSON.parse(stdout.join(""));
+    assert.equal(summary.allowed, false);
+    assert.equal(summary.gate, "openspec_preflight");
+    assert.equal(summary.install_scope, "user");
+    assert.equal(summary.block_reasons[0].code, "openspec_auto_install_failed");
+    assert.equal(existsSync(join(codexHome, "skills", "superspec-explore", "SKILL.md")), false);
+    assert.ok(stderr.join("").includes("自动安装 OpenSpec CLI 失败"));
+  } finally {
+    process.stdout.write = savedStdout;
+    process.stderr.write = savedStderr;
+    process.env.PATH = savedPath;
+    if (savedPathAlt === undefined) delete process.env.Path;
+    else process.env.Path = savedPathAlt;
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("main init with explicit user scope installs openspec before user setup", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "superspec-user-init-"));
+  const repo = join(tmp, "repo");
+  const codexHome = join(tmp, "codex-home");
+  const bin = join(tmp, "bin");
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+  const savedStdout = process.stdout.write;
+  const savedStderr = process.stderr.write;
+  const savedPath = process.env.PATH;
+  const savedPathAlt = process.env.Path;
+  mkdirSync(repo, { recursive: true });
+  installFakeNpmThatInstallsOpenSpec(bin);
+  installFakeOpenSpecVersion(bin, "1.3.0");
+  process.env.PATH = [bin, savedPath ?? savedPathAlt ?? ""].filter(Boolean).join(delimiter);
+  if (process.platform === "win32") process.env.Path = process.env.PATH;
+  process.stdout.write = ((chunk: any) => {
+    stdout.push(String(chunk));
+    return true;
+  }) as typeof process.stdout.write;
+  process.stderr.write = ((chunk: any) => {
+    stderr.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    const exitCode = main_init(["--scope", "user", "--path", repo, "--codex-home", codexHome]);
+    assert.equal(exitCode, 0, stderr.join(""));
+    assert.equal(existsSync(join(bin, "npm-installed-openspec.txt")), true, "explicit --scope user must also trigger OpenSpec upgrade");
+    const summary = JSON.parse(stdout.join(""));
+    assert.equal(summary.allowed, true, JSON.stringify(summary.block_reasons));
+    assert.equal(summary.install_scope, "user");
+    assert.equal(existsSync(join(codexHome, "skills", "superspec-explore", "SKILL.md")), true);
+  } finally {
+    process.stdout.write = savedStdout;
+    process.stderr.write = savedStderr;
+    process.env.PATH = savedPath;
+    if (savedPathAlt === undefined) delete process.env.Path;
+    else process.env.Path = savedPathAlt;
+    rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test("interactive init surfaces install failures in Chinese without leaking raw shell text", async () => {
@@ -363,7 +781,6 @@ test("interactive init surfaces install failures in Chinese without leaking raw 
     mode: "install",
     interactive: true,
     commandExistsFn: (cmd) => cmd === "npm",
-    confirm: async () => true,
     run: () => ({
       status: 1,
       stdout: "",

@@ -48,8 +48,18 @@ function templateSkillText(name: string): string {
   return readFileSync(join(TEMPLATE_ROOT, "workflow", "skills", name, "SKILL.md"), "utf8");
 }
 
+function projectLocalSkillText(name: string): string {
+  return readFileSync(join(REPO, ".codex", "skills", name, "SKILL.md"), "utf8");
+}
+
 function templatePromptText(name: string): string {
   return readFileSync(join(TEMPLATE_ROOT, "workflow", "prompts", `${name}.md`), "utf8");
+}
+
+function templateSkillDescription(name: string): string {
+  const match = /^description:\s*"([^"]+)"/mu.exec(templateSkillText(name));
+  assert.ok(match, `${name} should declare a skill description`);
+  return match[1];
 }
 
 function proposalDocText(relPath: string): string {
@@ -87,6 +97,8 @@ test("superspec package declares workflow payload surface", () => {
   assert.equal(pkg.files.includes("src"), false);
   assert.equal(pkg.files.includes("superspec.ts"), false);
   assert.equal(pkg.files.includes("tests"), false);
+  assert.equal(pkg.files.includes(".codex-plugin"), false);
+  assert.equal(pkg.files.includes("skills"), false);
 });
 
 test("compiled runtime resolves package payload from the package root", () => {
@@ -240,10 +252,62 @@ test("skills call guard before advancing", () => {
     assert.equal(text.includes("```bash"), false, name);
     assert.ok(text.includes("guard `block`"), name);
     assert.ok(text.includes("## 语言规则 / Language"), name);
+    assert.ok(text.includes("## 命令执行 / Shell"), name);
+    assert.ok(text.includes("superspec.cmd"), name);
+    assert.ok(text.includes("openspec.cmd"), name);
+    assert.ok(text.includes("superspec.ps1"), name);
     assert.ok(text.includes("默认使用简体中文"), name);
+    assert.ok(text.includes("不得裸露内部证据种类"), name);
+    assert.ok(text.includes("写给用户时必须先翻译成中文业务动作"), name);
   }
   assert.ok(templateSkillText("superspec-explore").includes("init --scope project"));
   assert.equal(templateSkillText("superspec-explore").includes("SUPERSPEC_INIT"), false);
+});
+
+test("workflow skill descriptions are user-facing Chinese, not bilingual protocol summaries", () => {
+  const expectedDescriptions: Record<(typeof REQUIRED_SKILLS)[number], string> = {
+    "superspec-explore": "1.新需求刚开始时用：先把目标、范围、风险和现有代码事实弄清楚，产出探索记录（`discovery.md`）；这一步只探索，不写正式方案，也不改代码。",
+    "superspec-propose": "2.需求已经清楚后用：把探索记录（`discovery.md`）整理成正式方案包，包括方案说明（`proposal.md`）、需求规格（`specs/**`）、设计说明（`design.md`）、任务清单（`tasks.md`）、测试契约和业务约束；这一步只定方案，不写实现。",
+    "superspec-apply": "3.方案通过后用：按 tasks 一项项写代码、跑测试、记录证据；每个任务都要先证明测试会失败，再实现到测试通过。",
+    "superspec-review": "4.代码任务做完后用：让 reviewer、architect 和 critic 检查实现，跑最终验证，判断能不能进入归档；有问题就退回修。",
+    "superspec-archive": "5.所有审查和验证通过后用：把完成的 change 归档到 specs，并确认关键证据和历史没有丢失；这一步是流程收尾。",
+  };
+  for (const name of REQUIRED_SKILLS) {
+    const description = templateSkillDescription(name);
+    assert.equal(description, expectedDescriptions[name], name);
+    assert.equal(description.includes(" / "), false, name);
+    assert.doesNotMatch(description, /\b(Produce|Explore|Apply|Archive|review phase|guard checks|gates)\b/u, name);
+  }
+});
+
+test("workflow skills declare short SuperSpec source metadata", () => {
+  for (const name of REQUIRED_SKILLS) {
+    const text = templateSkillText(name);
+    assert.match(text, /^metadata:\n  author: SuperSpec\n  source: SuperSpec\n---/mu, name);
+    assert.doesNotMatch(text.slice(0, text.indexOf("---", 4)), /github|https?:|peteryaoyang-superspec/iu, name);
+  }
+});
+
+test("project-local superspec skills mirror packaged workflow templates", () => {
+  if (!existsSync(join(REPO, ".codex", "skills"))) return;
+  for (const name of REQUIRED_SKILLS) {
+    assert.equal(projectLocalSkillText(name), templateSkillText(name), name);
+  }
+});
+
+test("skills avoid high-risk internal protocol names in user-facing step prose", () => {
+  const forbiddenPatterns: RegExp[] = [
+    /等待\s+`user_review_decision`/u,
+    /拿到\s+`user_review_decision`/u,
+    /写本轮\s+`main_review_digest`/u,
+    /主流程记录\s+`main_review_digest`/u,
+  ];
+  for (const name of REQUIRED_SKILLS) {
+    const text = templateSkillText(name);
+    for (const pattern of forbiddenPatterns) {
+      assert.equal(pattern.test(text), false, `${name} leaks ${pattern}`);
+    }
+  }
 });
 
 test("propose owns openspec package and sidecar gates", () => {
@@ -261,7 +325,7 @@ test("propose owns openspec package and sidecar gates", () => {
     "不是 advisory note",
     "propose.proposal_reviewed",
     "main_review_digest",
-    "user_review_decision",
+    "用户确认",
     "propose.invariants_reviewed",
     "propose.design_reviewed",
     "propose.test_plan_drafted",
@@ -275,7 +339,7 @@ test("propose owns openspec package and sidecar gates", () => {
 test("explore explicitly bridges openspec explore", () => {
   const text = templateSkillText("superspec-explore");
   assert.ok(text.includes(".codex/skills/openspec-explore/SKILL.md"));
-  assert.ok(text.includes("OpenSpec Awareness"));
+  assert.ok(text.includes("像需求探索搭档一样"));
   assert.ok(text.includes("openspec list --json"));
   assert.ok(text.includes("openspec status --change"));
   assert.ok(text.includes("superspec-propose"));
@@ -286,9 +350,9 @@ test("propose explicitly bridges openspec propose", () => {
   const text = templateSkillText("superspec-propose");
   assert.ok(text.includes(".codex/skills/openspec-propose/SKILL.md"));
   assert.ok(text.includes("openspec-propose"));
-  assert.ok(text.includes("artifact-order"));
+  assert.ok(text.includes("方案文件生成顺序"));
   assert.ok(text.includes("openspec instructions <artifact-id>"));
-  assert.ok(text.includes("one-shot"));
+  assert.ok(text.includes("一次性把所有方案文件都生成完"));
 });
 
 test("apply explicitly bridges openspec apply", () => {
@@ -393,14 +457,14 @@ test("skills delegate to openspec instruction engine", () => {
 test("human pause points are present", () => {
   const combined = REQUIRED_SKILLS.map((name) => templateSkillText(name)).join("\n");
   for (const phrase of [
-    "design option selection",
-    "tasks review confirmation",
+    "设计选项选择",
+    "任务审查确认",
     "apply isolation",
     "execution mode",
     "修复与接受偏差",
-    "final `archive_ready` confirmation",
+    "`archive_ready` 最终确认",
     "scope expands",
-    "branch handling",
+    "分支状态",
   ]) {
     assert.ok(combined.includes(phrase), phrase);
   }

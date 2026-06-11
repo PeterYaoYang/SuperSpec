@@ -4,11 +4,14 @@ import {
   REQUIRED_SUPERSPEC_AGENT_ROLES,
   REQUIRED_OPENSPEC_CODEX_SKILLS,
   type JsonMap,
+  type OpenspecCliProbe,
+  REQUIRED_OPENSPEC_MIN_VERSION,
   block,
+  commandExists,
+  openspec_cli_probe,
   reason,
   read_agent_toml_name,
   read_skill_frontmatter_name,
-  commandExists,
   runCommand,
 } from "./core.ts";
 import { install_workflow } from "./install_engine.ts";
@@ -33,7 +36,7 @@ type Action = {
 
 const ROLE_DESCRIPTIONS: Record<string, string> = {
   architect: "系统设计、边界、接口与长期取舍",
-  critic: "对计划、证据、假设与范围漂移做对抗审查",
+  critic: "严格审查计划、证据、假设与范围漂移",
   "test-engineer": "测试策略、覆盖率与 RED/GREEN 证据审查",
   "code-reviewer": "代码 / 规格 / 安全审查",
   verifier: "最终完成证据与验证审查",
@@ -68,7 +71,33 @@ export function recommended_openspec_install_plan(
   return null;
 }
 
+export function forced_openspec_install_plan(plan: OpenspecInstallPlan): OpenspecInstallPlan {
+  const versionedPackage = `${OPENSPEC_NPM_PACKAGE}@latest`;
+  const forced: Record<OpenspecInstallPlan["manager"], string[]> = {
+    npm: ["install", "-g", "--force", versionedPackage],
+    pnpm: ["add", "-g", "--force", versionedPackage],
+    yarn: ["global", "add", versionedPackage, "--force"],
+    bun: ["add", "-g", "--force", versionedPackage],
+  };
+  return { ...plan, args: forced[plan.manager], rendered: renderCommand(plan.cmd, forced[plan.manager]) };
+}
+
 export function missing_openspec_cli_message(
+  opts: {
+    cwd?: string;
+    commandExistsFn?: (cmd: string, meta?: { cwd?: string }) => boolean;
+  } = {},
+): string {
+  return openspec_cli_requirement_message({
+    ok: false,
+    state: "missing",
+    version: null,
+    message: "PATH 中缺少 OpenSpec CLI（openspec）",
+  }, opts);
+}
+
+export function openspec_cli_requirement_message(
+  probe: OpenspecCliProbe,
   opts: {
     cwd?: string;
     commandExistsFn?: (cmd: string, meta?: { cwd?: string }) => boolean;
@@ -76,9 +105,9 @@ export function missing_openspec_cli_message(
 ): string {
   const plan = recommended_openspec_install_plan(opts);
   if (plan) {
-    return `PATH 中缺少 openspec CLI。可先运行 \`${plan.rendered}\` 安装，然后重新运行 superspec init --scope project。`;
+    return `${probe.message}。需要 @fission-ai/openspec >= ${REQUIRED_OPENSPEC_MIN_VERSION}。可先运行 \`${plan.rendered}\` 安装或升级，然后重新运行 \`superspec init --scope project\`。`;
   }
-  return `PATH 中缺少 openspec CLI。请先安装 OpenSpec CLI（${OPENSPEC_INSTALL_DOC_URL}），然后重新运行 superspec init --scope project。`;
+  return `${probe.message}。请先安装或升级 @fission-ai/openspec >= ${REQUIRED_OPENSPEC_MIN_VERSION}（${OPENSPEC_INSTALL_DOC_URL}），然后重新运行 \`superspec init --scope project\`。`;
 }
 
 function openspecSkillProblems(repoRoot: string): string[] {
@@ -106,8 +135,8 @@ function writeSuperSpecAgent(repoRoot: string, name: string): string {
       'model_reasoning_effort = "high"',
       'developer_instructions = """',
       `你是仓库本地的 superspec ${name} native subagent。`,
-      "遵循分配给你的 superspec gate 证据任务，引用具体文件，并把阻塞点上报主线程。",
-      "不要用主线程自审替代必须的角色证据。",
+      "遵循分配给你的 superspec gate 证据任务，引用具体文件，并把未通过的问题上报主流程。",
+      "不要用主流程自审替代必须的角色证据。",
       '"""',
       "",
     ].join("\n"),
@@ -129,7 +158,7 @@ function writeSuperSpecPrompt(repoRoot: string, name: string): string {
       "",
       `你是仓库本地的 superspec ${name} 角色。`,
       "",
-      "请基于具体文件证据审查提供的 superspec gate 上下文，输出简洁的通过 / 阻塞报告，引用 source anchors 与 target refs，并且不要用主线程自审替代必须的 native-subagent 证据。",
+      "请基于具体文件证据审查提供的 superspec gate 上下文，输出简洁的通过 / 未通过报告，引用 source anchors 与 target refs，并且不要用主流程自审替代必须的 native-subagent 证据。",
       "",
     ].join("\n"),
     "utf8",
@@ -138,7 +167,8 @@ function writeSuperSpecPrompt(repoRoot: string, name: string): string {
 }
 
 function ensureOpenSpecCodex(repoRoot: string, actions: Action[]): string[] {
-  if (!commandExists("openspec", { cwd: repoRoot })) return [missing_openspec_cli_message({ cwd: repoRoot })];
+  const probe = openspec_cli_probe({ cwd: repoRoot });
+  if (!probe.ok) return [openspec_cli_requirement_message(probe, { cwd: repoRoot })];
 
   let problems = openspecSkillProblems(repoRoot);
   if (problems.length === 0) {

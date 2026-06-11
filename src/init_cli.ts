@@ -1,5 +1,15 @@
-import { block, commandExists, GuardError, printDecision, reason, runCommand } from "./core.ts";
-import { project_init, recommended_openspec_install_plan } from "./project_init.ts";
+import {
+  block,
+  commandExists,
+  GuardError,
+  printDecision,
+  reason,
+  runCommand,
+  openspec_cli_probe,
+  REQUIRED_OPENSPEC_MIN_VERSION,
+  type OpenspecCliProbe,
+} from "./core.ts";
+import { forced_openspec_install_plan, project_init, recommended_openspec_install_plan } from "./project_init.ts";
 import { install_workflow, uninstall_workflow, update_workflow, type EngineResult, type InstallScope } from "./install_engine.ts";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
@@ -20,7 +30,7 @@ function usage(): string {
 }
 
 function help(): string {
-  return `${usage()}\n可选参数：\n  -h, --help             显示帮助并退出\n  --scope {project,user} 安装到当前项目的 .codex 目录，或安装到用户级 Codex 目录（默认：project）\n  --project              等价于 --scope project\n  --user                 等价于 --scope user\n  --global               兼容别名，等价于 --user\n  --path PATH            --scope project 时使用的项目根目录（默认：当前目录）\n  --codex-home PATH      --scope user 时使用的 Codex 用户目录（默认：$CODEX_HOME 或 ~/.codex）\n  --create               兼容参数；init 默认就会创建缺失内容\n  --update               按 manifest 更新受管 SuperSpec 内容；用户改动文件保留，新的版本写入 *.new\n  --uninstall            按 manifest 卸载受管 SuperSpec 内容；.superspec 数据与既有/用户改动文件会保留\n  --dry-run              配合 --uninstall 时只预览将删除的文件，不实际修改\n  --force                安装时覆盖已有且内容不同的文件，并保留 *.bak 备份\n`;
+  return `${usage()}\n可选参数：\n  -h, --help             显示帮助并退出\n  --scope {project,user} 安装到当前项目的 .codex 目录，或安装到用户级 Codex 目录（默认：project）\n  --project              等价于 --scope project\n  --user                 等价于 --scope user\n  --global               兼容别名，等价于 --user\n  --path PATH            --scope project 时使用的项目根目录（默认：当前目录）\n  --codex-home PATH      --scope user 时使用的 Codex 用户目录（默认：$CODEX_HOME 或 ~/.codex）\n  --create               兼容参数；init 默认就会创建缺失内容\n  --update               按 manifest 更新 SuperSpec 管理的文件；用户改动文件保留，新的版本写入 *.new\n  --uninstall            按 manifest 卸载 SuperSpec 管理的文件；.superspec 数据与既有/用户改动文件会保留\n  --dry-run              配合 --uninstall 时只预览将删除的文件，不实际修改\n  --force                安装时覆盖已有且内容不同的文件，并保留 *.bak 备份\n`;
 }
 
 function parse_init_argv(argv: string[]): InitArgs {
@@ -62,6 +72,13 @@ function commandFailure(proc: { stdout: string; stderr: string; error?: Error; s
   return "安装命令执行失败，请查看终端日志后重试。";
 }
 
+function shouldRetryOpenSpecInstallWithForce(proc: { stdout: string; stderr: string; error?: Error }): boolean {
+  const output = `${proc.error?.message ?? ""}\n${proc.stderr}\n${proc.stdout}`;
+  const binConflict = /\bEEXIST\b|already exists|file exists|Refusing to delete|will not overwrite|would overwrite/iu.test(output);
+  const openspecBin = /\bopenspec(?:\.(?:cmd|ps1))?\b/iu.test(output);
+  return binConflict && openspecBin;
+}
+
 function engineDecision(gate: string, projectRoot: string, result: EngineResult, nextActions: string[]): { allowed: boolean; [key: string]: any } {
   if (result.problems.length > 0) {
     const decision = block("project", gate, result.problems.map((item) => reason(`${gate}_failed`, item)));
@@ -98,59 +115,69 @@ function canPrompt(): boolean {
   return Boolean(process.stdin.isTTY && process.stderr.isTTY);
 }
 
-async function promptYesNo(question: string, defaultYes = true): Promise<boolean> {
-  const rl = createInterface({ input: process.stdin, output: process.stderr });
-  const suffix = defaultYes ? "[Y/n]" : "[y/N]";
-  try {
-    for (;;) {
-      const answer = (await rl.question(`${question} ${suffix} `)).trim().toLowerCase();
-      if (answer === "") return defaultYes;
-      if (["y", "yes", "是", "好", "确认"].includes(answer)) return true;
-      if (["n", "no", "否", "不", "取消"].includes(answer)) return false;
-      process.stderr.write("请输入 y / n，或输入 是 / 否。\n");
-    }
-  } finally {
-    rl.close();
-  }
-}
-
-export async function maybe_install_missing_openspec(opts: {
+export function maybe_install_missing_openspec(opts: {
   cwd: string;
   scope: InstallScope;
   mode: InitArgs["mode"];
   interactive?: boolean;
   commandExistsFn?: (cmd: string, meta?: { cwd?: string }) => boolean;
-  confirm?: (question: string) => Promise<boolean>;
+  probeOpenspecFn?: (meta?: { cwd?: string }) => OpenspecCliProbe;
   run?: typeof runCommand;
   writeStderr?: (text: string) => void;
-}): Promise<"not-needed" | "installed" | "skipped" | "failed"> {
+}): "not-needed" | "installed" | "skipped" | "failed" {
   const commandExistsFn = opts.commandExistsFn ?? ((cmd: string, meta?: { cwd?: string }) => commandExists(cmd, { cwd: meta?.cwd }));
-  if (opts.scope !== "project" || opts.mode !== "install") return "not-needed";
-  if (commandExistsFn("openspec", { cwd: opts.cwd })) return "not-needed";
-  if (!(opts.interactive ?? canPrompt())) return "skipped";
-
-  const plan = recommended_openspec_install_plan({ cwd: opts.cwd, commandExistsFn });
-  if (plan === null) return "skipped";
-
-  const confirm = opts.confirm ?? ((question: string) => promptYesNo(question));
-  const accepted = await confirm(`未检测到 openspec CLI。是否现在尝试自动安装？\n将执行：${plan.rendered}`);
-  if (!accepted) return "skipped";
+  if (opts.mode !== "install") return "not-needed";
+  const run = opts.run ?? runCommand;
+  const probeOpenspecFn = opts.probeOpenspecFn ?? ((meta?: { cwd?: string }) => openspec_cli_probe({ cwd: meta?.cwd, commandExistsFn, run }));
+  const before = probeOpenspecFn({ cwd: opts.cwd });
+  if (before.ok) return "not-needed";
 
   const writeStderr = opts.writeStderr ?? ((text: string) => {
     process.stderr.write(text);
   });
+  const plan = recommended_openspec_install_plan({ cwd: opts.cwd, commandExistsFn });
+  if (plan === null) {
+    writeStderr(`${before.message}。SuperSpec 需要 @fission-ai/openspec >= ${REQUIRED_OPENSPEC_MIN_VERSION}，但未找到 npm、pnpm、yarn 或 bun，无法自动安装。\n`);
+    return "skipped";
+  }
+
+  writeStderr(`${before.message}。SuperSpec 需要 @fission-ai/openspec >= ${REQUIRED_OPENSPEC_MIN_VERSION}，将自动安装或升级。\n`);
   writeStderr(`正在安装 OpenSpec CLI：${plan.rendered}\n`);
-  const proc = (opts.run ?? runCommand)(plan.cmd, plan.args, { cwd: opts.cwd, timeout: 300_000 });
+  let proc = run(plan.cmd, plan.args, { cwd: opts.cwd, timeout: 300_000 });
+  if ((proc.error || proc.status !== 0) && shouldRetryOpenSpecInstallWithForce(proc)) {
+    const forcedPlan = forced_openspec_install_plan(plan);
+    writeStderr(`OpenSpec CLI 安装遇到全局 bin 冲突，正在覆盖重试：${forcedPlan.rendered}\n`);
+    proc = run(forcedPlan.cmd, forcedPlan.args, { cwd: opts.cwd, timeout: 300_000 });
+  }
   if (proc.error || proc.status !== 0) {
     writeStderr(`自动安装 OpenSpec CLI 失败：${commandFailure(proc)}\n`);
     return "failed";
   }
-  if (!commandExistsFn("openspec", { cwd: opts.cwd })) {
-    writeStderr("安装命令已完成，但当前 PATH 里仍未检测到 `openspec`。请重新打开终端或确认全局 bin 已在 PATH 中，然后重新运行 superspec init。\n");
+  const after = probeOpenspecFn({ cwd: opts.cwd });
+  if (!after.ok) {
+    writeStderr(`安装命令已完成，但当前 PATH 里的 openspec 仍不可用：${after.message}。请重新打开终端或确认全局 bin 已在 PATH 中，然后重新运行 superspec init；Windows PowerShell 请运行 superspec.cmd init。\n`);
     return "failed";
   }
-  writeStderr("OpenSpec CLI 安装完成，继续执行 superspec init。\n");
+  writeStderr("OpenSpec CLI 安装或升级完成，继续执行 superspec init。\n");
   return "installed";
+}
+
+function openspecPreflightBlocked(args: InitArgs, scope: InstallScope, installResult: "skipped" | "failed"): number {
+  const targetRoot = scope === "user" ? args.codexHome : args.path;
+  const code = installResult === "skipped" ? "openspec_auto_install_unavailable" : "openspec_auto_install_failed";
+  const message = installResult === "skipped"
+    ? `OpenSpec CLI 不满足 SuperSpec 要求，且未找到可用包管理器自动安装 @fission-ai/openspec >= ${REQUIRED_OPENSPEC_MIN_VERSION}。`
+    : `OpenSpec CLI 自动安装或升级 @fission-ai/openspec >= ${REQUIRED_OPENSPEC_MIN_VERSION} 未完成。`;
+  const decision = block("project", "openspec_preflight", [reason(code, message)], {
+    next_actions: [`install or upgrade @fission-ai/openspec >= ${REQUIRED_OPENSPEC_MIN_VERSION}, then rerun \`superspec init --scope ${scope}\``],
+  });
+  printDecision({
+    ...decision,
+    project_root: args.path,
+    install_scope: scope,
+    install_root: targetRoot,
+  }, { command: "init" });
+  return 1;
 }
 
 function run_init(args: InitArgs, scope: InstallScope): number {
@@ -185,7 +212,10 @@ export function main_init(argv: string[] = process.argv.slice(2)): number {
       return 0;
     }
     const args = parse_init_argv(argv);
-    return run_init(args, args.scope ?? "project");
+    const scope = args.scope ?? "project";
+    const openspecInstall = maybe_install_missing_openspec({ cwd: args.path, scope, mode: args.mode });
+    if (openspecInstall === "failed" || openspecInstall === "skipped") return openspecPreflightBlocked(args, scope, openspecInstall);
+    return run_init(args, scope);
   } catch (err) {
     const change = "project";
     const errReason = err instanceof GuardError ? reason("guard_error", err.message) : reason("guard_internal_error", `${(err as Error).name}: ${(err as Error).message}`);
@@ -202,7 +232,8 @@ export async function main_init_async(argv: string[] = process.argv.slice(2)): P
     }
     const args = parse_init_argv(argv);
     const scope = args.scope ?? (canPrompt() ? await promptInstallScope() : "project");
-    await maybe_install_missing_openspec({ cwd: args.path, scope, mode: args.mode });
+    const openspecInstall = maybe_install_missing_openspec({ cwd: args.path, scope, mode: args.mode });
+    if (openspecInstall === "failed" || openspecInstall === "skipped") return openspecPreflightBlocked(args, scope, openspecInstall);
     return run_init(args, scope);
   } catch (err) {
     const change = "project";

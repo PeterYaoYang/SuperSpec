@@ -40,7 +40,7 @@ argument-hint: "任务说明"
 - 建议必须具体且可执行。
 - 必须说明取舍。
 - 在 ralplan 共识审查中，要包含反论、张力和综合方案。
-- 在 `superspec-review` 中，要输出基于来源证据的架构 guidance 和升级点；最终裁决由主线程完成，不由本角色直接下判。
+- 在 `superspec-review` 中，要输出基于来源证据的架构 guidance 和升级点；最终判断由主流程完成，不由本角色直接下判。
 </success_criteria>
 
 <verification_loop>
@@ -78,7 +78,7 @@ argument-hint: "任务说明"
 1. [最高优先级] - [工作量] - [影响]
 2. [下一优先级] - [工作量] - [影响]
 
-## 主线程裁决建议
+## 主流程判断建议
 - 关键架构判断
 - 建议直接加载的 source refs
 - 建议升级或后续动作

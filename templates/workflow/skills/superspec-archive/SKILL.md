@@ -1,6 +1,9 @@
 ---
 name: superspec-archive
-description: "5.通过原生 `openspec archive` 归档 SuperSpec OpenSpec change，并执行 SuperSpec preservation checks。 / Archive an SuperSpec OpenSpec change via native `openspec archive` with SuperSpec preservation checks."
+description: "5.所有审查和验证通过后用：把完成的 change 归档到 specs，并确认关键证据和历史没有丢失；这一步是流程收尾。"
+metadata:
+  author: SuperSpec
+  source: SuperSpec
 ---
 
 # SuperSpec Archive
@@ -11,7 +14,14 @@ description: "5.通过原生 `openspec archive` 归档 SuperSpec OpenSpec change
 - 保留命令、路径、JSON 字段、gate 名、task/test id、代码标识符和外部 API 名称的原文。
 - 当 OpenSpec 模板要求固定标题或字段时，保留模板结构，只将正文内容写成中文。
 - 对话窗口里的解释、确认、总结和下一步说明必须使用中文；除命令、路径、字段名、代码标识符外，不要夹带英文说明词。
+- 对话窗口、AskUserQuestion 文案、进度更新和最终总结不得裸露内部证据种类、字段名或 reason code；用户确认记录、审查问题记录、审查轮次编号、问题唯一标识等都只用中文业务说法。原始协议名只允许写在证据 JSON、代码、测试、精确命令输出或用户明确要求的诊断片段中。
+- 本 skill 文档中的内部协议名只用于落盘证据或运行 guard；写给用户时必须先翻译成中文业务动作，例如“记录用户确认”“记录审查问题”“完成最终审查判断”。
 - 向用户转述 guard / archive 输出时，不要直接贴英文 `message`、`next_allowed_actions` 或英文模板标题；应改写为中文，并仅在需要定位内部协议时保留英文 code/command 于反引号中。
+
+## 命令执行 / Shell
+
+- Windows PowerShell 中执行 npm 全局 bin 时，必须显式使用 `.cmd` shim：`superspec.cmd ...`、`openspec.cmd ...`；不要运行 `superspec.ps1` 或 `openspec.ps1`。
+- macOS、Linux、Git Bash、cmd.exe 或其他不会优先拦截 `.ps1` 的 shell 中，继续使用文档中的 `superspec ...`、`openspec ...` 命令。
 
 仅在 `review_complete` passes（其中已经包含 final verification）后使用本 skill。
 
@@ -25,7 +35,7 @@ description: "5.通过原生 `openspec archive` 归档 SuperSpec OpenSpec change
 
 ## 步骤 / Steps
 
-1. 对 final `archive_ready` confirmation 使用 AskUserQuestion，等待明确选择。记录 archive-scoped human-confirmation evidence。当前 v1 不询问也不使用 `--skip-specs`；若 change 不应同步 specs，应先回到 propose/change update 调整 OpenSpec 包，而不是在 archive 阶段跳过。
+1. 对 `archive_ready` 最终确认使用 AskUserQuestion，等待明确选择。记录 archive-scoped human-confirmation evidence。当前 v1 不询问也不使用 `--skip-specs`；若 change 不应同步 specs，应先回到 propose/change update 调整 OpenSpec 包，而不是在 archive 阶段跳过。
 2. 检查 archive readiness 并生成 preservation manifest：
    ```text
    superspec guard check-archive-ready --change "<change>"

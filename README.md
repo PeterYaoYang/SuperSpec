@@ -99,10 +99,12 @@ SuperSpec 的 guard 会检查：
 ### 环境要求
 
 - Node.js `>= 20.19.0`
-- 本机 `PATH` 上可用 `openspec`
+- 本机 `PATH` 上可用兼容官方 `@fission-ai/openspec` 的 CLI，版本 `>= 1.4.1`，并支持 SuperSpec 依赖的 OpenSpec native surface
 - 目标项目准备使用 OpenSpec + Codex 工作流入口
 
-如果交互式执行 `superspec init --scope project` 时未检测到 `openspec`，SuperSpec 会主动询问是否现在代为安装 OpenSpec CLI。
+执行 `superspec init` 时，无论选择 `project` 还是 `user` scope，如果未检测到 `openspec`、检测到 `openspec-chinese` 或其他不兼容变体，或版本低于 `1.4.1`，SuperSpec 都会自动尝试安装 / 升级官方 OpenSpec CLI；遇到全局 bin 被不兼容变体占用时会用覆盖模式重试。
+
+Windows PowerShell 中如果遇到 npm 全局 bin 的 `.ps1` 执行策略报错，请显式使用 `.cmd` shim，例如 `superspec.cmd init --scope project`、`superspec.cmd guard check-init --change <change>`、`openspec.cmd status --change <change> --json`。
 
 ### 安装
 

@@ -82,15 +82,17 @@ test("decorateDecision adds Chinese workflow labels without changing reason code
     next_actions: ["rerun check-enter --change demo-change --gate explore_complete"],
   });
   const decorated = guard.decorateDecision(raw, { command: "check-enter" });
-  assert.equal(decorated.command_label_zh, "前置门禁检查");
+  assert.equal(decorated.command_label_zh, "进入阶段前检查");
   assert.equal(decorated.gate_label_zh, "探索完成");
-  assert.equal(decorated.decision_zh, "阻塞");
+  assert.equal(decorated.decision_zh, "未通过");
   assert.equal(decorated.block_reasons[0].code, "needs_user_decision_pending");
-  assert.equal(decorated.block_reasons[0].label_zh, "等待用户裁决");
-  assert.equal(decorated.next_allowed_actions_zh[0], "重新运行前置门禁检查。");
+  assert.equal(decorated.block_reasons[0].label_zh, "等待用户确认");
+  assert.equal(decorated.next_allowed_actions_zh[0], "重新运行进入阶段前检查。");
   assert.ok(Array.isArray(decorated.workflow_terms_zh));
-  assert.ok(decorated.workflow_terms_zh.some((item: JsonMap) => item.term === "check-enter"));
-  assert.ok(decorated.workflow_terms_zh.some((item: JsonMap) => item.term === "acceptance"));
+  assert.ok(decorated.workflow_terms_zh.some((item: JsonMap) => item.term === "check-enter" && item.label_zh === "进入阶段前检查"));
+  assert.ok(decorated.workflow_terms_zh.some((item: JsonMap) => item.term === "acceptance" && item.label_zh === "验收标准"));
+  assert.ok(decorated.workflow_terms_zh.some((item: JsonMap) => item.term === "user_review_decision" && item.label_zh === "用户确认记录"));
+  assert.ok(decorated.workflow_terms_zh.some((item: JsonMap) => item.term === "main_review_digest" && item.label_zh === "审查问题记录"));
 });
 
 test("printDecision adds Chinese display fields while preserving machine-readable fields", () => {
@@ -111,7 +113,7 @@ test("printDecision adds Chinese display fields while preserving machine-readabl
   });
   assert.equal(printed.block_reasons[0].code, "needs_user_decision_pending");
   assert.match(printed.block_reasons[0].message, /finding is waiting for the user's A\/B\/C\/D decision/u);
-  assert.equal(printed.block_reasons[0].message_zh, "等待用户裁决：当前问题已经进入用户检查点，必须先由用户在 A/B/C/D 中拍板。");
+  assert.equal(printed.block_reasons[0].message_zh, "等待用户确认：当前问题需要用户确认，请先选择 A/B/C/D 中的一项。");
   assert.equal(printed.next_allowed_actions[0], "fix project_init_failed reasons, then rerun superspec init --scope project");
   assert.equal(printed.next_allowed_actions_zh[0], "先处理项目初始化失败对应问题，然后重新运行相关命令。");
   assert.match(printed.trust_warnings[0], /audit-only\/self-reported/u);
@@ -122,21 +124,44 @@ test("printDecision adds Chinese display fields while preserving machine-readabl
   assert.equal(printed.actions[0].status_zh, "已更新");
   assert.equal(printed.actions[0].detail, "existing file backed up to .codex/skills/superspec-explore/SKILL.md.bak");
   assert.equal(printed.actions[0].detail_zh, "已有文件已备份到 .codex/skills/superspec-explore/SKILL.md.bak。");
+  assert.ok(printed.workflow_terms_zh.some((item: JsonMap) => item.term === "user_review_decision" && item.label_zh === "用户确认记录"));
+  assert.ok(printed.workflow_terms_zh.some((item: JsonMap) => item.term === "main_review_digest" && item.label_zh === "审查问题记录"));
+});
+
+test("printDecision adds Windows PowerShell cmd shim hints for openspec and superspec commands", () => {
+  const raw = guard.block("demo-change", "project_init", [
+    guard.reason("openspec_init_missing", "Run `openspec init --tools codex .` and then `superspec init --scope project`."),
+  ]);
+  const printed = captureStdoutJson(() => {
+    guard.printDecision(raw, { command: "init" });
+  });
+  assert.deepEqual(printed.windows_powershell_command_hints, [
+    "Windows PowerShell: use `openspec.cmd init --tools codex .`",
+    "Windows PowerShell: use `superspec.cmd init --scope project`",
+  ]);
 });
 
 test("reason_message_zh rewrites workflow-internal review terms into Chinese explanation", () => {
   const rendered = reason_message_zh("missing_source_guidance", "review_complete requires critic source_guidance evidence");
   assert.match(rendered, /缺少审查指导证据/u);
   assert.match(rendered, /审查完成/u);
-  assert.match(rendered, /对抗审查/u);
+  assert.match(rendered, /严格审查/u);
   assert.equal(rendered.includes("source_guidance"), false);
   assert.equal(rendered.includes("review_complete"), false);
+
+  const mixed = reason_message_zh("user_decision_unbound", "用户确认已写入 user_review_decision 但 main_review_digest 未引用 confirmed_refs");
+  assert.match(mixed, /用户确认记录/u);
+  assert.match(mixed, /审查问题记录/u);
+  assert.match(mixed, /已确认内容引用/u);
+  assert.equal(mixed.includes("user_review_decision"), false);
+  assert.equal(mixed.includes("main_review_digest"), false);
+  assert.equal(mixed.includes("confirmed_refs"), false);
 });
 
 test("translate_action_zh hides workflow-internal terms in review completion actions", () => {
   assert.equal(
     translate_action_zh("collect review_complete source_guidance from missing roles: critic, verifier"),
-    "补齐审查完成所缺的审查指导证据（角色：对抗审查、验证审查）。",
+    "补齐审查完成所缺的审查指导证据（角色：严格审查、验证审查）。",
   );
   assert.equal(
     translate_action_zh("record final_test pass evidence and reference it from verification_review"),
@@ -5908,9 +5933,9 @@ function dispositionOf(finding: JsonMap, overrides: JsonMap = {}): JsonMap {
     decision_scope_key: finding.decision_scope_key ?? "",
     summary: finding.summary,
     disposition: "needs_user_decision",
-    rationale: "material finding routed to the user checkpoint",
+    rationale: "material finding routed to user confirmation",
     route: "stay_same_gate_user_decision",
-    route_reason: "material scope finding requires user adjudication",
+    route_reason: "material scope finding requires user confirmation",
     ...overrides,
   };
 }
@@ -6673,7 +6698,7 @@ withFixture("DISC3 upstream business-invariants edit stale after digest", (fx) =
   const digest = roundDigestWithTargets(fx, "invariants_reviewed", 1, targets, [dispositionOf(finding, {
     disposition: "needs_user_decision",
     route: "stay_same_gate_user_decision",
-    route_reason: "business semantics need user checkpoint",
+    route_reason: "business semantics need user confirmation",
   })], { status: "blocked" });
   const evidences = [...base, review, roleEvidence(fx, "invariants_reviewed", "test-engineer"), digest];
   const before = guard.check_superspec_gate("demo-change", status(fx), fx.change, evidences, "invariants_reviewed");
