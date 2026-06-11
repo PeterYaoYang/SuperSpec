@@ -16,6 +16,8 @@ metadata:
 - 对话窗口里的解释、确认、总结和下一步说明必须使用中文；除命令、路径、字段名、代码标识符外，不要夹带英文说明词。
 - 对话窗口、AskUserQuestion 文案、进度更新和最终总结不得裸露内部证据种类、字段名或 reason code；用户确认记录、审查问题记录、审查轮次编号、问题唯一标识等都只用中文业务说法。原始协议名只允许写在证据 JSON、代码、测试、精确命令输出或用户明确要求的诊断片段中。
 - 本 skill 文档中的内部协议名只用于落盘证据或运行 guard；写给用户时必须先翻译成中文业务动作，例如“记录用户确认”“记录审查问题”“完成最终审查判断”。
+- 用户可见文案不得使用“裁决”描述用户动作；统一说“确认”“范围取舍”“处理方式选择”或“用户确认记录”。
+- 普通 workflow 命令使用 `--format agent` 读取 guard/init 输出；`--format json` 只用于诊断 evidence/schema/guard 内部，不得作为默认模型上下文或直接转述给用户。
 - 向用户转述 guard / archive 输出时，不要直接贴英文 `message`、`next_allowed_actions` 或英文模板标题；应改写为中文，并仅在需要定位内部协议时保留英文 code/command 于反引号中。
 
 ## 命令执行 / Shell
@@ -44,7 +46,7 @@ metadata:
 1. 对 `archive_ready` 最终确认使用 AskUserQuestion，等待明确选择。记录 archive-scoped human-confirmation evidence。当前 v1 不询问也不使用 `--skip-specs`；若 change 不应同步 specs，应先回到 propose/change update 调整 OpenSpec 包，而不是在 archive 阶段跳过。
 2. 检查 archive readiness 并生成 preservation manifest：
    ```text
-   superspec guard check-archive-ready --change "<change>"
+   superspec guard check-archive-ready --change "<change>" --format agent
    ```
    生成的 manifest 是 archive 前证据快照，必须能追踪 business-invariants、test-contract 和对应 invariant review evidence 的 sha256。
 3. 运行 native OpenSpec archive（移动 change、同步 delta->main specs、执行 validation）：
@@ -53,7 +55,7 @@ metadata:
    ```
 4. 根据 manifest 验证 archived `.superspec/` preservation：
    ```text
-   superspec guard check-archived --change "<change>"
+   superspec guard check-archived --change "<change>" --format agent
    ```
 
 遇到任何 guard `block` 就停止。

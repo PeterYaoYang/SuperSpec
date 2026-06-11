@@ -1,8 +1,10 @@
 import { command_zh } from "./i18n.ts";
+import { GuardError, parseDecisionOutputFormat, type DecisionOutputFormat } from "./util.ts";
 
 export type ParsedArgs = {
   command: string;
   change: string;
+  format?: DecisionOutputFormat;
   artifact?: string;
   gate?: string;
   task_id?: string;
@@ -47,7 +49,7 @@ function requiredBooleanFlags(command: string): string[] {
 }
 
 function optionalBooleanFlags(command: string): string[] {
-  return command === "recompute" ? ["--force-unlock", "--rebuild-corrupt"] : [];
+  return ["--user-facing", ...(command === "recompute" ? ["--force-unlock", "--rebuild-corrupt"] : [])];
 }
 
 function rootUsage(): string {
@@ -66,6 +68,7 @@ function commandUsage(command: string): string {
   const usageFlags = [
     "[-h]",
     ...requiredValueFlags(command).map((flag) => `${flag} ${flag.slice(2).replace(/-/g, "_").toUpperCase()}`),
+    "[--format {json,agent,user}]",
     ...requiredBooleanFlags(command),
     ...optionalBooleanFlags(command),
   ];
@@ -82,6 +85,7 @@ function commandHelp(command: string): string {
   for (const flag of requiredBooleanFlags(command)) {
     lines.push(`  ${flag}\n`);
   }
+  lines.push("  --format {json,agent,user}\n");
   for (const flag of optionalBooleanFlags(command)) {
     lines.push(`  ${flag}\n`);
   }
@@ -127,37 +131,50 @@ export function parse_argv(argv: string[]): ParsedArgs {
   if (argv.length === 0) throw new Error("缺少命令");
   const command = argv[0];
   const args = argv.slice(1);
-  const getValue = (flag: string): string | undefined => {
-    const idx = args.indexOf(flag);
-    if (idx === -1) return undefined;
-    return args[idx + 1];
+  const getValues = (flag: string): string[] => {
+    const values: string[] = [];
+    for (let idx = 0; idx < args.length; idx += 1) {
+      if (args[idx] !== flag) continue;
+      const value = args[idx + 1];
+      if (value === undefined || value.startsWith("--")) throw new GuardError(`${flag} 缺少取值`);
+      values.push(value);
+    }
+    return values;
   };
+  const getValue = (flag: string): string | undefined => getValues(flag)[0];
+  const formatValues = getValues("--format");
+  for (const value of formatValues) parseDecisionOutputFormat(value);
+  const selectedFormat = hasFlag(args, "--user-facing")
+    ? "user"
+    : (formatValues.length > 0 ? formatValues[formatValues.length - 1] : "json");
+  const format = parseDecisionOutputFormat(selectedFormat);
   const change = getValue("--change");
   if (!change) throw new Error("缺少必填参数 --change");
   if (command === "init") {
     if (!hasFlag(args, "--create")) throw new Error("缺少必填参数 --create");
-    return { command, change, create: true };
+    return { command, change, format, create: true };
   }
   if (command === "check-artifact") {
     const artifact = getValue("--artifact");
     if (!artifact) throw new Error("缺少必填参数 --artifact");
-    return { command, change, artifact };
+    return { command, change, format, artifact };
   }
   if (command === "check-enter") {
     const gate = getValue("--gate");
     if (!gate) throw new Error("缺少必填参数 --gate");
-    return { command, change, gate };
+    return { command, change, format, gate };
   }
   if (command === "check-task-reopen" || command === "check-task-edit" || command === "check-task-complete") {
     const taskId = getValue("--task-id");
     if (!taskId) throw new Error("缺少必填参数 --task-id");
-    return { command, change, task_id: taskId };
+    return { command, change, format, task_id: taskId };
   }
   const simple = new Set<string>(SIMPLE_COMMANDS);
   if (!simple.has(command)) throw new Error(`未知命令：${command}`);
   return {
     command,
     change,
+    format,
     force_unlock: command === "recompute" && hasFlag(args, "--force-unlock"),
     rebuild_corrupt: command === "recompute" && hasFlag(args, "--rebuild-corrupt"),
   };

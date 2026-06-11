@@ -16,6 +16,8 @@ metadata:
 - 对话窗口里的解释、问题说明、总结、提问和下一步说明必须使用中文；除命令、路径、字段名、代码标识符外，不要夹带英文说明词。
 - 对话窗口、AskUserQuestion 文案、进度更新和最终总结不得裸露内部证据种类、字段名或 reason code；用户确认记录、审查问题记录、审查轮次编号、问题唯一标识等都只用中文业务说法。原始协议名只允许写在证据 JSON、代码、测试、精确命令输出或用户明确要求的诊断片段中。
 - 本 skill 文档中的内部协议名只用于落盘证据或运行 guard；写给用户时必须先翻译成中文业务动作，例如“记录用户确认”“记录审查问题”“完成最终审查判断”。
+- 用户可见文案不得使用“裁决”描述用户动作；统一说“确认”“范围取舍”“处理方式选择”或“用户确认记录”。
+- 普通 workflow 命令使用 `--format agent` 读取 guard/init 输出；`--format json` 只用于诊断 evidence/schema/guard 内部，不得作为默认模型上下文或直接转述给用户。
 - 向用户转述 guard / review 输出时，不要直接贴英文 `message`、`next_allowed_actions` 或英文模板标题；应改写为中文，并仅在需要定位内部协议时保留英文 code/command 于反引号中。
 
 ## 命令执行 / Shell
@@ -53,7 +55,7 @@ metadata:
 
 1. 运行前置门禁检查（`check-enter`），确认探索阶段已经完成；该 gate 必须包含用户对探索结论和进入 propose 的明确确认，若 guard block 则停止并回到 explore 补确认：
    ```text
-   superspec guard check-enter --change "<change>" --gate explore_complete
+   superspec guard check-enter --change "<change>" --gate explore_complete --format agent
    ```
 2. 从 OpenSpec 获取方案文件生成顺序：
    ```text
@@ -72,28 +74,28 @@ metadata:
    - 主流程记录审查问题记录，给每个 finding 写处理结果：关键 findings（范围、非目标、验收标准、业务语义、设计边界）必须进入用户确认并停下来，用 AskUserQuestion 把原文和 A/B/C/D 选项展示给用户，拿到用户确认后才能继续；发现探索记录不完整时 route 用 `return_explore` 回 explore，不得自行补范围。
    - 修订 `proposal.md` 后必须重跑 `critic`（新一轮 round），直到 clean round + digest 通过，然后验证：
    ```text
-   superspec guard check-enter --change "<change>" --gate propose.proposal_reviewed
+   superspec guard check-enter --change "<change>" --gate propose.proposal_reviewed --format agent
    ```
    guard 未通过前不要开始编写 `specs/**` 或 `design.md`（两者的入口门禁都是 `proposal_reviewed`）。
 5. 设计说明 `design.md` 编写后：获取 `architect`、`critic`、`test-engineer` 的 native-subagent review evidence（带 `review_round_id` `design_complete-r<N>` + `findings[]` + 全量 pinned target：`proposal.md` + `design.md` + `specs/**/*.md` + 探索记录）。主流程记录审查问题记录；关键问题必须停下来向用户说明并等待用户确认，按用户确认改 design/specs 后 supersede 旧轮并重审。对于设计选项选择和最终设计确认，使用 AskUserQuestion 并等待明确选择；记录 human-confirmation evidence，然后验证：
    ```text
-   superspec guard check-enter --change "<change>" --gate propose.design_reviewed
+   superspec guard check-enter --change "<change>" --gate propose.design_reviewed --format agent
    ```
 6. 需求规格 `specs/**` 和设计说明 `design.md` 编写后、测试契约 `test-contract.md` 编写前：起草业务约束 `.superspec/artifacts/business-invariants.md`。每条 `INV-*` 必须有 statement、scope、source anchors、acceptance_refs、risk_refs、confidence、enforcement_level、test_refs_or_review_only_reason；记录 rejected candidates，防止把当前实现习惯误升格为业务真相。获取 `critic` + `test-engineer` review evidence（带 `review_round_id` `invariants_reviewed-r<N>` + `findings[]` + pinned target：business-invariants + design + specs glob）。主流程记录审查问题记录；关键业务语义问题必须进入用户确认，不得把实现习惯静默升格为 invariant 真相。然后验证：
    ```text
-   superspec guard check-enter --change "<change>" --gate propose.invariants_reviewed
+   superspec guard check-enter --change "<change>" --gate propose.invariants_reviewed --format agent
    ```
 7. 业务约束 `business-invariants.md` 完成后、任务清单 `tasks.md` 编写前：起草测试契约 `.superspec/artifacts/test-contract.md`，覆盖 specs 中每个 `#### Scenario` 和命中本 change scope 的 hard `INV-*`，包含 TEST ids、关联 INV ids、预期 RED reasons、预期 GREEN criteria 和 commands。获取 `test-engineer` + `critic` review evidence（带 `review_round_id` `test_contract_drafted-r<N>` + `findings[]` + pinned target：test-contract + invariants + design + specs glob）。主流程记录审查问题记录；验收标准变更等关键问题必须用户确认。然后验证：
    ```text
-   superspec guard check-enter --change "<change>" --gate propose.test_plan_drafted
+   superspec guard check-enter --change "<change>" --gate propose.test_plan_drafted --format agent
    ```
-8. 通过 `openspec instructions tasks` 编写任务清单 `tasks.md` 时：为每个 task 补充 `requirement_refs`、`invariant_refs`（必须是 business-invariants `INV-*` ids 的子集）、`test_refs`（必须是 test-contract TEST ids 的子集）、`read_scope`、`write_scope`、dependencies、TDD metadata，以及需要时的 parallel group。若 reviewer 对 task 映射提出 round-tagged findings，走 `tasks_complete-r<N>` 确认循环（pinned target：tasks + test-contract + invariants + design + specs glob）；验收标准问题 route 用 `return_test_contract_drafted`，映射问题用 `stay_same_gate_fix`。对于任务审查确认，使用 AskUserQuestion 并等待明确选择；按披露循环记录用户裁决和审查问题处理结果，然后验证：
+8. 通过 `openspec instructions tasks` 编写任务清单 `tasks.md` 时：为每个 task 补充 `requirement_refs`、`invariant_refs`（必须是 business-invariants `INV-*` ids 的子集）、`test_refs`（必须是 test-contract TEST ids 的子集）、`read_scope`、`write_scope`、dependencies、TDD metadata，以及需要时的 parallel group。若 reviewer 对 task 映射提出 round-tagged findings，走 `tasks_complete-r<N>` 确认循环（pinned target：tasks + test-contract + invariants + design + specs glob）；验收标准问题 route 用 `return_test_contract_drafted`，映射问题用 `stay_same_gate_fix`。对于任务审查确认，使用 AskUserQuestion 并等待明确选择；按披露循环记录用户确认和审查问题处理结果，然后验证：
    ```text
-   superspec guard check-enter --change "<change>" --gate propose.tasks_mapped
+   superspec guard check-enter --change "<change>" --gate propose.tasks_mapped --format agent
    ```
 9. 验证 apply readiness：
    ```text
-   superspec guard check-apply-ready --change "<change>"
+   superspec guard check-apply-ready --change "<change>" --format agent
    ```
 
 遇到任何 guard `block` 就停止。

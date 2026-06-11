@@ -75,6 +75,65 @@ function captureStdoutJson(run: () => void): JsonMap {
   return JSON.parse(writes.join(""));
 }
 
+function captureStdoutText(run: () => void): string {
+  const writes: string[] = [];
+  const savedWrite = process.stdout.write;
+  process.stdout.write = ((chunk: any) => {
+    writes.push(String(chunk));
+    return true;
+  }) as typeof process.stdout.write;
+  try {
+    run();
+  } finally {
+    process.stdout.write = savedWrite;
+  }
+  return writes.join("");
+}
+
+function assertSafeOutputHasNoLeaks(text: string): void {
+  const forbiddenPatterns: RegExp[] = [
+    /needs_user_decision/iu,
+    /user_review_decision/iu,
+    /main_review_digest/iu,
+    /decision_scope_key/iu,
+    /finding_uid/iu,
+    /needs_user_decision_pending/iu,
+    /unknown_gate/iu,
+    /explore_complete/iu,
+    /check-enter/iu,
+    /raw_secret_gate/iu,
+    /raw_secret_reason/iu,
+    /AskUserQuestion/u,
+    /export\s+function/iu,
+    /function\s+foo\s*\(/iu,
+    /用户裁决/u,
+    /裁决/u,
+    /审查指导证据/u,
+    /验证审查证据/u,
+    /最终测试通过证据/u,
+    /主流程最终判断记录/u,
+  ];
+  for (const pattern of forbiddenPatterns) {
+    assert.doesNotMatch(text, pattern, `safe output leaked ${pattern}: ${text}`);
+  }
+}
+
+function assertNoForbiddenAgentKeys(value: unknown): void {
+  const forbidden = new Set(["gate", "command", "reason_codes", "block_reasons", "workflow_terms_zh", "message", "message_zh"]);
+  const visit = (item: unknown): void => {
+    if (Array.isArray(item)) {
+      for (const child of item) visit(child);
+      return;
+    }
+    if (!item || typeof item !== "object") return;
+    for (const [key, child] of Object.entries(item as JsonMap)) {
+      assert.equal(forbidden.has(key), false, `agent output leaked key ${key}`);
+      visit(child);
+    }
+  };
+  visit(value);
+}
+
 test("decorateDecision adds Chinese workflow labels without changing reason codes", () => {
   const raw = guard.block("demo-change", "explore_complete", [
     guard.reason("needs_user_decision_pending", "explore_complete: finding is waiting for the user's A/B/C/D decision"),
@@ -126,6 +185,120 @@ test("printDecision adds Chinese display fields while preserving machine-readabl
   assert.equal(printed.actions[0].detail_zh, "已有文件已备份到 .codex/skills/superspec-explore/SKILL.md.bak。");
   assert.ok(printed.workflow_terms_zh.some((item: JsonMap) => item.term === "user_review_decision" && item.label_zh === "用户确认记录"));
   assert.ok(printed.workflow_terms_zh.some((item: JsonMap) => item.term === "main_review_digest" && item.label_zh === "审查问题记录"));
+});
+
+test("agent output is a safe whitelist view while json keeps diagnostic fields", () => {
+  const raw = guard.block("demo-change", "explore_complete", [
+    guard.reason(
+      "needs_user_decision_pending",
+      "用户裁决：export function foo() { return needs_user_decision; } main_review_digest decision_scope_key finding_uid",
+      ["function foo(", "user_review_decision"],
+    ),
+  ], {
+    next_actions: ["AskUserQuestion then write user_review_decision with decision_scope_key and finding_uid"],
+  });
+  raw.actions = [{
+    action: "export function foo()",
+    status: "updated",
+    detail: "main_review_digest function foo(",
+  }];
+
+  const jsonDiagnostic = captureStdoutJson(() => {
+    guard.printDecision(raw, { command: "check-enter", format: "json" });
+  });
+  assert.equal(jsonDiagnostic.gate, "explore_complete");
+  assert.equal(jsonDiagnostic.block_reasons[0].code, "needs_user_decision_pending");
+  assert.match(jsonDiagnostic.block_reasons[0].message, /export function foo/u);
+  assert.ok(Array.isArray(jsonDiagnostic.workflow_terms_zh));
+
+  const agentText = captureStdoutText(() => {
+    guard.printDecision(raw, { command: "check-enter", format: "agent" });
+  });
+  const agent = JSON.parse(agentText);
+  assert.equal(agent.allowed, false);
+  assert.equal(agent.status, "blocked");
+  assert.equal(agent.workflow_action, "ask_user_confirmation");
+  assertNoForbiddenAgentKeys(agent);
+  assertSafeOutputHasNoLeaks(agentText);
+});
+
+test("user output hides poisoned raw messages and protocol terms", () => {
+  const raw = guard.block("demo-change", "explore_complete", [
+    guard.reason("needs_user_decision_pending", "用户裁决 export function foo() needs_user_decision main_review_digest", ["function foo("]),
+  ], {
+    next_actions: ["AskUserQuestion then write user_review_decision"],
+  });
+  const text = captureStdoutText(() => {
+    guard.printDecision(raw, { command: "check-enter", format: "user" });
+  });
+  assert.match(text, /暂时不能继续/u);
+  assert.match(text, /用户确认/u);
+  assertSafeOutputHasNoLeaks(text);
+});
+
+test("safe output uses generic action text for evidence-kind blockers", () => {
+  const cases: Array<[string, guard.AgentWorkflowAction]> = [
+    ["missing_source_guidance", "collect_review_evidence"],
+    ["missing_final_verification_review", "collect_review_evidence"],
+    ["missing_final_tests", "collect_test_evidence"],
+    ["missing_main_adjudication", "collect_review_evidence"],
+  ];
+  for (const [code, expectedAction] of cases) {
+    const raw = guard.block("demo-change", "review_complete", [
+      guard.reason(code, "review_complete requires source_guidance verification_review final_test main_adjudication evidence"),
+    ], {
+      next_actions: ["repair source_guidance evidence and write main_adjudication"],
+    });
+
+    const agentText = captureStdoutText(() => {
+      guard.printDecision(raw, { command: "check-review-complete", format: "agent" });
+    });
+    const agent = JSON.parse(agentText);
+    assert.equal(agent.workflow_action, expectedAction, code);
+    assertNoForbiddenAgentKeys(agent);
+    assertSafeOutputHasNoLeaks(agentText);
+
+    const userText = captureStdoutText(() => {
+      guard.printDecision(raw, { command: "check-review-complete", format: "user" });
+    });
+    assertSafeOutputHasNoLeaks(userText);
+  }
+});
+
+test("agent output falls back safely for unknown reason and gate identifiers", () => {
+  const raw = guard.block("demo-change", "raw_secret_gate", [
+    guard.reason("raw_secret_reason", "needs_user_decision main_review_digest export function foo()", ["decision_scope_key", "function foo("]),
+  ], {
+    next_actions: ["AskUserQuestion user_review_decision"],
+  });
+  const agentText = captureStdoutText(() => {
+    guard.printDecision(raw, { command: "check-enter", format: "agent" });
+  });
+  const agent = JSON.parse(agentText);
+  assert.equal(agent.workflow_action, "inspect_diagnostics");
+  assert.equal(agent.stage_label_zh, "内部流程阶段");
+  assertNoForbiddenAgentKeys(agent);
+  assertSafeOutputHasNoLeaks(agentText);
+});
+
+test("agent workflow action mapping is deterministic for common blocker groups", () => {
+  const cases: Array<[string, guard.AgentWorkflowAction]> = [
+    ["needs_user_decision_pending", "ask_user_confirmation"],
+    ["missing_source_guidance", "collect_review_evidence"],
+    ["missing_final_verification_review", "collect_review_evidence"],
+    ["missing_main_adjudication", "collect_review_evidence"],
+    ["missing_red_evidence", "collect_test_evidence"],
+    ["missing_final_tests", "collect_test_evidence"],
+    ["validate_failed", "collect_test_evidence"],
+    ["invalid_task_graph", "fix_artifacts"],
+    ["review_digest_invalid", "fix_artifacts"],
+    ["state_corrupt", "inspect_diagnostics"],
+    ["unknown_future_reason", "inspect_diagnostics"],
+  ];
+  for (const [code, expected] of cases) {
+    assert.equal(guard.workflowActionForReasonCodes([code]), expected, code);
+  }
+  assert.equal(guard.workflowActionForReasonCodes([], true), "continue");
 });
 
 test("printDecision adds Windows PowerShell cmd shim hints for openspec and superspec commands", () => {
@@ -1034,6 +1207,33 @@ test("command surface includes init and apply-ready", () => {
   assert.equal(guard.parse_argv(["check-apply-ready", "--change", "demo-change"]).command, "check-apply-ready");
 });
 
+test("command surface accepts safe output formats", () => {
+  assert.equal(guard.parse_argv(["check-init", "--change", "demo-change", "--format", "agent"]).format, "agent");
+  assert.equal(guard.parse_argv(["check-init", "--change", "demo-change", "--format", "user"]).format, "user");
+  assert.equal(guard.parse_argv(["check-init", "--change", "demo-change", "--user-facing"]).format, "user");
+  assert.equal(guard.parse_argv(["check-init", "--change", "demo-change"]).format, "json");
+  assert.throws(
+    () => guard.parse_argv(["check-init", "--change", "demo-change", "--format", "raw"]),
+    /--format 只允许 json、agent 或 user/u,
+  );
+  assert.throws(
+    () => guard.parse_argv(["check-init", "--change", "demo-change", "--format"]),
+    /--format 缺少取值/u,
+  );
+  assert.throws(
+    () => guard.parse_argv(["check-init", "--change", "demo-change", "--format", "--user-facing"]),
+    /--format 缺少取值/u,
+  );
+  assert.throws(
+    () => guard.parse_argv(["check-init", "--change", "demo-change", "--format", "agent", "--format"]),
+    /--format 缺少取值/u,
+  );
+  assert.throws(
+    () => guard.parse_argv(["check-init", "--change", "demo-change", "--format", "raw", "--user-facing"]),
+    /--format 只允许 json、agent 或 user/u,
+  );
+});
+
 test("command surface keeps check-verify-ready compatibility alias", () => {
   assert.equal(guard.parse_argv(["check-verify-ready", "--change", "demo-change"]).command, "check-verify-ready");
 });
@@ -1080,6 +1280,44 @@ test("cli unknown command emits argparse-style invalid choice", () => {
   assert.equal(proc.stderr.includes("invalid choice"), false);
 });
 
+test("cli invalid format reports a non-internal guard error", () => {
+  const proc = spawnSync(process.execPath, [GUARD_TS, "check-init", "--change", "demo-change", "--format", "raw"], { encoding: "utf8" });
+  assert.equal(proc.status, 2);
+  assert.equal(proc.stderr, "");
+  const printed = JSON.parse(proc.stdout);
+  assert.equal(printed.decision, "block");
+  assert.equal(printed.block_reasons[0].code, "guard_error");
+  assert.match(printed.block_reasons[0].message, /--format 只允许 json、agent 或 user/u);
+  assert.equal(proc.stdout.includes("guard_internal_error"), false);
+});
+
+test("cli missing format value reports a non-internal guard error", () => {
+  const proc = spawnSync(process.execPath, [GUARD_TS, "check-init", "--change", "demo-change", "--format"], { encoding: "utf8" });
+  assert.equal(proc.status, 2);
+  assert.equal(proc.stderr, "");
+  const printed = JSON.parse(proc.stdout);
+  assert.equal(printed.decision, "block");
+  assert.equal(printed.block_reasons[0].code, "guard_error");
+  assert.match(printed.block_reasons[0].message, /--format 缺少取值/u);
+  assert.equal(proc.stdout.includes("guard_internal_error"), false);
+
+  const withUserFacing = spawnSync(process.execPath, [GUARD_TS, "check-init", "--change", "demo-change", "--format", "--user-facing"], { encoding: "utf8" });
+  assert.equal(withUserFacing.status, 2);
+  assert.equal(withUserFacing.stderr, "");
+  const userFacingPrinted = JSON.parse(withUserFacing.stdout);
+  assert.equal(userFacingPrinted.block_reasons[0].code, "guard_error");
+  assert.match(userFacingPrinted.block_reasons[0].message, /--format 缺少取值/u);
+  assert.equal(withUserFacing.stdout.includes("guard_internal_error"), false);
+
+  const duplicate = spawnSync(process.execPath, [GUARD_TS, "check-init", "--change", "demo-change", "--format", "agent", "--format"], { encoding: "utf8" });
+  assert.equal(duplicate.status, 2);
+  assert.equal(duplicate.stderr, "");
+  const duplicatePrinted = JSON.parse(duplicate.stdout);
+  assert.equal(duplicatePrinted.block_reasons[0].code, "guard_error");
+  assert.match(duplicatePrinted.block_reasons[0].message, /--format 缺少取值/u);
+  assert.equal(duplicate.stdout.includes("guard_internal_error"), false);
+});
+
 test("cli subcommand help emits usage to stdout", () => {
   const proc = spawnSync(process.execPath, [GUARD_TS, "check-artifact", "--help"], { encoding: "utf8" });
   assert.equal(proc.status, 0);
@@ -1093,6 +1331,7 @@ test("standalone init help emits init-specific usage", () => {
   assert.equal(proc.stderr, "");
   assert.ok(proc.stdout.includes("usage: superspec init [-h] [--scope {project,user}]"));
   assert.ok(proc.stdout.includes("可选参数："));
+  assert.ok(proc.stdout.includes("--format {json,agent,user}"));
   assert.ok(proc.stdout.includes("--user"));
   assert.equal(proc.stdout.includes("show this help message and exit"), false);
 });
@@ -1240,6 +1479,37 @@ test("standalone project init creates missing project surfaces without a change"
     assert.equal(existsSync(join(tmp, ".superspec")), false);
   } finally {
     process.stdout.write = savedWrite;
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("standalone project init supports agent output format", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "superspec-project-init-agent-"));
+  try {
+    const text = captureStdoutText(() => {
+      assert.equal(main_init(["--path", tmp, "--format", "agent"]), 0);
+    });
+    const agent = JSON.parse(text);
+    assert.equal(agent.allowed, true);
+    assert.equal(agent.workflow_action, "continue");
+    assertNoForbiddenAgentKeys(agent);
+    assertSafeOutputHasNoLeaks(text);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("standalone project init rejects missing format value even with user-facing override", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "superspec-project-init-format-"));
+  try {
+    const text = captureStdoutText(() => {
+      assert.equal(main_init(["--path", tmp, "--format", "--user-facing"]), 2);
+    });
+    const printed = JSON.parse(text);
+    assert.equal(printed.block_reasons[0].code, "guard_error");
+    assert.match(printed.block_reasons[0].message, /--format 缺少取值/u);
+    assert.equal(text.includes("guard_internal_error"), false);
+  } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
 });
@@ -4437,6 +4707,20 @@ withFixture("FIX-13 gate routing defenses", (fx) => {
   writeText(join(fx.change, "tasks.md"), "notes only, no structured tasks\n");
   const tasksGate = guard.check_superspec_gate("demo-change", status(fx), fx.change, [], "tasks_complete");
   assert.ok(codes(tasksGate.block_reasons).includes("invalid_task_graph"));
+});
+
+withFixture("agent output hides unknown dispatch gate identifiers", (fx) => {
+  const decision = withRuntime({ load_context: () => [status(fx), fx.repo, fx.change, []] }, () => {
+    const [result] = guard.dispatch({ command: "check-enter", change: "demo-change", gate: "raw_secret_gate", format: "agent" });
+    return result;
+  });
+  const agentText = captureStdoutText(() => {
+    guard.printDecision(decision, { command: "check-enter", format: "agent" });
+  });
+  const agent = JSON.parse(agentText);
+  assert.equal(agent.workflow_action, "inspect_diagnostics");
+  assertNoForbiddenAgentKeys(agent);
+  assertSafeOutputHasNoLeaks(agentText);
 });
 
 withFixture("FIX-13 review readiness defenses", (fx) => {

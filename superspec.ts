@@ -33,9 +33,9 @@ function help(): string {
     "  version     print SuperSpec CLI version",
     "",
     "examples:",
-    "  superspec init --scope project",
+    "  superspec init --scope project --format agent",
     "  superspec init --scope user",
-    "  superspec guard check-init --change <change>",
+    "  superspec guard check-init --change <change> --format agent",
     "  superspec doctor",
     "",
   ].join("\n");
@@ -43,7 +43,7 @@ function help(): string {
 
 function updateHelp(): string {
   return [
-    "usage: superspec update [--scope {project,user}] [--path PATH] [--codex-home PATH] [--local-only]",
+    "usage: superspec update [--scope {project,user}] [--path PATH] [--codex-home PATH] [--format {json,agent,user}] [--local-only]",
     "",
     "updates the global SuperSpec CLI from npm, then updates manifest-managed SuperSpec surfaces.",
     "",
@@ -53,6 +53,7 @@ function updateHelp(): string {
     "  --user, --global        equivalent to --scope user",
     "  --path PATH             project root for project scope (default: current directory)",
     "  --codex-home PATH       Codex user home for user scope (default: $CODEX_HOME or ~/.codex)",
+    "  --format {json,agent,user} output format; use agent for workflow consumption",
     "  --local-only            skip npm self-update and use the currently installed package",
     "  -h, --help              show this help",
     "",

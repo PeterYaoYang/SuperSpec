@@ -16,6 +16,8 @@ metadata:
 - 对话窗口里的解释、总结、提问和下一步说明必须使用中文；除命令、路径、字段名、代码标识符外，不要夹带英文说明词。
 - 对话窗口、AskUserQuestion 文案、进度更新和最终总结不得裸露内部证据种类、字段名或 reason code；用户确认记录、审查问题记录、审查轮次编号、问题唯一标识等都只用中文业务说法。原始协议名只允许写在证据 JSON、代码、测试、精确命令输出或用户明确要求的诊断片段中。
 - 本 skill 文档中的内部协议名只用于落盘证据或运行 guard；写给用户时必须先翻译成中文业务动作，例如“记录用户确认”“记录审查问题”“完成最终审查判断”。
+- 用户可见文案不得使用“裁决”描述用户动作；统一说“确认”“范围取舍”“处理方式选择”或“用户确认记录”。
+- 普通 workflow 命令使用 `--format agent` 读取 guard/init 输出；`--format json` 只用于诊断 evidence/schema/guard 内部，不得作为默认模型上下文或直接转述给用户。
 - 向用户转述 guard / review 输出时，不要直接贴英文 `message`、`next_allowed_actions` 或英文模板标题；应改写为中文，并仅在需要定位内部协议时保留英文 code/command 于反引号中。
 
 ## 命令执行 / Shell
@@ -53,7 +55,7 @@ metadata:
 2. 当 dirty worktree、untracked files 或 branch state 需要确认时，使用 AskUserQuestion 处理分支状态。
 3. 验证 apply readiness：
    ```text
-   superspec guard check-apply-ready --change "<change>"
+   superspec guard check-apply-ready --change "<change>" --format agent
    ```
 4. 获取 native apply context 和 task list：
    ```text
@@ -65,21 +67,21 @@ metadata:
    - 若 `request_changes_route:"reopen_tasks"`，读取 `reopen_task_ids`，逐个判断当前 task 所处阶段：
      - 如果该 task 仍是 `[x]`，说明还处于首次回退前；先由主流程基于本轮 review 的结构化 output 写出该 task 的 `task_reopen` evidence 与配套 `status:"superseded"` evidence，形成完整 reopen package，再执行：
      ```text
-     superspec guard check-task-reopen --change "<change>" --task-id "<task-id>"
+     superspec guard check-task-reopen --change "<change>" --task-id "<task-id>" --format agent
      ```
        只有该 guard `allow` 后，才允许把对应 task 从 `- [x]` 改为 `- [ ]`，并把它重新纳入本轮 apply。
      - 如果该 task 已经是 `[ ]`，且当前 `tasks.md` 已匹配授权后的 `after_tasks_sha256`，说明它已经处于合法 reopened apply；此时直接续跑 `check-task-edit -> RED/GREEN -> check-task-complete`，不要重复创建 `task_reopen`，也不要再次执行 pre-revert `check-task-reopen`。
    - 若 `request_changes_route:"change_update"`，停止 apply，回 propose / change update；不要试图通过 reopen 继续实现。
 6. 对每个 pending task（包括刚刚合法 reopen 的 task），在任何实现编辑前执行任务编辑前检查（`check-task-edit`）：
    ```text
-   superspec guard check-task-edit --change "<change>" --task-id "<task-id>"
+   superspec guard check-task-edit --change "<change>" --task-id "<task-id>" --format agent
    ```
 7. 在 runtime/business implementation edits 前产出 RED evidence，除非有允许的 `no_tdd_reason` 或处于现状锁定测试模式（`characterization mode`）。这里的 `characterization` 指“先把当前真实行为测出来并锁住，重构后保持一致”。RED/GREEN evidence 必须引用 task 的 `test_refs`，并在 task 声明 `invariant_refs` 时同步记录 `invariant_refs`。若 task 来自 reopen，本轮 successor GREEN / alternative verification / manual verification 必须携带同一 `reopen_id`。
 8. 按 native dynamic instruction 和 `contextFiles` 指引，实现最小 task scope。
 9. 产出 GREEN evidence，保留 `test_id`、`invariant_refs`、命令、输出摘要和 raw log ref；raw log ref 指向原始输出文件，evidence 中只写必要摘要，不复制完整日志。
 10. 勾选 task 前执行任务完成检查（`check-task-complete`）：
    ```text
-   superspec guard check-task-complete --change "<change>" --task-id "<task-id>"
+   superspec guard check-task-complete --change "<change>" --task-id "<task-id>" --format agent
    ```
    然后按 native apply semantics 将 task 从 `- [ ]` 改为 `- [x]`。
 11. 如果该 task 来自 reopen，在重新勾回 `[x]` 后写入 `kind:"task_reopen_resolved"` evidence，关闭本轮 reopen 授权；不要复用旧 reopen 生命周期。reopen 只授权：

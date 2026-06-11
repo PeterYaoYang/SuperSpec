@@ -16,6 +16,8 @@ metadata:
 - 对话窗口里的解释、问题说明、总结、提问和下一步说明必须使用中文；除命令、路径、字段名、代码标识符外，不要夹带英文说明词。
 - 对话窗口、AskUserQuestion 文案、进度更新和最终总结不得裸露内部证据种类、字段名或 reason code；用户确认记录、审查问题记录、审查轮次编号、问题唯一标识等都只用中文业务说法。原始协议名只允许写在证据 JSON、代码、测试、精确命令输出或用户明确要求的诊断片段中。
 - 本 skill 文档中的内部协议名只用于落盘证据或运行 guard；写给用户时必须先翻译成中文业务动作，例如“记录用户确认”“记录审查问题”“完成最终审查判断”。
+- 用户可见文案不得使用“裁决”描述用户动作；统一说“确认”“范围取舍”“处理方式选择”或“用户确认记录”。
+- 普通 workflow 命令使用 `--format agent` 读取 guard/init 输出；`--format json` 只用于诊断 evidence/schema/guard 内部，不得作为默认模型上下文或直接转述给用户。
 - 向用户转述 guard / review 输出时，不要直接贴英文 `message`、`next_allowed_actions` 或英文模板标题；应改写为中文，并仅在需要定位内部协议时保留英文 code/command 于反引号中。
 
 ## 命令执行 / Shell
@@ -64,12 +66,12 @@ metadata:
 
 1. 确保项目级 SuperSpec surfaces 已存在：
    ```text
-   superspec init --scope project
+   superspec init --scope project --format agent
    ```
 2. 创建或打开 native OpenSpec change root，然后确认 change-scoped guard readiness 并拉取 native context：
    ```text
    openspec new change "<change>"   # 仅当该 change 不存在时执行
-   superspec guard check-init --change "<change>"
+   superspec guard check-init --change "<change>" --format agent
    openspec list --json
    openspec status --change "<change>" --json   # changeRoot / artifactPaths / actionContext for grounding
    ```
@@ -85,7 +87,7 @@ metadata:
 9. 对探索结论、范围边界和进入 propose 的授权使用 AskUserQuestion，并等待明确选择；记录探索阶段人工确认 evidence（JSON 中为 `gate:"explore_complete"`、`kind:"human_confirmation"`、`created_by:"user"`），`confirmed_refs` 固定记录用户确认过的探索记录。
 10. 运行进入阶段前检查（`check-enter`），验证 explore completion：
    ```text
-   superspec guard check-enter --change "<change>" --gate explore_complete
+   superspec guard check-enter --change "<change>" --gate explore_complete --format agent
    ```
 
 遇到任何 guard `block` 就停止。用户确认相关阻塞原因包括：缺少审查问题记录（`missing_review_digest`）、等待用户确认（`needs_user_decision_pending`）、历史 finding 未处理完（`finding_unresolved`）、用户确认未绑定（`user_decision_unbound`）、缺少 finding 问题清单（`ledger_injection_missing`）、审查轮次已达上限（`round_budget_exhausted`）等。它们的唯一合法出路是回到确认循环或升级给用户，不允许绕过。

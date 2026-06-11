@@ -18,6 +18,8 @@ metadata:
 - 对话窗口里的解释、审查结论、验证结论、提问和下一步说明必须使用中文；除命令、路径、字段名、代码标识符外，不要夹带英文说明词。
 - 对话窗口、AskUserQuestion 文案、进度更新和最终总结不得裸露内部证据种类、字段名或 reason code；用户确认记录、审查问题记录、审查轮次编号、问题唯一标识等都只用中文业务说法。原始协议名只允许写在证据 JSON、代码、测试、精确命令输出或用户明确要求的诊断片段中。
 - 本 skill 文档中的内部协议名只用于落盘证据或运行 guard；写给用户时必须先翻译成中文业务动作，例如“记录用户确认”“记录审查问题”“完成最终审查判断”。
+- 用户可见文案不得使用“裁决”描述用户动作；统一说“确认”“范围取舍”“处理方式选择”或“用户确认记录”。
+- 普通 workflow 命令使用 `--format agent` 读取 guard/init 输出；`--format json` 只用于诊断 evidence/schema/guard 内部，不得作为默认模型上下文或直接转述给用户。
 - 向用户转述 guard / review / verification 输出时，不要直接贴英文 `message`、`next_allowed_actions`、`Summary`、`Justification`、`PASS/FAIL` 等模板词；应改写为中文，并仅在需要定位内部协议时保留英文 code/command 于反引号中。
 
 ## 命令执行 / Shell
@@ -55,7 +57,7 @@ metadata:
 Review 前必须确认这些 SuperSpec distribution files 存在；缺失、无效或当前 Codex surface 无法从它们启动 native subagents 时，review gate 必须 block：
 
 ```text
-superspec guard check-init --change "<change>"
+superspec guard check-init --change "<change>" --format agent
 ```
 
 Required project-scope files: `.codex/agents/code-reviewer.toml`、`.codex/prompts/code-reviewer.md`、`.codex/agents/architect.toml`、`.codex/prompts/architect.md`、`.codex/agents/critic.toml`、`.codex/prompts/critic.md`、`.codex/agents/verifier.toml`、`.codex/prompts/verifier.md`。
@@ -64,7 +66,7 @@ Required project-scope files: `.codex/agents/code-reviewer.toml`、`.codex/promp
 
 1. 检查 review readiness：
    ```text
-   superspec guard check-review-ready --change "<change>"
+   superspec guard check-review-ready --change "<change>" --format agent
    ```
 2. 从 guard decision、`git diff`、OpenSpec artifacts、tasks、business invariants、test contract、RED/GREEN 摘要和 live role output 摘要构建审查范围；不要默认打开完整 `.superspec/evidence/**/*.json`。
 3. 运行 repo-local review guidance：
@@ -105,7 +107,7 @@ Required project-scope files: `.codex/agents/code-reviewer.toml`、`.codex/promp
    - `request_changes` 只负责给出结构化回退方向，不直接修改 task checkbox。
 8. 仅在 allow path 检查 review completion：
    ```text
-   superspec guard check-review-complete --change "<change>"
+   superspec guard check-review-complete --change "<change>" --format agent
    ```
    - 只有最终 allow path 才应执行并通过这一步。
    - 如果本轮 `main_adjudication.review_decision:"request_changes"`，则本轮 review 的正确出口是停止并回到对应路由；不要把 `request_changes` 轮次伪装成 `review_complete`。

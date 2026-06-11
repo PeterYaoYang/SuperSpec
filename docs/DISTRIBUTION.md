@@ -20,9 +20,9 @@
 1. **安装 footprint 由 guard 的 `check-init` 强制**（见 `superspec_guard.ts` 的 `REQUIRED_*` 常量），是装机清单的权威来源：
    - 前置：PATH 上的 `openspec` 必须满足 SuperSpec 对官方 OpenSpec CLI 的兼容要求：版本 `>= 1.4.1`，且支持 `instructions/archive/validate/status --help`（`REQUIRED_OPENSPEC_CLI_SURFACES`）。检测到 `openspec-chinese` 标识、低版本或兼容不完整变体时不能满足此前置；`init` 会自动尝试安装 / 升级官方包，遇到全局 bin 冲突会用覆盖模式重试。
    - 前置：`.codex/skills/{openspec-explore,openspec-propose,openspec-apply-change,openspec-archive-change}/SKILL.md` 存在且 frontmatter `name` 正确 → 由 `openspec init --tools codex .` 产出。
-   - SuperSpec payload：5 个用户可见 skill（explore/propose/apply/review/archive）+ 5 个 role agent/prompt。project scope 时安装到 `.codex/agents/{architect,critic,test-engineer,code-reviewer,verifier}.toml` + `.codex/prompts/{同 5 名}.md` + `.codex/skills/superspec-{explore,propose,apply,review,archive}/`；user scope 时安装到 Codex user home 的 `agents/`、`prompts/`、`skills/`。`init` 由全局 npm bin `superspec init` 承担，`verify` 已合并进 `review`。
+   - SuperSpec payload：5 个用户可见 skill（explore/propose/apply/review/archive）+ 5 个 role agent/prompt。project scope 时安装到 `.codex/agents/{architect,critic,test-engineer,code-reviewer,verifier}.toml` + `.codex/prompts/{同 5 名}.md` + `.codex/skills/superspec-{explore,propose,apply,review,archive}/`；user scope 时安装到 Codex user home 的 `agents/`、`prompts/` 和 `skills/`。`init` 由全局 npm bin `superspec init` 承担，`verify` 已合并进 `review`。
 2. **命令入口约束**：
-  - 包本体通过 GitHub Release tarball 或 npm registry 全局安装；当前内测主路径是 `npm install -g https://github.com/PeterYaoYang/SuperSpec/releases/download/v0.1.0/superspec-0.1.0.tgz`，正式 npm 发布后是 `npm install -g @peterxiaoyang/superspec`。workflow skills 直接调用 `superspec guard ...` / `superspec init --scope project`，不依赖目标仓库的 `node_modules/.bin` 或 POSIX shell 环境变量展开。
+  - 包本体通过 GitHub Release tarball 或 npm registry 全局安装；当前内测主路径是 `npm install -g https://github.com/PeterYaoYang/SuperSpec/releases/download/v0.1.0/superspec-0.1.0.tgz`，正式 npm 发布后是 `npm install -g @peterxiaoyang/superspec`。workflow skills 直接调用 `superspec guard ... --format agent` / `superspec init --scope project --format agent`，不依赖目标仓库的 `node_modules/.bin` 或 POSIX shell 环境变量展开。
    - 不安装 project-local wrapper script；正式入口只依赖 npm 生成的跨平台 bin（Unix shim + Windows `.cmd`/PowerShell shim）。
    - 环境假设：Node ≥ 20.19.0（运行编译后的 ESM JavaScript）、官方 OpenSpec CLI ≥ 1.4.1，openspec 必须先 init。
 3. **没有 git 安全网**：
@@ -60,7 +60,7 @@ superspec/
 ├─ templates/              # SuperSpec canonical workflow templates
 │  ├─ workflow/
 │  │  ├─ skills/superspec-*/SKILL.md     (5: explore/propose/apply/review/archive)
-│  │  └─ prompts/*.md                  (5)
+│  │  └─ prompts/*.md                    (5)
 │  └─ sidecar/
 │     ├─ config.yaml                    # 可选默认配置
 │     ├─ discovery.md
@@ -80,7 +80,7 @@ superspec/
     - npm 自动生成跨平台 shim（Windows 也有 `.cmd`/PowerShell shim），**消除 workflow skill 的仓库相对路径耦合**。
     - JS launcher 在加载 `dist/*.js` runtime 前先校验 Node ≥ 20.19.0，避免旧 Node 直接报不可读的 ESM/syntax 错误。
   - `"files": ["README.md","bin","dist","templates","adapters","schemas"]`，`"type":"module"`，`"engines": { "node": ">=20.19.0" }`。
-  - workflow skill 的唯一包内来源是 `templates/workflow/skills/`，不维护根目录 `skills/` 副本，也不依赖 `.codex-plugin/plugin.json`；每个 SuperSpec skill 在 frontmatter `metadata.author/source` 中声明短来源 `SuperSpec`。
+  - workflow skill 的唯一包内来源是 `templates/workflow/skills/`；不维护根目录 `skills/` 副本，也不依赖 `.codex-plugin/plugin.json`；每个 SuperSpec skill 在 frontmatter `metadata.author/source` 中声明短来源 `SuperSpec`。
   - `"build": "node build.js"`，`prepack` / `prepublishOnly` 自动 build；TS 源码和 `tests/` 用于开发/CI，不随 npm 包发布。运行用户需要 Node ≥ 20.19.0；仓库开发/CI 仍使用 Node 24，因为测试直接执行 `.ts` 文件。
 - 聚合 CLI：`superspec init/update/uninstall/guard/doctor`，并支持 `superspec --version` / `superspec -v` / `superspec version`；`superspec-init` / `superspec-guard` 保留为兼容入口。
 
@@ -89,10 +89,12 @@ superspec/
 `superspec init --scope project` 不生成 `scripts/superspec_guard` / `scripts/superspec_init`。skills 默认走全局 `superspec`，命令示例保持 shell-neutral：
 
 ```text
-superspec guard check-init --change "<change>"
-superspec init --scope project
+superspec guard check-init --change "<change>" --format agent
+superspec init --scope project --format agent
 superspec doctor
 ```
+
+输出格式分三层：默认 `json` 保持完整诊断字段，供自动化和排障使用；普通 workflow skill 必须使用 `--format agent` 读取白名单视图，避免把 reason code、evidence kind、内部字段名或函数形状喂给模型；`--format user` 输出面向人的中文文本。i18n 只负责固定术语和标签，不承担安全过滤职责；需要排查 evidence/schema/guard 内部时才显式使用 `--format json`。
 
 依赖 npm `bin` 生成跨平台入口：Unix 下是 shim，Windows 下是 `.cmd`/PowerShell shim。入口是 JS launcher，先校验 Node 版本，再加载 `dist` 中的编译后 JS runtime。skill 模板不得使用 `${VAR:-default}`、`test -f`、`mkdir`/`mv` 等 shell-specific 片段来调用 SuperSpec 自身。
 Windows PowerShell 可能优先解析 npm 生成的 `.ps1` shim 并受执行策略阻断；workflow skill 必须提示 PowerShell 用户显式运行 `superspec.cmd ...` / `openspec.cmd ...`。
@@ -137,7 +139,7 @@ Windows PowerShell 可能优先解析 npm 生成的 `.ps1` shim 并受执行策�
 1. **Preflight**：任意 install scope 下都要求 Node ≥ 20.19.0，且 `openspec` 必须满足官方 OpenSpec CLI 兼容要求：版本 ≥ 1.4.1，并通过 `REQUIRED_OPENSPEC_CLI_SURFACES`；若缺失、低版本、检测到 `openspec-chinese` 标识或不兼容变体，`init` 会自动尝试安装 / 升级官方包，必要时覆盖冲突的全局 bin。project scope 还要求 `.codex/skills/openspec-*` 存在（缺 → 提示或代跑 `openspec init --tools codex .`）。user scope 只安装 SuperSpec Codex surfaces，不要求当前目录是 OpenSpec 项目。
 2. **逐文件落地**：目标不存在 → 写入并记 `managed=true`；已存在且内容相同 → 记 `managed=true`；已存在且不同 → 记 `preexisting=true,managed=false` 并跳过（`--force` 才覆盖，且先备份 `*.bak`）。
 3. **接线 CLI**：不写 project wrapper；project/user scope 都依赖全局 `superspec` npm bin。
-4. **写 manifest** + 打印安装摘要与下一步（project scope 建议跑 `superspec guard check-init --change <c>` 自检）。
+4. **写 manifest** + 打印安装摘要与下一步（project scope 的 workflow 自检使用 `superspec guard check-init --change <c> --format agent`；诊断脚本可继续用默认 JSON）。
 5. 幂等：重复 init = 补齐缺失 + 不动已存在。
 
 ### 6.3 `superspec update`
@@ -187,7 +189,7 @@ Windows PowerShell 可能优先解析 npm 生成的 `.ps1` shim 并受执行策�
 3. wrapper 默认形态：已取消 project wrapper，统一 npm bin。
 4. 角色名是否前缀化（需 guard 配合）。
 
-> **已拍板 2026-06-10（审计 H-3/D-2，D1/D3 裁决）**：`.superspec/` 运行时数据是否进使用方仓库的 git **由最终用户选择**，工具不强制。`init` 应提供选择项并按选择生成 .gitignore 片段（推荐预设：ledger + evidence JSON + archive manifest 入库，`reports/`/`raw/`/`handoffs/` ignore + sha 锚定）；风险声明见 SPEC §5.1。
+> **已拍板 2026-06-10（审计 H-3/D-2，D1/D3 决定）**：`.superspec/` 运行时数据是否进使用方仓库的 git **由最终用户选择**，工具不强制。`init` 应提供选择项并按选择生成 .gitignore 片段（推荐预设：ledger + evidence JSON + archive manifest 入库，`reports/`/`raw/`/`handoffs/` ignore + sha 锚定）；风险声明见 SPEC §5.1。
 
 ## 11. 分阶段落地
 - **P0**：拍板待定项；把 guard 从 proposal 迁到包 `runtime/`（Codex 停稳后）。

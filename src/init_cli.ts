@@ -6,7 +6,9 @@ import {
   reason,
   runCommand,
   openspec_cli_probe,
+  parseDecisionOutputFormat,
   REQUIRED_OPENSPEC_MIN_VERSION,
+  type DecisionOutputFormat,
   type OpenspecCliProbe,
 } from "./core.ts";
 import { forced_openspec_install_plan, project_init, recommended_openspec_install_plan } from "./project_init.ts";
@@ -21,26 +23,31 @@ type InitArgs = {
   codexHome: string;
   mode: "install" | "update" | "uninstall";
   scope: InstallScope | null;
+  format: DecisionOutputFormat;
   dryRun: boolean;
   force: boolean;
 };
 
 function usage(): string {
-  return "usage: superspec init [-h] [--scope {project,user}] [--path PATH] [--codex-home PATH] [--create] [--update] [--uninstall] [--dry-run] [--force]\n";
+  return "usage: superspec init [-h] [--scope {project,user}] [--path PATH] [--codex-home PATH] [--format {json,agent,user}] [--create] [--update] [--uninstall] [--dry-run] [--force]\n";
 }
 
 function help(): string {
-  return `${usage()}\n可选参数：\n  -h, --help             显示帮助并退出\n  --scope {project,user} 安装到当前项目的 .codex 目录，或安装到用户级 Codex 目录（默认：project）\n  --project              等价于 --scope project\n  --user                 等价于 --scope user\n  --global               兼容别名，等价于 --user\n  --path PATH            --scope project 时使用的项目根目录（默认：当前目录）\n  --codex-home PATH      --scope user 时使用的 Codex 用户目录（默认：$CODEX_HOME 或 ~/.codex）\n  --create               兼容参数；init 默认就会创建缺失内容\n  --update               按 manifest 更新 SuperSpec 管理的文件；用户改动文件保留，新的版本写入 *.new\n  --uninstall            按 manifest 卸载 SuperSpec 管理的文件；.superspec 数据与既有/用户改动文件会保留\n  --dry-run              配合 --uninstall 时只预览将删除的文件，不实际修改\n  --force                安装时覆盖已有且内容不同的文件，并保留 *.bak 备份\n`;
+  return `${usage()}\n可选参数：\n  -h, --help             显示帮助并退出\n  --scope {project,user} 安装到当前项目的 .codex 目录，或安装到用户级 Codex 目录（默认：project）\n  --project              等价于 --scope project\n  --user                 等价于 --scope user\n  --global               兼容别名，等价于 --user\n  --path PATH            --scope project 时使用的项目根目录（默认：当前目录）\n  --codex-home PATH      --scope user 时使用的 Codex 用户目录（默认：$CODEX_HOME 或 ~/.codex）\n  --format {json,agent,user} 输出格式；json 用于诊断，agent/user 用于安全展示\n  --user-facing          等价于 --format user\n  --create               兼容参数；init 默认就会创建缺失内容\n  --update               按 manifest 更新 SuperSpec 管理的文件；用户改动文件保留，新的版本写入 *.new\n  --uninstall            按 manifest 卸载 SuperSpec 管理的文件；.superspec 数据与既有/用户改动文件会保留\n  --dry-run              配合 --uninstall 时只预览将删除的文件，不实际修改\n  --force                安装时覆盖已有且内容不同的文件，并保留 *.bak 备份\n`;
 }
 
 function parse_init_argv(argv: string[]): InitArgs {
-  const getValue = (flag: string): string | undefined => {
-    const idx = argv.indexOf(flag);
-    if (idx === -1) return undefined;
-    const value = argv[idx + 1];
-    if (value === undefined || value.startsWith("--")) throw new GuardError(`${flag} 缺少取值`);
-    return value;
+  const getValues = (flag: string): string[] => {
+    const values: string[] = [];
+    for (let idx = 0; idx < argv.length; idx += 1) {
+      if (argv[idx] !== flag) continue;
+      const value = argv[idx + 1];
+      if (value === undefined || value.startsWith("--")) throw new GuardError(`${flag} 缺少取值`);
+      values.push(value);
+    }
+    return values;
   };
+  const getValue = (flag: string): string | undefined => getValues(flag)[0];
   const update = argv.includes("--update");
   const uninstall = argv.includes("--uninstall");
   if (update && uninstall) throw new GuardError("--update 与 --uninstall 不能同时使用");
@@ -51,11 +58,18 @@ function parse_init_argv(argv: string[]): InitArgs {
   let scope: InstallScope | null = scopeFlag === "global" ? "user" : (scopeFlag as InstallScope | undefined) ?? null;
   if (userShortcut) scope = "user";
   if (argv.includes("--project")) scope = "project";
+  const formatValues = getValues("--format");
+  for (const value of formatValues) parseDecisionOutputFormat(value);
+  const selectedFormat = argv.includes("--user-facing")
+    ? "user"
+    : (formatValues.length > 0 ? formatValues[formatValues.length - 1] : "json");
+  const format = parseDecisionOutputFormat(selectedFormat);
   return {
     path: resolve(getValue("--path") ?? process.cwd()),
     codexHome: resolve(getValue("--codex-home") ?? process.env.CODEX_HOME ?? joinHomeCodex()),
     mode: uninstall ? "uninstall" : update ? "update" : "install",
     scope,
+    format,
     dryRun: argv.includes("--dry-run"),
     force: argv.includes("--force"),
   };
@@ -176,7 +190,7 @@ function openspecPreflightBlocked(args: InitArgs, scope: InstallScope, installRe
     project_root: args.path,
     install_scope: scope,
     install_root: targetRoot,
-  }, { command: "init" });
+  }, { command: "init", format: args.format });
   return 1;
 }
 
@@ -201,17 +215,18 @@ function run_init(args: InitArgs, scope: InstallScope): number {
   }
   summary.install_scope = scope;
   summary.install_root = targetRoot;
-  printDecision(summary, { command: "init" });
+  printDecision(summary, { command: "init", format: args.format });
   return summary.allowed ? 0 : 1;
 }
 
 export function main_init(argv: string[] = process.argv.slice(2)): number {
+  let args: InitArgs | null = null;
   try {
     if (argv.includes("-h") || argv.includes("--help")) {
       process.stdout.write(help());
       return 0;
     }
-    const args = parse_init_argv(argv);
+    args = parse_init_argv(argv);
     const scope = args.scope ?? "project";
     const openspecInstall = maybe_install_missing_openspec({ cwd: args.path, scope, mode: args.mode });
     if (openspecInstall === "failed" || openspecInstall === "skipped") return openspecPreflightBlocked(args, scope, openspecInstall);
@@ -219,18 +234,19 @@ export function main_init(argv: string[] = process.argv.slice(2)): number {
   } catch (err) {
     const change = "project";
     const errReason = err instanceof GuardError ? reason("guard_error", err.message) : reason("guard_internal_error", `${(err as Error).name}: ${(err as Error).message}`);
-    printDecision(block(change, "guard_error", [errReason]), { command: "init" });
+    printDecision(block(change, "guard_error", [errReason]), { command: "init", format: args?.format });
     return 2;
   }
 }
 
 export async function main_init_async(argv: string[] = process.argv.slice(2)): Promise<number> {
+  let args: InitArgs | null = null;
   try {
     if (argv.includes("-h") || argv.includes("--help")) {
       process.stdout.write(help());
       return 0;
     }
-    const args = parse_init_argv(argv);
+    args = parse_init_argv(argv);
     const scope = args.scope ?? (canPrompt() ? await promptInstallScope() : "project");
     const openspecInstall = maybe_install_missing_openspec({ cwd: args.path, scope, mode: args.mode });
     if (openspecInstall === "failed" || openspecInstall === "skipped") return openspecPreflightBlocked(args, scope, openspecInstall);
@@ -238,7 +254,7 @@ export async function main_init_async(argv: string[] = process.argv.slice(2)): P
   } catch (err) {
     const change = "project";
     const errReason = err instanceof GuardError ? reason("guard_error", err.message) : reason("guard_internal_error", `${(err as Error).name}: ${(err as Error).message}`);
-    printDecision(block(change, "guard_error", [errReason]), { command: "init" });
+    printDecision(block(change, "guard_error", [errReason]), { command: "init", format: args?.format });
     return 2;
   }
 }

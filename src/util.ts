@@ -67,6 +67,16 @@ export type Decision = {
   trust_warnings_zh?: string[];
   workflow_terms_zh?: WorkflowTermHint[];
 };
+export type DecisionOutputFormat = "json" | "agent" | "user";
+export type AgentWorkflowAction =
+  | "continue"
+  | "fix_artifacts"
+  | "ask_user_confirmation"
+  | "collect_review_evidence"
+  | "collect_test_evidence"
+  | "repair_evidence"
+  | "rerun_check"
+  | "inspect_diagnostics";
 export type TaskInfo = { task_id: string; checked: boolean; desc: string; attrs: Record<string, string> };
 
 export const BUILTIN_CONFIG: JsonMap = {
@@ -267,6 +277,11 @@ export class GuardError extends Error {}
 
 export const runtime: JsonMap = {};
 
+export function parseDecisionOutputFormat(raw: string): DecisionOutputFormat {
+  if (raw === "json" || raw === "agent" || raw === "user") return raw;
+  throw new GuardError("--format 只允许 json、agent 或 user");
+}
+
 export function reason(code: string, message: string, refs: string[] | null = null): Reason {
   const zh = reason_zh(code);
   return { code, message, refs: refs ?? [], label_zh: zh.label_zh, hint_zh: zh.hint_zh };
@@ -423,8 +438,227 @@ function sanitizeDecisionForOutput(decision: JsonMap): JsonMap {
   };
 }
 
-export function printDecision(decision: JsonMap, opts: { command?: string } = {}): void {
+function userFacingLine(value: unknown): string {
+  return String(value ?? "").replace(/\s+/gu, " ").trim();
+}
+
+const SAFE_TEXT_REPLACEMENTS: Array<[RegExp, string]> = [
+  [/\bneeds_user_decision_pending\b/giu, "等待用户确认"],
+  [/\bneeds_user_decision\b/giu, "等待用户确认"],
+  [/\buser_review_decision\b/giu, "用户确认记录"],
+  [/\bmain_review_digest\b/giu, "审查问题记录"],
+  [/\breview_standing_authorization\b/giu, "长期授权记录"],
+  [/\bdecision_scope_key\b/giu, "确认范围"],
+  [/\bfinding_uid\b/giu, "问题标识"],
+  [/\bexport\s+function\s+[A-Za-z_$][\w$]*\s*\([^)]*\)/gu, "内部实现细节"],
+  [/\bfunction\s+[A-Za-z_$][\w$]*\s*\([^)]*\)/gu, "内部实现细节"],
+  [/\b[A-Za-z_$][\w$]*\s*\([^)]*\)/gu, "内部调用细节"],
+  [/裁决/gu, "确认"],
+];
+
+function safeDisplayText(value: unknown): string {
+  let out = userFacingLine(value);
+  for (const [pattern, replacement] of SAFE_TEXT_REPLACEMENTS) out = out.replace(pattern, replacement);
+  return out;
+}
+
+function fallbackReasonForWorkflowAction(action: AgentWorkflowAction): string {
+  const fallbacks: Record<AgentWorkflowAction, string> = {
+    continue: "当前检查已通过。",
+    ask_user_confirmation: "需要用户确认后才能继续。",
+    collect_review_evidence: "需要补齐审查或验证复核记录。",
+    collect_test_evidence: "需要补齐测试或校验证据。",
+    fix_artifacts: "需要修正方案、任务或证据结构。",
+    repair_evidence: "需要修复证据记录。",
+    rerun_check: "需要重新运行当前检查。",
+    inspect_diagnostics: "需要查看诊断输出后处理。",
+  };
+  return fallbacks[action];
+}
+
+function safeReasonText(_item: JsonMap, action: AgentWorkflowAction = "inspect_diagnostics"): string {
+  return fallbackReasonForWorkflowAction(action);
+}
+
+const WORKFLOW_ACTION_BY_REASON: Array<[Set<string>, AgentWorkflowAction]> = [
+  [new Set([
+    "needs_user_decision_pending",
+    "user_decision_unbound",
+    "missing_review_digest",
+    "missing_human_confirmation",
+    "apply_isolation_unconfirmed",
+    "scope_expansion_unconfirmed",
+    "finding_unresolved",
+    "round_budget_exhausted",
+  ]), "ask_user_confirmation"],
+  [new Set([
+    "missing_source_guidance",
+    "missing_verification_review",
+    "missing_final_verification_review",
+    "missing_roles",
+    "missing_native_subagent_evidence",
+    "missing_invariant_review",
+    "missing_test_contract_review",
+    "missing_architect_review",
+    "missing_critic_review",
+    "missing_test-engineer_review",
+    "missing_code-reviewer_review",
+    "missing_verifier_review",
+    "missing_main_adjudication",
+    "proposal_reviewed_failed",
+    "review_not_ready",
+    "missing_proposal_review",
+  ]), "collect_review_evidence"],
+  [new Set([
+    "missing_red_evidence",
+    "missing_green_evidence",
+    "missing_characterization",
+    "test_contract_not_honored",
+    "validate_failed",
+    "missing_final_tests",
+    "verify_failure_unconfirmed",
+  ]), "collect_test_evidence"],
+  [new Set([
+    "missing_discovery",
+    "missing_proposal",
+    "missing_design",
+    "missing_tasks",
+    "invalid_task_graph",
+    "invalid_business_invariants",
+    "review_finding_invalid",
+    "review_digest_invalid",
+    "user_decision_invalid",
+    "human_confirmation_invalid",
+    "standing_authorization_invalid",
+    "evidence_unknown_kind",
+    "evidence_missing_field",
+    "artifact_update_required",
+    "rereview_required",
+  ]), "fix_artifacts"],
+  [new Set([
+    "state_concurrent_update",
+    "state_fingerprint_stale",
+  ]), "rerun_check"],
+  [new Set([
+    "state_corrupt",
+    "openspec_cli_unavailable",
+    "openspec_native_surface_missing",
+    "dirty_worktree_unavailable",
+    "guard_error",
+    "guard_internal_error",
+    "unknown_gate",
+    "unknown_artifact",
+    "not_openspec_artifact",
+  ]), "inspect_diagnostics"],
+];
+
+export function workflowActionForReasonCodes(reasonCodes: string[], allowed = false): AgentWorkflowAction {
+  if (allowed) return "continue";
+  const codes = new Set(reasonCodes);
+  for (const [matches, action] of WORKFLOW_ACTION_BY_REASON) {
+    for (const code of matches) {
+      if (codes.has(code)) return action;
+    }
+  }
+  return "inspect_diagnostics";
+}
+
+function summaryForWorkflowAction(action: AgentWorkflowAction, allowed: boolean): string {
+  if (allowed || action === "continue") return "当前检查已通过，可以继续下一步。";
+  const summaries: Record<Exclude<AgentWorkflowAction, "continue">, string> = {
+    ask_user_confirmation: "当前阶段需要用户确认一个范围或处理方式选择后才能继续。",
+    collect_review_evidence: "当前阶段缺少必要审查或验证复核记录，补齐后再继续。",
+    collect_test_evidence: "当前阶段缺少测试或校验证据，补齐后再继续。",
+    fix_artifacts: "当前阶段的方案、任务或证据结构需要修正后再继续。",
+    repair_evidence: "当前证据记录需要修复后再继续。",
+    rerun_check: "当前检查需要在输入稳定后重新运行。",
+    inspect_diagnostics: "当前检查需要查看诊断输出后处理。",
+  };
+  return summaries[action];
+}
+
+function nextStepsForWorkflowAction(action: AgentWorkflowAction, allowed: boolean): string[] {
+  if (allowed || action === "continue") return ["继续执行下一步。"];
+  const steps: Record<Exclude<AgentWorkflowAction, "continue">, string[]> = {
+    ask_user_confirmation: ["向用户展示待确认的问题与选项，记录选择后重新运行检查。"],
+    collect_review_evidence: ["补齐所需审查或验证复核记录，然后重新运行检查。"],
+    collect_test_evidence: ["补齐失败/通过测试或校验证据，然后重新运行检查。"],
+    fix_artifacts: ["修正相关方案、任务或证据结构，然后重新运行检查。"],
+    repair_evidence: ["修复证据记录中的结构或引用问题，然后重新运行检查。"],
+    rerun_check: ["等待输入稳定后重新运行当前检查。"],
+    inspect_diagnostics: ["使用诊断输出查看内部细节，再按对应问题处理。"],
+  };
+  return steps[action];
+}
+
+const DIAGNOSTIC_HINT = "需要排查内部细节时使用 --format json。";
+
+export function renderAgentDecision(decision: JsonMap, opts: { command?: string } = {}): JsonMap {
+  const decorated = sanitizeDecisionForOutput(decorateDecision(decision, opts));
+  const reasons = Array.isArray(decorated.block_reasons) ? decorated.block_reasons : [];
+  const reasonCodes = reasons.map((item: JsonMap) => String(item.code ?? ""));
+  const allowed = Boolean(decorated.allowed);
+  const workflowAction = workflowActionForReasonCodes(reasonCodes, allowed);
+  const renderedReasons = reasons.map((item: JsonMap) => safeReasonText(item, workflowAction)).filter(Boolean);
+  return {
+    allowed,
+    status: allowed ? "allowed" : "blocked",
+    workflow_action: workflowAction,
+    stage_label_zh: safeDisplayText(decorated.gate_label_zh) || "当前阶段",
+    check_label_zh: safeDisplayText(decorated.command_label_zh) || "当前检查",
+    summary_zh: safeDisplayText(summaryForWorkflowAction(workflowAction, allowed)),
+    reasons_zh: renderedReasons.length > 0 ? renderedReasons : undefined,
+    next_steps_zh: nextStepsForWorkflowAction(workflowAction, allowed).map(safeDisplayText),
+    diagnostic_hint: DIAGNOSTIC_HINT,
+  };
+}
+
+export function renderUserFacingDecision(decision: JsonMap, opts: { command?: string } = {}): string {
+  const decorated = sanitizeDecisionForOutput(decorateDecision(decision, opts));
+  const agentView = renderAgentDecision(decorated, opts);
+  const gate = safeDisplayText(decorated.gate_label_zh) || "当前检查";
+  const command = safeDisplayText(decorated.command_label_zh);
+  const lines: string[] = [];
+
+  if (decorated.allowed) {
+    lines.push(`检查通过：${gate}。`);
+  } else {
+    lines.push(`暂时不能继续：${gate}。`);
+  }
+
+  if (command && command !== gate) {
+    lines.push(`检查项：${command}。`);
+  }
+
+  const reasons = Array.isArray(decorated.block_reasons) ? decorated.block_reasons : [];
+  if (!decorated.allowed && reasons.length > 0) {
+    lines.push("原因：");
+    for (const item of reasons) {
+      const reasonText = safeReasonText(item as JsonMap, agentView.workflow_action as AgentWorkflowAction);
+      lines.push(`- ${reasonText}`);
+    }
+  }
+
+  const nextActions = Array.isArray(agentView.next_steps_zh) ? agentView.next_steps_zh.map(safeDisplayText).filter(Boolean) : [];
+  if (nextActions.length > 0) {
+    lines.push("下一步：");
+    for (const action of nextActions) lines.push(`- ${action}`);
+  }
+  lines.push(`诊断：${DIAGNOSTIC_HINT}`);
+
+  return `${lines.join("\n")}\n`;
+}
+
+export function printDecision(decision: JsonMap, opts: { command?: string; format?: DecisionOutputFormat } = {}): void {
   const decorated = decorateDecision(decision, opts);
+  if (opts.format === "user") {
+    process.stdout.write(renderUserFacingDecision(decorated, opts));
+    return;
+  }
+  if (opts.format === "agent") {
+    process.stdout.write(`${JSON.stringify(renderAgentDecision(decorated, opts), null, 2)}\n`);
+    return;
+  }
   process.stdout.write(`${JSON.stringify(sanitizeDecisionForOutput(decorated), null, 2)}\n`);
 }
 

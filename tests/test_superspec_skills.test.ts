@@ -70,6 +70,13 @@ function repoText(relPath: string): string {
   return readFileSync(join(REPO, relPath), "utf8");
 }
 
+function superspecCommandLines(text: string): Array<{ line: string; lineNo: number }> {
+  return text
+    .split(/\r?\n/u)
+    .map((line, index) => ({ line: line.trim(), lineNo: index + 1 }))
+    .filter(({ line }) => /\bsuperspec(?:\.cmd)?\s+(?:guard|init)\b/u.test(line));
+}
+
 function npmCommand(): string {
   return process.platform === "win32" ? "npm.cmd" : "npm";
 }
@@ -264,6 +271,24 @@ test("skills call guard before advancing", () => {
   assert.equal(templateSkillText("superspec-explore").includes("SUPERSPEC_INIT"), false);
 });
 
+test("workflow skills use safe agent output for ordinary superspec commands", () => {
+  for (const name of REQUIRED_SKILLS) {
+    const text = templateSkillText(name);
+    const lines = superspecCommandLines(text);
+    assert.ok(lines.length > 0, name);
+    for (const { line, lineNo } of lines) {
+      if (line.includes("--format json")) {
+        const nearby = text.split(/\r?\n/u).slice(Math.max(0, lineNo - 4), lineNo + 3).join("\n");
+        assert.match(nearby, /诊断|debug|debugging/u, `${name}:${lineNo} json output must be explicitly diagnostic`);
+        continue;
+      }
+      assert.match(line, /--format agent\b/u, `${name}:${lineNo} must use --format agent: ${line}`);
+    }
+    assert.ok(text.includes("普通 workflow 命令使用 `--format agent`"), name);
+    assert.ok(text.includes("`--format json` 只用于诊断"), name);
+  }
+});
+
 test("workflow skill descriptions are user-facing Chinese, not bilingual protocol summaries", () => {
   const expectedDescriptions: Record<(typeof REQUIRED_SKILLS)[number], string> = {
     "superspec-explore": "1.新需求刚开始时用：先把目标、范围、风险和现有代码事实弄清楚，产出探索记录（`discovery.md`）；这一步只探索，不写正式方案，也不改代码。",
@@ -307,6 +332,21 @@ test("skills avoid high-risk internal protocol names in user-facing step prose",
     for (const pattern of forbiddenPatterns) {
       assert.equal(pattern.test(text), false, `${name} leaks ${pattern}`);
     }
+  }
+});
+
+test("workflow skills constrain confusing user-visible decision wording", () => {
+  const wordingRule = "用户可见文案不得使用“裁决”描述用户动作";
+  for (const name of REQUIRED_SKILLS) {
+    const text = templateSkillText(name);
+    assert.ok(text.includes(wordingRule), name);
+    assert.ok(text.includes("统一说“确认”“范围取舍”“处理方式选择”或“用户确认记录”"), name);
+
+    const unexpected = text
+      .split(/\r?\n/u)
+      .map((line, index) => ({ line, index: index + 1 }))
+      .filter(({ line }) => line.includes("裁决") && !line.includes(wordingRule));
+    assert.deepEqual(unexpected, [], `${name} should not use 裁决 outside the wording rule`);
   }
 });
 
