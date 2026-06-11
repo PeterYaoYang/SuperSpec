@@ -29,7 +29,7 @@ import {
   repo_root_from_cwd,
 } from "./openspec.ts";
 import { config_file, load_config, project_config_file } from "./paths.ts";
-import { index_evidence, live_pass } from "./evidence.ts";
+import { index_evidence, live_user_confirmations } from "./evidence.ts";
 import { tasks_structure_hash } from "./tasks.ts";
 import {
   dirty_worktree_paths,
@@ -66,6 +66,7 @@ import {
 } from "./archive.ts";
 import {
   check_archive_ready,
+  check_apply_ready,
   check_artifact,
   check_init,
   check_superspec_gate,
@@ -214,7 +215,7 @@ function dispatch_once(args: ParsedArgs): [JsonMap, string] {
   if (cmd !== "recompute") {
     const changedPaths = String(config.preset ?? "full") !== "full" ? runtime.dirty_worktree_paths(repoRoot) : [];
     presetRequired = preset_upgrade_required_from_context(config, changedPaths);
-    const presetHumanConfirmed = live_pass(evidences, { gate: "preset_upgrade", kind: "human_confirmation" }).length > 0;
+    const presetHumanConfirmed = live_user_confirmations(evidences, "preset_upgrade").length > 0;
     presetProblems = preset_upgrade_reasons(config, changedPaths, presetHumanConfirmed);
     if (cmd !== "init") staleProblems = state_stale_reasons(changeRoot, status);
   }
@@ -244,7 +245,7 @@ function dispatch_once(args: ParsedArgs): [JsonMap, string] {
     dec = check_superspec_gate(change, status, changeRoot, evidences, args.gate ?? "");
     route = gate_route_phase(args.gate ?? "");
   } else if (cmd === "check-apply-ready") {
-    dec = check_superspec_gate(change, status, changeRoot, evidences, "propose_complete");
+    dec = check_apply_ready(change, status, changeRoot, evidences);
     route = "propose";
   } else if (cmd === "check-task-edit") {
     dec = check_task_edit(change, status, changeRoot, evidences, args.task_id ?? "");
@@ -294,7 +295,7 @@ function dispatch_once(args: ParsedArgs): [JsonMap, string] {
       const lockedShapeProblems = openspec_status_shape_reasons(lockedStatus);
       const lockedChangedPaths = String(lockedConfig.preset ?? "full") !== "full" ? runtime.dirty_worktree_paths(lockedRepoRoot) : [];
       const lockedPresetRequired = preset_upgrade_required_from_context(lockedConfig, lockedChangedPaths);
-      const lockedPresetHumanConfirmed = live_pass(lockedEvidences, { gate: "preset_upgrade", kind: "human_confirmation" }).length > 0;
+      const lockedPresetHumanConfirmed = live_user_confirmations(lockedEvidences, "preset_upgrade").length > 0;
       const lockedPresetProblems = preset_upgrade_reasons(lockedConfig, lockedChangedPaths, lockedPresetHumanConfirmed);
       const lockedStaleProblems = state_stale_reasons(lockedChangeRoot, lockedStatus);
       const lockedCorruptProblems = state_corrupt_reasons(lockedChangeRoot);

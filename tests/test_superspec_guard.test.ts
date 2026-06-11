@@ -369,6 +369,7 @@ function passEvidence(gate: string, kind = "review", overrides: JsonMap = {}): J
   // FIX-7: human_confirmation carries a minimal schema (confirmation_text + confirmed refs).
   const confirmationDefaults: JsonMap = kind === "human_confirmation"
     ? {
+      created_by: "user",
       confirmation_text: `human confirmed ${gate}`,
       ...(gate === "branch_handling" ? {} : { confirmed_refs: [`${gate}-confirmed`] }),
     }
@@ -751,6 +752,25 @@ function reopenGuidanceEvidences(fx: Fixture): JsonMap[] {
   });
 }
 
+function taskReopenReadyEvidences(fx: Fixture): JsonMap[] {
+  const guidance = [
+    ...reopenGuidanceEvidences(fx),
+    reviewEvidence(fx, "critic"),
+  ];
+  return [
+    ...prepareProposeComplete(fx, { checked: true }),
+    ...guidance,
+    mainAdjudication(fx, guidance, {
+      review_decision: "request_changes",
+      request_changes_route: "reopen_tasks",
+      blocking_source_evidence_refs: ["EV-code-reviewer-guidance"],
+      reopen_task_ids: ["TASK-001"],
+      verification_evidence_refs: [],
+    }),
+    taskReopenEvidence(fx),
+  ];
+}
+
 function businessInvariantsText(id = "INV-001", overrides: JsonMap = {}): string {
   const confidence = overrides.confidence ?? "source-backed";
   const enforcement = overrides.enforcement_level ?? "automated-test";
@@ -842,6 +862,7 @@ function prepareProposeComplete(fx: Fixture, opts: { checked?: boolean; testCont
   );
   return [
     roleEvidence(fx, "explore_complete", "critic"),
+    passEvidence("explore_complete", "human_confirmation"),
     ...proposalReviewedEvidences(fx),
     roleEvidence(fx, "design_complete", "architect"),
     roleEvidence(fx, "design_complete", "critic"),
@@ -1250,18 +1271,33 @@ withFixture("explore complete requires discovery sidecar", (fx) => {
   assert.ok(decision.next_allowed_actions.length > 0);
 });
 
-withFixture("explore complete allows main thread discovery with critic review only", (fx) => {
+withFixture("explore complete blocks until discovery is human confirmed", (fx) => {
   writeText(join(fx.change, ".superspec", "artifacts", "discovery.md"), "source anchors and facts\n");
-  const decision = guard.check_superspec_gate("demo-change", status(fx, { proposal: "blocked", specs: "blocked", design: "blocked", tasks: "blocked" }), fx.change, [
+  const blocked = guard.check_superspec_gate("demo-change", status(fx, { proposal: "blocked", specs: "blocked", design: "blocked", tasks: "blocked" }), fx.change, [
     roleEvidence(fx, "explore_complete", "critic"),
   ], "explore_complete");
-  assert.equal(decision.allowed, true, JSON.stringify(decision));
+  assert.equal(blocked.allowed, false, JSON.stringify(blocked));
+  assert.ok(codes(blocked.block_reasons).includes("missing_human_confirmation"));
+  const nonUser = guard.check_superspec_gate("demo-change", status(fx, { proposal: "blocked", specs: "blocked", design: "blocked", tasks: "blocked" }), fx.change, [
+    roleEvidence(fx, "explore_complete", "critic"),
+    passEvidence("explore_complete", "human_confirmation", { created_by: "main-thread" }),
+  ], "explore_complete");
+  assert.equal(nonUser.allowed, false, JSON.stringify(nonUser));
+  assert.ok(codes(nonUser.block_reasons).includes("missing_human_confirmation"));
+  const allowed = guard.check_superspec_gate("demo-change", status(fx, { proposal: "blocked", specs: "blocked", design: "blocked", tasks: "blocked" }), fx.change, [
+    roleEvidence(fx, "explore_complete", "critic"),
+    passEvidence("explore_complete", "human_confirmation"),
+  ], "explore_complete");
+  assert.equal(allowed.allowed, true, JSON.stringify(allowed));
 });
 
 withFixture("FIX-4 explore complete blocks stale discovery review after discovery edit", (fx) => {
   const discoveryPath = join(fx.change, ".superspec", "artifacts", "discovery.md");
   writeText(discoveryPath, "discovery v1 facts\n");
-  const evidences = [roleEvidence(fx, "explore_complete", "critic")];
+  const evidences = [
+    roleEvidence(fx, "explore_complete", "critic"),
+    passEvidence("explore_complete", "human_confirmation"),
+  ];
   const exploreStatus = status(fx, { proposal: "blocked", specs: "blocked", design: "blocked", tasks: "blocked" });
   const before = guard.check_superspec_gate("demo-change", exploreStatus, fx.change, evidences, "explore_complete");
   assert.equal(before.allowed, true, JSON.stringify(before));
@@ -1276,7 +1312,7 @@ withFixture("FIX-4 design complete blocks stale design review after design edit"
   const designPath = join(fx.change, "design.md");
   writeText(designPath, "design v1\n");
   const evidences = [
-    roleEvidence(fx, "explore_complete", "critic"),
+    ...exploreConfirmedEvidences(fx),
     ...proposalReviewedEvidences(fx),
     roleEvidence(fx, "design_complete", "architect"),
     roleEvidence(fx, "design_complete", "critic"),
@@ -1337,7 +1373,7 @@ withFixture("FIX-2 design complete allows when explore_complete satisfied", (fx)
   writeText(join(fx.change, ".superspec", "artifacts", "discovery.md"), "source anchors and facts\n");
   writeText(join(fx.change, "design.md"), "design\n");
   const decision = guard.check_superspec_gate("demo-change", status(fx), fx.change, [
-    roleEvidence(fx, "explore_complete", "critic"),
+    ...exploreConfirmedEvidences(fx),
     ...proposalReviewedEvidences(fx),
     roleEvidence(fx, "design_complete", "architect"),
     roleEvidence(fx, "design_complete", "critic"),
@@ -1347,13 +1383,42 @@ withFixture("FIX-2 design complete allows when explore_complete satisfied", (fx)
   assert.equal(decision.allowed, true, JSON.stringify(decision));
 });
 
+withFixture("test contract drafted blocks until design is user-confirmed", (fx) => {
+  writeText(join(fx.change, ".superspec", "artifacts", "discovery.md"), "source anchors and facts\n");
+  writeText(join(fx.change, "design.md"), "design\n");
+  writeText(join(fx.change, ".superspec", "artifacts", "business-invariants.md"), businessInvariantsText());
+  writeText(join(fx.change, ".superspec", "artifacts", "test-contract.md"), testContractText());
+  writeText(join(fx.change, "specs", "attendance", "spec.md"), "#### Scenario: Scenario A\n");
+  const base = [
+    ...exploreConfirmedEvidences(fx),
+    ...proposalReviewedEvidences(fx),
+    roleEvidence(fx, "design_complete", "architect"),
+    roleEvidence(fx, "design_complete", "critic"),
+    roleEvidence(fx, "design_complete", "test-engineer"),
+    roleEvidence(fx, "invariants_reviewed", "critic"),
+    roleEvidence(fx, "invariants_reviewed", "test-engineer"),
+    roleEvidence(fx, "test_contract_drafted", "test-engineer"),
+    roleEvidence(fx, "test_contract_drafted", "critic"),
+  ];
+  const missing = guard.check_superspec_gate("demo-change", status(fx, { tasks: "blocked" }), fx.change, base, "test_contract_drafted");
+  assert.equal(missing.allowed, false, JSON.stringify(missing));
+  assert.ok(codes(missing.block_reasons).includes("design_complete_failed"), JSON.stringify(missing.block_reasons));
+  assert.ok(codes(missing.block_reasons).includes("missing_human_confirmation"), JSON.stringify(missing.block_reasons));
+  const nonUser = guard.check_superspec_gate("demo-change", status(fx, { tasks: "blocked" }), fx.change, [
+    ...base,
+    passEvidence("design_complete", "human_confirmation", { created_by: "main-thread" }),
+  ], "test_contract_drafted");
+  assert.equal(nonUser.allowed, false, JSON.stringify(nonUser));
+  assert.ok(codes(nonUser.block_reasons).includes("missing_human_confirmation"), JSON.stringify(nonUser.block_reasons));
+});
+
 withFixture("test contract drafted passes without tasks", (fx) => {
   writeText(join(fx.change, ".superspec", "artifacts", "discovery.md"), "source anchors and facts\n");
   writeText(join(fx.change, "design.md"), "design\n");
   writeText(join(fx.change, ".superspec", "artifacts", "business-invariants.md"), businessInvariantsText());
   writeText(join(fx.change, ".superspec", "artifacts", "test-contract.md"), testContractText());
   const decision = guard.check_superspec_gate("demo-change", status(fx, { tasks: "blocked" }), fx.change, [
-    roleEvidence(fx, "explore_complete", "critic"),
+    ...exploreConfirmedEvidences(fx),
     ...proposalReviewedEvidences(fx),
     roleEvidence(fx, "design_complete", "architect"),
     roleEvidence(fx, "design_complete", "critic"),
@@ -1464,7 +1529,7 @@ withFixture("test contract drafted allows human-confirmation invariant outside T
   writeText(join(fx.change, ".superspec", "artifacts", "test-contract.md"), testContractText("TEST-001", "Scenario A", ""));
   writeText(join(fx.change, "specs", "attendance", "spec.md"), "#### Scenario: Scenario A\n");
   const decision = guard.check_superspec_gate("demo-change", status(fx, { tasks: "blocked" }), fx.change, [
-    roleEvidence(fx, "explore_complete", "critic"),
+    ...exploreConfirmedEvidences(fx),
     ...proposalReviewedEvidences(fx),
     roleEvidence(fx, "design_complete", "architect"),
     roleEvidence(fx, "design_complete", "critic"),
@@ -1628,8 +1693,36 @@ withFixture("propose complete requires all internal gates", (fx) => {
 
 withFixture("propose gate aliases map to internal gates", (fx) => {
   const evidences = prepareProposeComplete(fx);
+  assert.equal(guard.GATE_ALIASES["propose.apply_ready"], "apply_ready");
   const decision = guard.check_superspec_gate("demo-change", status(fx), fx.change, evidences, "propose.apply_ready");
   assert.equal(decision.allowed, true, JSON.stringify(decision));
+});
+
+withFixture("apply-ready blocks until apply isolation is user-confirmed", (fx) => {
+  const evidences = prepareProposeComplete(fx).filter((ev) => ev.gate !== "apply_isolation");
+  const decision = guard.check_apply_ready("demo-change", status(fx), fx.change, evidences);
+  assert.equal(decision.allowed, false, JSON.stringify(decision));
+  assert.ok(codes(decision.block_reasons).includes("apply_isolation_unconfirmed"), JSON.stringify(decision.block_reasons));
+  const nonUser = prepareProposeComplete(fx).map((ev) => (
+    ev.gate === "apply_isolation" ? { ...ev, created_by: "main-thread" } : ev
+  ));
+  const nonUserDecision = guard.check_apply_ready("demo-change", status(fx), fx.change, nonUser);
+  assert.equal(nonUserDecision.allowed, false, JSON.stringify(nonUserDecision));
+  assert.ok(codes(nonUserDecision.block_reasons).includes("apply_isolation_unconfirmed"), JSON.stringify(nonUserDecision.block_reasons));
+  const aliasDecision = guard.check_superspec_gate("demo-change", status(fx), fx.change, evidences, "propose.apply_ready");
+  assert.equal(aliasDecision.allowed, false, JSON.stringify(aliasDecision));
+  assert.ok(codes(aliasDecision.block_reasons).includes("apply_isolation_unconfirmed"), JSON.stringify(aliasDecision.block_reasons));
+  withRuntime({ load_context: () => [status(fx), fx.repo, fx.change, evidences] }, () => {
+    const [ready] = guard.dispatch({ command: "check-apply-ready", change: "demo-change" });
+    assert.equal(ready.allowed, false, JSON.stringify(ready));
+    assert.ok(codes(ready.block_reasons).includes("apply_isolation_unconfirmed"), JSON.stringify(ready.block_reasons));
+    const [enter] = guard.dispatch({ command: "check-enter", change: "demo-change", gate: "apply_ready" });
+    assert.equal(enter.allowed, false, JSON.stringify(enter));
+    assert.ok(codes(enter.block_reasons).includes("apply_isolation_unconfirmed"), JSON.stringify(enter.block_reasons));
+    const [aliasEnter] = guard.dispatch({ command: "check-enter", change: "demo-change", gate: "propose.apply_ready" });
+    assert.equal(aliasEnter.allowed, false, JSON.stringify(aliasEnter));
+    assert.ok(codes(aliasEnter.block_reasons).includes("apply_isolation_unconfirmed"), JSON.stringify(aliasEnter.block_reasons));
+  });
 });
 
 withFixture("task edit blocks when propose not complete", (fx) => {
@@ -3021,6 +3114,26 @@ withFixture("task reopen blocks under-adjudicated request_changes guidance", (fx
   assert.ok(reasonSet.includes("blocking_findings_open"), JSON.stringify(decision.block_reasons));
 });
 
+withFixture("task reopen blocks without user-confirmed apply isolation", (fx) => {
+  const evidences = taskReopenReadyEvidences(fx);
+  const allowed = guard.check_task_reopen("demo-change", status(fx), fx.change, evidences, "TASK-001");
+  assert.equal(allowed.allowed, true, JSON.stringify(allowed));
+
+  const missingIsolation = evidences.filter((ev) => ev.gate !== "apply_isolation");
+  const missing = guard.check_task_reopen("demo-change", status(fx), fx.change, missingIsolation, "TASK-001");
+  assert.equal(missing.allowed, false, JSON.stringify(missing));
+  assert.ok(codes(missing.block_reasons).includes("apply_isolation_unconfirmed"), JSON.stringify(missing.block_reasons));
+  assert.ok(!codes(missing.block_reasons).includes("task_reopen_invalid"), JSON.stringify(missing.block_reasons));
+
+  const nonUserIsolation = evidences.map((ev) => (
+    ev.gate === "apply_isolation" ? { ...ev, created_by: "main-thread" } : ev
+  ));
+  const nonUser = guard.check_task_reopen("demo-change", status(fx), fx.change, nonUserIsolation, "TASK-001");
+  assert.equal(nonUser.allowed, false, JSON.stringify(nonUser));
+  assert.ok(codes(nonUser.block_reasons).includes("apply_isolation_unconfirmed"), JSON.stringify(nonUser.block_reasons));
+  assert.ok(!codes(nonUser.block_reasons).includes("task_reopen_invalid"), JSON.stringify(nonUser.block_reasons));
+});
+
 withFixture("task reopen rejects non-review source guidance authorization", (fx) => {
   const guidance = [
     ...reopenGuidanceEvidences(fx),
@@ -3758,6 +3871,18 @@ withFixture("FIX-7 complete human confirmation passes minimal schema", (fx) => {
   ];
   const problems = guard.evidence_schema_guard("demo-change", fx.change, fx.repo, evidences);
   assert.ok(!codes(problems).includes("human_confirmation_invalid"), JSON.stringify(problems));
+});
+
+withFixture("FIX-7 human confirmation must be user-authored", (fx) => {
+  const problems = guard.evidence_schema_guard("demo-change", fx.change, fx.repo, [
+    passEvidence("design_complete", "human_confirmation", {
+      evidence_id: "EV-hc-main-thread",
+      created_by: "main-thread",
+      confirmation_text: "confirmed design trade-offs",
+      confirmed_refs: ["design.md"],
+    }),
+  ]);
+  assert.ok(codes(problems).includes("human_confirmation_invalid"), JSON.stringify(problems));
 });
 
 withFixture("FIX-7 branch handling confirmation uses confirmed_paths pattern", (fx) => {
@@ -5870,6 +5995,13 @@ function exploreCheck(fx: Fixture, evidences: JsonMap[]): JsonMap {
   return guard.check_superspec_gate("demo-change", status(fx, EXPLORE_ONLY_STATUS), fx.change, evidences, "explore_complete");
 }
 
+function exploreConfirmedEvidences(fx: Fixture): JsonMap[] {
+  return [
+    roleEvidence(fx, "explore_complete", "critic"),
+    passEvidence("explore_complete", "human_confirmation"),
+  ];
+}
+
 function discSchemaCodes(fx: Fixture, evidences: JsonMap[]): string[] {
   return codes(guard.evidence_schema_guard("demo-change", fx.change, fx.repo, evidences));
 }
@@ -6082,7 +6214,7 @@ withFixture("DISC findings on role review evidence are schema-checked", (fx) => 
 
 withFixture("DISC B6 legacy explore evidence without rounds stays grandfathered", (fx) => {
   writeDiscovery(fx);
-  const decision = exploreCheck(fx, [roleEvidence(fx, "explore_complete", "critic")]);
+  const decision = exploreCheck(fx, exploreConfirmedEvidences(fx));
   assert.equal(decision.allowed, true, JSON.stringify(decision));
 });
 
@@ -6122,6 +6254,7 @@ withFixture("DISC latest round and digest must pin the current target set", (fx)
   const evidences = [
     exploreRoundReview(fx, 1, []),
     exploreDigest(fx, 1, []),
+    passEvidence("explore_complete", "human_confirmation"),
   ];
   const before = exploreCheck(fx, evidences);
   assert.equal(before.allowed, true, JSON.stringify(before));
@@ -6245,6 +6378,7 @@ withFixture("DISC option_d_custom drives artifact update, re-review, and the ful
       user_decision_refs: ["EV-user-decision-1"],
       artifact_update_refs: [DISCOVERY_REL],
     })]),
+    passEvidence("explore_complete", "human_confirmation"),
   ]);
   assert.equal(full.allowed, true, JSON.stringify(full.block_reasons));
 });
@@ -6269,6 +6403,7 @@ withFixture("DISC standing authorization coverage is category, gate, type, and e
       disposition: "accepted_deviation",
       standing_authorization_refs: ["EV-standing-auth-1"],
     })]),
+    passEvidence("explore_complete", "human_confirmation"),
   ];
   const ok = exploreCheck(fx, accepted());
   assert.equal(ok.allowed, true, JSON.stringify(ok.block_reasons));
@@ -6317,6 +6452,7 @@ withFixture("DISC accepted material deviation must be acknowledged by the clean 
       acknowledged_accepted_deviation_uids: [finding.finding_uid],
     }),
     r2Digest,
+    passEvidence("explore_complete", "human_confirmation"),
   ]);
   assert.equal(withAck.allowed, true, JSON.stringify(withAck.block_reasons));
 });
@@ -6454,37 +6590,37 @@ function designTargetRefs(fx: Fixture): JsonMap[] {
 withFixture("DISC2 proposal_reviewed is a hard gate with a mandatory disclosure loop", (fx) => {
   writeDiscovery(fx);
   writeProposal(fx);
-  const explore = roleEvidence(fx, "explore_complete", "critic");
+  const explore = exploreConfirmedEvidences(fx);
   // No proposal review at all: both the role check and the born-disclosure check block.
-  const empty = proposalCheck(fx, [explore]);
+  const empty = proposalCheck(fx, [...explore]);
   assert.equal(empty.allowed, false);
   assert.ok(codes(empty.block_reasons).includes("missing_proposal_review"), JSON.stringify(empty.block_reasons));
   assert.ok(codes(empty.block_reasons).includes("missing_review_digest"), JSON.stringify(empty.block_reasons));
   // Old-style (round-less, findings-less) critic evidence cannot dodge the disclosure loop:
   // proposal_reviewed has no legacy population, so there is no grandfather path.
-  const oldStyle = proposalCheck(fx, [explore, roleEvidence(fx, "proposal_reviewed", "critic")]);
+  const oldStyle = proposalCheck(fx, [...explore, roleEvidence(fx, "proposal_reviewed", "critic")]);
   assert.equal(oldStyle.allowed, false);
   assert.ok(codes(oldStyle.block_reasons).includes("missing_review_digest"), JSON.stringify(oldStyle.block_reasons));
   // Round-tagged clean review + digest is the only allow path.
-  const full = proposalCheck(fx, [explore, proposalRoundReview(fx, 1, []), proposalDigest(fx, 1, [])]);
+  const full = proposalCheck(fx, [...explore, proposalRoundReview(fx, 1, []), proposalDigest(fx, 1, [])]);
   assert.equal(full.allowed, true, JSON.stringify(full.block_reasons));
 });
 
 withFixture("DISC2 proposal blocker cannot be silently fixed by the main thread", (fx) => {
   writeDiscovery(fx);
   writeProposal(fx);
-  const explore = roleEvidence(fx, "explore_complete", "critic");
+  const explore = exploreConfirmedEvidences(fx);
   const finding = proposalFinding();
   const r1 = proposalRoundReview(fx, 1, [finding]);
   const r1Digest = proposalDigest(fx, 1, [dispositionOf(finding)], { status: "blocked" });
   // Disclosed but waiting for the user: hard stop.
-  const pending = proposalCheck(fx, [explore, r1, r1Digest]);
+  const pending = proposalCheck(fx, [...explore, r1, r1Digest]);
   assert.equal(pending.allowed, false);
   assert.ok(codes(pending.block_reasons).includes("needs_user_decision_pending"), JSON.stringify(pending.block_reasons));
   // "Silent fix" without any disclosure: rerun the critic straight to a clean round and never
   // give the r1 blocker a disposition — the ledger keeps the history alive.
   const silent = proposalCheck(fx, [
-    explore, r1,
+    ...explore, r1,
     proposalRoundReview(fx, 2, [], { prompt_ref: proposalRoundPrompt(fx, 2, [r1]) }),
     proposalDigest(fx, 2, [], { previous_digest_refs: [] }),
   ]);
@@ -6493,7 +6629,7 @@ withFixture("DISC2 proposal blocker cannot be silently fixed by the main thread"
   // Dropping the disclosed finding from the next digest is just as blocked: the pending
   // user decision survives in the ledger.
   const dropped = proposalCheck(fx, [
-    explore, r1, r1Digest,
+    ...explore, r1, r1Digest,
     proposalRoundReview(fx, 2, [], { prompt_ref: proposalRoundPrompt(fx, 2, [r1, r1Digest]) }),
     proposalDigest(fx, 2, []),
   ]);
@@ -6506,7 +6642,7 @@ withFixture("DISC2 proposal blocker cannot be silently fixed by the main thread"
     confirmed_refs: proposalTargets(fx),
   });
   const legal = proposalCheck(fx, [
-    explore, r1, r1Digest, decisionEv,
+    ...explore, r1, r1Digest, decisionEv,
     proposalRoundReview(fx, 2, [], { prompt_ref: proposalRoundPrompt(fx, 2, [r1, r1Digest]) }),
     proposalDigest(fx, 2, [dispositionOf(finding, { disposition: "user_decided", user_decision_refs: ["EV-user-decision-1"] })]),
   ]);
@@ -6516,7 +6652,7 @@ withFixture("DISC2 proposal blocker cannot be silently fixed by the main thread"
 withFixture("DISC2 disposition routes are bounded globally and per gate", (fx) => {
   writeDiscovery(fx);
   writeProposal(fx);
-  const explore = roleEvidence(fx, "explore_complete", "critic");
+  const explore = exploreConfirmedEvidences(fx);
   const finding = proposalFinding();
   // Unknown route fails the digest schema outright.
   const schemaCodes = discSchemaCodes(fx, [proposalDigest(fx, 1, [dispositionOf(finding, { route: "just-fix-it" })], { status: "blocked" })]);
@@ -6524,13 +6660,13 @@ withFixture("DISC2 disposition routes are bounded globally and per gate", (fx) =
   // A known route that is illegal on this gate blocks: reopen_tasks belongs to review_complete.
   const r1 = proposalRoundReview(fx, 1, [finding]);
   const illegal = proposalCheck(fx, [
-    explore, r1,
+    ...explore, r1,
     proposalDigest(fx, 1, [dispositionOf(finding, { route: "reopen_tasks" })], { status: "blocked" }),
   ]);
   assert.ok(codes(illegal.block_reasons).includes("finding_route_invalid"), JSON.stringify(illegal.block_reasons));
   // return_explore is the legal escape hatch for discovery-incomplete proposal findings.
   const legalRoute = proposalCheck(fx, [
-    explore, r1,
+    ...explore, r1,
     proposalDigest(fx, 1, [dispositionOf(finding, { route: "return_explore" })], { status: "blocked" }),
   ]);
   assert.ok(!codes(legalRoute.block_reasons).includes("finding_route_invalid"), JSON.stringify(legalRoute.block_reasons));

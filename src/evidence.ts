@@ -314,6 +314,9 @@ function finding_string_list_reasons(ev: JsonMap, finding: JsonMap, field: strin
 function human_confirmation_reasons(ev: JsonMap): Reason[] {
   const problems: Reason[] = [];
   const gate = normalize_gate(String(ev.gate ?? ""));
+  if (String(ev.created_by ?? "") !== "user") {
+    problems.push(reason("human_confirmation_invalid", `${ev._path}: human_confirmation must be created_by user`));
+  }
   if (!HUMAN_CONFIRMATION_GATES.has(gate)) {
     problems.push(reason(
       "human_confirmation_invalid",
@@ -848,4 +851,9 @@ export function supersede_reasons(evidences: JsonMap[]): Reason[] {
 export function live_pass(evidences: JsonMap[], filters: { gate?: string | null; kind?: string | null; task_id?: string | null } = {}): JsonMap[] {
   const dead = superseded_ids(evidences);
   return find_pass(evidences, filters).filter((ev) => !dead.has(ev.evidence_id));
+}
+
+export function live_user_confirmations(evidences: JsonMap[], gate: string): JsonMap[] {
+  return live_pass(evidences, { gate, kind: "human_confirmation" })
+    .filter((ev) => String(ev.created_by ?? "") === "user");
 }

@@ -179,6 +179,12 @@ SuperSpec 能让流程更规范，但它不是安全锁。
 
 ## 常用命令
 
+查看当前 SuperSpec CLI 版本：
+
+```bash
+superspec --version
+```
+
 安装到当前项目：
 
 ```bash
@@ -191,6 +197,12 @@ superspec init --scope project
 superspec update --scope project
 ```
 
+这条命令会先通过 npm 更新全局 `@peterxiaoyang/superspec`，再用新版本更新当前项目里的入口文件。只想使用当前已安装包更新项目文件时，可以运行：
+
+```bash
+superspec update --scope project --local-only
+```
+
 卸载当前项目里的 SuperSpec 入口：
 
 ```bash
@@ -198,6 +210,12 @@ superspec uninstall --scope project
 ```
 
 这些命令默认不会删除已经生成的 `.superspec/` 过程记录。
+
+诊断全局安装、PATH、OpenSpec 依赖和 npm bin 指向问题：
+
+```bash
+superspec doctor
+```
 
 ## 进阶信息
 

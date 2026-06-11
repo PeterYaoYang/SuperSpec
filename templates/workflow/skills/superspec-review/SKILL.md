@@ -25,6 +25,14 @@ metadata:
 - Windows PowerShell 中执行 npm 全局 bin 时，必须显式使用 `.cmd` shim：`superspec.cmd ...`、`openspec.cmd ...`；不要运行 `superspec.ps1` 或 `openspec.ps1`。
 - macOS、Linux、Git Bash、cmd.exe 或其他不会优先拦截 `.ps1` 的 shell 中，继续使用文档中的 `superspec ...`、`openspec ...` 命令。
 
+## 上下文读取纪律 / Context Budget
+
+- guard 可以在本地读取完整 `.superspec/evidence/**/*.json` 并重算判定；主流程默认不要打开完整 evidence JSON，除非正在排查 guard block、修复 schema，或用户明确要求诊断原文。
+- 主流程默认只读取 guard decision、当前 review 必要 artifact、native subagent `output_ref` 的摘要/结论段、`required_load_refs` 指向的关键 source，以及 final verification 的摘要。
+- `source_refs` 只是可追溯来源，不等于必须读取；只有 `required_load_refs` 是主流程必须亲自读取并写入 `loaded_refs` 的内容。
+- raw log、长报告和历史 superseded evidence 默认只作为引用、hash 或摘要保留；不要把全文复制进对话上下文或新的 evidence。
+- guard-only read 不能替代主流程的 `loaded_refs`：凡进入 `required_load_refs` 的材料，主流程必须真实读取后再写 `main_adjudication`。
+
 ## 硬边界
 
 - `review_complete` 是 allow-only gate。只有 `main_adjudication.review_decision:"allow"` 才允许进入 `check-review-complete` / `archive_ready`。
@@ -58,13 +66,13 @@ Required project-scope files: `.codex/agents/code-reviewer.toml`、`.codex/promp
    ```text
    superspec guard check-review-ready --change "<change>"
    ```
-2. 从 `git diff`、OpenSpec artifacts、tasks、business invariants、test contract、red/green evidence 和 `.superspec` evidence 构建审查范围。
+2. 从 guard decision、`git diff`、OpenSpec artifacts、tasks、business invariants、test contract、RED/GREEN 摘要和 live role output 摘要构建审查范围；不要默认打开完整 `.superspec/evidence/**/*.json`。
 3. 运行 repo-local review guidance：
    - 启动 repo-local `code-reviewer` native subagent，记录审查指导证据（内部 JSON kind 为 `source_guidance`）。
    - 启动 repo-local `architect` native subagent，记录审查指导证据（内部 JSON kind 为 `source_guidance`）。
    - 启动独立 repo-local `critic` native subagent，审查 superspec-specific scope drift、隐藏假设、业务不变量是否被测试/实现扭曲、遗漏的 rollback targets 和 evidence 充分性，并记录审查指导证据（内部 JSON kind 为 `source_guidance`）。
 4. 主流程读取关键 source，准备 `main_adjudication` 输入：
-   - 从每条 `source_guidance.source_refs` 中判断哪些内容需要亲自加载。
+   - 从每条 `source_guidance.source_refs` 中判断哪些内容确实需要亲自加载，不要把所有来源自动升级为必须读取。
    - `source_refs` / `required_load_refs` 使用 `pinned_ref = {path, blob_sha}`；其中 `pinned_ref.path` 一律是 repo-root relative path。`required_load_refs` 必须按 `(path, blob_sha)` 精确包含于 `source_refs`。
    - 对所有 `required_load_refs` 做真实读取，并在 `loaded_refs` 中记录同样的 `pinned_ref`；`loaded_refs` 必须按 `(path, blob_sha)` 精确覆盖全部 `required_load_refs`，同一路径不同 blob 不算已加载。
    - 对所有 `required_claim_ids` 写出结构化 `claim_adjudications[] = {claim_id, decision, rationale}`。

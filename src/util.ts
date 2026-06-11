@@ -107,6 +107,7 @@ export const EVIDENCE_KINDS = new Set([
 // FIX-8 (audit A-5) adds the previously anchor-less human pause points:
 // apply isolation choice, apply-phase scope expansion, and verify-failure disposition.
 export const HUMAN_CONFIRMATION_GATES = new Set([
+  "explore_complete",
   "design_complete",
   "invariants_reviewed",
   "archive_ready",
@@ -244,8 +245,8 @@ export const GATE_ALIASES: Record<string, string> = {
   "propose.invariants_reviewed": "invariants_reviewed",
   "propose.test_plan_drafted": "test_contract_drafted",
   "propose.tasks_mapped": "tasks_complete",
-  "propose.apply_ready": "propose_complete",
-  apply_ready: "propose_complete",
+  "propose.apply_ready": "apply_ready",
+  apply_ready: "apply_ready",
 };
 export const GATE_ROUTE: Record<string, string> = {
   explore_complete: "explore",
@@ -256,6 +257,7 @@ export const GATE_ROUTE: Record<string, string> = {
   test_contract_honored: "propose",
   tasks_complete: "propose",
   propose_complete: "propose",
+  apply_ready: "propose",
   review_complete: "review",
   verify_complete: "review",
   archive_ready: "archive",

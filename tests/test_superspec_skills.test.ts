@@ -454,9 +454,54 @@ test("skills delegate to openspec instruction engine", () => {
   assert.ok(archive.includes("openspec archive"));
 });
 
+test("workflow skills keep evidence reads compact", () => {
+  for (const name of REQUIRED_SKILLS) {
+    const text = templateSkillText(name);
+    assert.ok(text.includes("上下文读取纪律 / Context Budget"), name);
+    assert.ok(text.includes("guard 可以在本地读取完整 `.superspec/evidence/**/*.json`"), name);
+    assert.ok(text.includes("主流程默认不要打开完整 evidence JSON"), name);
+    assert.ok(text.includes("raw log"), name);
+    assert.ok(text.includes("不要把全文复制进对话上下文或新的 evidence"), name);
+  }
+
+  for (const name of ["superspec-explore", "superspec-propose"]) {
+    const text = templateSkillText(name);
+    assert.ok(text.includes("当前轮披露循环所需的最小结构化字段必须读取"), name);
+    assert.ok(text.includes("findings[]"), name);
+    assert.ok(text.includes("finding_uid"), name);
+    assert.ok(text.includes("decision_scope_key"), name);
+    assert.ok(text.includes("逐字 `summary`"), name);
+  }
+
+  const apply = templateSkillText("superspec-apply");
+  for (const phrase of [
+    "gate:\"apply_isolation\"",
+    "human_confirmation",
+    "confirmation_text",
+    "confirmed_refs",
+    "tasks_structure_hash",
+    "不要仅凭聚合日志替代每个 task/test 所需的 RED/GREEN 证据字段",
+    "test_ids[]",
+    "每个 claimed id 都必须出现在引用的 raw log 中",
+    "若当前 task gate 需要单个 `test_id` 覆盖",
+  ]) {
+    assert.ok(apply.includes(phrase), phrase);
+  }
+
+  const review = templateSkillText("superspec-review");
+  assert.ok(review.includes("`source_refs` 只是可追溯来源，不等于必须读取"));
+  assert.ok(review.includes("只有 `required_load_refs` 是主流程必须亲自读取并写入 `loaded_refs` 的内容"));
+  assert.ok(review.includes("guard-only read 不能替代主流程的 `loaded_refs`"));
+  assert.ok(review.includes("不要默认打开完整 `.superspec/evidence/**/*.json`"));
+
+  const propose = templateSkillText("superspec-propose");
+  assert.equal(/tasks_complete[\s\S]{0,200}human[-_]confirmation/u.test(propose), false);
+});
+
 test("human pause points are present", () => {
   const combined = REQUIRED_SKILLS.map((name) => templateSkillText(name)).join("\n");
   for (const phrase of [
+    "探索结论、范围边界和进入 propose 的授权",
     "设计选项选择",
     "任务审查确认",
     "apply isolation",

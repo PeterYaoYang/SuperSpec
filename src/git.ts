@@ -3,7 +3,7 @@ import { dirname, isAbsolute, relative } from "node:path";
 import type { JsonMap, Reason, TaskInfo } from "./util.ts";
 import { GuardError, reason, renderList, runCommand, runtime } from "./util.ts";
 import { splitList, task_test_evidence } from "./tasks.ts";
-import { live_pass } from "./evidence.ts";
+import { live_user_confirmations } from "./evidence.ts";
 
 export function file_blob_sha(filePath: string): string {
   if (!existsSync(filePath) || !statSync(filePath).isFile()) throw new GuardError(`git_blob_inspection_failure: reviewed target missing: ${filePath}`);
@@ -46,7 +46,7 @@ export function dirty_worktree_reasons(repoRoot: string, changeRoot: string, evi
   if (rel && !rel.startsWith("..") && !isAbsolute(rel)) changeRel = rel;
   const unknown = dirty.filter((item) => !(changeRel && item.startsWith(`${changeRel}/`)));
   if (unknown.length === 0) return [];
-  const confirmations = live_pass(evidences, { gate: "branch_handling", kind: "human_confirmation" });
+  const confirmations = live_user_confirmations(evidences, "branch_handling");
   const confirmedScopes = confirmations.flatMap((ev) => (
     Array.isArray(ev.confirmed_paths) ? ev.confirmed_paths.map((item) => String(item)).filter(Boolean) : []
   ));

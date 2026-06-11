@@ -23,6 +23,14 @@ metadata:
 - Windows PowerShell 中执行 npm 全局 bin 时，必须显式使用 `.cmd` shim：`superspec.cmd ...`、`openspec.cmd ...`；不要运行 `superspec.ps1` 或 `openspec.ps1`。
 - macOS、Linux、Git Bash、cmd.exe 或其他不会优先拦截 `.ps1` 的 shell 中，继续使用文档中的 `superspec ...`、`openspec ...` 命令。
 
+## 上下文读取纪律 / Context Budget
+
+- guard 可以在本地读取完整 `.superspec/evidence/**/*.json` 并重算判定；主流程默认不要打开完整 evidence JSON，除非正在排查 guard block、修复 schema，或用户明确要求诊断原文。
+- 主流程默认只读取 guard decision、当前 task 必要 artifact、OpenSpec instructions apply 返回的 `contextFiles`、native subagent `output_ref` 的摘要/结论段，以及 task RED/GREEN 所需的最小测试摘要。
+- raw log、长报告和历史 superseded evidence 默认只作为引用、hash 或摘要保留；不要把全文复制进对话上下文或新的 evidence。
+- RED/GREEN 仍按 task 的 `test_refs` 记录 gate-driving evidence；同一次命令输出可以作为共享 raw log 被引用，但不要仅凭聚合日志替代每个 task/test 所需的 RED/GREEN 证据字段。
+- 使用按运行合并建档的 `test_ids[]` 清单时，每个 claimed id 都必须出现在引用的 raw log 中；若当前 task gate 需要单个 `test_id` 覆盖，仍要补齐对应 gate-driving evidence。
+
 在 propose package 完成后使用本 skill 执行实现任务。**Task context、ordering 和 progress 来自 OpenSpec native apply instructions**（`openspec instructions apply`）；SuperSpec 为每个 task 包上一层 RED/GREEN guard checks。
 
 ## 边界 / Boundaries
@@ -41,7 +49,7 @@ metadata:
 
 ## 步骤 / Steps
 
-1. 对实现隔离（apply isolation）和执行模式（execution mode）使用 AskUserQuestion，并等待明确选择。
+1. 对实现隔离（apply isolation）和执行模式（execution mode）使用 AskUserQuestion，并等待明确选择；记录 `gate:"apply_isolation"` 的 `human_confirmation` evidence，必须包含 `confirmation_text`、`confirmed_refs` 和当前 `tasks_structure_hash`。
 2. 当 dirty worktree、untracked files 或 branch state 需要确认时，使用 AskUserQuestion 处理分支状态。
 3. 验证 apply readiness：
    ```text
@@ -68,7 +76,7 @@ metadata:
    ```
 7. 在 runtime/business implementation edits 前产出 RED evidence，除非有允许的 `no_tdd_reason` 或处于现状锁定测试模式（`characterization mode`）。这里的 `characterization` 指“先把当前真实行为测出来并锁住，重构后保持一致”。RED/GREEN evidence 必须引用 task 的 `test_refs`，并在 task 声明 `invariant_refs` 时同步记录 `invariant_refs`。若 task 来自 reopen，本轮 successor GREEN / alternative verification / manual verification 必须携带同一 `reopen_id`。
 8. 按 native dynamic instruction 和 `contextFiles` 指引，实现最小 task scope。
-9. 产出 GREEN evidence，保留 `test_id`、`invariant_refs`、命令、输出摘要和 raw log ref。
+9. 产出 GREEN evidence，保留 `test_id`、`invariant_refs`、命令、输出摘要和 raw log ref；raw log ref 指向原始输出文件，evidence 中只写必要摘要，不复制完整日志。
 10. 勾选 task 前执行任务完成检查（`check-task-complete`）：
    ```text
    superspec guard check-task-complete --change "<change>" --task-id "<task-id>"

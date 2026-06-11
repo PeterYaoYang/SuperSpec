@@ -82,7 +82,7 @@ superspec/
   - `"files": ["README.md","bin","dist","templates","adapters","schemas"]`，`"type":"module"`，`"engines": { "node": ">=20.19.0" }`。
   - workflow skill 的唯一包内来源是 `templates/workflow/skills/`，不维护根目录 `skills/` 副本，也不依赖 `.codex-plugin/plugin.json`；每个 SuperSpec skill 在 frontmatter `metadata.author/source` 中声明短来源 `SuperSpec`。
   - `"build": "node build.js"`，`prepack` / `prepublishOnly` 自动 build；TS 源码和 `tests/` 用于开发/CI，不随 npm 包发布。运行用户需要 Node ≥ 20.19.0；仓库开发/CI 仍使用 Node 24，因为测试直接执行 `.ts` 文件。
-- 聚合 CLI：`superspec init/update/uninstall/guard`；`superspec-init` / `superspec-guard` 保留为兼容入口。
+- 聚合 CLI：`superspec init/update/uninstall/guard/doctor`，并支持 `superspec --version` / `superspec -v` / `superspec version`；`superspec-init` / `superspec-guard` 保留为兼容入口。
 
 ## 4. CLI 接线方案
 
@@ -91,6 +91,7 @@ superspec/
 ```text
 superspec guard check-init --change "<change>"
 superspec init --scope project
+superspec doctor
 ```
 
 依赖 npm `bin` 生成跨平台入口：Unix 下是 shim，Windows 下是 `.cmd`/PowerShell shim。入口是 JS launcher，先校验 Node 版本，再加载 `dist` 中的编译后 JS runtime。skill 模板不得使用 `${VAR:-default}`、`test -f`、`mkdir`/`mv` 等 shell-specific 片段来调用 SuperSpec 自身。
@@ -140,6 +141,7 @@ Windows PowerShell 可能优先解析 npm 生成的 `.ps1` shim 并受执行策�
 5. 幂等：重复 init = 补齐缺失 + 不动已存在。
 
 ### 6.3 `superspec update`
+0. 默认先执行 `npm install -g @peterxiaoyang/superspec@latest` 自更新全局 CLI；若 npm 报 `superspec` 全局 bin 冲突，自动用 `--force` 重试一次；安装成功后重新执行新版 `superspec update --skip-self-update ...`。`--local-only` 跳过 npm 自更新，只用当前已安装包更新 manifest-managed surfaces。
 1. 读 manifest + Preflight。
 2. 按 `sha256` 三态处理 managed 文件：
    - 未改 → 覆盖为新版；

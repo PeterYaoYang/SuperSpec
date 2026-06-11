@@ -66,6 +66,7 @@ import {
   live_task_reopens,
   live_task_reopen_resolutions,
   live_pass,
+  live_user_confirmations,
   pass_task_reopens,
   supersede_reasons,
   unresolved_live_task_reopens,
@@ -433,7 +434,7 @@ function archive_ready_actions(change: string, reasons: Reason[], review: Decisi
 function default_gate_next_actions(gate: string): string[] {
   switch (gate) {
     case "explore_complete":
-      return ["write .superspec/artifacts/discovery.md and record native_subagent critic evidence"];
+      return ["write .superspec/artifacts/discovery.md, record native_subagent critic evidence, and record explore_complete human confirmation"];
     case "proposal_reviewed":
       return ["run the proposal critic review (round-tagged, findings[]) and record a main_review_digest disclosing every finding"];
     case "design_complete":
@@ -609,6 +610,9 @@ export function check_superspec_gate(change: string, status: JsonMap, changeRoot
       if (!exploreReviews.some((ev) => ev.agent_role === role)) reasons.push(reason("missing_native_subagent_evidence", `explore_complete requires native_subagent ${role} report`));
     }
     reasons.push(...stale_artifact_review_reasons(exploreReviews, changeRoot, ".superspec/artifacts/discovery.md", "stale_explore_review", "explore_complete"));
+    if (live_user_confirmations(evidences, "explore_complete").length === 0) {
+      reasons.push(reason("missing_human_confirmation", "explore_complete requires human confirmation before entering propose"));
+    }
     // DISC Phase 1: material findings raised by explore reviews must be disclosed to the user
     // (main_review_digest + user_review_decision) before the gate can pass.
     reasons.push(...review_disclosure_reasons("explore_complete", changeRoot, evidences));
@@ -635,7 +639,7 @@ export function check_superspec_gate(change: string, status: JsonMap, changeRoot
     for (const role of ["architect", "critic", "test-engineer"]) {
       if (!designReviews.some((ev) => ev.agent_role === role)) reasons.push(reason(`missing_${role}_review`, `design_complete requires native_subagent ${role} report`));
     }
-    if (live_pass(evidences, { kind: "human_confirmation", gate: "design_complete" }).length === 0) reasons.push(reason("missing_human_confirmation", "design_complete requires human confirmation"));
+    if (live_user_confirmations(evidences, "design_complete").length === 0) reasons.push(reason("missing_human_confirmation", "design_complete requires human confirmation"));
     reasons.push(...stale_artifact_review_reasons(designReviews, changeRoot, "design.md", "stale_design_review", "design_complete"));
     // DISC Phase 2: design reviews carrying round-tagged findings enter the disclosure loop
     // (legacy design evidence stays grandfathered, P2-3).
@@ -657,7 +661,7 @@ export function check_superspec_gate(change: string, status: JsonMap, changeRoot
     const humanRequired = human_confirmation_business_invariant_ids(changeRoot);
     if (humanRequired.size > 0) {
       const confirmed = new Set<string>();
-      for (const ev of live_pass(evidences, { gate: "invariants_reviewed", kind: "human_confirmation" })) {
+      for (const ev of live_user_confirmations(evidences, "invariants_reviewed")) {
         for (const id of evidence_invariant_refs(ev)) confirmed.add(id);
       }
       const missing = [...humanRequired].filter((id) => !confirmed.has(id)).sort();
@@ -748,6 +752,8 @@ export function check_superspec_gate(change: string, status: JsonMap, changeRoot
         reasons.push(...sub.block_reasons);
       }
     }
+  } else if (gate === "apply_ready") {
+    return check_apply_ready(change, status, changeRoot, evidences);
   } else {
     return block(change, gate, [reason("unknown_gate", `unknown superspec gate: ${gate}`)]);
   }
@@ -1153,6 +1159,7 @@ export function check_task_reopen(change: string, status: JsonMap, changeRoot: s
     reasons.push(reason("propose_not_complete", "task_reopen requires propose_complete"));
     reasons.push(...propose.block_reasons);
   }
+  reasons.push(...apply_scope_confirmation_reasons(changeRoot, evidences));
   const tasks = parse_tasks(changeRoot);
   const task = tasks[taskId];
   if (!task) return block(change, gate, [...reasons, reason("unknown_task", `task ${taskId} not found in tasks.md`)], { task_id: taskId });
@@ -1160,7 +1167,17 @@ export function check_task_reopen(change: string, status: JsonMap, changeRoot: s
   reasons.push(...request_changes_round_reasons(evidences));
   const reopenCheck = active_task_reopen_reasons(changeRoot, evidences, task, taskId, "pre_revert");
   reasons.push(...reopenCheck.reasons);
-  if (reasons.length > 0) return block(change, gate, reasons, { task_id: taskId, next_actions: [`keep ${taskId} checked, fix task_reopen evidence / supersedes, then rerun check-task-reopen`] });
+  if (reasons.length > 0) {
+    const reasonSet = reason_codes(reasons);
+    return block(change, gate, reasons, {
+      task_id: taskId,
+      next_actions: action_list(
+        reasonSet.has("apply_isolation_unconfirmed") ? "AskUserQuestion for apply isolation/execution mode and record gate=\"apply_isolation\" human_confirmation" : null,
+        reasonSet.has("scope_expansion_unconfirmed") ? "stop: redesign/split the change or record gate=\"scope_expansion\" human_confirmation re-approving tasks.md structure" : null,
+        `keep ${taskId} checked, fix task_reopen evidence / supersedes, then rerun check-task-reopen`,
+      ),
+    });
+  }
   return allow(change, gate, { task_id: taskId });
 }
 
@@ -1170,7 +1187,7 @@ export function check_task_reopen(change: string, status: JsonMap, changeRoot: s
 // apply-phase scope expansion (SPEC §14.7) and demands explicit user re-approval — redesign,
 // split into a new change, or record a scope_expansion confirmation re-pinning the structure.
 function apply_scope_confirmation_reasons(changeRoot: string, evidences: JsonMap[]): Reason[] {
-  const isolation = live_pass(evidences, { gate: "apply_isolation", kind: "human_confirmation" });
+  const isolation = live_user_confirmations(evidences, "apply_isolation");
   const currentHash = tasks_structure_hash(changeRoot);
   if (isolation.length === 0) {
     const hashHint = currentHash ? ` with tasks_structure_hash=${currentHash}` : "";
@@ -1180,12 +1197,34 @@ function apply_scope_confirmation_reasons(changeRoot: string, evidences: JsonMap
     )];
   }
   if (currentHash === null) return [];
-  const approvals = [...isolation, ...live_pass(evidences, { gate: "scope_expansion", kind: "human_confirmation" })];
+  const approvals = [...isolation, ...live_user_confirmations(evidences, "scope_expansion")];
   if (approvals.some((ev) => String(ev.tasks_structure_hash ?? "") === currentHash)) return [];
   return [reason(
     "scope_expansion_unconfirmed",
     `tasks.md structure changed after the last user-approved apply scope; ask the user to redesign/split the change or re-approve by recording gate="scope_expansion" human_confirmation with tasks_structure_hash=${currentHash}`,
   )];
+}
+
+export function check_apply_ready(change: string, status: JsonMap, changeRoot: string, evidences: JsonMap[]): Decision {
+  const gate = "apply_ready";
+  const reasons: Reason[] = [];
+  const propose = check_superspec_gate(change, status, changeRoot, evidences, "propose_complete");
+  if (!propose.allowed) {
+    reasons.push(reason("propose_not_complete", "apply_ready requires propose_complete"));
+    reasons.push(...propose.block_reasons);
+  }
+  reasons.push(...apply_scope_confirmation_reasons(changeRoot, evidences));
+  if (reasons.length > 0) {
+    const reasonSet = reason_codes(reasons);
+    return block(change, gate, reasons, {
+      next_actions: action_list(
+        !propose.allowed ? "pass propose_complete before apply" : null,
+        reasonSet.has("apply_isolation_unconfirmed") ? "AskUserQuestion for apply isolation/execution mode and record gate=\"apply_isolation\" human_confirmation" : null,
+        reasonSet.has("scope_expansion_unconfirmed") ? "stop: redesign/split the change or record gate=\"scope_expansion\" human_confirmation re-approving tasks.md structure" : null,
+      ),
+    });
+  }
+  return allow(change, gate, { openspec_summary: artifact_status_map(status) });
 }
 
 export function check_task_edit(change: string, status: JsonMap, changeRoot: string, evidences: JsonMap[], taskId: string): Decision {
@@ -1506,7 +1545,7 @@ export function check_review_complete(change: string, status: JsonMap, changeRoo
     && ev.status === "fail");
   if (failedVerifications.length > 0) {
     const dispositions = new Set(
-      live_pass(evidences, { gate: "verify_failure_handling", kind: "human_confirmation" })
+      live_user_confirmations(evidences, "verify_failure_handling")
         .flatMap((ev) => (Array.isArray(ev.confirmed_refs) ? ev.confirmed_refs.map((item) => String(item)) : [])),
     );
     const unhandled = failedVerifications
@@ -1589,7 +1628,7 @@ export function check_archive_ready(change: string, status: JsonMap, changeRoot:
   if (!ok && !reviewCodes.has("validate_failed")) {
     reasons.push(reason("validate_failed", "openspec validate did not pass"));
   }
-  if (live_pass(evidences, { gate: "archive_ready", kind: "human_confirmation" }).length === 0) {
+  if (live_user_confirmations(evidences, "archive_ready").length === 0) {
     reasons.push(reason("missing_final_confirmation", "archive_ready requires human confirmation evidence"));
   }
   if (reasons.length > 0) return block(change, gate, reasons, { next_actions: archive_ready_actions(change, reasons, review) });

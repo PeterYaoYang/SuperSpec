@@ -23,6 +23,14 @@ metadata:
 - Windows PowerShell 中执行 npm 全局 bin 时，必须显式使用 `.cmd` shim：`superspec.cmd ...`、`openspec.cmd ...`；不要运行 `superspec.ps1` 或 `openspec.ps1`。
 - macOS、Linux、Git Bash、cmd.exe 或其他不会优先拦截 `.ps1` 的 shell 中，继续使用文档中的 `superspec ...`、`openspec ...` 命令。
 
+## 上下文读取纪律 / Context Budget
+
+- guard 可以在本地读取完整 `.superspec/evidence/**/*.json` 并重算判定；主流程默认不要打开完整 evidence JSON，除非正在排查 guard block、修复 schema，或用户明确要求诊断原文。
+- 主流程默认只读取 guard decision、当前 gate 必要 artifact、OpenSpec instructions 返回的必要 context、native subagent `output_ref` 的摘要/结论段，以及用户确认所需的最小原文。
+- 当前轮披露循环所需的最小结构化字段必须读取，不能只看 `output_ref` 摘要；包括 role evidence 的 `findings[]`、`finding_uid`、`decision_scope_key`、逐字 `summary`、`target_refs`，以及本轮 digest 需要引用的 evidence id。
+- raw log、长报告和历史 superseded evidence 默认只作为引用、hash 或摘要保留；不要把全文复制进对话上下文或新的 evidence。
+- native subagent 的 `output_ref` 应指向简洁审查报告；原始命令输出或长日志放在 raw/report 文件中被引用，不作为默认阅读材料。
+
 在 explore 完成后使用本 skill，用于把探索记录整理成可执行的正式方案包。OpenSpec 负责生成标准方案文件，具体写法必须通过它自带的指令（`openspec instructions`）获取；SuperSpec 负责在外层增加审查门禁（gates）、业务约束（`business-invariants.md`）、测试契约（`test-contract.md`）和任务元数据。
 
 ## 边界 / Boundaries
@@ -43,7 +51,7 @@ metadata:
 
 ## 步骤 / Steps
 
-1. 运行前置门禁检查（`check-enter`），确认探索阶段已经完成：
+1. 运行前置门禁检查（`check-enter`），确认探索阶段已经完成；该 gate 必须包含用户对探索结论和进入 propose 的明确确认，若 guard block 则停止并回到 explore 补确认：
    ```text
    superspec guard check-enter --change "<change>" --gate explore_complete
    ```
@@ -79,7 +87,7 @@ metadata:
    ```text
    superspec guard check-enter --change "<change>" --gate propose.test_plan_drafted
    ```
-8. 通过 `openspec instructions tasks` 编写任务清单 `tasks.md` 时：为每个 task 补充 `requirement_refs`、`invariant_refs`（必须是 business-invariants `INV-*` ids 的子集）、`test_refs`（必须是 test-contract TEST ids 的子集）、`read_scope`、`write_scope`、dependencies、TDD metadata，以及需要时的 parallel group。若 reviewer 对 task 映射提出 round-tagged findings，走 `tasks_complete-r<N>` 确认循环（pinned target：tasks + test-contract + invariants + design + specs glob）；验收标准问题 route 用 `return_test_contract_drafted`，映射问题用 `stay_same_gate_fix`。对于任务审查确认，使用 AskUserQuestion 并等待明确选择；记录 human-confirmation evidence，然后验证：
+8. 通过 `openspec instructions tasks` 编写任务清单 `tasks.md` 时：为每个 task 补充 `requirement_refs`、`invariant_refs`（必须是 business-invariants `INV-*` ids 的子集）、`test_refs`（必须是 test-contract TEST ids 的子集）、`read_scope`、`write_scope`、dependencies、TDD metadata，以及需要时的 parallel group。若 reviewer 对 task 映射提出 round-tagged findings，走 `tasks_complete-r<N>` 确认循环（pinned target：tasks + test-contract + invariants + design + specs glob）；验收标准问题 route 用 `return_test_contract_drafted`，映射问题用 `stay_same_gate_fix`。对于任务审查确认，使用 AskUserQuestion 并等待明确选择；按披露循环记录用户裁决和审查问题处理结果，然后验证：
    ```text
    superspec guard check-enter --change "<change>" --gate propose.tasks_mapped
    ```

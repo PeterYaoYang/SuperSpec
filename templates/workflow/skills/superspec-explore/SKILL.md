@@ -23,6 +23,14 @@ metadata:
 - Windows PowerShell 中执行 npm 全局 bin 时，必须显式使用 `.cmd` shim：`superspec.cmd ...`、`openspec.cmd ...`；不要运行 `superspec.ps1` 或 `openspec.ps1`。
 - macOS、Linux、Git Bash、cmd.exe 或其他不会优先拦截 `.ps1` 的 shell 中，继续使用文档中的 `superspec ...`、`openspec ...` 命令。
 
+## 上下文读取纪律 / Context Budget
+
+- guard 可以在本地读取完整 `.superspec/evidence/**/*.json` 并重算判定；主流程默认不要打开完整 evidence JSON，除非正在排查 guard block、修复 schema，或用户明确要求诊断原文。
+- 主流程默认只读取 guard decision、当前 gate 必要 artifact、OpenSpec instructions 返回的必要 context、native subagent `output_ref` 的摘要/结论段，以及用户确认所需的最小原文。
+- 当前轮披露循环所需的最小结构化字段必须读取，不能只看 `output_ref` 摘要；包括 role evidence 的 `findings[]`、`finding_uid`、`decision_scope_key`、逐字 `summary`、`target_refs`，以及本轮 digest 需要引用的 evidence id。
+- raw log、长报告和历史 superseded evidence 默认只作为引用、hash 或摘要保留；不要把全文复制进对话上下文或新的 evidence。
+- native subagent 的 `output_ref` 应指向简洁审查报告；原始命令输出或长日志放在 raw/report 文件中被引用，不作为默认阅读材料。
+
 在 init 之后、编写 OpenSpec proposal package 之前使用本 skill。
 
 ## 边界 / Boundaries
@@ -74,7 +82,8 @@ metadata:
    ```
 7. 在 `.superspec/evidence/discovery/` 记录 critic evidence，包含 `execution_mode:"native_subagent"`、`agent_role`、`agent_id`、`output_ref`、`source_anchors` 和 `target_refs`。
 8. 按确认循环处理 findings：写本轮审查问题记录；存在关键问题时**停下来向用户说明并等待用户确认**，再按用户确认更新探索记录 / 重跑 critic / 写新一轮记录，直到最新轮 clean 且问题清单里没有未处理完的问题。
-9. 运行进入阶段前检查（`check-enter`），验证 explore completion：
+9. 对探索结论、范围边界和进入 propose 的授权使用 AskUserQuestion，并等待明确选择；记录探索阶段人工确认 evidence（JSON 中为 `gate:"explore_complete"`、`kind:"human_confirmation"`、`created_by:"user"`），`confirmed_refs` 固定记录用户确认过的探索记录。
+10. 运行进入阶段前检查（`check-enter`），验证 explore completion：
    ```text
    superspec guard check-enter --change "<change>" --gate explore_complete
    ```

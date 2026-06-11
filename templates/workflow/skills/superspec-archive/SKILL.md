@@ -23,6 +23,12 @@ metadata:
 - Windows PowerShell 中执行 npm 全局 bin 时，必须显式使用 `.cmd` shim：`superspec.cmd ...`、`openspec.cmd ...`；不要运行 `superspec.ps1` 或 `openspec.ps1`。
 - macOS、Linux、Git Bash、cmd.exe 或其他不会优先拦截 `.ps1` 的 shell 中，继续使用文档中的 `superspec ...`、`openspec ...` 命令。
 
+## 上下文读取纪律 / Context Budget
+
+- guard 可以在本地读取完整 `.superspec/evidence/**/*.json` 并重算 archive 判定；主流程默认不要打开完整 evidence JSON，除非正在排查 guard block、修复 preservation manifest，或用户明确要求诊断原文。
+- 主流程默认只读取 guard decision、archive preservation 摘要、OpenSpec archive 输出摘要，以及最终验证 archive 结果所需的最小 manifest 信息。
+- raw log、长报告和历史 superseded evidence 默认只作为引用、hash 或摘要保留；不要把全文复制进对话上下文或新的 evidence。
+
 仅在 `review_complete` passes（其中已经包含 final verification）后使用本 skill。
 
 ## 边界 / Boundaries
