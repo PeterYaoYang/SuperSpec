@@ -68,6 +68,7 @@ export type Decision = {
   workflow_terms_zh?: WorkflowTermHint[];
 };
 export type DecisionOutputFormat = "json" | "agent" | "user";
+export type PacketOutputFormat = "agent" | "prompt";
 export type AgentWorkflowAction =
   | "continue"
   | "fix_artifacts"
@@ -185,12 +186,10 @@ export const FORBIDDEN_FIELDS = new Set([
   "artifact_status",
 ]);
 export const OPENSPEC_ARTIFACTS = new Set(["proposal", "specs", "design", "tasks"]);
-export const REQUIRED_OPENSPEC_CODEX_SKILLS = [
-  "openspec-explore",
-  "openspec-propose",
-  "openspec-apply-change",
-  "openspec-archive-change",
-] as const;
+// Compatibility export for callers that imported the old repo-local OpenSpec bridge list.
+// Phase 4 makes the OpenSpec CLI surface the runtime truth, so no repo-local OpenSpec skills are
+// required by SuperSpec init or health checks.
+export const REQUIRED_OPENSPEC_CODEX_SKILLS = [] as const;
 // D4 (audit G-2): SuperSpec's own workflow skills are part of the init health surface — a deleted
 // or renamed superspec-* skill must be visible at check-init, not discovered mid-workflow.
 export const REQUIRED_SUPERSPEC_WORKFLOW_SKILLS = [
@@ -208,6 +207,7 @@ export const REQUIRED_SUPERSPEC_AGENT_ROLES = [
   "verifier",
 ] as const;
 export const REQUIRED_OPENSPEC_CLI_SURFACES = [
+  ["list", "--help"],
   ["instructions", "--help"],
   ["archive", "--help"],
   ["validate", "--help"],
@@ -280,6 +280,12 @@ export const runtime: JsonMap = {};
 export function parseDecisionOutputFormat(raw: string): DecisionOutputFormat {
   if (raw === "json" || raw === "agent" || raw === "user") return raw;
   throw new GuardError("--format 只允许 json、agent 或 user");
+}
+
+export function parsePacketOutputFormat(raw: string, opts: { allowPrompt?: boolean } = {}): PacketOutputFormat {
+  if (raw === "agent") return raw;
+  if (opts.allowPrompt && raw === "prompt") return raw;
+  throw new GuardError(opts.allowPrompt ? "--format 只允许 agent 或 prompt" : "--format 只允许 agent");
 }
 
 export function reason(code: string, message: string, refs: string[] | null = null): Reason {
@@ -660,6 +666,19 @@ export function printDecision(decision: JsonMap, opts: { command?: string; forma
     return;
   }
   process.stdout.write(`${JSON.stringify(sanitizeDecisionForOutput(decorated), null, 2)}\n`);
+}
+
+export function printPacket(payload: JsonMap | string, opts: { format: PacketOutputFormat }): void {
+  if (opts.format === "prompt") {
+    process.stdout.write(String(payload));
+    if (!String(payload).endsWith("\n")) process.stdout.write("\n");
+    return;
+  }
+  process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+}
+
+export function printPacketError(code: string, message: string): void {
+  process.stdout.write(`${JSON.stringify({ status: "error", error_code: code, message }, null, 2)}\n`);
 }
 
 export function runCommand(

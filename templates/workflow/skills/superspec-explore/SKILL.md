@@ -10,84 +10,70 @@ metadata:
 
 ## 语言规则 / Language
 
-- 默认使用简体中文撰写所有人类可读产物、分析、报告、说明和 OpenSpec 文档正文。
-- 保留命令、路径、JSON 字段、gate 名、task/test id、代码标识符和外部 API 名称的原文。
-- 当 OpenSpec 模板要求固定标题或字段时，保留模板结构，只将正文内容写成中文。
-- 对话窗口里的解释、问题说明、总结、提问和下一步说明必须使用中文；除命令、路径、字段名、代码标识符外，不要夹带英文说明词。
-- 对话窗口、AskUserQuestion 文案、进度更新和最终总结不得裸露内部证据种类、字段名或 reason code；用户确认记录、审查问题记录、审查轮次编号、问题唯一标识等都只用中文业务说法。原始协议名只允许写在证据 JSON、代码、测试、精确命令输出或用户明确要求的诊断片段中。
-- 本 skill 文档中的内部协议名只用于落盘证据或运行 guard；写给用户时必须先翻译成中文业务动作，例如“记录用户确认”“记录审查问题”“完成最终审查判断”。
+- 默认使用简体中文写人类可读内容；命令、路径、字段名、gate 名、task/test id、代码标识符保留原文。
 - 用户可见文案不得使用“裁决”描述用户动作；统一说“确认”“范围取舍”“处理方式选择”或“用户确认记录”。
-- 普通 workflow 命令使用 `--format agent` 读取 guard/init 输出；`--format json` 只用于诊断 evidence/schema/guard 内部，不得作为默认模型上下文或直接转述给用户。
-- 向用户转述 guard / review 输出时，不要直接贴英文 `message`、`next_allowed_actions` 或英文模板标题；应改写为中文，并仅在需要定位内部协议时保留英文 code/command 于反引号中。
+- 不把内部证据种类、reason code、JSON 字段大全直接转述给用户；需要诊断时才引用原文。
+- 普通 workflow 命令使用 `--format agent`；`--format json` 只用于诊断，不作为默认上下文。
 
 ## 命令执行 / Shell
 
-- Windows PowerShell 中执行 npm 全局 bin 时，必须显式使用 `.cmd` shim：`superspec.cmd ...`、`openspec.cmd ...`；不要运行 `superspec.ps1` 或 `openspec.ps1`。
-- macOS、Linux、Git Bash、cmd.exe 或其他不会优先拦截 `.ps1` 的 shell 中，继续使用文档中的 `superspec ...`、`openspec ...` 命令。
+- Windows PowerShell 中使用 `.cmd` shim：`superspec.cmd ...`、`openspec.cmd ...`；不要运行 `superspec.ps1` 或 `openspec.ps1`。
+- 其他 shell 使用文档中的 `superspec ...`、`openspec ...` 命令。
 
-## 上下文读取纪律 / Context Budget
+## 阶段职责
 
-- guard 可以在本地读取完整 `.superspec/evidence/**/*.json` 并重算判定；主流程默认不要打开完整 evidence JSON，除非正在排查 guard block、修复 schema，或用户明确要求诊断原文。
-- 主流程默认只读取 guard decision、当前 gate 必要 artifact、OpenSpec instructions 返回的必要 context、native subagent `output_ref` 的摘要/结论段，以及用户确认所需的最小原文。
-- 当前轮披露循环所需的最小结构化字段必须读取，不能只看 `output_ref` 摘要；包括 role evidence 的 `findings[]`、`finding_uid`、`decision_scope_key`、逐字 `summary`、`target_refs`，以及本轮 digest 需要引用的 evidence id。
-- raw log、长报告和历史 superseded evidence 默认只作为引用、hash 或摘要保留；不要把全文复制进对话上下文或新的 evidence。
-- native subagent 的 `output_ref` 应指向简洁审查报告；原始命令输出或长日志放在 raw/report 文件中被引用，不作为默认阅读材料。
+Explore 只做需求澄清、代码事实调查、范围边界和风险记录。产物是 `openspec/changes/<change>/.superspec/artifacts/discovery.md`；不写 `proposal.md`、`specs/**`、`design.md`、`tasks.md`，也不改实现代码。
 
-在 init 之后、编写 OpenSpec proposal package 之前使用本 skill。
+## 第一条必跑命令
 
-## 边界 / Boundaries
+```text
+superspec init --scope project --format agent
+```
 
-- 先桥接 repo-local OpenSpec explore skill：读取 `.codex/skills/openspec-explore/SKILL.md`，并按它的探索方式工作：像需求探索搭档一样帮助用户澄清目标、调查代码、比较方案和暴露风险，不急着下结论。
-- 相比 OpenSpec 的原始探索模式，SuperSpec 增加了更严格的边界：**只思考和调查，不实现**。主流程可以读代码、搜索代码，并把发现写成探索记录（`discovery.md`）作为 evidence；但不能修改应用代码，也不能在本阶段编写 OpenSpec planning artifacts。如果调查过程中发现需要沉淀 proposal/specs/design/tasks，请先记录到探索记录（`discovery.md`），再交给 `superspec-propose`，由 `openspec instructions` 生成 OpenSpec artifacts。
-- Explore 只产出需求和上下文证据；不完成 OpenSpec proposal、specs、design 或 tasks。
-- 需求 critique evidence 必须来自 repo-local `critic` native subagent。
-- v1 evidence 是 audit-only/self-reported；除非有 OpenSpec facts 支撑，不要把它描述成强制运行时事实。
+随后创建或打开 OpenSpec change，并读取当前上下文：
 
-## 范围收敛透明度 / Scope Transparency
+```text
+openspec list --json
+openspec status --change "<change>" --json
+superspec guard check-init --change "<change>" --format agent
+superspec guard workflow-packet --change "<change>" --gate explore_complete --format agent
+```
 
-- Agent 可以在 explore/propose 前基于证据收敛范围，但不得静默收窄用户目标。
-- 当用户目标、现有实现或合理利益相关方预期自然覆盖多个层级、模块、入口、流程、角色或行为，而探索记录、proposal 或 design 只准备覆盖其中一部分时，必须显式记录纳入范围、排除范围、排除理由、已知或可合理推断的影响，以及仍未知但会影响范围判断的风险。
-- 不能把“本轮先做最小改动”“默认不处理其他模块”“按当前实现猜测无影响”作为隐式排除理由；这些都必须写成可审查的范围决策。
-- `critic` 必须拦住未说明的关键范围收窄：如果范围收敛会改变用户合理预期、验收标准、兼容承诺、测试边界或后续实现风险，而 artifact 没有说明纳入/排除/理由/影响，则不能通过 explore/propose handoff。
+遇到任何 guard `block` 就停止，按 packet 的 `next_action` 处理；不要绕过 guard。
 
-## 审查问题确认循环 / Review Disclosure Loop（DISC Phase 1）
+## OpenSpec 边界
 
-多角色审查发现的问题**不允许主流程自行处理掉**。关键问题包括：范围（`scope`）、非目标（`non_goal`）、验收标准（`acceptance`）、业务语义（`business_semantics`）、设计边界（`design_boundary`）。这些问题必须按原文展示给用户，拿到用户确认后才能继续。
+- 直接使用 OpenSpec CLI surface，不读取 repo-local `openspec-*` skill 文本。
+- 用 `openspec list --json` 和 `openspec status --change "<change>" --json` 确认 change 结构、artifactPaths 和当前状态。
+- OpenSpec 负责 change 结构和后续 artifact 语义；本阶段只补 SuperSpec discovery 证据。
+- 如果发现需要正式方案、规格、设计或任务，先写入 discovery，再交给 `superspec-propose`。
 
-- critic review evidence 必须携带 `review_round_id`（形如 `explore_complete-r<N>`，从 r1 连续编号）和结构化 `findings[]`：每条 finding 含 `finding_id`、`finding_uid`（`<gate>:<evidence_id>:<finding_id>`）、`finding_type`（`blocker|scope_risk|open_question|agent_assumption|non_blocking_finding`）、`category`、`material_categories[]`、关键问题的 `decision_scope_key`，以及 reviewer 原话 `summary`。分类字段由 reviewer 产生，主流程不得改写（P0-2）。
-- 每轮审查后主流程写 `kind:"main_review_digest"` evidence（`created_by:"main-thread"`），逐条覆盖该轮所有 findings：身份字段与 `summary` **逐字拷贝**原始 finding，给出 `disposition`（`fixed|false_positive|accepted_deviation|user_decided|needs_user_decision`）、`rationale`、`route`/`route_reason` 和每种处理结果的证据；`target_refs` 固定记录当前探索记录内容；`source_review_evidence_refs` 引用本轮全部 role review；round>1 时 `previous_digest_refs` 串接上一轮记录。
-- **关键 finding 一律走用户确认点**：内部先写审查问题记录 evidence（JSON kind 为 `main_review_digest`，`status:"blocked"` + `needs_user_decision`），然后把 finding 原文 + A/B/C/D 选项 +（每个选项对范围、非目标、验收标准、测试边界的影响）呈现给用户。用户确认记录 evidence 的 JSON kind 为 `user_review_decision`（`created_by:"user"`，`finding_uids` 精确到 `finding_uid`，`decision_scope_key`、`material_categories[]`、`confirmed_refs` 固定记录用户看到的 blob）。D 选项必须保留 `user_text` 原文并填 `structured_decision`（scope/non_goals/acceptance_impact/test_impact + requires_artifact_update/requires_rereview 布尔值）。
-- 用户确认导致探索记录修改后：更新 artifact → supersede 过期的旧轮 review → 重跑 critic（round k>1 的 prompt **必须**内嵌工具生成的问题清单，由 `render_finding_ledger` 生成，guard 逐字校验）→ 写新一轮 `main_review_digest`（最终处理结果引用 `user_decision_refs`，artifact 修改时附 `artifact_update_refs`）。
-- 关键 finding 的任何最终处理结果（含 `fixed`/`false_positive`）必须引用 `user_decision_refs[]`、有效 `standing_authorization_refs[]` 或 `baseline_decision_refs[]`；standing authorization 只能由用户创建、按 category 授权、永不覆盖 blocker。
-- finding history 是 append-only：旧 blocker 不会因 clean 重审而消失，必须拿到最终处理结果；同一 gate 超过 3 轮仍未处理完成时停止迭代，把未决 findings 整体升级给用户（`escalate_round_budget`）。
-- 历史 change 的旧式 critic evidence（无 `review_round_id`/`findings[]`）维持原判定口径，不被追溯 block。
+## Native Subagent 边界
 
-## 步骤 / Steps
+需求 critique 必须来自 repo-local `critic` native subagent。生成 prompt 时使用 packet，而不是把 disclosure 协议常驻在 skill 正文：
 
-1. 确保项目级 SuperSpec surfaces 已存在：
-   ```text
-   superspec init --scope project --format agent
-   ```
-2. 创建或打开 native OpenSpec change root，然后确认 change-scoped guard readiness 并拉取 native context：
-   ```text
-   openspec new change "<change>"   # 仅当该 change 不存在时执行
-   superspec guard check-init --change "<change>" --format agent
-   openspec list --json
-   openspec status --change "<change>" --json   # changeRoot / artifactPaths / actionContext for grounding
-   ```
-3. 按 OpenSpec 的探索方式工作，同时遵守 SuperSpec 输出边界：可以自由调查和澄清，但本阶段只写 SuperSpec sidecar evidence。
-4. 主流程直接调查当前实现：定位相关文件、隐藏契约、约束、风险和 source anchors。
-5. 启动 repo-local `critic` native subagent（round r1），审查歧义、遗漏场景、矛盾、scope risk 和范围收敛透明度；如存在未显式说明的关键范围收窄，critic 必须 block。critic 输出按上方确认循环要求落成带 `review_round_id` + `findings[]` 的 evidence。
-6. 写入合并后的探索记录文件：
-   ```text
-   openspec/changes/<change>/.superspec/artifacts/discovery.md
-   ```
-7. 在 `.superspec/evidence/discovery/` 记录 critic evidence，包含 `execution_mode:"native_subagent"`、`agent_role`、`agent_id`、`output_ref`、`source_anchors` 和 `target_refs`。
-8. 按确认循环处理 findings：写本轮审查问题记录；存在关键问题时**停下来向用户说明并等待用户确认**，再按用户确认更新探索记录 / 重跑 critic / 写新一轮记录，直到最新轮 clean 且问题清单里没有未处理完的问题。
-9. 对探索结论、范围边界和进入 propose 的授权使用 AskUserQuestion，并等待明确选择；记录探索阶段人工确认 evidence（JSON 中为 `gate:"explore_complete"`、`kind:"human_confirmation"`、`created_by:"user"`），`confirmed_refs` 固定记录用户确认过的探索记录。
-10. 运行进入阶段前检查（`check-enter`），验证 explore completion：
-   ```text
-   superspec guard check-enter --change "<change>" --gate explore_complete --format agent
-   ```
+```text
+superspec guard review-packet --change "<change>" --gate explore_complete --role critic --round 1 --format prompt
+```
 
-遇到任何 guard `block` 就停止。用户确认相关阻塞原因包括：缺少审查问题记录（`missing_review_digest`）、等待用户确认（`needs_user_decision_pending`）、历史 finding 未处理完（`finding_unresolved`）、用户确认未绑定（`user_decision_unbound`）、缺少 finding 问题清单（`ledger_injection_missing`）、审查轮次已达上限（`round_budget_exhausted`）等。它们的唯一合法出路是回到确认循环或升级给用户，不允许绕过。
+主流程整理审查问题时读取 main-thread packet：
+
+```text
+superspec guard review-packet --change "<change>" --gate explore_complete --role main-thread --round 1 --format agent
+```
+
+round > 1 的 reviewer prompt 必须使用 packet/ledger 注入；不要手写历史问题清单。
+
+## 用户确认边界
+
+- 关键范围、非目标、验收标准、业务语义或设计边界问题必须面向用户说明并等待明确确认。
+- 探索结论、范围边界和进入 propose 的授权必须等待用户确认后再记录 evidence。
+- 用户看到的文字要用中文业务语言；内部 JSON 名只写进证据、命令输出或诊断片段。
+
+## 完成检查
+
+```text
+superspec guard workflow-packet --change "<change>" --gate explore_complete --format agent
+```
+
+只有 packet 显示 allowed 后，才进入 `superspec-propose`。

@@ -6,8 +6,9 @@
 
 1. `SPEC.md`：当前单一规范源。实现、修改和审查以它为准。
 2. `DISTRIBUTION.md`：安装、升级、卸载和 npm 分发方案。
-3. `plans/MASTER_FIX_PLAN_2026-06-10.md`：2026-06-10 审计修复的总控入口；只在继续该批修复时阅读。
-4. `audits/WORKFLOW_FULL_AUDIT_2026-06-10.md`：最新全面审计报告；查问题来源和证据时阅读。
+3. `designs/WORKFLOW_CONTEXT_PACKET_FIRST_MERGED_DESIGN.md`：工作流上下文占用压缩合并方案；继续做 packet-first 瘦身或 OpenSpec bridge 迁移时先读。
+4. `plans/MASTER_FIX_PLAN_2026-06-10.md`：2026-06-10 审计修复的总控入口；只在继续该批修复时阅读。
+5. `audits/WORKFLOW_FULL_AUDIT_2026-06-10.md`：最新全面审计报告；查问题来源和证据时阅读。
 
 ## 目录地图
 

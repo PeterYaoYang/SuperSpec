@@ -56,6 +56,18 @@ function templatePromptText(name: string): string {
   return readFileSync(join(TEMPLATE_ROOT, "workflow", "prompts", `${name}.md`), "utf8");
 }
 
+function projectLocalPromptText(name: string): string {
+  return readFileSync(join(REPO, ".codex", "prompts", `${name}.md`), "utf8");
+}
+
+function adapterAgentText(name: string): string {
+  return readFileSync(join(ADAPTER_ROOT, "agents", `${name}.toml`), "utf8");
+}
+
+function projectLocalAgentText(name: string): string {
+  return readFileSync(join(REPO, ".codex", "agents", `${name}.toml`), "utf8");
+}
+
 function templateSkillDescription(name: string): string {
   const match = /^description:\s*"([^"]+)"/mu.exec(templateSkillText(name));
   assert.ok(match, `${name} should declare a skill description`);
@@ -223,6 +235,11 @@ test("superspec distribution files are not gitignored", () => {
     "schemas/install-manifest.schema.json",
     "superspec.ts",
     "tsconfig.build.json",
+    "openspec/changes/demo/proposal.md",
+    "openspec/changes/demo/design.md",
+    "openspec/changes/demo/tasks.md",
+    "openspec/changes/demo/specs/example/spec.md",
+    "openspec/specs/example/spec.md",
   ];
   for (const path of checked) {
     const proc = spawnSync("git", ["check-ignore", "-q", path], { cwd: REPO });
@@ -264,8 +281,7 @@ test("skills call guard before advancing", () => {
     assert.ok(text.includes("openspec.cmd"), name);
     assert.ok(text.includes("superspec.ps1"), name);
     assert.ok(text.includes("默认使用简体中文"), name);
-    assert.ok(text.includes("不得裸露内部证据种类"), name);
-    assert.ok(text.includes("写给用户时必须先翻译成中文业务动作"), name);
+    assert.ok(text.includes("不把内部证据种类"), name);
   }
   assert.ok(templateSkillText("superspec-explore").includes("init --scope project"));
   assert.equal(templateSkillText("superspec-explore").includes("SUPERSPEC_INIT"), false);
@@ -282,7 +298,8 @@ test("workflow skills use safe agent output for ordinary superspec commands", ()
         assert.match(nearby, /诊断|debug|debugging/u, `${name}:${lineNo} json output must be explicitly diagnostic`);
         continue;
       }
-      assert.match(line, /--format agent\b/u, `${name}:${lineNo} must use --format agent: ${line}`);
+      if (line.includes("review-packet") && line.includes("--format prompt")) continue;
+      assert.match(line, /--format agent\b/u, `${name}:${lineNo} must use --format agent or review-packet prompt: ${line}`);
     }
     assert.ok(text.includes("普通 workflow 命令使用 `--format agent`"), name);
     assert.ok(text.includes("`--format json` 只用于诊断"), name);
@@ -320,6 +337,14 @@ test("project-local superspec skills mirror packaged workflow templates", () => 
   }
 });
 
+test("project-local role prompts and agents mirror packaged templates", () => {
+  if (!existsSync(join(REPO, ".codex", "prompts")) || !existsSync(join(REPO, ".codex", "agents"))) return;
+  for (const name of REQUIRED_ROLES) {
+    assert.equal(projectLocalPromptText(name), templatePromptText(name), name);
+    assert.equal(projectLocalAgentText(name), adapterAgentText(name), name);
+  }
+});
+
 test("skills avoid high-risk internal protocol names in user-facing step prose", () => {
   const forbiddenPatterns: RegExp[] = [
     /等待\s+`user_review_decision`/u,
@@ -350,7 +375,30 @@ test("workflow skills constrain confusing user-visible decision wording", () => 
   }
 });
 
-test("propose owns openspec package and sidecar gates", () => {
+test("workflow skills are thin packet-driven entrypoints", () => {
+  const maxChars: Record<(typeof REQUIRED_SKILLS)[number], number> = {
+    "superspec-explore": 4200,
+    "superspec-propose": 5200,
+    "superspec-apply": 4200,
+    "superspec-review": 5200,
+    "superspec-archive": 3600,
+  };
+  for (const name of REQUIRED_SKILLS) {
+    const text = templateSkillText(name);
+    assert.ok(text.length <= maxChars[name], `${name} should stay thin: ${text.length}`);
+    assert.ok(text.includes("## 阶段职责"), name);
+    assert.ok(text.includes("## 第一条必跑命令"), name);
+    assert.ok(text.includes("遇到任何 guard `block` 就停止"), name);
+    assert.equal(text.includes("## 证据契约"), false, name);
+    assert.equal(text.includes("### 严重级别"), false, name);
+    assert.equal(text.includes("每个 evidence file 都必须包含通用 schema 字段"), false, name);
+  }
+  assert.ok(templateSkillText("superspec-propose").includes("review-packet --format prompt"));
+  assert.ok(templateSkillText("superspec-review").includes("review-packet --change"));
+  assert.ok(templateSkillText("superspec-archive").includes("workflow-packet --change"));
+});
+
+test("propose owns openspec package and sidecar gates as wrapper anchors", () => {
   const text = templateSkillText("superspec-propose");
   for (const phrase of [
     "proposal.md",
@@ -364,41 +412,41 @@ test("propose owns openspec package and sidecar gates", () => {
     // 不新增 guard gate" wording must stay deleted and the disclosure loop must be present.
     "不是 advisory note",
     "propose.proposal_reviewed",
-    "main_review_digest",
+    "review-packet --role main-thread",
     "用户确认",
     "propose.invariants_reviewed",
     "propose.design_reviewed",
     "propose.test_plan_drafted",
     "propose.tasks_mapped",
-    "check-apply-ready",
+    "apply_ready",
   ]) {
     assert.ok(text.includes(phrase), phrase);
   }
 });
 
-test("explore explicitly bridges openspec explore", () => {
+test("explore uses OpenSpec CLI surfaces directly", () => {
   const text = templateSkillText("superspec-explore");
-  assert.ok(text.includes(".codex/skills/openspec-explore/SKILL.md"));
-  assert.ok(text.includes("像需求探索搭档一样"));
+  assert.equal(text.includes(".codex/skills/openspec-explore/SKILL.md"), false);
+  assert.ok(text.includes("直接使用 OpenSpec CLI surface"));
   assert.ok(text.includes("openspec list --json"));
   assert.ok(text.includes("openspec status --change"));
   assert.ok(text.includes("superspec-propose"));
-  assert.ok(text.includes("openspec instructions"));
+  assert.ok(text.includes("不写 `proposal.md`"));
 });
 
-test("propose explicitly bridges openspec propose", () => {
+test("propose uses OpenSpec instructions CLI directly", () => {
   const text = templateSkillText("superspec-propose");
-  assert.ok(text.includes(".codex/skills/openspec-propose/SKILL.md"));
-  assert.ok(text.includes("openspec-propose"));
-  assert.ok(text.includes("方案文件生成顺序"));
+  assert.equal(text.includes(".codex/skills/openspec-propose/SKILL.md"), false);
+  assert.ok(text.includes("直接使用 OpenSpec CLI surface"));
+  assert.ok(text.includes("artifact 顺序"));
   assert.ok(text.includes("openspec instructions <artifact-id>"));
-  assert.ok(text.includes("一次性把所有方案文件都生成完"));
+  assert.ok(text.includes("不要手写绕过"));
 });
 
-test("apply explicitly bridges openspec apply", () => {
+test("apply uses OpenSpec apply instructions CLI directly", () => {
   const text = templateSkillText("superspec-apply");
-  assert.ok(text.includes(".codex/skills/openspec-apply-change/SKILL.md"));
-  assert.ok(text.includes("openspec-apply-change"));
+  assert.equal(text.includes(".codex/skills/openspec-apply-change/SKILL.md"), false);
+  assert.ok(text.includes("直接使用 OpenSpec CLI surface"));
   assert.ok(text.includes("contextFiles"));
   assert.ok(text.includes("progress"));
   assert.ok(text.includes("dynamic instruction"));
@@ -407,13 +455,14 @@ test("apply explicitly bridges openspec apply", () => {
 
 test("archive documents native archive handoff", () => {
   const text = templateSkillText("superspec-archive");
-  assert.ok(text.includes(".codex/skills/openspec-archive-change/SKILL.md"));
-  assert.ok(text.includes("`mkdir`/`mv` archive procedure"));
-  assert.ok(text.includes("`openspec archive` 取代"));
+  assert.equal(text.includes(".codex/skills/openspec-archive-change/SKILL.md"), false);
+  assert.ok(text.includes("直接使用 OpenSpec CLI surface"));
+  assert.ok(text.includes("native OpenSpec CLI"));
+  assert.ok(text.includes("SuperSpec 不重新实现移动、spec sync 或 validation"));
   assert.ok(text.includes("openspec archive -y"));
   assert.ok(text.includes("--no-validate"));
   assert.ok(text.includes(".superspec/artifacts/business-invariants.md"));
-  assert.ok(text.includes(".superspec/evidence/invariants/"));
+  assert.ok(text.includes("test-contract.md"));
 });
 
 test("test contract template preserves invariant mapping", () => {
@@ -433,37 +482,16 @@ test("review requires repo-local native agents", () => {
   assert.ok(text.includes(".codex/prompts/critic.md"));
   assert.ok(text.includes(".codex/agents/verifier.toml"));
   assert.ok(text.includes(".codex/prompts/verifier.md"));
-  assert.ok(text.includes("`superspec-review` 直接拥有并执行 repo-local review 协议"));
-  assert.ok(text.includes("不要为 code review 调用另一个 skill 或 workflow"));
-  assert.ok(text.includes("不需要单独安装 `code-review` skill"));
-  assert.ok(text.includes("native subagent"));
+  assert.ok(text.includes("repo-local native agents"));
+  assert.ok(text.includes("不要调用全局 `$code-review`"));
+  assert.ok(text.includes("native agents"));
   assert.ok(text.includes("`review_complete` 是 allow-only gate"));
-  assert.ok(text.includes("`main_adjudication.review_decision:\"allow\"`"));
   assert.ok(text.includes("`request_changes_route`"));
-  assert.ok(text.includes("`verification_evidence_refs` 必须为空"));
   assert.ok(text.includes("`execution_mode:\"direct\"` + `created_by:\"main-thread\"`"));
   assert.ok(text.includes("main_adjudication"));
-  assert.ok(text.includes("source_guidance"));
   assert.ok(text.includes("check-init"));
   assert.ok(text.includes("openspec validate"));
-  assert.ok(text.includes("task_matrix_ref"));
-  assert.ok(text.includes("scope_drift_ref"));
-  assert.ok(text.includes("kind:\"final_test\""));
-  assert.ok(text.includes("kind:\"main_adjudication\""));
-  assert.ok(text.includes("Review Guidance 协议"));
-  assert.ok(text.includes("规格一致性"));
-  assert.ok(text.includes("安全性"));
-  assert.ok(text.includes("严重级别"));
-  assert.ok(text.includes("CRITICAL"));
-  assert.ok(text.includes("每个 evidence file 都必须包含通用 schema 字段"));
-  assert.ok(text.includes("evidence_id"));
-  assert.ok(text.includes("非空 `{path, blob_sha}` 列表"));
-  assert.ok(text.includes("kind:\"verification_review\""));
-  assert.ok(text.includes("required_load_refs"));
-  assert.ok(text.includes("required_claim_ids"));
-  assert.ok(text.includes("source_evidence_refs"));
-  assert.ok(text.includes("loaded_refs"));
-  assert.ok(text.includes("不要用 main-thread self-review"));
+  assert.ok(text.includes("request-changes round 不生成 allow-path verification"));
 });
 
 test("review prompts require Chinese-only user-visible prose outside code identifiers", () => {
@@ -476,10 +504,48 @@ test("review prompts require Chinese-only user-visible prose outside code identi
   }
 });
 
+test("role prompts are thin packet-driven review surfaces", () => {
+  for (const name of REQUIRED_ROLES) {
+    const text = templatePromptText(name);
+    assert.ok(text.length <= 1800, `${name} prompt should stay thin: ${text.length}`);
+    assert.ok(text.includes("## 角色身份"), name);
+    assert.ok(text.includes("## 读写边界"), name);
+    assert.ok(text.includes("## SuperSpec Packet 规则"), name);
+    assert.ok(text.includes("## 输出风格"), name);
+    assert.ok(text.includes("`review-packet`"), name);
+    assert.ok(text.includes("`prompt_ref`"), name);
+    assert.ok(text.includes("`required_output_kind`"), name);
+    assert.ok(text.includes("`output_contract_fields`"), name);
+    assert.ok(text.includes("不要依赖本 prompt 记忆输出 schema"), name);
+    assert.equal(text.includes("<output_contract>"), false, name);
+    assert.equal(text.includes("<execution_loop>"), false, name);
+    assert.equal(text.includes("## 结论摘要"), false, name);
+    assert.equal(text.includes("Code Review Summary"), false, name);
+  }
+});
+
+test("role agent toml files are thin prompt-bound entrypoints", () => {
+  for (const name of REQUIRED_ROLES) {
+    const text = adapterAgentText(name);
+    assert.ok(text.length <= 1200, `${name} agent should stay thin: ${text.length}`);
+    assert.ok(text.includes(`name = "${name}"`), name);
+    assert.ok(text.includes("Prompt binding:"), name);
+    assert.ok(text.includes(`.codex/prompts/${name}.md`), name);
+    assert.ok(text.includes("`review-packet`"), name);
+    assert.ok(text.includes("`prompt_ref`"), name);
+    assert.ok(text.includes("Boundary:"), name);
+    assert.ok(text.includes("Output:"), name);
+    assert.equal(text.includes("<output_contract>"), false, name);
+    assert.equal(text.includes("<execution_loop>"), false, name);
+    assert.equal(text.includes("<posture_overlay>"), false, name);
+    assert.equal(text.includes("OMX Agent Metadata"), false, name);
+    assert.equal(text.includes("native_subagent_leaf_guard"), false, name);
+  }
+});
+
 test("business skills use positive overlay instructions", () => {
   const combined = REQUIRED_SKILLS.map((name) => templateSkillText(name)).join("\n");
-  assert.ok(combined.includes("audit-only"));
-  assert.ok(combined.includes("native_subagent"));
+  assert.ok(combined.includes("native subagent"));
   assert.equal(combined.includes("Do not create `.codex/hooks.json`"), false);
   assert.equal(combined.includes("Do not create or use `openspec/schemas/superspec`"), false);
   assert.equal(combined.includes("schema: superspec"), false);
@@ -494,48 +560,26 @@ test("skills delegate to openspec instruction engine", () => {
   assert.ok(archive.includes("openspec archive"));
 });
 
-test("workflow skills keep evidence reads compact", () => {
-  for (const name of REQUIRED_SKILLS) {
-    const text = templateSkillText(name);
-    assert.ok(text.includes("上下文读取纪律 / Context Budget"), name);
-    assert.ok(text.includes("guard 可以在本地读取完整 `.superspec/evidence/**/*.json`"), name);
-    assert.ok(text.includes("主流程默认不要打开完整 evidence JSON"), name);
-    assert.ok(text.includes("raw log"), name);
-    assert.ok(text.includes("不要把全文复制进对话上下文或新的 evidence"), name);
-  }
-
-  for (const name of ["superspec-explore", "superspec-propose"]) {
-    const text = templateSkillText(name);
-    assert.ok(text.includes("当前轮披露循环所需的最小结构化字段必须读取"), name);
-    assert.ok(text.includes("findings[]"), name);
-    assert.ok(text.includes("finding_uid"), name);
-    assert.ok(text.includes("decision_scope_key"), name);
-    assert.ok(text.includes("逐字 `summary`"), name);
-  }
-
-  const apply = templateSkillText("superspec-apply");
+test("phase-2 migrated hard protocol lockpoints to guard tests", () => {
+  const guardTests = readdirSync(join(REPO, "tests"))
+    .filter((name) => /^test_superspec_guard.*\.test\.ts$/u.test(name))
+    .sort()
+    .map((name) => repoText(`tests/${name}`))
+    .join("\n");
   for (const phrase of [
-    "gate:\"apply_isolation\"",
-    "human_confirmation",
-    "confirmation_text",
-    "confirmed_refs",
-    "tasks_structure_hash",
-    "不要仅凭聚合日志替代每个 task/test 所需的 RED/GREEN 证据字段",
-    "test_ids[]",
-    "每个 claimed id 都必须出现在引用的 raw log 中",
-    "若当前 task gate 需要单个 `test_id` 覆盖",
+    "review-packet serves main-thread digest and adjudication contracts with exact required refs",
+    "review-packet fails closed when review evidence contract is stale",
+    "review-packet prompt and ledger-render share the deterministic round>1 ledger block",
+    "packet commands are strictly read-only and do not touch state, ledger, or preservation artifacts",
+    "main adjudication requires canonical main-thread author boundary",
+    "main adjudication request_changes requires route",
+    "review complete blocks request_changes and hands off to apply",
+    "DISC main_review_digest schema is fail-closed",
+    "DISC user_review_decision schema is fail-closed",
+    "DISC material terminal dispositions require a binding user decision",
   ]) {
-    assert.ok(apply.includes(phrase), phrase);
+    assert.ok(guardTests.includes(phrase), phrase);
   }
-
-  const review = templateSkillText("superspec-review");
-  assert.ok(review.includes("`source_refs` 只是可追溯来源，不等于必须读取"));
-  assert.ok(review.includes("只有 `required_load_refs` 是主流程必须亲自读取并写入 `loaded_refs` 的内容"));
-  assert.ok(review.includes("guard-only read 不能替代主流程的 `loaded_refs`"));
-  assert.ok(review.includes("不要默认打开完整 `.superspec/evidence/**/*.json`"));
-
-  const propose = templateSkillText("superspec-propose");
-  assert.equal(/tasks_complete[\s\S]{0,200}human[-_]confirmation/u.test(propose), false);
 });
 
 test("human pause points are present", () => {
@@ -544,9 +588,7 @@ test("human pause points are present", () => {
     "探索结论、范围边界和进入 propose 的授权",
     "设计选项选择",
     "任务审查确认",
-    "apply isolation",
-    "execution mode",
-    "修复与接受偏差",
+    "apply isolation 和 execution mode",
     "`archive_ready` 最终确认",
     "scope expands",
     "分支状态",

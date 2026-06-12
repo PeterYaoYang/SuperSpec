@@ -64,7 +64,7 @@ function installFakeNpmThatInstallsOpenSpec(binDir: string): void {
       `  ${JSON.stringify(`const skills = ${JSON.stringify([...guard.REQUIRED_OPENSPEC_CODEX_SKILLS])};`)},`,
       "  'const args = process.argv.slice(2);',",
       "  \"if (args[0] === '--version') { console.log('OpenSpec 1.4.1'); process.exit(0); }\",",
-      "  \"if (args[1] === '--help' && ['instructions', 'archive', 'validate', 'status'].includes(args[0] ?? '')) process.exit(0);\",",
+      "  \"if (args[1] === '--help' && ['list', 'instructions', 'archive', 'validate', 'status'].includes(args[0] ?? '')) process.exit(0);\",",
       "  \"if (args[0] === 'init' || args[0] === 'update') {\",",
       "  \"  for (const name of skills) {\",",
       "  \"    const dir = join(process.cwd(), '.codex', 'skills', name);\",",
@@ -386,6 +386,20 @@ test("openspec probe rejects openspec-chinese even when it reports a compatible 
   assert.match(probe.message, /openspec-chinese/u);
 });
 
+test("openspec probe requires list CLI surface for explore grounding", () => {
+  const probe = guard.openspec_cli_probe({
+    commandExistsFn: () => true,
+    run: (_cmd, args) => {
+      if (args[0] === "--version") return { status: 0, stdout: "OpenSpec 1.4.1\n", stderr: "" };
+      if (args[0] === "list" && args[1] === "--help") return { status: 1, stdout: "", stderr: "unknown command list\n" };
+      return { status: 0, stdout: "", stderr: "" };
+    },
+  });
+  assert.equal(probe.ok, false);
+  assert.equal(probe.state, "invalid");
+  assert.match(probe.message, /openspec list --help/u);
+});
+
 test("init automatically installs openspec when it is missing", async () => {
   const writes: string[] = [];
   const runs: Array<{ cmd: string; args: string[] }> = [];
@@ -639,7 +653,7 @@ test("main init with explicit project scope upgrades openspec before project set
     assert.equal(existsSync(join(bin, "npm-installed-openspec.txt")), true, "explicit --scope project must trigger OpenSpec upgrade");
     const summary = JSON.parse(stdout.join(""));
     assert.equal(summary.allowed, true, JSON.stringify(summary.block_reasons));
-    assert.equal(existsSync(join(repo, ".codex", "skills", "openspec-explore", "SKILL.md")), true);
+    assert.equal(existsSync(join(repo, ".codex", "skills", "openspec-explore", "SKILL.md")), false);
     assert.equal(existsSync(join(repo, ".codex", "skills", "superspec-explore", "SKILL.md")), true);
   } finally {
     process.stdout.write = savedStdout;

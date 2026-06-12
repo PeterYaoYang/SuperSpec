@@ -10,7 +10,6 @@ import {
   FINAL_VERIFICATION_ROLES,
   REQUIRED_SUPERSPEC_AGENT_ROLES,
   REQUIRED_SUPERSPEC_WORKFLOW_SKILLS,
-  REQUIRED_OPENSPEC_CODEX_SKILLS,
   REVIEW_GUIDANCE_ROLES,
   REVIEW_EVIDENCE_REQUIRED_FIELDS,
   TDD_MODES,
@@ -454,27 +453,8 @@ function default_gate_next_actions(gate: string): string[] {
   }
 }
 
-export function openspec_init_reasons(repoRoot: string): Reason[] {
-  const reasons: Reason[] = [];
-  reasons.push(...runtime.openspec_cli_capability_reasons());
-  const skillsRoot = join(repoRoot, ".codex", "skills");
-  const missing = REQUIRED_OPENSPEC_CODEX_SKILLS.filter((name) => !existsSync(join(skillsRoot, name, "SKILL.md")));
-  if (missing.length > 0) {
-    reasons.push(reason(
-      "openspec_init_missing",
-      "OpenSpec native Codex skills are missing; run `openspec init --tools codex .` or `openspec update --force .` from the repository root",
-      missing,
-    ));
-  }
-  for (const name of REQUIRED_OPENSPEC_CODEX_SKILLS) {
-    const skillPath = join(skillsRoot, name, "SKILL.md");
-    if (!existsSync(skillPath)) continue;
-    const declared = read_skill_frontmatter_name(skillPath);
-    if (declared !== name) {
-      reasons.push(reason("openspec_native_surface_invalid", `OpenSpec native skill ${skillPath} has invalid front matter name ${repr(declared)}`, [skillPath]));
-    }
-  }
-  return reasons;
+export function openspec_init_reasons(_repoRoot: string): Reason[] {
+  return runtime.openspec_cli_capability_reasons();
 }
 
 // D4 (audit G-2): check-init must notice when SuperSpec's own workflow skills are missing or

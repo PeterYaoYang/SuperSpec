@@ -12,6 +12,9 @@ const COMMAND_ZH: Record<string, ZhHint> = {
   "check-task-reopen": { label_zh: "任务重开检查", hint_zh: "检查被审查打回的任务是否满足重开条件。" },
   "check-task-edit": { label_zh: "任务编辑前检查", hint_zh: "检查任务在开始实现前是否满足测试与范围前置条件。" },
   "check-task-complete": { label_zh: "任务完成检查", hint_zh: "检查任务在勾完成前是否满足 GREEN 或替代验证要求。" },
+  "workflow-packet": { label_zh: "流程数据包", hint_zh: "只读生成当前流程 gate 的紧凑执行数据包。" },
+  "review-packet": { label_zh: "审查数据包", hint_zh: "只读生成审查角色或主线程的最小任务包。" },
+  "ledger-render": { label_zh: "问题清单渲染", hint_zh: "渲染审查轮次的确定性问题清单文本。" },
   "check-review-ready": { label_zh: "进入审查前检查", hint_zh: "检查实现阶段是否已经处理完成，可以进入审查阶段。" },
   "check-review-complete": { label_zh: "审查完成检查", hint_zh: "检查审查阶段证据是否齐备并允许通过。" },
   "check-verify-ready": { label_zh: "验证完成检查", hint_zh: "检查最终验证证据是否完整。" },
@@ -583,10 +586,8 @@ export function action_status_zh(status: string): string {
 
 export function action_label_zh(action: string): string {
   const exact: Record<string, string> = {
-    openspec_codex_skills: "检查 OpenSpec 配套技能文件",
+    openspec_cli_surface: "检查 OpenSpec CLI 能力",
     superspec_repo_local_roles: "检查 SuperSpec 本地角色与提示词",
-    "openspec init --tools codex .": "运行 OpenSpec 初始化命令",
-    "openspec update --force .": "运行 OpenSpec 更新命令",
   };
   if (exact[action]) return exact[action];
   const patterns: Array<[RegExp, (...parts: string[]) => string]> = [

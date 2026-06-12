@@ -1,13 +1,18 @@
 import { command_zh } from "./i18n.ts";
-import { GuardError, parseDecisionOutputFormat, type DecisionOutputFormat } from "./util.ts";
+import { GuardError, parseDecisionOutputFormat, parsePacketOutputFormat, type DecisionOutputFormat, type PacketOutputFormat } from "./util.ts";
+import { normalize_gate } from "./openspec.ts";
 
 export type ParsedArgs = {
   command: string;
   change: string;
   format?: DecisionOutputFormat;
+  packet_format?: PacketOutputFormat;
   artifact?: string;
   gate?: string;
   task_id?: string;
+  role?: string;
+  evidence_kind?: string;
+  round?: number;
   create?: boolean;
   force_unlock?: boolean;
   rebuild_corrupt?: boolean;
@@ -32,15 +37,25 @@ const COMMANDS = [
   "check-task-reopen",
   "check-task-edit",
   "check-task-complete",
+  "workflow-packet",
+  "review-packet",
+  "ledger-render",
 ] as const;
 const COMMAND_LIST = COMMANDS.join(",");
 const COMMAND_CHOICES = COMMANDS.map((item) => `'${item}'`).join(", ");
+
+function isPacketCommand(command: string): boolean {
+  return command === "workflow-packet" || command === "review-packet" || command === "ledger-render";
+}
 
 function requiredValueFlags(command: string): string[] {
   const flags = ["--change"];
   if (command === "check-artifact") flags.push("--artifact");
   if (command === "check-enter") flags.push("--gate");
   if (command === "check-task-reopen" || command === "check-task-edit" || command === "check-task-complete") flags.push("--task-id");
+  if (command === "workflow-packet") flags.push("--gate");
+  if (command === "review-packet") flags.push("--gate", "--role", "--round");
+  if (command === "ledger-render") flags.push("--gate");
   return flags;
 }
 
@@ -49,7 +64,26 @@ function requiredBooleanFlags(command: string): string[] {
 }
 
 function optionalBooleanFlags(command: string): string[] {
+  if (isPacketCommand(command)) return [];
   return ["--user-facing", ...(command === "recompute" ? ["--force-unlock", "--rebuild-corrupt"] : [])];
+}
+
+function optionalValueFlags(command: string): string[] {
+  if (command === "workflow-packet") return ["--task-id"];
+  if (command === "review-packet") return ["--kind"];
+  if (command === "ledger-render") return ["--round"];
+  return [];
+}
+
+function formatUsage(command: string): string | null {
+  if (command === "workflow-packet") return "--format {agent}";
+  if (command === "review-packet") return "--format {agent,prompt}";
+  if (command === "ledger-render") return null;
+  return "[--format {json,agent,user}]";
+}
+
+function requiresFormat(command: string): boolean {
+  return command === "workflow-packet" || command === "review-packet";
 }
 
 function rootUsage(): string {
@@ -68,7 +102,8 @@ function commandUsage(command: string): string {
   const usageFlags = [
     "[-h]",
     ...requiredValueFlags(command).map((flag) => `${flag} ${flag.slice(2).replace(/-/g, "_").toUpperCase()}`),
-    "[--format {json,agent,user}]",
+    ...(formatUsage(command) ? [formatUsage(command)!] : []),
+    ...optionalValueFlags(command).map((flag) => `[${flag} ${flag.slice(2).replace(/-/g, "_").toUpperCase()}]`),
     ...requiredBooleanFlags(command),
     ...optionalBooleanFlags(command),
   ];
@@ -85,7 +120,12 @@ function commandHelp(command: string): string {
   for (const flag of requiredBooleanFlags(command)) {
     lines.push(`  ${flag}\n`);
   }
-  lines.push("  --format {json,agent,user}\n");
+  const formatToken = formatUsage(command);
+  if (formatToken) lines.push(`  ${formatToken}\n`);
+  for (const flag of optionalValueFlags(command)) {
+    const metavariable = flag.slice(2).replace(/-/g, "_").toUpperCase();
+    lines.push(`  ${flag} ${metavariable}\n`);
+  }
   for (const flag of optionalBooleanFlags(command)) {
     lines.push(`  ${flag}\n`);
   }
@@ -97,7 +137,9 @@ function hasFlag(argv: string[], flag: string): boolean {
 }
 
 function missingRequiredFlags(command: string, args: string[]): string[] {
-  return [...requiredValueFlags(command), ...requiredBooleanFlags(command)].filter((flag) => !hasFlag(args, flag));
+  const missing = [...requiredValueFlags(command), ...requiredBooleanFlags(command)].filter((flag) => !hasFlag(args, flag));
+  if (requiresFormat(command) && !hasFlag(args, "--format")) missing.push("--format");
+  return missing;
 }
 
 export function emitArgparsePreamble(argv: string[]): number | null {
@@ -119,10 +161,12 @@ export function emitArgparsePreamble(argv: string[]): number | null {
     process.stdout.write(commandHelp(command));
     return 0;
   }
-  const missing = missingRequiredFlags(command, args);
-  if (missing.length > 0) {
-    process.stderr.write(`${commandUsage(command)}superspec_guard ${command}：错误：缺少必填参数：${missing.join(", ")}\n`);
-    return 2;
+  if (!isPacketCommand(command)) {
+    const missing = missingRequiredFlags(command, args);
+    if (missing.length > 0) {
+      process.stderr.write(`${commandUsage(command)}superspec_guard ${command}：错误：缺少必填参数：${missing.join(", ")}\n`);
+      return 2;
+    }
   }
   return null;
 }
@@ -143,13 +187,21 @@ export function parse_argv(argv: string[]): ParsedArgs {
   };
   const getValue = (flag: string): string | undefined => getValues(flag)[0];
   const formatValues = getValues("--format");
-  for (const value of formatValues) parseDecisionOutputFormat(value);
+  const isPacketOutputCommand = command === "workflow-packet" || command === "review-packet";
+  const isPacketCommand = isPacketOutputCommand || command === "ledger-render";
+  const selectedPacketFormat = formatValues.length > 0 ? formatValues[formatValues.length - 1] : undefined;
+  if (isPacketOutputCommand) {
+    if (!selectedPacketFormat) throw new GuardError("缺少必填参数 --format");
+    for (const value of formatValues) parsePacketOutputFormat(value, { allowPrompt: command === "review-packet" });
+  } else {
+    for (const value of formatValues) parseDecisionOutputFormat(value);
+  }
   const selectedFormat = hasFlag(args, "--user-facing")
     ? "user"
     : (formatValues.length > 0 ? formatValues[formatValues.length - 1] : "json");
-  const format = parseDecisionOutputFormat(selectedFormat);
+  const format = isPacketCommand ? undefined : parseDecisionOutputFormat(selectedFormat);
   const change = getValue("--change");
-  if (!change) throw new Error("缺少必填参数 --change");
+  if (!change) throw new (isPacketCommand ? GuardError : Error)("缺少必填参数 --change");
   if (command === "init") {
     if (!hasFlag(args, "--create")) throw new Error("缺少必填参数 --create");
     return { command, change, format, create: true };
@@ -163,6 +215,48 @@ export function parse_argv(argv: string[]): ParsedArgs {
     const gate = getValue("--gate");
     if (!gate) throw new Error("缺少必填参数 --gate");
     return { command, change, format, gate };
+  }
+  if (command === "workflow-packet") {
+    const gate = getValue("--gate");
+    if (!gate) throw new GuardError("缺少必填参数 --gate");
+    const normalizedGate = normalize_gate(gate);
+    const taskId = getValue("--task-id");
+    if ((normalizedGate === "task_edit" || normalizedGate === "task_complete" || normalizedGate === "task_reopen") && !taskId) {
+      throw new GuardError("workflow-packet 缺少必填参数 --task-id");
+    }
+    return { command, change, gate, task_id: taskId, packet_format: parsePacketOutputFormat(selectedPacketFormat!, { allowPrompt: false }) };
+  }
+  if (command === "review-packet") {
+    const gate = getValue("--gate");
+    const role = getValue("--role");
+    const roundValue = getValue("--round");
+    const evidenceKind = getValue("--kind");
+    if (!gate) throw new GuardError("缺少必填参数 --gate");
+    if (!role) throw new GuardError("缺少必填参数 --role");
+    if (!roundValue) throw new GuardError("缺少必填参数 --round");
+    if (evidenceKind !== undefined && evidenceKind !== "source_guidance" && evidenceKind !== "verification_review") {
+      throw new GuardError("--kind 只允许 source_guidance 或 verification_review");
+    }
+    const round = Number.parseInt(roundValue, 10);
+    if (!Number.isInteger(round) || round < 1) throw new GuardError("--round 必须是大于等于 1 的整数");
+    return {
+      command,
+      change,
+      gate,
+      role,
+      evidence_kind: evidenceKind,
+      round,
+      packet_format: parsePacketOutputFormat(selectedPacketFormat!, { allowPrompt: true }),
+    };
+  }
+  if (command === "ledger-render") {
+    const gate = getValue("--gate");
+    const roundValue = getValue("--round");
+    if (!gate) throw new GuardError("缺少必填参数 --gate");
+    if (roundValue === undefined) return { command, change, gate };
+    const round = Number.parseInt(roundValue, 10);
+    if (!Number.isInteger(round) || round < 1) throw new GuardError("--round 必须是大于等于 1 的整数");
+    return { command, change, gate, round };
   }
   if (command === "check-task-reopen" || command === "check-task-edit" || command === "check-task-complete") {
     const taskId = getValue("--task-id");

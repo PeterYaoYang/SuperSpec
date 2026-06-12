@@ -2,7 +2,6 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "no
 import { join, resolve } from "node:path";
 import {
   REQUIRED_SUPERSPEC_AGENT_ROLES,
-  REQUIRED_OPENSPEC_CODEX_SKILLS,
   type JsonMap,
   type OpenspecCliProbe,
   REQUIRED_OPENSPEC_MIN_VERSION,
@@ -11,11 +10,8 @@ import {
   openspec_cli_probe,
   reason,
   read_agent_toml_name,
-  read_skill_frontmatter_name,
-  runCommand,
 } from "./core.ts";
 import { install_workflow } from "./install_engine.ts";
-import { system_failure_zh } from "./i18n.ts";
 
 export const OPENSPEC_NPM_PACKAGE = "@fission-ai/openspec";
 export const OPENSPEC_INSTALL_DOC_URL = "https://github.com/Fission-AI/OpenSpec#readme";
@@ -41,10 +37,6 @@ const ROLE_DESCRIPTIONS: Record<string, string> = {
   "code-reviewer": "代码 / 规格 / 安全审查",
   verifier: "最终完成证据与验证审查",
 };
-
-function commandFailure(proc: { stdout: string; stderr: string; error?: Error; status?: number | null }): string {
-  return system_failure_zh((proc.error?.message ?? (proc.stderr || proc.stdout)).trim(), proc.status !== null && proc.status !== undefined ? `命令执行失败（退出状态码 ${proc.status}）。` : "命令执行失败，请查看终端日志后重试。");
-}
 
 function renderCommand(cmd: string, args: string[]): string {
   return [cmd, ...args].join(" ");
@@ -110,20 +102,6 @@ export function openspec_cli_requirement_message(
   return `${probe.message}。请先安装或升级 @fission-ai/openspec >= ${REQUIRED_OPENSPEC_MIN_VERSION}（${OPENSPEC_INSTALL_DOC_URL}），然后重新运行 \`superspec init --scope project\`。`;
 }
 
-function openspecSkillProblems(repoRoot: string): string[] {
-  const skillsRoot = join(repoRoot, ".codex", "skills");
-  const problems: string[] = [];
-  for (const name of REQUIRED_OPENSPEC_CODEX_SKILLS) {
-    const skillPath = join(skillsRoot, name, "SKILL.md");
-    if (!existsSync(skillPath) || !statSync(skillPath).isFile()) {
-      problems.push(name);
-      continue;
-    }
-    if (read_skill_frontmatter_name(skillPath) !== name) problems.push(name);
-  }
-  return problems.sort();
-}
-
 function writeSuperSpecAgent(repoRoot: string, name: string): string {
   const filePath = join(repoRoot, ".codex", "agents", `${name}.toml`);
   mkdirSync(join(repoRoot, ".codex", "agents"), { recursive: true });
@@ -166,39 +144,14 @@ function writeSuperSpecPrompt(repoRoot: string, name: string): string {
   return filePath;
 }
 
-function ensureOpenSpecCodex(repoRoot: string, actions: Action[]): string[] {
+function ensureOpenSpecCliSurface(repoRoot: string, actions: Action[]): string[] {
   const probe = openspec_cli_probe({ cwd: repoRoot });
-  if (!probe.ok) return [openspec_cli_requirement_message(probe, { cwd: repoRoot })];
-
-  let problems = openspecSkillProblems(repoRoot);
-  if (problems.length === 0) {
-    actions.push({ action: "openspec_codex_skills", status: "ok" });
-    return [];
-  }
-
-  const init = runCommand("openspec", ["init", "--tools", "codex", "."], { cwd: repoRoot, timeout: 60_000 });
   actions.push({
-    action: "openspec init --tools codex .",
-    status: init.status === 0 ? "updated" : "failed",
-    refs: problems,
-    detail: init.status === 0 ? undefined : commandFailure(init),
+    action: "openspec_cli_surface",
+    status: probe.ok ? "ok" : "failed",
+    detail: probe.message,
   });
-  if (init.error || init.status !== 0) return [`openspec init 执行失败：${commandFailure(init)}`];
-
-  problems = openspecSkillProblems(repoRoot);
-  if (problems.length === 0) return [];
-
-  const update = runCommand("openspec", ["update", "--force", "."], { cwd: repoRoot, timeout: 60_000 });
-  actions.push({
-    action: "openspec update --force .",
-    status: update.status === 0 ? "updated" : "failed",
-    refs: problems,
-    detail: update.status === 0 ? undefined : commandFailure(update),
-  });
-  if (update.error || update.status !== 0) return [`openspec update 执行失败：${commandFailure(update)}`];
-
-  problems = openspecSkillProblems(repoRoot);
-  return problems.length === 0 ? [] : [`OpenSpec 配套技能文件仍然缺失或无效：${problems.join(", ")}`];
+  return probe.ok ? [] : [openspec_cli_requirement_message(probe, { cwd: repoRoot })];
 }
 
 function ensureSuperSpecRoles(repoRoot: string, actions: Action[]): string[] {
@@ -246,7 +199,7 @@ export function project_init(repoRootRaw = process.cwd(), opts: { force?: boolea
   const repoRoot = resolve(repoRootRaw);
   const actions: Action[] = [];
   const problems = [
-    ...ensureOpenSpecCodex(repoRoot, actions),
+    ...ensureOpenSpecCliSurface(repoRoot, actions),
     ...ensureSuperSpecWorkflow(repoRoot, actions, opts.force === true),
     ...ensureSuperSpecRoles(repoRoot, actions),
   ];

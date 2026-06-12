@@ -18,8 +18,8 @@
 ## 1. 已验证约束（设计前提，均已实测）
 
 1. **安装 footprint 由 guard 的 `check-init` 强制**（见 `superspec_guard.ts` 的 `REQUIRED_*` 常量），是装机清单的权威来源：
-   - 前置：PATH 上的 `openspec` 必须满足 SuperSpec 对官方 OpenSpec CLI 的兼容要求：版本 `>= 1.4.1`，且支持 `instructions/archive/validate/status --help`（`REQUIRED_OPENSPEC_CLI_SURFACES`）。检测到 `openspec-chinese` 标识、低版本或兼容不完整变体时不能满足此前置；`init` 会自动尝试安装 / 升级官方包，遇到全局 bin 冲突会用覆盖模式重试。
-   - 前置：`.codex/skills/{openspec-explore,openspec-propose,openspec-apply-change,openspec-archive-change}/SKILL.md` 存在且 frontmatter `name` 正确 → 由 `openspec init --tools codex .` 产出。
+   - 前置：PATH 上的 `openspec` 必须满足 SuperSpec 对官方 OpenSpec CLI 的兼容要求：版本 `>= 1.4.1`，且支持 `list/instructions/archive/validate/status --help`（`REQUIRED_OPENSPEC_CLI_SURFACES`）。检测到 `openspec-chinese` 标识、低版本或兼容不完整变体时不能满足此前置；`init` 会自动尝试安装 / 升级官方包，遇到全局 bin 冲突会用覆盖模式重试。
+   - OpenSpec bridge 不再依赖 `.codex/skills/openspec-*`；project init 只安装/修复 SuperSpec 自身的 workflow skills、prompts 和 agents。
    - SuperSpec payload：5 个用户可见 skill（explore/propose/apply/review/archive）+ 5 个 role agent/prompt。project scope 时安装到 `.codex/agents/{architect,critic,test-engineer,code-reviewer,verifier}.toml` + `.codex/prompts/{同 5 名}.md` + `.codex/skills/superspec-{explore,propose,apply,review,archive}/`；user scope 时安装到 Codex user home 的 `agents/`、`prompts/` 和 `skills/`。`init` 由全局 npm bin `superspec init` 承担，`verify` 已合并进 `review`。
 2. **命令入口约束**：
   - 包本体通过 GitHub Release tarball 或 npm registry 全局安装；当前内测主路径是 `npm install -g https://github.com/PeterYaoYang/SuperSpec/releases/download/v0.1.0/superspec-0.1.0.tgz`，正式 npm 发布后是 `npm install -g @peterxiaoyang/superspec`。workflow skills 直接调用 `superspec guard ... --format agent` / `superspec init --scope project --format agent`，不依赖目标仓库的 `node_modules/.bin` 或 POSIX shell 环境变量展开。
@@ -136,7 +136,7 @@ Windows PowerShell 可能优先解析 npm 生成的 `.ps1` shim 并受执行策�
 
 ### 6.2 `superspec init`
 0. 裸 `superspec init` 在 TTY 中先询问 scope：`project`（当前项目 `.codex/`）或 `user`（Codex user home），直接回车默认 `project`。脚本/CI 未传 `--scope` 时也默认 `project`；使用 `--scope project` 或 `--scope user` 可显式跳过交互。
-1. **Preflight**：任意 install scope 下都要求 Node ≥ 20.19.0，且 `openspec` 必须满足官方 OpenSpec CLI 兼容要求：版本 ≥ 1.4.1，并通过 `REQUIRED_OPENSPEC_CLI_SURFACES`；若缺失、低版本、检测到 `openspec-chinese` 标识或不兼容变体，`init` 会自动尝试安装 / 升级官方包，必要时覆盖冲突的全局 bin。project scope 还要求 `.codex/skills/openspec-*` 存在（缺 → 提示或代跑 `openspec init --tools codex .`）。user scope 只安装 SuperSpec Codex surfaces，不要求当前目录是 OpenSpec 项目。
+1. **Preflight**：任意 install scope 下都要求 Node ≥ 20.19.0，且 `openspec` 必须满足官方 OpenSpec CLI 兼容要求：版本 ≥ 1.4.1，并通过 `REQUIRED_OPENSPEC_CLI_SURFACES`（`list/instructions/archive/validate/status --help`）；若缺失、低版本、检测到 `openspec-chinese` 标识或不兼容变体，`init` 会自动尝试安装 / 升级官方包，必要时覆盖冲突的全局 bin。project scope 不再回补 `.codex/skills/openspec-*`，只校验 CLI surface 并安装 SuperSpec Codex surfaces。user scope 只安装 SuperSpec Codex surfaces，不要求当前目录是 OpenSpec 项目。
 2. **逐文件落地**：目标不存在 → 写入并记 `managed=true`；已存在且内容相同 → 记 `managed=true`；已存在且不同 → 记 `preexisting=true,managed=false` 并跳过（`--force` 才覆盖，且先备份 `*.bak`）。
 3. **接线 CLI**：不写 project wrapper；project/user scope 都依赖全局 `superspec` npm bin。
 4. **写 manifest** + 打印安装摘要与下一步（project scope 的 workflow 自检使用 `superspec guard check-init --change <c> --format agent`；诊断脚本可继续用默认 JSON）。
@@ -144,7 +144,7 @@ Windows PowerShell 可能优先解析 npm 生成的 `.ps1` shim 并受执行策�
 
 ### 6.3 `superspec update`
 0. 默认先执行 `npm install -g @peterxiaoyang/superspec@latest` 自更新全局 CLI；若 npm 报 `superspec` 全局 bin 冲突，自动用 `--force` 重试一次；安装成功后重新执行新版 `superspec update --skip-self-update ...`。`--local-only` 跳过 npm 自更新，只用当前已安装包更新 manifest-managed surfaces。
-1. 读 manifest + Preflight。
+1. 读 manifest 并执行 update-scope 自检（manifest/schema/managed surface 计划）；不会重新触发 OpenSpec CLI 自动安装 / 升级 preflight，避免 update/uninstall 意外改动全局 OpenSpec。
 2. 按 `sha256` 三态处理 managed 文件：
    - 未改 → 覆盖为新版；
    - 用户改过 → **保留用户版**，新版写到 `*.new` 并警告（dpkg 风格）；
@@ -180,7 +180,7 @@ Windows PowerShell 可能优先解析 npm 生成的 `.ps1` shim 并受执行策�
 5. **状态 schema 迁移**：`update` 跨 `SCHEMA_VERSION` 时必须处理 `.superspec/state.json`。
 
 ## 9. 与 guard 契约的依赖（single source of truth）
-- 装机清单 = guard 的 `REQUIRED_OPENSPEC_CODEX_SKILLS` / `REQUIRED_SUPERSPEC_AGENT_ROLES` / `REQUIRED_SIDECAR_DIRS` / `REQUIRED_OPENSPEC_CLI_SURFACES`。
+- 装机清单 = guard 的 `REQUIRED_SUPERSPEC_WORKFLOW_SKILLS` / `REQUIRED_SUPERSPEC_AGENT_ROLES` / `REQUIRED_SIDECAR_DIRS` / `REQUIRED_OPENSPEC_CLI_SURFACES`；`REQUIRED_OPENSPEC_CODEX_SKILLS` 仅保留为空兼容导出，不再是安装或健康面。
 - **若 guard 改这些常量，templates 与 manifest 引擎需同步**；建议加一条「templates ↔ guard 常量」一致性测试，防漂移。
 
 ## 10. 待定决策（需拍板）
