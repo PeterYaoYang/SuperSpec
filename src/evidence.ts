@@ -41,6 +41,10 @@ import {
   standing_authorization_schema_reasons,
   user_decision_schema_reasons,
 } from "./disclosure.ts";
+import {
+  pinned_artifact_ref_reasons as shared_pinned_artifact_ref_reasons,
+  worker_test_run_reasons,
+} from "./apply_worker_chain.ts";
 
 function file_ref_reasons(baseRoot: string, ev: JsonMap, field: string, code: string): Reason[] {
   const problems: Reason[] = [];
@@ -65,6 +69,44 @@ function file_ref_reasons(baseRoot: string, ev: JsonMap, field: string, code: st
     }
   }
   return problems;
+}
+
+function contractField(line: string): { key: string; value: string } | null {
+  const match = line.match(/^\s*-\s+`?([A-Za-z0-9_-]+)`?\s*:\s*(.*)$/);
+  if (!match) return null;
+  return { key: match[1], value: match[2].trim() };
+}
+
+function test_contract_section_lines(changeRoot: string, testId: string): string[] {
+  const pathValue = join(changeRoot, ".superspec", "artifacts", "test-contract.md");
+  if (!existsSync(pathValue) || !statSync(pathValue).isFile()) return [];
+  const lines = readFileSync(pathValue, "utf8").split(/\r?\n/);
+  const out: string[] = [];
+  let inSection = false;
+  for (const line of lines) {
+    const heading = line.match(/^###\s+(.+?)\s*$/);
+    if (heading) {
+      if (inSection) break;
+      inSection = heading[1].trim() === testId;
+      continue;
+    }
+    if (inSection) out.push(line);
+  }
+  return out;
+}
+
+function expected_failure_contract(changeRoot: string, testId: string): { signature?: string; classifier?: string } {
+  const fields = new Map<string, string[]>();
+  for (const line of test_contract_section_lines(changeRoot, testId)) {
+    const field = contractField(line);
+    if (!field) continue;
+    const values = fields.get(field.key) ?? [];
+    values.push(field.value);
+    fields.set(field.key, values);
+  }
+  const signature = (fields.get("expected_failure_signature") ?? [])[0];
+  const classifier = (fields.get("expected_failure_classifier") ?? [])[0];
+  return { signature, classifier };
 }
 
 function pinned_ref_list_reasons(
@@ -136,6 +178,37 @@ function pinned_ref_reasons(ev: JsonMap, field: string, baseRoot: string, staleC
     if (actual !== expected) problems.push(reason(staleCode, `${ev._path}: ${field} stale for ${rel}`));
   }
   return problems;
+}
+
+function string_list_field_reasons(ev: JsonMap, field: string, code: string, opts: { allowEmpty?: boolean } = {}): Reason[] {
+  const raw = ev[field];
+  if (!Array.isArray(raw) || (!opts.allowEmpty && raw.length === 0) || !raw.every((item) => typeof item === "string" && item.length > 0)) {
+    return [reason(code, `${ev._path}: ${field} must be a non-empty string list`)];
+  }
+  return [];
+}
+
+function fingerprint_field_reasons(ev: JsonMap, field: string, code: string): Reason[] {
+  const raw = ev[field];
+  if (typeof raw === "string") {
+    return raw.startsWith("sha256:") ? [] : [reason(code, `${ev._path}: ${field} must be a sha256 fingerprint`)];
+  }
+  if (isObject(raw) && typeof raw.fingerprint_digest === "string" && raw.fingerprint_digest.startsWith("sha256:")) return [];
+  return [reason(code, `${ev._path}: ${field} must be a sha256 fingerprint or fingerprint object`)];
+}
+
+function pinned_artifact_ref_item_reasons(
+  refItem: unknown,
+  field: string,
+  changeRoot: string,
+  expected: { kind?: string; role?: string; task_id?: string; chain_id?: string | null } = {},
+): Reason[] {
+  return shared_pinned_artifact_ref_reasons(changeRoot, refItem, field, {
+    kind: expected.kind,
+    role: expected.role,
+    taskId: expected.task_id,
+    chainId: expected.chain_id,
+  });
 }
 
 export function role_target_ref_reasons(ev: JsonMap, targetRoot: string): Reason[] {
@@ -373,6 +446,31 @@ function test_run_reasons(ev: JsonMap, changeRoot: string): Reason[] {
   if (typeof ev.result_summary !== "string" || !ev.result_summary.trim()) {
     problems.push(reason("test_run_summary_missing", `${ev._path}: test_run requires non-empty result_summary`));
   }
+  const runnerOrigin = ev.runner_origin;
+  const executorWorkerRun = ev.apply_execution_chain === "executor_worker";
+  if (runnerOrigin !== undefined && runnerOrigin !== "main-thread" && runnerOrigin !== "test-runner") {
+    problems.push(reason("test_run_runner_origin_invalid", `${ev._path}: runner_origin must be main-thread or test-runner`));
+  }
+  if (runnerOrigin === "test-runner" && (typeof ev.phase !== "string" || !ev.phase)) {
+    problems.push(reason("test_run_runner_origin_invalid", `${ev._path}: runner_origin=test-runner requires phase`));
+  }
+  if (runnerOrigin === "test-runner" && ev.gate === "task_complete" && ev.semantic_status === "expected_success" && !executorWorkerRun) {
+    problems.push(reason("test_run_runner_origin_invalid", `${ev._path}: test-runner GREEN evidence must belong to apply_execution_chain=executor_worker`));
+  }
+  if (executorWorkerRun && runnerOrigin !== "test-runner") {
+    problems.push(reason("test_run_runner_origin_invalid", `${ev._path}: apply_execution_chain=executor_worker requires runner_origin=test-runner`));
+  }
+  if (executorWorkerRun && (typeof ev.apply_worker_chain_id !== "string" || !ev.apply_worker_chain_id)) {
+    problems.push(reason("test_run_worker_ref_missing", `${ev._path}: apply_execution_chain=executor_worker requires apply_worker_chain_id`));
+  }
+  if (runnerOrigin === "test-runner" || executorWorkerRun) {
+    problems.push(...worker_test_run_reasons(
+      changeRoot,
+      ev,
+      typeof ev.task_id === "string" ? ev.task_id : "",
+      executorWorkerRun && typeof ev.apply_worker_chain_id === "string" ? ev.apply_worker_chain_id : null,
+    ));
+  }
   if (logTexts.length > 0) {
     const claimed = [
       ...(typeof ev.test_id === "string" && ev.test_id.trim() ? [ev.test_id.trim()] : []),
@@ -382,6 +480,74 @@ function test_run_reasons(ev: JsonMap, changeRoot: string): Reason[] {
       if (!logTexts.some((text) => text.includes(testId))) {
         problems.push(reason("test_id_not_in_log", `${ev._path}: claimed test_id ${repr(testId)} does not appear in any referenced raw log`, [testId]));
       }
+    }
+  }
+  if (ev.semantic_status === "expected_failure" && typeof ev.test_id === "string" && ev.test_id.trim()) {
+    const expected = expected_failure_contract(changeRoot, ev.test_id.trim());
+    if (expected.signature) {
+      if (ev.expected_failure_signature !== expected.signature) {
+        problems.push(reason("test_run_wrong_failure_reason", `${ev._path}: RED evidence expected_failure_signature must match test contract for ${ev.test_id}`, [ev.test_id]));
+      }
+      if (!logTexts.some((text) => text.includes(String(expected.signature)))) {
+        problems.push(reason("test_run_wrong_failure_reason", `${ev._path}: RED raw_log_refs do not contain expected_failure_signature for ${ev.test_id}`, [ev.test_id]));
+      }
+    }
+    if (expected.classifier && ev.expected_failure_classifier !== expected.classifier) {
+      problems.push(reason("test_run_wrong_failure_reason", `${ev._path}: RED evidence expected_failure_classifier must match test contract for ${ev.test_id}`, [ev.test_id]));
+    }
+  }
+  return problems;
+}
+
+function apply_worker_chain_reasons(ev: JsonMap, changeRoot: string): Reason[] {
+  const problems: Reason[] = [];
+  const state = String(ev.chain_state ?? "");
+  if (!["active", "closed", "abandoned"].includes(state)) {
+    problems.push(reason("apply_worker_chain_invalid", `${ev._path}: apply_worker_chain chain_state must be active, closed, or abandoned`));
+  }
+  for (const field of ["task_id", "apply_worker_chain_id"]) {
+    if (typeof ev[field] !== "string" || !ev[field]) problems.push(reason("apply_worker_chain_invalid", `${ev._path}: apply_worker_chain requires ${field}`));
+  }
+  if (state === "active") {
+    problems.push(...fingerprint_field_reasons(ev, "executor_packet_fingerprint", "apply_worker_chain_invalid"));
+    problems.push(...fingerprint_field_reasons(ev, "source_implementation_fingerprint", "apply_worker_chain_invalid"));
+    problems.push(...string_list_field_reasons(ev, "declared_task_write_scope", "apply_worker_chain_invalid"));
+    problems.push(...string_list_field_reasons(ev, "pre_edit_evidence_refs", "apply_worker_chain_invalid"));
+  }
+  if (state === "closed") {
+    const taskId = typeof ev.task_id === "string" ? ev.task_id : undefined;
+    const chainId = typeof ev.apply_worker_chain_id === "string" ? ev.apply_worker_chain_id : undefined;
+    const refProblems = [
+      ...pinned_artifact_ref_item_reasons(ev.executor_report_ref, "executor_report_ref", changeRoot, { kind: "worker_report", role: "executor", task_id: taskId, chain_id: chainId }),
+      ...pinned_artifact_ref_item_reasons(ev.task_code_review_report_ref, "task_code_review_report_ref", changeRoot, { kind: "worker_report", role: "code-reviewer", task_id: taskId, chain_id: chainId }),
+      ...pinned_artifact_ref_item_reasons(ev.verifier_report_ref, "verifier_report_ref", changeRoot, { kind: "worker_report", role: "verifier", task_id: taskId, chain_id: chainId }),
+    ];
+    problems.push(...refProblems);
+    if (refProblems.length > 0) problems.push(reason("apply_worker_chain_invalid", `${ev._path}: closed apply_worker_chain report refs must be pinned same-chain worker reports`));
+    if (!isObject(ev.green_test_run_evidence_ref) && typeof ev.green_test_run_evidence_ref !== "string") {
+      problems.push(reason("apply_worker_chain_invalid", `${ev._path}: closed apply_worker_chain requires green_test_run_evidence_ref`));
+    }
+    problems.push(...fingerprint_field_reasons(ev, "observed_freshness_fingerprint", "apply_worker_chain_invalid"));
+  }
+  if (state === "abandoned") {
+    const taskId = typeof ev.task_id === "string" ? ev.task_id : undefined;
+    const chainId = typeof ev.apply_worker_chain_id === "string" ? ev.apply_worker_chain_id : undefined;
+    if ("restored_implementation_fingerprint" in ev) {
+      problems.push(...fingerprint_field_reasons(ev, "restored_implementation_fingerprint", "apply_worker_chain_invalid"));
+    }
+    if (!("restored_implementation_fingerprint" in ev) && !("serial_takeover_baseline_ref" in ev)) {
+      problems.push(reason("apply_worker_chain_invalid", `${ev._path}: abandoned apply_worker_chain requires restored_implementation_fingerprint or serial_takeover_baseline_ref`));
+    }
+    if ("serial_takeover_baseline_ref" in ev) {
+      const baselineProblems = pinned_artifact_ref_item_reasons(
+        ev.serial_takeover_baseline_ref,
+        "serial_takeover_baseline_ref",
+        changeRoot,
+        { kind: "status_report", role: "verifier", task_id: taskId, chain_id: chainId },
+      );
+      problems.push(...baselineProblems);
+      if (baselineProblems.length > 0) problems.push(reason("apply_worker_chain_invalid", `${ev._path}: abandoned apply_worker_chain serial_takeover_baseline_ref must be a pinned same-chain status_report`));
+      problems.push(...string_list_field_reasons(ev, "successor_green_evidence_refs", "apply_worker_chain_invalid"));
     }
   }
   return problems;
@@ -400,6 +566,7 @@ export function validate_evidence_schema(ev: JsonMap, change: string, changeRoot
   }
   if (ev.kind === "human_confirmation") problems.push(...human_confirmation_reasons(ev));
   if (ev.kind === "test_run") problems.push(...test_run_reasons(ev, changeRoot));
+  if (ev.kind === "apply_worker_chain") problems.push(...apply_worker_chain_reasons(ev, changeRoot));
   // DISC Phase 1: disclosure evidence kinds and reviewer findings[] are schema-checked fail-closed.
   if (ev.kind === "main_review_digest") problems.push(...review_digest_schema_reasons(ev));
   if (ev.kind === "user_review_decision") problems.push(...user_decision_schema_reasons(ev));

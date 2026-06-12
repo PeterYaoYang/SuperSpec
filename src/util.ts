@@ -104,6 +104,7 @@ export const EVIDENCE_KINDS = new Set([
   "test_run",
   "alternative_verification",
   "manual_verification",
+  "apply_worker_chain",
   "task_reopen",
   "task_reopen_resolved",
   "human_confirmation",
@@ -202,6 +203,8 @@ export const REQUIRED_SUPERSPEC_WORKFLOW_SKILLS = [
 export const REQUIRED_SUPERSPEC_AGENT_ROLES = [
   "architect",
   "critic",
+  "executor",
+  "test-runner",
   "test-engineer",
   "code-reviewer",
   "verifier",

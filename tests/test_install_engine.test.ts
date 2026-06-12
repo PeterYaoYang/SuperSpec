@@ -44,6 +44,16 @@ const SKILL_TARGET = ".codex/skills/superspec-demo/SKILL.md";
 const USER_SKILL_TARGET = "skills/superspec-demo/SKILL.md";
 const WRAPPER_TARGET = "scripts/superspec_demo";
 
+function tomlTable(text: string, table: string): string {
+  const match = new RegExp(`(?:^|\\n)\\[${table}\\]\\n?([\\s\\S]*?)(?=\\n\\[[^\\]]+\\]|$)`, "u").exec(text);
+  return match?.[1] ?? "";
+}
+
+function assertTomlSetting(text: string, table: string, key: string, value: string): void {
+  const body = tomlTable(text, table);
+  assert.match(body, new RegExp(`^${key}\\s*=\\s*${value}$`, "mu"), `${table}.${key}`);
+}
+
 function installFakeNpmThatInstallsOpenSpec(binDir: string): void {
   mkdirSync(binDir, { recursive: true });
   const openspecPath = join(binDir, "openspec");
@@ -106,7 +116,7 @@ function installFakeOpenSpecVersion(binDir: string, version: string): void {
 test("real install map loads and every source file exists", () => {
   const { mappings, problems } = guard.load_install_map();
   assert.deepEqual(problems, []);
-  assert.equal(mappings.length, 15, `expected 5 skills, 5 prompts, and 5 agents, got ${mappings.length}`);
+  assert.equal(mappings.length, 19, `expected 5 skills, 7 prompts, and 7 agents, got ${mappings.length}`);
   const targets = mappings.map((item) => item.target);
   for (const name of guard.REQUIRED_SUPERSPEC_WORKFLOW_SKILLS) {
     assert.ok(targets.includes(`.codex/skills/${name}/SKILL.md`), name);
@@ -178,7 +188,17 @@ test("fresh install copies files, sets wrapper exec bit, and writes a schema-val
     assert.equal(manifest.superspecVersion, "9.9.9");
     assert.equal(manifest.files.length, 2);
     assert.ok(manifest.files.every((entry: any) => entry.managed === true && entry.preexisting === false));
+    assert.deepEqual(manifest.configPatch, {
+      path: ".codex/config.toml",
+      retainedOnUninstall: true,
+      managed: false,
+    });
     assert.ok(manifest.createdDirs.includes(".codex/skills/superspec-demo"), JSON.stringify(manifest.createdDirs));
+    const config = readFileSync(join(fx.repo, ".codex", "config.toml"), "utf8");
+    assertTomlSetting(config, "features", "multi_agent", "true");
+    assertTomlSetting(config, "features", "child_agents_md", "true");
+    assertTomlSetting(config, "agents", "max_threads", "12");
+    assertTomlSetting(config, "agents", "max_depth", "1");
     // Idempotent re-install: everything already matches, nothing is rewritten as "created".
     const again = guard.install_workflow(fx.repo, { packageRoot: fx.packageRoot });
     assert.deepEqual(again.problems, []);
@@ -197,9 +217,58 @@ test("user-scope install targets Codex home surfaces and skips project wrappers"
     assert.equal(existsSync(join(fx.repo, WRAPPER_TARGET)), false, "user scope must not install project wrapper scripts");
     assert.equal(existsSync(join(fx.repo, guard.USER_INSTALL_MANIFEST_REL)), true, "user manifest location");
     assert.equal(existsSync(join(fx.repo, guard.PROJECT_INSTALL_MANIFEST_REL)), false, "project manifest must not be written");
+    const config = readFileSync(join(fx.repo, "config.toml"), "utf8");
+    assertTomlSetting(config, "agents", "max_threads", "12");
     assert.equal(result.manifest!.installScope, "user");
     assert.equal(result.manifest!.files.length, 1);
     assert.equal((result.manifest!.files as any[])[0].path, USER_SKILL_TARGET);
+    assert.deepEqual(result.manifest!.configPatch, {
+      path: "config.toml",
+      retainedOnUninstall: true,
+      managed: false,
+    });
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("install merges Codex config without dropping unrelated user settings", () => {
+  const fx = createEngineFixture();
+  try {
+    writeText(
+      join(fx.repo, ".codex", "config.toml"),
+      [
+        'model = "gpt-5.5"',
+        "",
+        "[features]",
+        "hooks = true",
+        "multi_agent = false",
+        "",
+        "[agents]",
+        "max_threads = 6",
+        "",
+        "[model_providers.localproxy]",
+        'name = "localproxy"',
+        "",
+      ].join("\n"),
+    );
+    const result = guard.install_workflow(fx.repo, { packageRoot: fx.packageRoot });
+    assert.deepEqual(result.problems, []);
+    const config = readFileSync(join(fx.repo, ".codex", "config.toml"), "utf8");
+    assert.match(config, /^model = "gpt-5\.5"$/mu);
+    assert.match(config, /^hooks = true$/mu);
+    assert.match(config, /^name = "localproxy"$/mu);
+    assertTomlSetting(config, "features", "multi_agent", "false");
+    assertTomlSetting(config, "features", "child_agents_md", "true");
+    assertTomlSetting(config, "agents", "max_threads", "6");
+    assertTomlSetting(config, "agents", "max_depth", "1");
+    assert.ok(result.actions.some((item) => item.action === "configure .codex/config.toml" && item.status === "updated"));
+
+    const forced = guard.install_workflow(fx.repo, { packageRoot: fx.packageRoot, force: true });
+    assert.deepEqual(forced.problems, []);
+    const forcedConfig = readFileSync(join(fx.repo, ".codex", "config.toml"), "utf8");
+    assertTomlSetting(forcedConfig, "features", "multi_agent", "true");
+    assertTomlSetting(forcedConfig, "agents", "max_threads", "12");
   } finally {
     fx.cleanup();
   }

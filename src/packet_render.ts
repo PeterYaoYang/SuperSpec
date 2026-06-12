@@ -6,6 +6,7 @@ import type { PacketDispatchResult, ReviewPacket, WorkflowPacket, PinnedRef, Fin
 import {
   CLAIM_ADJUDICATION_DECISIONS,
   FINDING_ADJUDICATION_DECISIONS,
+  fingerprint_obj,
   GuardError,
   MAIN_ADJUDICATION_REQUIRED_FIELDS,
   MAIN_ADJUDICATION_DECISIONS,
@@ -16,9 +17,13 @@ import {
   VERIFY_EVIDENCE_REQUIRED_FIELDS,
   allow,
   block,
+  deepEqual,
   isObject,
+  reason,
   renderList,
   runtime,
+  safe_within,
+  sha256_text,
   type JsonMap,
   type Reason,
 } from "./util.ts";
@@ -47,11 +52,30 @@ import {
   check_task_complete,
   check_task_edit,
   check_task_reopen,
+  apply_worker_chain_lifecycle_reasons,
 } from "./gates.ts";
 import { final_verification_evidences, index_evidence, live_pass, live_user_confirmations } from "./evidence.ts";
 import { file_blob_sha, dirty_worktree_paths } from "./git.ts";
 import { preset_upgrade_reasons, preset_upgrade_required_from_context } from "./archive.ts";
 import { state_corrupt_reasons, state_stale_reasons } from "./state.ts";
+import { parse_tasks, resolve_test_contract_command, splitList, test_contract_invariant_refs_by_test } from "./tasks.ts";
+import {
+  APPLY_CODE_REVIEW_REPORT_REQUIRED_FIELDS,
+  APPLY_EXECUTOR_REPORT_REQUIRED_FIELDS,
+  APPLY_TEST_RUNNER_REPORT_REQUIRED_FIELDS,
+  APPLY_VERIFIER_REPORT_REQUIRED_FIELDS,
+  apply_worker_implementation_fingerprint,
+  apply_worker_executor_input_ref_digest,
+  apply_worker_protected_path_refs,
+  compute_apply_worker_freshness,
+  fingerprint_digest,
+  fingerprint_matches,
+  pinned_artifact_ref_reasons as shared_pinned_artifact_ref_reasons,
+  pre_edit_evidence_ref_reasons,
+  read_pinned_artifact_json,
+  worker_input_ref_digest,
+  worker_test_run_reasons,
+} from "./apply_worker_chain.ts";
 
 type PacketContext = {
   change: string;
@@ -604,6 +628,971 @@ function review_packet(ctx: PacketContext, gateRaw: string, role: string, round:
   return packet;
 }
 
+function decision_status(decision: JsonMap): "allowed" | "blocked" {
+  return decision.allowed ? "allowed" : "blocked";
+}
+
+function safe_decision_status(ctx: PacketContext, gate: string, taskId: string): "allowed" | "blocked" {
+  try {
+    return decision_status(evaluate_workflow_decision(ctx, gate, taskId));
+  } catch {
+    return "blocked";
+  }
+}
+
+function decision_reasons(decision: JsonMap): Reason[] {
+  return Array.isArray(decision.block_reasons) ? decision.block_reasons : [];
+}
+
+function apply_worker_report_policy(): JsonMap {
+  return {
+    max_inline_report_chars: 12000,
+    artifact_ref_policy: "raw transcripts, diffs, logs, and long outputs must be returned as refs",
+    truncation_policy: "fail_closed",
+  };
+}
+
+function without_audit_metadata(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(without_audit_metadata);
+  if (!isObject(value)) return value;
+  const out: JsonMap = {};
+  for (const [key, child] of Object.entries(value)) {
+    if (key === "computed_at") continue;
+    out[key] = without_audit_metadata(child);
+  }
+  return out;
+}
+
+function apply_worker_stop_conditions(kind: string): string[] {
+  if (kind === "apply_test") {
+    return [
+      "Stop after reporting the bounded test command result only.",
+      "Do not change implementation files.",
+      "Return raw logs as pinned artifact refs when output is long.",
+    ];
+  }
+  if (kind === "apply_executor") {
+    return [
+      "Stay inside declared_task_write_scope.",
+      "Stop after implementation report; do not mark tasks complete.",
+      "Do not write OpenSpec artifacts or .superspec evidence directly.",
+    ];
+  }
+  if (kind === "apply_code_review") {
+    return [
+      "Review only the task-local executor output and current diff.",
+      "Stop after implementation code-review report.",
+      "Do not write GREEN evidence or task completion state.",
+    ];
+  }
+  return [
+    "Verify the accepted worker chain and GREEN evidence only.",
+    "Stop after verifier report.",
+    "Do not mark tasks complete or enter change-level review.",
+  ];
+}
+
+function apply_worker_packet_fingerprint(packet: JsonMap): string {
+  const {
+    generated_at,
+    guard_fingerprint,
+    block_reasons,
+    apply_worker_chain_refs,
+    apply_worker_chain_active_refs,
+    ...stable
+  } = packet;
+  const blockerCodes = Array.isArray(block_reasons) ? block_reasons.map((item: Reason) => item.code).sort() : [];
+  return fingerprint_obj(without_audit_metadata({ ...stable, blocker_codes: blockerCodes }));
+}
+
+function finalize_apply_worker_packet(packet: JsonMap): JsonMap {
+  packet.guard_fingerprint = apply_worker_packet_fingerprint(packet);
+  return packet;
+}
+
+function apply_packet_common(ctx: PacketContext, packetKind: string, taskId: string, workerChainContext: "none" | "executor_worker", blockers: Reason[]): JsonMap {
+  const applyReady = evaluate_workflow_decision(ctx, "apply_ready");
+  const packet: JsonMap = {
+    packet_kind: packetKind,
+    change: ctx.change,
+    task_id: taskId,
+    generated_at: new Date().toISOString(),
+    worker_chain_context: workerChainContext,
+    worker_state: blockers.length === 0 ? "ready" : "blocked",
+    apply_ready: decision_status(applyReady),
+    openspec_context_file_refs: collect_change_refs(ctx.changeRoot, [
+      "proposal.md",
+      "design.md",
+      "tasks.md",
+      ".superspec/artifacts/business-invariants.md",
+      ".superspec/artifacts/test-contract.md",
+    ]),
+    openspec_dynamic_instructions: openspec_cli_surfaces_for_gate(ctx.change, "task_edit"),
+    task_refs: collect_change_refs(ctx.changeRoot, ["tasks.md"]),
+    test_contract_refs: collect_change_refs(ctx.changeRoot, [".superspec/artifacts/test-contract.md"]),
+    common_worker_report_policy: apply_worker_report_policy(),
+    stop_conditions: apply_worker_stop_conditions(packetKind),
+  };
+  if (blockers.length > 0) {
+    packet.blockers = unique_strings(blockers.map((item) => item.code));
+    packet.block_reasons = blockers;
+  }
+  return packet;
+}
+
+function task_lookup_blockers(ctx: PacketContext, taskId: string): { task: ReturnType<typeof parse_tasks>[string] | null; blockers: Reason[] } {
+  const task = parse_tasks(ctx.changeRoot)[taskId];
+  if (!task) return { task: null, blockers: [reason("unknown_task", `task ${taskId} not found`)] };
+  return { task, blockers: [] };
+}
+
+function active_apply_worker_chain_id(ctx: PacketContext, taskId: string): string | null {
+  const active = active_apply_worker_chain(ctx, taskId).active;
+  return active ? String(active.apply_worker_chain_id) : null;
+}
+
+function terminal_apply_worker_chain_valid(ctx: PacketContext, ev: JsonMap, taskId: string, chainId: string): boolean {
+  const state = String(ev.chain_state ?? "");
+  if (state === "closed") {
+    return shared_pinned_artifact_ref_reasons(ctx.changeRoot, ev.executor_report_ref, "executor_report_ref", { kind: "worker_report", role: "executor", taskId, chainId }).length === 0
+      && shared_pinned_artifact_ref_reasons(ctx.changeRoot, ev.task_code_review_report_ref, "task_code_review_report_ref", { kind: "worker_report", role: "code-reviewer", taskId, chainId }).length === 0
+      && shared_pinned_artifact_ref_reasons(ctx.changeRoot, ev.verifier_report_ref, "verifier_report_ref", { kind: "worker_report", role: "verifier", taskId, chainId }).length === 0;
+  }
+  if (state === "abandoned") {
+    if ("restored_implementation_fingerprint" in ev && fingerprint_digest(ev.restored_implementation_fingerprint)) return true;
+    if ("serial_takeover_baseline_ref" in ev) {
+      return shared_pinned_artifact_ref_reasons(ctx.changeRoot, ev.serial_takeover_baseline_ref, "serial_takeover_baseline_ref", { kind: "status_report", role: "verifier", taskId, chainId }).length === 0
+        && Array.isArray(ev.successor_green_evidence_refs)
+        && ev.successor_green_evidence_refs.length > 0
+        && ev.successor_green_evidence_refs.every((item: unknown) => typeof item === "string" && item.length > 0);
+    }
+  }
+  return false;
+}
+
+function apply_worker_chain_packet_state(ctx: PacketContext, taskId: string): { active: JsonMap | null; blockers: Reason[] } {
+  const chains = ctx.evidences
+    .filter((ev) => isObject(ev) && !ev._invalid && ev.status === "pass" && ev.gate === "task_complete" && ev.kind === "apply_worker_chain" && ev.task_id === taskId)
+    .filter((ev) => typeof ev.apply_worker_chain_id === "string" && ev.apply_worker_chain_id);
+  const blockers: Reason[] = [];
+  const activeByChain = new Map<string, JsonMap[]>();
+  const terminalsByChain = new Map<string, JsonMap[]>();
+  for (const ev of chains) {
+    const chainId = String(ev.apply_worker_chain_id ?? "");
+    if (String(ev.chain_state ?? "") === "active") {
+      const bucket = activeByChain.get(chainId) ?? [];
+      bucket.push(ev);
+      activeByChain.set(chainId, bucket);
+    }
+    if (String(ev.chain_state ?? "") === "closed" || String(ev.chain_state ?? "") === "abandoned") {
+      const bucket = terminalsByChain.get(chainId) ?? [];
+      bucket.push(ev);
+      terminalsByChain.set(chainId, bucket);
+    }
+  }
+  const validTerminalChainIds = new Set(chains
+    .filter((ev) => String(ev.chain_state ?? "") === "closed" || String(ev.chain_state ?? "") === "abandoned")
+    .filter((ev) => terminal_apply_worker_chain_valid(ctx, ev, taskId, String(ev.apply_worker_chain_id ?? "")))
+    .map((ev) => String(ev.apply_worker_chain_id ?? ""))
+    .filter(Boolean));
+  const duplicateActives = [...activeByChain.entries()]
+    .filter(([chainId]) => !validTerminalChainIds.has(chainId))
+    .map(([, items]) => items)
+    .filter((items) => items.length > 1)
+    .flatMap((items) => items.map((ev) => String(ev.evidence_id ?? ev.apply_worker_chain_id ?? "")))
+    .filter(Boolean)
+    .sort();
+  const activeCandidates = [...activeByChain.entries()]
+    .filter(([chainId]) => !validTerminalChainIds.has(chainId))
+    .map(([, items]) => items[0])
+    .filter(Boolean);
+  blockers.push(...apply_worker_chain_lifecycle_reasons(ctx.repoRoot, ctx.changeRoot, ctx.evidences, taskId).filter((item) => (
+    item.code === "apply_worker_chain_active_conflict"
+      || item.code === "apply_worker_chain_terminal_conflict"
+      || item.code === "apply_worker_chain_terminal_invalid"
+      || item.code === "apply_worker_chain_missing_active"
+  )));
+  const parallelActives = activeCandidates.length > 1
+    ? activeCandidates.map((ev) => String(ev.evidence_id ?? ev.apply_worker_chain_id ?? "")).filter(Boolean).sort()
+    : [];
+  const activeConflicts = [...new Set([...duplicateActives, ...parallelActives])].sort();
+  if (activeConflicts.length > 0) {
+    blockers.push(reason("apply_worker_chain_active_conflict", `task ${taskId} has conflicting active apply worker chain markers: ${renderList(activeConflicts)}`, activeConflicts));
+  }
+  const duplicateTerminals = [...terminalsByChain.values()]
+    .filter((items) => items.length > 1)
+    .flatMap((items) => items.map((ev) => String(ev.evidence_id ?? ev.apply_worker_chain_id ?? "")))
+    .filter(Boolean)
+    .sort();
+  if (duplicateTerminals.length > 0) {
+    blockers.push(reason("apply_worker_chain_terminal_conflict", `task ${taskId} has duplicate apply worker chain terminal markers: ${renderList(duplicateTerminals)}`, duplicateTerminals));
+  }
+  const invalidTerminals = chains
+    .filter((ev) => String(ev.chain_state ?? "") === "closed" || String(ev.chain_state ?? "") === "abandoned")
+    .filter((ev) => !terminal_apply_worker_chain_valid(ctx, ev, taskId, String(ev.apply_worker_chain_id ?? "")))
+    .map((ev) => String(ev.evidence_id ?? ev.apply_worker_chain_id ?? ""))
+    .filter(Boolean)
+    .sort();
+  if (invalidTerminals.length > 0) {
+    blockers.push(reason("apply_worker_chain_terminal_invalid", `task ${taskId} has invalid apply worker chain terminal markers: ${renderList(invalidTerminals)}`, invalidTerminals));
+  }
+  const active = activeCandidates[0] ?? null;
+  return { active: blockers.length === 0 ? active : null, blockers };
+}
+
+function active_apply_worker_chain(ctx: PacketContext, taskId: string): { active: JsonMap | null; blockers: Reason[] } {
+  return apply_worker_chain_packet_state(ctx, taskId);
+}
+
+function require_active_apply_worker_chain(ctx: PacketContext, taskId: string, blockers: Reason[]): string | null {
+  const state = active_apply_worker_chain(ctx, taskId);
+  blockers.push(...state.blockers);
+  const active = state.active;
+  const chainId = active ? String(active.apply_worker_chain_id) : null;
+  if (!chainId) {
+    blockers.push(reason("missing_apply_worker_chain_active", `task ${taskId} requires an active apply_worker_chain marker before downstream worker packet generation`));
+  } else {
+    blockers.push(...pre_edit_evidence_ref_reasons(ctx.evidences, active, taskId, "apply_worker_chain_active_invalid"));
+  }
+  return chainId;
+}
+
+function generated_apply_worker_chain_id(ctx: PacketContext, taskId: string, writeScope: string[] = []): string {
+  const digest = sha256_text(`${ctx.change}\n${taskId}\n${writeScope.join("\n")}`).slice("sha256:".length, "sha256:".length + 16);
+  const base = `CHAIN-${taskId}-${digest}`;
+  const used = new Set(ctx.evidences
+    .filter((ev) => isObject(ev) && ev.kind === "apply_worker_chain" && ev.task_id === taskId && typeof ev.apply_worker_chain_id === "string")
+    .map((ev) => String(ev.apply_worker_chain_id)));
+  if (!used.has(base)) return base;
+  for (let idx = 2; idx < 1000; idx += 1) {
+    const candidate = `${base}-R${idx}`;
+    if (!used.has(candidate)) return candidate;
+  }
+  return `${base}-R${sha256_text([...used].sort().join("\n")).slice("sha256:".length, "sha256:".length + 8)}`;
+}
+
+function implementation_fingerprint(ctx: PacketContext, declaredTaskWriteScope: string[] = []): JsonMap {
+  return apply_worker_implementation_fingerprint(ctx.repoRoot, ctx.changeRoot, [], { declaredTaskWriteScope });
+}
+
+function read_json_ref(ctx: PacketContext, ref: string): { value: JsonMap | null; blockers: Reason[] } {
+  const target = safe_within(ctx.changeRoot, ref);
+  if (target === null) return { value: null, blockers: [reason("ref_path_unsafe", `ref escapes change root: ${ref}`, [ref])] };
+  if (!existsSync(target) || !statSync(target).isFile()) return { value: null, blockers: [reason("ref_not_readable", `ref is not readable: ${ref}`, [ref])] };
+  if (statSync(target).size <= 0) return { value: null, blockers: [reason("ref_empty", `ref is empty: ${ref}`, [ref])] };
+  try {
+    const value = JSON.parse(readFileSync(target, "utf8"));
+    return isObject(value) ? { value, blockers: [] } : { value: null, blockers: [reason("ref_type_mismatch", `ref must contain a JSON object: ${ref}`, [ref])] };
+  } catch {
+    return { value: null, blockers: [reason("ref_type_mismatch", `ref must contain valid JSON: ${ref}`, [ref])] };
+  }
+}
+
+function validate_pinned_artifact_ref_object(
+  ctx: PacketContext,
+  item: unknown,
+  label: string,
+  expected: { role: string; taskId: string; chainId?: string | null; kind?: string },
+  code = "pinned_artifact_ref_invalid",
+): Reason[] {
+  return shared_pinned_artifact_ref_reasons(ctx.changeRoot, item, label, {
+    kind: expected.kind ?? "worker_report",
+    role: expected.role,
+    taskId: expected.taskId,
+    chainId: expected.chainId,
+  }, code);
+}
+
+function validate_pinned_artifact_ref(
+  ctx: PacketContext,
+  ref: string,
+  expected: { role: string; taskId: string; chainId?: string | null; kind?: string },
+): { ref: JsonMap | null; blockers: Reason[] } {
+  const loaded = read_json_ref(ctx, ref);
+  if (loaded.blockers.length > 0 || !loaded.value) return { ref: null, blockers: loaded.blockers };
+  const item = loaded.value;
+  const blockers = validate_pinned_artifact_ref_object(ctx, item, ref, expected);
+  return { ref: blockers.length === 0 ? item : null, blockers };
+}
+
+function validate_worker_report_refs(
+  ctx: PacketContext,
+  refs: string[],
+  expected: { role: string; taskId: string; chainId?: string | null; missingCode: string; missingMessage: string },
+): { refs: JsonMap[]; blockers: Reason[] } {
+  if (refs.length === 0) return { refs: [], blockers: [reason(expected.missingCode, expected.missingMessage)] };
+  const resolved: JsonMap[] = [];
+  const blockers: Reason[] = [];
+  for (const ref of refs) {
+    const result = validate_pinned_artifact_ref(ctx, ref, { role: expected.role, taskId: expected.taskId, chainId: expected.chainId });
+    blockers.push(...result.blockers);
+    if (result.ref) resolved.push(result.ref);
+  }
+  return { refs: resolved, blockers };
+}
+
+function worker_report_origin_blockers(refItem: unknown, expectedOrigin: unknown, label: string): Reason[] {
+  if (!isObject(refItem) || typeof expectedOrigin !== "string" || !expectedOrigin.startsWith("sha256:")) return [];
+  return refItem.origin_packet_fingerprint === expectedOrigin
+    ? []
+    : [reason("worker_report_origin_mismatch", `${label} origin_packet_fingerprint must match active apply_worker_chain executor_packet_fingerprint`, [])];
+}
+
+function worker_report_input_blockers(refItem: unknown, refs: unknown[], label: string): Reason[] {
+  if (!isObject(refItem)) return [];
+  const expected = worker_input_ref_digest(refs);
+  return refItem.input_ref_digest === expected
+    ? []
+    : [reason("worker_report_input_ref_mismatch", `${label} input_ref_digest must match upstream refs`, [])];
+}
+
+function worker_report_input_digest_blockers(refItem: unknown, expectedDigest: string, label: string): Reason[] {
+  if (!isObject(refItem)) return [];
+  return refItem.input_ref_digest === expectedDigest
+    ? []
+    : [reason("worker_report_input_ref_mismatch", `${label} input_ref_digest must match active executor packet inputs`, [])];
+}
+
+function code_review_executor_binding_blockers(ctx: PacketContext, codeReviewRef: JsonMap, activeChain: JsonMap | null | undefined, taskId: string, chainId: string): Reason[] {
+  const blockers: Reason[] = [];
+  const report = read_pinned_artifact_json(ctx.changeRoot, codeReviewRef);
+  if (!report) return [reason("worker_report_content_invalid", "task_code_review_report_ref content must be readable before spawning GREEN test-runner", [])];
+  const executorReportRef = report.executor_report_ref;
+  blockers.push(...validate_pinned_artifact_ref_object(ctx, executorReportRef, "task_code_review_report_ref.executor_report_ref", {
+    role: "executor",
+    taskId,
+    chainId,
+  }));
+  if (isObject(executorReportRef)) {
+    blockers.push(...worker_report_origin_blockers(executorReportRef, activeChain?.executor_packet_fingerprint, "task_code_review_report_ref.executor_report_ref"));
+    if (activeChain) {
+      blockers.push(...worker_report_input_digest_blockers(
+        executorReportRef,
+        apply_worker_executor_input_ref_digest(ctx.evidences, activeChain),
+        "task_code_review_report_ref.executor_report_ref",
+      ));
+    }
+    blockers.push(...worker_report_input_blockers(codeReviewRef, [executorReportRef], "task_code_review_report_ref"));
+  }
+  return blockers;
+}
+
+function validate_executor_worker_test_run_refs(ctx: PacketContext, ev: JsonMap, ref: string, taskId: string, chainId: string): Reason[] {
+  return worker_test_run_reasons(ctx.changeRoot, ev, taskId, chainId, "pinned_evidence_ref_invalid")
+    .map((item) => ({ ...item, refs: [ref] }));
+}
+
+function validate_test_run_evidence_refs(
+  ctx: PacketContext,
+  refs: string[],
+  expected: { taskId: string; gate: "task_edit" | "task_complete"; phase: "red" | "characterization" | "green"; semanticStatus: "expected_failure" | "expected_success"; chainId?: string | null; missingCode: string; missingMessage: string },
+): { refs: JsonMap[]; blockers: Reason[] } {
+  if (refs.length === 0) return { refs: [], blockers: [reason(expected.missingCode, expected.missingMessage)] };
+  const resolved: JsonMap[] = [];
+  const blockers: Reason[] = [];
+  for (const ref of refs) {
+    let evidenceId = ref;
+    const maybePath = safe_within(ctx.changeRoot, ref);
+    if (maybePath !== null && existsSync(maybePath) && statSync(maybePath).isFile()) {
+      const loaded = read_json_ref(ctx, ref);
+      blockers.push(...loaded.blockers);
+      if (loaded.value) {
+        if (loaded.value.kind !== "test_run") blockers.push(reason("pinned_evidence_ref_invalid", `${ref}: kind must be test_run`, [ref]));
+        if (normalize_gate(String(loaded.value.gate ?? "")) !== expected.gate) blockers.push(reason("pinned_evidence_ref_invalid", `${ref}: gate must be ${expected.gate}`, [ref]));
+        if (loaded.value.task_id !== expected.taskId) blockers.push(reason("pinned_evidence_ref_invalid", `${ref}: task_id must be ${expected.taskId}`, [ref]));
+        if (loaded.value.phase !== undefined && loaded.value.phase !== expected.phase) blockers.push(reason("pinned_evidence_ref_invalid", `${ref}: phase must be ${expected.phase}`, [ref]));
+        if (loaded.value.semantic_status !== expected.semanticStatus) blockers.push(reason("pinned_evidence_ref_invalid", `${ref}: semantic_status must be ${expected.semanticStatus}`, [ref]));
+        if (expected.chainId && loaded.value.apply_worker_chain_id !== expected.chainId) blockers.push(reason("pinned_evidence_ref_invalid", `${ref}: apply_worker_chain_id mismatch`, [ref]));
+        if (typeof loaded.value.evidence_id === "string" && loaded.value.evidence_id) evidenceId = loaded.value.evidence_id;
+        if (expected.chainId) blockers.push(...validate_executor_worker_test_run_refs(ctx, loaded.value, ref, expected.taskId, expected.chainId));
+      }
+    }
+    const ev = live_pass(ctx.evidences, { kind: "test_run", task_id: expected.taskId })
+      .find((item) => String(item.evidence_id ?? "") === evidenceId);
+    if (!ev) {
+      blockers.push(reason("pinned_evidence_ref_invalid", `test_run evidence ref is not live/pass for ${expected.taskId}: ${ref}`, [ref]));
+      continue;
+    }
+    if (normalize_gate(String(ev.gate ?? "")) !== expected.gate) blockers.push(reason("pinned_evidence_ref_invalid", `${ref}: gate must be ${expected.gate}`, [ref]));
+    if (ev.semantic_status !== expected.semanticStatus) blockers.push(reason("pinned_evidence_ref_invalid", `${ref}: semantic_status must be ${expected.semanticStatus}`, [ref]));
+    if (ev.phase !== undefined && ev.phase !== expected.phase) blockers.push(reason("pinned_evidence_ref_invalid", `${ref}: phase must be ${expected.phase}`, [ref]));
+    if (expected.chainId) {
+      if (ev.apply_execution_chain !== "executor_worker") blockers.push(reason("pinned_evidence_ref_invalid", `${ref}: apply_execution_chain must be executor_worker`, [ref]));
+      if (ev.apply_worker_chain_id !== expected.chainId) blockers.push(reason("pinned_evidence_ref_invalid", `${ref}: apply_worker_chain_id mismatch`, [ref]));
+      blockers.push(...validate_executor_worker_test_run_refs(ctx, ev, ref, expected.taskId, expected.chainId));
+    }
+    resolved.push(ev);
+  }
+  return { refs: resolved, blockers };
+}
+
+function validate_active_apply_worker_chain_refs(
+  ctx: PacketContext,
+  refs: string[],
+  taskId: string,
+  expectedChainId: string,
+  expectedPacketFingerprint: string,
+  expectedSourceImplementationFingerprint: unknown,
+  expectedDeclaredTaskWriteScope: string[],
+  expectedPreEditEvidenceRefs: string[],
+): { refs: JsonMap[]; blockers: Reason[] } {
+  if (refs.length === 0) {
+    return {
+      refs: [],
+      blockers: [reason(
+        "missing_apply_worker_chain_ref",
+        "apply-executor-packet --format prompt requires --apply-worker-chain-ref pointing at the recorded active apply_worker_chain evidence",
+      )],
+    };
+  }
+  const resolved: JsonMap[] = [];
+  const blockers: Reason[] = [];
+  const hasTerminal = ctx.evidences.some((ev) => isObject(ev)
+    && !ev._invalid
+    && ev.status === "pass"
+    && ev.gate === "task_complete"
+    && ev.kind === "apply_worker_chain"
+    && ev.task_id === taskId
+    && ev.apply_worker_chain_id === expectedChainId
+    && (ev.chain_state === "closed" || ev.chain_state === "abandoned"));
+  if (hasTerminal) {
+    blockers.push(reason("apply_worker_chain_ref_invalid", `apply_worker_chain ${expectedChainId} already has a terminal marker and cannot authorize executor spawn`, [expectedChainId]));
+  }
+  const stringList = (value: unknown): string[] => Array.isArray(value)
+    ? value.map(String).filter(Boolean).sort()
+    : [];
+  const activeListBindingBlockers = (value: JsonMap, ref: string): Reason[] => {
+    const fieldBlockers: Reason[] = [];
+    if (!deepEqual(stringList(value.declared_task_write_scope), stringList(expectedDeclaredTaskWriteScope))) {
+      fieldBlockers.push(reason("apply_worker_chain_ref_invalid", `${ref}: declared_task_write_scope mismatch`, [ref]));
+    }
+    if (!deepEqual(stringList(value.pre_edit_evidence_refs), stringList(expectedPreEditEvidenceRefs))) {
+      fieldBlockers.push(reason("apply_worker_chain_ref_invalid", `${ref}: pre_edit_evidence_refs mismatch`, [ref]));
+    }
+    return fieldBlockers;
+  };
+  for (const ref of refs) {
+    let evidenceId = ref;
+    const maybePath = safe_within(ctx.changeRoot, ref);
+    if (maybePath !== null && existsSync(maybePath) && statSync(maybePath).isFile()) {
+      const loaded = read_json_ref(ctx, ref);
+      blockers.push(...loaded.blockers);
+      if (loaded.value) {
+        if (loaded.value.kind !== "apply_worker_chain") blockers.push(reason("apply_worker_chain_ref_invalid", `${ref}: kind must be apply_worker_chain`, [ref]));
+        if (normalize_gate(String(loaded.value.gate ?? "")) !== "task_complete") blockers.push(reason("apply_worker_chain_ref_invalid", `${ref}: gate must be task_complete`, [ref]));
+        if (loaded.value.task_id !== taskId) blockers.push(reason("apply_worker_chain_ref_invalid", `${ref}: task_id must be ${taskId}`, [ref]));
+        if (loaded.value.chain_state !== "active") blockers.push(reason("apply_worker_chain_ref_invalid", `${ref}: chain_state must be active`, [ref]));
+        if (loaded.value.apply_worker_chain_id !== expectedChainId) blockers.push(reason("apply_worker_chain_ref_invalid", `${ref}: apply_worker_chain_id mismatch`, [ref]));
+        if (loaded.value.executor_packet_fingerprint !== expectedPacketFingerprint) blockers.push(reason("apply_worker_chain_ref_invalid", `${ref}: executor_packet_fingerprint mismatch`, [ref]));
+        if (!fingerprint_matches(loaded.value.source_implementation_fingerprint, expectedSourceImplementationFingerprint)) {
+          blockers.push(reason("apply_worker_chain_ref_invalid", `${ref}: source_implementation_fingerprint mismatch`, [ref]));
+        }
+        blockers.push(...activeListBindingBlockers(loaded.value, ref));
+        if (typeof loaded.value.evidence_id === "string" && loaded.value.evidence_id) evidenceId = loaded.value.evidence_id;
+      }
+    }
+    const ev = live_pass(ctx.evidences, { gate: "task_complete", kind: "apply_worker_chain", task_id: taskId })
+      .find((item) => String(item.evidence_id ?? "") === evidenceId);
+    if (!ev) {
+      blockers.push(reason("apply_worker_chain_ref_invalid", `apply_worker_chain ref is not live/pass for ${taskId}: ${ref}`, [ref]));
+      continue;
+    }
+    if (ev.chain_state !== "active") blockers.push(reason("apply_worker_chain_ref_invalid", `${ref}: chain_state must be active`, [ref]));
+    if (ev.apply_worker_chain_id !== expectedChainId) blockers.push(reason("apply_worker_chain_ref_invalid", `${ref}: apply_worker_chain_id mismatch`, [ref]));
+    if (ev.executor_packet_fingerprint !== expectedPacketFingerprint) blockers.push(reason("apply_worker_chain_ref_invalid", `${ref}: executor_packet_fingerprint mismatch`, [ref]));
+    if (!fingerprint_matches(ev.source_implementation_fingerprint, expectedSourceImplementationFingerprint)) {
+      blockers.push(reason("apply_worker_chain_ref_invalid", `${ref}: source_implementation_fingerprint mismatch`, [ref]));
+    }
+    blockers.push(...activeListBindingBlockers(ev, ref));
+    resolved.push(ev);
+  }
+  return { refs: resolved, blockers };
+}
+
+function pre_edit_refs_bound_to_active_chain(ctx: PacketContext, active: JsonMap | null, refs: JsonMap[], label: string, taskId: string): Reason[] {
+  const allowed = new Set(Array.isArray(active?.pre_edit_evidence_refs) ? active.pre_edit_evidence_refs.map(String) : []);
+  if (allowed.size === 0) return [reason("pinned_evidence_ref_invalid", `task ${taskId} active apply_worker_chain has no pre_edit_evidence_refs`)];
+  const blockers: Reason[] = [];
+  for (const ev of refs) {
+    const evidenceId = String(ev.evidence_id ?? "");
+    if (!allowed.has(evidenceId)) blockers.push(reason("pinned_evidence_ref_invalid", `${label} evidence ref is not part of active apply_worker_chain pre_edit_evidence_refs: ${evidenceId}`, [evidenceId]));
+  }
+  blockers.push(...pre_edit_evidence_ref_reasons(ctx.evidences, active, taskId, "pinned_evidence_ref_invalid"));
+  return blockers;
+}
+
+function write_scope_blockers(taskId: string, writeScope: string[]): Reason[] {
+  const blockers: Reason[] = [];
+  if (writeScope.length === 0) {
+    blockers.push(reason("missing_write_scope", `task ${taskId} requires declared write_scope before executor worker handoff`));
+    return blockers;
+  }
+  const forbidden = writeScope.filter((item) =>
+    item === "."
+    || item === ""
+    || item.startsWith("/")
+    || item.includes("..")
+    || item === "proposal.md"
+    || item === "design.md"
+    || item === "tasks.md"
+    || item.startsWith("specs/")
+    || item.startsWith(".superspec/")
+  );
+  if (forbidden.length > 0) {
+    blockers.push(reason("unsafe_write_scope", `task ${taskId} has unsafe executor write_scope entries: ${renderList(forbidden)}`, forbidden));
+  }
+  return blockers;
+}
+
+function pre_edit_evidence_refs(ctx: PacketContext, taskId: string): string[] {
+  return live_pass(ctx.evidences, { gate: "task_edit", kind: "test_run", task_id: taskId })
+    .filter((ev) => ev.semantic_status === "expected_failure" || ev.semantic_status === "expected_success")
+    .map((ev) => String(ev.evidence_id ?? ""))
+    .filter(Boolean)
+    .sort();
+}
+
+function apply_task_context_fields(ctx: PacketContext, taskId: string, task: ReturnType<typeof parse_tasks>[string] | null, writeScope: string[], expectedGuardRefs: unknown[] = []): JsonMap {
+  return {
+    task_content_ref: change_pinned_ref(ctx.changeRoot, "tasks.md"),
+    task_acceptance_refs: task ? splitList(task.attrs.requirement_refs ?? "") : [],
+    task_invariant_refs: task ? splitList(task.attrs.invariant_refs ?? "") : [],
+    task_test_refs: task ? splitList(task.attrs.test_refs ?? "") : [],
+    business_invariant_refs: collect_change_refs(ctx.changeRoot, [".superspec/artifacts/business-invariants.md"]),
+    test_contract_refs: collect_change_refs(ctx.changeRoot, [".superspec/artifacts/test-contract.md"]),
+    pre_edit_evidence_refs: pre_edit_evidence_refs(ctx, taskId),
+    current_worktree_refs: dirty_repo_refs(ctx, `apply worker current worktree refs for ${taskId}`),
+    protected_path_refs: apply_worker_protected_path_refs(ctx.repoRoot, ctx.changeRoot, expectedGuardRefs),
+    scope_diff_review_policy: {
+      declared_task_write_scope: writeScope,
+      forbidden_paths: ["proposal.md", "design.md", "tasks.md", "specs/", ".superspec/"],
+      require_scope_verdict: true,
+      mismatch_behavior: "fail_closed",
+    },
+  };
+}
+
+function apply_test_packet(ctx: PacketContext, args: ParsedArgs): JsonMap {
+  const taskId = args.task_id ?? "";
+  const testId = args.test_id ?? "";
+  const phase = args.phase ?? "red";
+  const blockers: Reason[] = [];
+  const applyReady = evaluate_workflow_decision(ctx, "apply_ready");
+  if (!applyReady.allowed) blockers.push(...decision_reasons(applyReady));
+  const { task, blockers: taskBlockers } = task_lookup_blockers(ctx, taskId);
+  blockers.push(...taskBlockers);
+  const declaredTests = new Set(task ? splitList(task.attrs.test_refs ?? "") : []);
+  if (task && !declaredTests.has(testId)) {
+    blockers.push(reason("test_not_declared_for_task", `test ${testId} is not declared in task ${taskId} test_refs`, [testId]));
+  }
+  const [config, configProblems] = load_config(ctx.repoRoot, ctx.changeRoot);
+  blockers.push(...configProblems);
+  const command = resolve_test_contract_command(ctx.changeRoot, testId, config);
+  blockers.push(...command.blockers);
+  const invariantRefs = [...(test_contract_invariant_refs_by_test(ctx.changeRoot).get(testId) ?? new Set<string>())].sort();
+  if (invariantRefs.length === 0) blockers.push(reason("missing_invariant_refs", `test ${testId} requires invariant refs in test contract`, [testId]));
+  if (phase === "green") {
+    const taskEdit = evaluate_workflow_decision(ctx, "task_edit", taskId);
+    if (!taskEdit.allowed) blockers.push(...decision_reasons(taskEdit));
+    if ((args.task_code_review_report_refs ?? []).length === 0) {
+      blockers.push(reason("missing_task_code_review_report_ref", "apply-test-packet --phase green requires --task-code-review-report-ref before spawning test-runner"));
+    }
+  } else if ((args.task_code_review_report_refs ?? []).length > 0) {
+    blockers.push(reason("unexpected_task_code_review_report_ref", "apply-test-packet --phase red/characterization must not consume --task-code-review-report-ref"));
+  }
+  const workerChainContext = phase === "green" ? "executor_worker" : "none";
+  const packet = apply_packet_common(ctx, "apply_test", taskId, workerChainContext, blockers);
+  packet.test_id = testId;
+  packet.phase = phase;
+  packet.expected_semantic_status = phase === "red" ? "expected_failure" : "expected_success";
+  packet.test_runner_report_required_fields = [...APPLY_TEST_RUNNER_REPORT_REQUIRED_FIELDS];
+  packet.required_invariant_refs = invariantRefs;
+  packet.allowed_test_command = command.command;
+  packet.test_command_source = command.source;
+  packet.expected_worktree_side_effects = [];
+  if (command.command_ref) packet.test_command_ref = command.command_ref;
+  if (command.expected_failure_signature) packet.expected_failure_signature = command.expected_failure_signature;
+  if (command.expected_failure_classifier) packet.expected_failure_classifier = command.expected_failure_classifier;
+  if (workerChainContext === "executor_worker") {
+    const chainId = require_active_apply_worker_chain(ctx, taskId, blockers);
+    if (chainId) {
+      const reviewRefs = validate_worker_report_refs(ctx, args.task_code_review_report_refs ?? [], {
+        role: "code-reviewer",
+        taskId,
+        chainId,
+        missingCode: "missing_task_code_review_report_ref",
+        missingMessage: "apply-test-packet --phase green requires --task-code-review-report-ref before spawning test-runner",
+      });
+      blockers.push(...reviewRefs.blockers);
+      packet.apply_worker_chain_id = chainId;
+      packet.task_code_review_report_pinned_refs = reviewRefs.refs;
+      packet.task_code_review_report_refs = args.task_code_review_report_refs ?? [];
+      const activeChain = active_apply_worker_chain(ctx, taskId).active;
+      if (reviewRefs.refs[0]) {
+        const reviewReport = read_pinned_artifact_json(ctx.changeRoot, reviewRefs.refs[0]);
+        if (isObject(reviewReport?.executor_report_ref)) packet.executor_report_pinned_refs = [reviewReport.executor_report_ref];
+        blockers.push(...code_review_executor_binding_blockers(ctx, reviewRefs.refs[0], activeChain, taskId, chainId));
+      }
+      const activeScope = Array.isArray(activeChain?.declared_task_write_scope) ? activeChain.declared_task_write_scope.map(String).filter(Boolean) : [];
+      const currentImplementation = apply_worker_implementation_fingerprint(ctx.repoRoot, ctx.changeRoot, reviewRefs.refs, { declaredTaskWriteScope: activeScope });
+      packet.post_code_review_worktree_fingerprint = currentImplementation;
+      const observedDigest = fingerprint_digest(reviewRefs.refs[0]?.observed_implementation_fingerprint);
+      if (!observedDigest) {
+        blockers.push(reason("post_code_review_worktree_fingerprint_missing", "apply-test-packet --phase green requires code-review report observed_implementation_fingerprint"));
+      } else if (observedDigest !== currentImplementation.fingerprint_digest) {
+        blockers.push(reason("post_code_review_worktree_fingerprint_mismatch", "apply-test-packet --phase green requires code-review report observed implementation fingerprint to match current worktree"));
+      }
+    } else if ((args.task_code_review_report_refs ?? []).length === 0) {
+      blockers.push(reason("missing_task_code_review_report_ref", "apply-test-packet --phase green requires --task-code-review-report-ref before spawning test-runner"));
+    }
+  }
+  packet.worker_state = blockers.length === 0 ? "ready" : "blocked";
+  if (blockers.length > 0) {
+    packet.blockers = unique_strings(blockers.map((item) => item.code));
+    packet.block_reasons = blockers;
+  }
+  return finalize_apply_worker_packet(packet);
+}
+
+function apply_executor_packet(ctx: PacketContext, args: ParsedArgs): JsonMap {
+  const taskId = args.task_id ?? "";
+  const blockers: Reason[] = [];
+  const applyReady = evaluate_workflow_decision(ctx, "apply_ready");
+  if (!applyReady.allowed) blockers.push(...decision_reasons(applyReady));
+  const taskEdit = evaluate_workflow_decision(ctx, "task_edit", taskId);
+  if (!taskEdit.allowed) blockers.push(...decision_reasons(taskEdit));
+  const { task, blockers: taskBlockers } = task_lookup_blockers(ctx, taskId);
+  blockers.push(...taskBlockers);
+  const writeScope = task ? splitList(task.attrs.write_scope ?? "") : [];
+  blockers.push(...write_scope_blockers(taskId, writeScope));
+  if (task && (task.attrs.tdd_required ?? "true").toLowerCase() === "false") {
+    blockers.push(reason("unsupported_executor_tdd_mode", `task ${taskId} has tdd_required:false and must stay on main-thread apply path`));
+  }
+  blockers.push(...apply_worker_chain_packet_state(ctx, taskId).blockers);
+  const packet = apply_packet_common(ctx, "apply_executor", taskId, "executor_worker", blockers);
+  const chainId = active_apply_worker_chain_id(ctx, taskId) ?? generated_apply_worker_chain_id(ctx, taskId, writeScope);
+  packet.worker_chain_context = "executor_worker";
+  packet.apply_worker_chain_id = chainId;
+  packet.declared_task_write_scope = writeScope;
+  packet.task_edit = decision_status(taskEdit);
+  packet.task_complete = safe_decision_status(ctx, "task_complete", taskId);
+  Object.assign(packet, apply_task_context_fields(ctx, taskId, task, writeScope));
+  packet.required_test_refs = task ? splitList(task.attrs.test_refs ?? "") : [];
+  packet.executor_report_required_fields = [...APPLY_EXECUTOR_REPORT_REQUIRED_FIELDS];
+  packet.executor_runtime_policy = {
+    initial_wait_seconds: 60,
+    max_running_seconds: 7200,
+    status_request_after_seconds: 300,
+    max_silent_seconds: 900,
+    stale_after_seconds: 1800,
+  };
+  packet.chain_activation_template = {
+    kind: "apply_worker_chain",
+    gate: "task_complete",
+    status: "pass",
+    task_id: taskId,
+    apply_worker_chain_id: chainId,
+    chain_state: "active",
+    executor_packet_fingerprint: "",
+    source_implementation_fingerprint: implementation_fingerprint(ctx, writeScope),
+    declared_task_write_scope: writeScope,
+    pre_edit_evidence_refs: pre_edit_evidence_refs(ctx, taskId),
+  };
+  if (args.packet_format === "prompt") {
+    const expectedPacketFingerprint = apply_worker_packet_fingerprint(packet);
+    const activeRefs = validate_active_apply_worker_chain_refs(
+      ctx,
+      args.apply_worker_chain_refs ?? [],
+      taskId,
+      chainId,
+      expectedPacketFingerprint,
+      packet.chain_activation_template.source_implementation_fingerprint,
+      packet.chain_activation_template.declared_task_write_scope,
+      packet.chain_activation_template.pre_edit_evidence_refs,
+    );
+    blockers.push(...activeRefs.blockers);
+    packet.apply_worker_chain_refs = args.apply_worker_chain_refs ?? [];
+    packet.apply_worker_chain_active_refs = activeRefs.refs;
+  }
+  packet.worker_state = blockers.length === 0 ? "ready" : "blocked";
+  if (blockers.length > 0) {
+    packet.blockers = unique_strings(blockers.map((item) => item.code));
+    packet.block_reasons = blockers;
+  }
+  finalize_apply_worker_packet(packet);
+  packet.chain_activation_template.executor_packet_fingerprint = packet.guard_fingerprint;
+  return packet;
+}
+
+function apply_code_review_packet(ctx: PacketContext, args: ParsedArgs): JsonMap {
+  const taskId = args.task_id ?? "";
+  const blockers: Reason[] = [];
+  const applyReady = evaluate_workflow_decision(ctx, "apply_ready");
+  if (!applyReady.allowed) blockers.push(...decision_reasons(applyReady));
+  const taskEdit = evaluate_workflow_decision(ctx, "task_edit", taskId);
+  if (!taskEdit.allowed) blockers.push(...decision_reasons(taskEdit));
+  const { task, blockers: taskBlockers } = task_lookup_blockers(ctx, taskId);
+  blockers.push(...taskBlockers);
+  const writeScope = task ? splitList(task.attrs.write_scope ?? "") : [];
+  blockers.push(...write_scope_blockers(taskId, writeScope));
+  const chainId = require_active_apply_worker_chain(ctx, taskId, blockers);
+  const activeChain = active_apply_worker_chain(ctx, taskId).active;
+  if (chainId) {
+    const executorRefs = validate_worker_report_refs(ctx, args.executor_report_refs ?? [], {
+      role: "executor",
+      taskId,
+      chainId,
+      missingCode: "missing_executor_report_ref",
+      missingMessage: "apply-code-review-packet requires --executor-report-ref",
+    });
+    blockers.push(...executorRefs.blockers);
+    if (executorRefs.refs[0]) {
+      blockers.push(...worker_report_origin_blockers(executorRefs.refs[0], activeChain?.executor_packet_fingerprint, "executor_report_ref"));
+      if (activeChain) {
+        blockers.push(...worker_report_input_digest_blockers(executorRefs.refs[0], apply_worker_executor_input_ref_digest(ctx.evidences, activeChain), "executor_report_ref"));
+      }
+    }
+    const packet = apply_packet_common(ctx, "apply_code_review", taskId, "executor_worker", blockers);
+    packet.apply_worker_chain_id = chainId;
+    packet.declared_task_write_scope = writeScope;
+    packet.executor_report_pinned_refs = executorRefs.refs;
+    packet.executor_report_refs = args.executor_report_refs ?? [];
+    packet.expected_executor_origin_packet_fingerprint = activeChain?.executor_packet_fingerprint;
+    if (activeChain) packet.expected_executor_input_ref_digest = apply_worker_executor_input_ref_digest(ctx.evidences, activeChain);
+    packet.executor_report_required_fields = [...APPLY_EXECUTOR_REPORT_REQUIRED_FIELDS];
+    packet.code_review_report_required_fields = [...APPLY_CODE_REVIEW_REPORT_REQUIRED_FIELDS];
+    packet.task_edit = decision_status(taskEdit);
+    Object.assign(packet, apply_task_context_fields(ctx, taskId, task, writeScope, executorRefs.refs));
+    packet.code_review_checks = [
+      "executor_report_matches_current_diff",
+      "changed_files_within_declared_task_write_scope",
+      "protected_paths_unchanged",
+      "test_and_invariant_mapping_supported",
+      "suggest_green_test_ids",
+    ];
+    packet.worker_state = blockers.length === 0 ? "ready" : "blocked";
+    if (blockers.length > 0) {
+      packet.blockers = unique_strings(blockers.map((item) => item.code));
+      packet.block_reasons = blockers;
+    }
+    return finalize_apply_worker_packet(packet);
+  }
+  const packet = apply_packet_common(ctx, "apply_code_review", taskId, "executor_worker", blockers);
+  packet.declared_task_write_scope = writeScope;
+  packet.executor_report_refs = args.executor_report_refs ?? [];
+  packet.executor_report_required_fields = [...APPLY_EXECUTOR_REPORT_REQUIRED_FIELDS];
+  packet.code_review_report_required_fields = [...APPLY_CODE_REVIEW_REPORT_REQUIRED_FIELDS];
+  packet.task_edit = decision_status(taskEdit);
+  Object.assign(packet, apply_task_context_fields(ctx, taskId, task, writeScope));
+  return finalize_apply_worker_packet(packet);
+}
+
+function apply_verify_packet(ctx: PacketContext, args: ParsedArgs): JsonMap {
+  const taskId = args.task_id ?? "";
+  const blockers: Reason[] = [];
+  const applyReady = evaluate_workflow_decision(ctx, "apply_ready");
+  if (!applyReady.allowed) blockers.push(...decision_reasons(applyReady));
+  const taskEdit = evaluate_workflow_decision(ctx, "task_edit", taskId);
+  if (!taskEdit.allowed) blockers.push(...decision_reasons(taskEdit));
+  const { task, blockers: taskBlockers } = task_lookup_blockers(ctx, taskId);
+  blockers.push(...taskBlockers);
+  const writeScope = task ? splitList(task.attrs.write_scope ?? "") : [];
+  blockers.push(...write_scope_blockers(taskId, writeScope));
+  const chainId = require_active_apply_worker_chain(ctx, taskId, blockers);
+  const activeChain = active_apply_worker_chain(ctx, taskId).active;
+  const packet = apply_packet_common(ctx, "apply_verify", taskId, "executor_worker", blockers);
+  if (chainId) {
+    const executorRefs = validate_worker_report_refs(ctx, args.executor_report_refs ?? [], {
+      role: "executor",
+      taskId,
+      chainId,
+      missingCode: "missing_executor_report_ref",
+      missingMessage: "apply-verify-packet requires --executor-report-ref",
+    });
+    const codeReviewRefs = validate_worker_report_refs(ctx, args.task_code_review_report_refs ?? [], {
+      role: "code-reviewer",
+      taskId,
+      chainId,
+      missingCode: "missing_task_code_review_report_ref",
+      missingMessage: "apply-verify-packet requires --task-code-review-report-ref",
+    });
+    const greenRefs = validate_test_run_evidence_refs(ctx, args.green_test_run_evidence_refs ?? [], {
+      taskId,
+      gate: "task_complete",
+      phase: "green",
+      semanticStatus: "expected_success",
+      chainId,
+      missingCode: "missing_green_test_run_evidence_ref",
+      missingMessage: "apply-verify-packet requires --green-test-run-evidence-ref",
+    });
+    const redRefs = validate_test_run_evidence_refs(ctx, args.red_test_run_evidence_refs ?? [], {
+      taskId,
+      gate: "task_edit",
+      phase: "red",
+      semanticStatus: "expected_failure",
+      chainId: null,
+      missingCode: "missing_red_test_run_evidence_ref",
+      missingMessage: "apply-verify-packet requires --red-test-run-evidence-ref",
+    });
+    const characterizationRefs = validate_test_run_evidence_refs(ctx, args.characterization_test_run_evidence_refs ?? [], {
+      taskId,
+      gate: "task_edit",
+      phase: "characterization",
+      semanticStatus: "expected_success",
+      chainId: null,
+      missingCode: "missing_characterization_test_run_evidence_ref",
+      missingMessage: "apply-verify-packet requires --characterization-test-run-evidence-ref",
+    });
+    blockers.push(...executorRefs.blockers, ...codeReviewRefs.blockers, ...greenRefs.blockers);
+    if (executorRefs.refs[0]) {
+      blockers.push(...worker_report_origin_blockers(executorRefs.refs[0], activeChain?.executor_packet_fingerprint, "executor_report_ref"));
+      if (activeChain) {
+        blockers.push(...worker_report_input_digest_blockers(executorRefs.refs[0], apply_worker_executor_input_ref_digest(ctx.evidences, activeChain), "executor_report_ref"));
+      }
+    }
+    if (executorRefs.refs[0] && codeReviewRefs.refs[0]) {
+      blockers.push(...worker_report_input_blockers(codeReviewRefs.refs[0], [executorRefs.refs[0]], "task_code_review_report_ref"));
+    }
+    if ((args.red_test_run_evidence_refs ?? []).length === 0 && (args.characterization_test_run_evidence_refs ?? []).length === 0) {
+      blockers.push(reason("missing_pre_edit_test_run_evidence_ref", "apply-verify-packet requires --red-test-run-evidence-ref or --characterization-test-run-evidence-ref"));
+    } else {
+      if ((args.red_test_run_evidence_refs ?? []).length > 0) blockers.push(...redRefs.blockers, ...pre_edit_refs_bound_to_active_chain(ctx, activeChain, redRefs.refs, "red", taskId));
+      if ((args.characterization_test_run_evidence_refs ?? []).length > 0) blockers.push(...characterizationRefs.blockers, ...pre_edit_refs_bound_to_active_chain(ctx, activeChain, characterizationRefs.refs, "characterization", taskId));
+    }
+    packet.apply_worker_chain_id = chainId;
+    packet.executor_report_pinned_refs = executorRefs.refs;
+    packet.task_code_review_report_pinned_refs = codeReviewRefs.refs;
+    packet.green_test_run_evidence_pinned_refs = greenRefs.refs;
+    packet.red_test_run_evidence_pinned_refs = redRefs.refs;
+    packet.characterization_test_run_evidence_pinned_refs = characterizationRefs.refs;
+    if (executorRefs.refs[0]) packet.expected_executor_origin_packet_fingerprint = activeChain?.executor_packet_fingerprint;
+    if (executorRefs.refs[0] && activeChain) packet.expected_executor_input_ref_digest = apply_worker_executor_input_ref_digest(ctx.evidences, activeChain);
+    if (executorRefs.refs[0] && codeReviewRefs.refs[0]) {
+      packet.expected_code_review_input_ref_digest = worker_input_ref_digest([executorRefs.refs[0]]);
+    }
+    if (executorRefs.refs[0] && codeReviewRefs.refs[0] && greenRefs.refs[0]) {
+      const canonicalGreenRefs = [...greenRefs.refs].sort((a: JsonMap, b: JsonMap) => String(a.evidence_id ?? "").localeCompare(String(b.evidence_id ?? "")));
+      const expectedFreshness = compute_apply_worker_freshness(ctx.repoRoot, ctx.changeRoot, ctx.evidences, taskId, chainId, {
+        executor_report_ref: executorRefs.refs[0],
+        task_code_review_report_ref: codeReviewRefs.refs[0],
+        green_test_run_evidence_ref: String(canonicalGreenRefs[0].evidence_id ?? ""),
+        green_test_run_evidence_refs: canonicalGreenRefs.map((ev) => String(ev.evidence_id ?? "")).filter(Boolean),
+      });
+      packet.expected_freshness_fingerprint = expectedFreshness;
+      const preEditRefs = [
+        ...(Array.isArray(packet.red_test_run_evidence_pinned_refs) ? packet.red_test_run_evidence_pinned_refs : []),
+        ...(Array.isArray(packet.characterization_test_run_evidence_pinned_refs) ? packet.characterization_test_run_evidence_pinned_refs : []),
+      ];
+      packet.expected_verifier_input_ref_digest = worker_input_ref_digest([
+        executorRefs.refs[0],
+        codeReviewRefs.refs[0],
+        ...canonicalGreenRefs.map((ev: JsonMap) => ({ kind: "test_run", evidence_id: String(ev.evidence_id ?? ""), phase: ev.phase, semantic_status: ev.semantic_status })),
+        ...preEditRefs.map((ev: JsonMap) => ({ kind: "test_run", evidence_id: String(ev.evidence_id ?? ""), phase: ev.phase, semantic_status: ev.semantic_status })),
+      ]);
+      const missingGreenFingerprint = greenRefs.refs.filter((ev) => !fingerprint_digest(ev.implementation_fingerprint));
+      if (missingGreenFingerprint.length > 0) {
+        blockers.push(reason("green_implementation_fingerprint_missing", "apply-verify-packet requires GREEN evidence to record implementation_fingerprint"));
+      } else if (!greenRefs.refs.every((ev) => fingerprint_matches(ev.implementation_fingerprint, expectedFreshness.implementation_fingerprint))) {
+        blockers.push(reason("green_implementation_fingerprint_mismatch", "apply-verify-packet requires current implementation fingerprint to match GREEN evidence implementation_fingerprint"));
+      }
+      if (!fingerprint_matches(codeReviewRefs.refs[0].observed_implementation_fingerprint, expectedFreshness.implementation_fingerprint)) {
+        blockers.push(reason("task_code_review_implementation_fingerprint_mismatch", "apply-verify-packet requires code-reviewer observed_implementation_fingerprint to match current implementation fingerprint"));
+      }
+      if (Array.isArray(expectedFreshness.protected_dirty_paths) && expectedFreshness.protected_dirty_paths.length > 0) {
+        blockers.push(reason("protected_path_dirty", `apply-verify-packet requires protected change artifacts to stay unchanged during executor-worker verification: ${renderList(expectedFreshness.protected_dirty_paths.map(String))}`, expectedFreshness.protected_dirty_paths.map(String)));
+      }
+    }
+  }
+  packet.declared_task_write_scope = writeScope;
+  packet.task_edit = decision_status(taskEdit);
+  packet.task_complete = safe_decision_status(ctx, "task_complete", taskId);
+  Object.assign(packet, apply_task_context_fields(ctx, taskId, task, writeScope, [
+    ...(Array.isArray(packet.executor_report_pinned_refs) ? packet.executor_report_pinned_refs : []),
+    ...(Array.isArray(packet.task_code_review_report_pinned_refs) ? packet.task_code_review_report_pinned_refs : []),
+  ]));
+  packet.current_worktree_refs = dirty_repo_refs(ctx, "apply_verify current worktree refs");
+  packet.protected_path_refs = Array.isArray(packet.expected_freshness_fingerprint?.protected_path_refs)
+    ? packet.expected_freshness_fingerprint.protected_path_refs
+    : apply_worker_protected_path_refs(ctx.repoRoot, ctx.changeRoot);
+  packet.scope_diff_review_policy = {
+    declared_task_write_scope: writeScope,
+    forbidden_paths: ["proposal.md", "design.md", "tasks.md", "specs/", ".superspec/"],
+    require_scope_verdict: true,
+  };
+  packet.verification_checks = [
+    "red_or_characterization_pre_edit_evidence_bound_to_active_chain",
+    "executor_report_same_chain_and_fresh",
+    "task_code_review_report_same_chain_and_fresh",
+    "green_test_run_same_chain_and_pinned_transcripts",
+    "current_freshness_matches_expected_freshness_fingerprint",
+    "protected_change_artifacts_clean",
+  ];
+  packet.executor_report_required_fields = [...APPLY_EXECUTOR_REPORT_REQUIRED_FIELDS];
+  packet.code_review_report_required_fields = [...APPLY_CODE_REVIEW_REPORT_REQUIRED_FIELDS];
+  packet.verifier_report_required_fields = [...APPLY_VERIFIER_REPORT_REQUIRED_FIELDS];
+  packet.test_evidence_required_fields = ["command", "cwd", "exit_code", "repo_head", "implementation_fingerprint", "guard_artifact_manifest_fingerprint", "raw_log_pinned_refs"];
+  packet.executor_report_refs = args.executor_report_refs ?? [];
+  packet.task_code_review_report_refs = args.task_code_review_report_refs ?? [];
+  packet.green_test_run_evidence_refs = args.green_test_run_evidence_refs ?? [];
+  packet.red_test_run_evidence_refs = args.red_test_run_evidence_refs ?? [];
+  packet.characterization_test_run_evidence_refs = args.characterization_test_run_evidence_refs ?? [];
+  packet.worker_state = blockers.length === 0 ? "ready" : "blocked";
+  if (blockers.length > 0) {
+    packet.blockers = unique_strings(blockers.map((item) => item.code));
+    packet.block_reasons = blockers;
+  }
+  return finalize_apply_worker_packet(packet);
+}
+
+function render_apply_worker_prompt(packet: JsonMap): string {
+  const blockedHeaders: Record<string, string> = {
+    apply_test: "DO NOT SPAWN TEST-RUNNER",
+    apply_executor: "DO NOT SPAWN IMPLEMENTATION EXECUTOR",
+    apply_code_review: "DO NOT SPAWN IMPLEMENTATION CODE-REVIEWER",
+    apply_verify: "DO NOT SPAWN IMPLEMENTATION VERIFIER",
+  };
+  const lines: string[] = [];
+  if (packet.worker_state === "blocked") {
+    lines.push(blockedHeaders[String(packet.packet_kind)] ?? "DO NOT SPAWN WORKER", "");
+  } else {
+    lines.push("# SuperSpec Apply Worker Packet", "");
+  }
+  lines.push(
+    `packet_kind: ${String(packet.packet_kind)}`,
+    `change: ${String(packet.change)}`,
+    `task_id: ${String(packet.task_id)}`,
+    `worker_state: ${String(packet.worker_state)}`,
+    `worker_chain_context: ${String(packet.worker_chain_context)}`,
+  );
+  if (typeof packet.test_id === "string") lines.push(`test_id: ${packet.test_id}`);
+  if (typeof packet.phase === "string") lines.push(`phase: ${packet.phase}`);
+  if (typeof packet.allowed_test_command === "string") lines.push(`allowed_test_command: ${packet.allowed_test_command}`);
+  if (typeof packet.apply_worker_chain_id === "string") lines.push(`apply_worker_chain_id: ${packet.apply_worker_chain_id}`);
+  if (packet.packet_kind === "apply_executor" && packet.worker_state === "ready") {
+    lines.push(
+      "",
+      "CHAIN ACTIVATION VERIFIED FOR IMPLEMENTATION EXECUTOR",
+      "The active apply_worker_chain evidence ref has been validated for this prompt.",
+      "",
+      "chain_activation_template:",
+      JSON.stringify(packet.chain_activation_template ?? {}, null, 2),
+    );
+  }
+  if (packet.worker_state === "ready") {
+    lines.push("", "Packet JSON:", JSON.stringify(packet, null, 2));
+  }
+  if (Array.isArray(packet.blockers) && packet.blockers.length > 0) {
+    lines.push("", "Blockers:", ...packet.blockers.map((item: string) => `- ${item}`));
+  }
+  if (Array.isArray(packet.block_reasons) && packet.block_reasons.length > 0) {
+    lines.push("", "Blocker details:", ...packet.block_reasons.map((item: Reason) => `- ${item.code}: ${item.message}`));
+  }
+  if (Array.isArray(packet.stop_conditions) && packet.stop_conditions.length > 0) {
+    lines.push("", "Stop conditions:", ...packet.stop_conditions.map((item: string) => `- ${item}`));
+  }
+  return `${lines.join("\n")}\n`;
+}
+
 function render_ref(ref: PinnedRef): string {
   return `- ${ref.root}:${ref.path} @ ${ref.blob_sha}`;
 }
@@ -684,6 +1673,30 @@ export function dispatch_packet(args: ParsedArgs): PacketDispatchResult {
     }
     return { output_format: "agent", payload: packet };
   }
+  if (args.command === "apply-test-packet") {
+    assert_packet_context_clean(ctx);
+    const packet = apply_test_packet(ctx, args);
+    if (args.packet_format === "prompt") return { output_format: "prompt", payload: render_apply_worker_prompt(packet) };
+    return { output_format: "agent", payload: packet };
+  }
+  if (args.command === "apply-executor-packet") {
+    assert_packet_context_clean(ctx);
+    const packet = apply_executor_packet(ctx, args);
+    if (args.packet_format === "prompt") return { output_format: "prompt", payload: render_apply_worker_prompt(packet) };
+    return { output_format: "agent", payload: packet };
+  }
+  if (args.command === "apply-code-review-packet") {
+    assert_packet_context_clean(ctx);
+    const packet = apply_code_review_packet(ctx, args);
+    if (args.packet_format === "prompt") return { output_format: "prompt", payload: render_apply_worker_prompt(packet) };
+    return { output_format: "agent", payload: packet };
+  }
+  if (args.command === "apply-verify-packet") {
+    assert_packet_context_clean(ctx);
+    const packet = apply_verify_packet(ctx, args);
+    if (args.packet_format === "prompt") return { output_format: "prompt", payload: render_apply_worker_prompt(packet) };
+    return { output_format: "agent", payload: packet };
+  }
   if (args.command === "ledger-render") {
     assert_packet_context_clean(ctx);
     return { output_format: "prompt", payload: render_ledger(ctx, args.gate ?? "", args.round) };
@@ -692,5 +1705,11 @@ export function dispatch_packet(args: ParsedArgs): PacketDispatchResult {
 }
 
 export function is_packet_command(command: string): boolean {
-  return command === "workflow-packet" || command === "review-packet" || command === "ledger-render";
+  return command === "workflow-packet"
+    || command === "review-packet"
+    || command === "apply-test-packet"
+    || command === "apply-executor-packet"
+    || command === "apply-code-review-packet"
+    || command === "apply-verify-packet"
+    || command === "ledger-render";
 }

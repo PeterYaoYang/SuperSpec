@@ -37,6 +37,7 @@ export const INSTALL_MANIFEST_REL = PROJECT_INSTALL_MANIFEST_REL;
 export type InstallMapping = { kind: string; source: string; target: string };
 export type InstallScope = "project" | "user";
 export type ManifestFileEntry = { path: string; sha256: string; managed: boolean; preexisting: boolean };
+export type ManifestConfigPatchEntry = { path: string; retainedOnUninstall: boolean; managed: boolean };
 export type EngineAction = {
   action: string;
   status: "ok" | "created" | "updated" | "skipped" | "removed" | "would_remove" | "failed";
@@ -48,6 +49,16 @@ export type EngineResult = {
   problems: string[];
   manifest: JsonMap | null;
 };
+
+export const CODEX_NATIVE_AGENT_MAX_THREADS = 12;
+export const CODEX_NATIVE_AGENT_MAX_DEPTH = 1;
+
+const CODEX_CONFIG_ENTRIES = [
+  { table: "features", key: "multi_agent", value: "true" },
+  { table: "features", key: "child_agents_md", value: "true" },
+  { table: "agents", key: "max_threads", value: String(CODEX_NATIVE_AGENT_MAX_THREADS) },
+  { table: "agents", key: "max_depth", value: String(CODEX_NATIVE_AGENT_MAX_DEPTH) },
+];
 
 function package_version(packageRoot: string): string {
   try {
@@ -96,6 +107,15 @@ export function manifest_shape_problems(manifest: any): string[] {
   if (manifest.installScope !== undefined && !["project", "user"].includes(manifest.installScope)) problems.push("installScope must be project or user");
   if (!Array.isArray(manifest.createdDirs) || manifest.createdDirs.some((item: any) => typeof item !== "string" || !item)) problems.push("createdDirs malformed");
   if (!Array.isArray(manifest.dataGlobs) || manifest.dataGlobs.some((item: any) => typeof item !== "string" || !item)) problems.push("dataGlobs malformed");
+  if (manifest.configPatch !== undefined) {
+    if (!isObject(manifest.configPatch)
+      || typeof manifest.configPatch.path !== "string"
+      || !manifest.configPatch.path
+      || manifest.configPatch.retainedOnUninstall !== true
+      || manifest.configPatch.managed !== false) {
+      problems.push("configPatch malformed");
+    }
+  }
   if (!Array.isArray(manifest.files)) {
     problems.push("files missing");
   } else {
@@ -145,6 +165,101 @@ function scoped_mappings(mappings: InstallMapping[], scope: InstallScope): Insta
   });
 }
 
+export function codex_config_rel(scope: InstallScope = "project"): string {
+  return scope === "user" ? "config.toml" : join(".codex", "config.toml");
+}
+
+function table_header_name(line: string): string | null {
+  const match = /^\s*\[([A-Za-z0-9_.-]+)\]\s*(?:#.*)?$/u.exec(line);
+  return match?.[1] ?? null;
+}
+
+function is_any_table_header(line: string): boolean {
+  return /^\s*\[[^\]]+\]\s*(?:#.*)?$/u.test(line);
+}
+
+function escape_regexp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function split_toml_lines(text: string): string[] {
+  if (!text) return [];
+  const lines = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+  if (lines[lines.length - 1] === "") lines.pop();
+  return lines;
+}
+
+function ensure_toml_key(lines: string[], table: string, key: string, value: string, overwriteExisting: boolean): boolean {
+  let start = -1;
+  let end = lines.length;
+  for (let idx = 0; idx < lines.length; idx += 1) {
+    if (table_header_name(lines[idx]) !== table) continue;
+    start = idx;
+    end = lines.length;
+    for (let next = idx + 1; next < lines.length; next += 1) {
+      if (!is_any_table_header(lines[next])) continue;
+      end = next;
+      break;
+    }
+    break;
+  }
+
+  if (start === -1) {
+    if (lines.length > 0 && lines[lines.length - 1].trim() !== "") lines.push("");
+    lines.push(`[${table}]`, `${key} = ${value}`);
+    return true;
+  }
+
+  const keyRe = new RegExp(`^\\s*${escape_regexp(key)}\\s*=`, "u");
+  const desired = `${key} = ${value}`;
+  for (let idx = start + 1; idx < end; idx += 1) {
+    if (!keyRe.test(lines[idx])) continue;
+    if (lines[idx] === desired) return false;
+    if (!overwriteExisting) return false;
+    lines[idx] = desired;
+    return true;
+  }
+
+  let insertAt = end;
+  while (insertAt > start + 1 && lines[insertAt - 1].trim() === "") insertAt -= 1;
+  lines.splice(insertAt, 0, desired);
+  return true;
+}
+
+export function merge_codex_config(text: string, opts: { force?: boolean } = {}): string {
+  const lines = split_toml_lines(text);
+  for (const entry of CODEX_CONFIG_ENTRIES) {
+    ensure_toml_key(lines, entry.table, entry.key, entry.value, opts.force === true);
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+export function ensure_codex_config(repoRoot: string, scope: InstallScope = "project", opts: { force?: boolean } = {}): { action: EngineAction; problems: string[] } {
+  const rel = codex_config_rel(scope);
+  const configPath = join(repoRoot, rel);
+  const existed = existsSync(configPath);
+  try {
+    const before = existed ? readFileSync(configPath, "utf8") : "";
+    const after = merge_codex_config(before, opts);
+    if (after === before) return { action: { action: `configure ${rel}`, status: "ok" }, problems: [] };
+    mkdirSync(dirname(configPath), { recursive: true });
+    writeFileSync(configPath, after, "utf8");
+    return {
+      action: {
+        action: `configure ${rel}`,
+        status: existed ? "updated" : "created",
+        detail: `Codex native subagent concurrency set to ${CODEX_NATIVE_AGENT_MAX_THREADS}`,
+      },
+      problems: [],
+    };
+  } catch (err) {
+    return {
+      action: { action: `configure ${rel}`, status: "failed" },
+      problems: [`Codex config update failed: ${(err as Error).message}`],
+    };
+  }
+}
+
 function write_install_manifest(repoRoot: string, packageRoot: string, files: ManifestFileEntry[], createdDirs: string[], scope: InstallScope): JsonMap {
   const manifest: JsonMap = {
     superspecVersion: package_version(packageRoot),
@@ -155,6 +270,11 @@ function write_install_manifest(repoRoot: string, packageRoot: string, files: Ma
     files,
     createdDirs: [...new Set(createdDirs)].sort(),
     dataGlobs: ["**/.superspec"],
+    configPatch: {
+      path: codex_config_rel(scope),
+      retainedOnUninstall: true,
+      managed: false,
+    } satisfies ManifestConfigPatchEntry,
   };
   const manifestPath = join(repoRoot, install_manifest_rel(scope));
   mkdirSync(dirname(manifestPath), { recursive: true });
@@ -225,8 +345,11 @@ export function install_workflow(repoRoot: string, opts: { force?: boolean; pack
       actions.push({ action: `install ${mapping.target}`, status: "skipped", detail: "pre-existing file with different content kept; rerun with --force to overwrite (backs up *.bak)" });
     }
   }
+  const configResult = ensure_codex_config(repoRoot, scope, { force: opts.force === true });
+  actions.push(configResult.action);
+  problems.push(...configResult.problems);
   const manifest = write_install_manifest(repoRoot, packageRoot, files, createdDirs, scope);
-  return { actions, problems: [], manifest };
+  return { actions, problems, manifest };
 }
 
 export function update_workflow(repoRoot: string, opts: { packageRoot?: string; scope?: InstallScope } = {}): EngineResult {
@@ -297,8 +420,11 @@ export function update_workflow(repoRoot: string, opts: { packageRoot?: string; 
     }
   }
 
+  const configResult = ensure_codex_config(repoRoot, scope);
+  actions.push(configResult.action);
+  problems.push(...configResult.problems);
   const manifest = write_install_manifest(repoRoot, packageRoot, files, createdDirs, scope);
-  return { actions, problems: [], manifest };
+  return { actions, problems, manifest };
 }
 
 function remove_empty_created_dirs(repoRoot: string, createdDirs: string[], actions: EngineAction[]): void {

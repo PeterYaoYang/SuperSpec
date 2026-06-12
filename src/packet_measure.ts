@@ -104,9 +104,11 @@ const REPRESENTATIVE_SCENARIOS: readonly ScenarioSpec[] = [
   },
   {
     name: "apply_ready",
-    description: "Post-bridge runtime surface for apply orchestration before task execution.",
+    description: "Post-bridge runtime surface for apply orchestration and bounded executor handoff.",
     files: [
       ".codex/skills/superspec-apply/SKILL.md",
+      ".codex/prompts/executor.md",
+      ".codex/agents/executor.toml",
     ],
   },
   {
@@ -154,9 +156,11 @@ const REPRESENTATIVE_SCENARIOS: readonly ScenarioSpec[] = [
   },
   {
     name: "task_reopen_to_resolved",
-    description: "Post-bridge runtime surface for reopened apply work from revert through successor completion.",
+    description: "Post-bridge runtime surface for reopened apply work from revert through successor executor completion.",
     files: [
       ".codex/skills/superspec-apply/SKILL.md",
+      ".codex/prompts/executor.md",
+      ".codex/agents/executor.toml",
     ],
   },
   {
@@ -226,10 +230,25 @@ const LEDGER_BLOCK_SAMPLES: readonly MaterializedSampleSpec[] = [
 
 function ensureReadableTextFile(repoRoot: string, relPath: string): string {
   const absPath = join(repoRoot, relPath);
-  if (!existsSync(absPath) || !statSync(absPath).isFile()) {
-    throw new GuardError(`packet_measure_missing_file: ${relPath}`);
+  if (existsSync(absPath) && statSync(absPath).isFile()) {
+    return readFileSync(absPath, "utf8");
   }
-  return readFileSync(absPath, "utf8");
+  const skillMatch = /^\.codex\/skills\/([^/]+)\/SKILL\.md$/u.exec(relPath);
+  if (skillMatch) {
+    const fallback = join(repoRoot, "templates", "workflow", "skills", skillMatch[1], "SKILL.md");
+    if (existsSync(fallback) && statSync(fallback).isFile()) return readFileSync(fallback, "utf8");
+  }
+  const promptMatch = /^\.codex\/prompts\/([^/]+)\.md$/u.exec(relPath);
+  if (promptMatch) {
+    const fallback = join(repoRoot, "templates", "workflow", "prompts", `${promptMatch[1]}.md`);
+    if (existsSync(fallback) && statSync(fallback).isFile()) return readFileSync(fallback, "utf8");
+  }
+  const agentMatch = /^\.codex\/agents\/([^/]+)\.toml$/u.exec(relPath);
+  if (agentMatch) {
+    const fallback = join(repoRoot, "adapters", "codex", "agents", `${agentMatch[1]}.toml`);
+    if (existsSync(fallback) && statSync(fallback).isFile()) return readFileSync(fallback, "utf8");
+  }
+  throw new GuardError(`packet_measure_missing_file: ${relPath}`);
 }
 
 function dedupePaths(paths: Iterable<string>): string[] {

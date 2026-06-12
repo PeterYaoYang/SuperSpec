@@ -75,6 +75,23 @@
         "type": "string",
         "minLength": 1
       }
+    },
+    "configPatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "retainedOnUninstall", "managed"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "retainedOnUninstall": {
+          "const": true
+        },
+        "managed": {
+          "const": false
+        }
+      }
     }
   }
 }

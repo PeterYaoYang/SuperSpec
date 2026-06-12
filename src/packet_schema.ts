@@ -52,6 +52,8 @@ export type ReviewPacket = {
   stop_conditions: string[];
 };
 
+export type ApplyWorkerPacket = Record<string, any>;
+
 export type PacketDispatchResult =
-  | { output_format: "agent"; payload: WorkflowPacket | ReviewPacket }
+  | { output_format: "agent"; payload: WorkflowPacket | ReviewPacket | ApplyWorkerPacket }
   | { output_format: "prompt"; payload: string };

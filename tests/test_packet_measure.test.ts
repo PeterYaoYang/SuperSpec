@@ -19,8 +19,8 @@ function findRepoRoot(start: string): string {
 }
 
 const REPO = findRepoRoot(dirname(fileURLToPath(import.meta.url)));
-const EXPECTED_INSTALL_UPPER_BOUND_TOTAL = 32790;
-const EXPECTED_RUNTIME_REQUIRED_SUBSET_TOTAL = 20406;
+const EXPECTED_INSTALL_UPPER_BOUND_TOTAL = 44575;
+const EXPECTED_RUNTIME_REQUIRED_SUBSET_TOTAL = 30009;
 const EXPECTED_INSTALL_UPPER_BOUND_PATHS = [
   ".codex/skills/superspec-apply/SKILL.md",
   ".codex/skills/superspec-archive/SKILL.md",
@@ -30,12 +30,16 @@ const EXPECTED_INSTALL_UPPER_BOUND_PATHS = [
   "adapters/codex/agents/architect.toml",
   "adapters/codex/agents/code-reviewer.toml",
   "adapters/codex/agents/critic.toml",
+  "adapters/codex/agents/executor.toml",
   "adapters/codex/agents/test-engineer.toml",
+  "adapters/codex/agents/test-runner.toml",
   "adapters/codex/agents/verifier.toml",
   "templates/workflow/prompts/architect.md",
   "templates/workflow/prompts/code-reviewer.md",
   "templates/workflow/prompts/critic.md",
+  "templates/workflow/prompts/executor.md",
   "templates/workflow/prompts/test-engineer.md",
+  "templates/workflow/prompts/test-runner.md",
   "templates/workflow/prompts/verifier.md",
   "templates/workflow/skills/superspec-apply/SKILL.md",
   "templates/workflow/skills/superspec-archive/SKILL.md",
@@ -47,12 +51,16 @@ const EXPECTED_RUNTIME_REQUIRED_SUBSET_PATHS = [
   "adapters/codex/agents/architect.toml",
   "adapters/codex/agents/code-reviewer.toml",
   "adapters/codex/agents/critic.toml",
+  "adapters/codex/agents/executor.toml",
   "adapters/codex/agents/test-engineer.toml",
+  "adapters/codex/agents/test-runner.toml",
   "adapters/codex/agents/verifier.toml",
   "templates/workflow/prompts/architect.md",
   "templates/workflow/prompts/code-reviewer.md",
   "templates/workflow/prompts/critic.md",
+  "templates/workflow/prompts/executor.md",
   "templates/workflow/prompts/test-engineer.md",
+  "templates/workflow/prompts/test-runner.md",
   "templates/workflow/prompts/verifier.md",
   "templates/workflow/skills/superspec-apply/SKILL.md",
   "templates/workflow/skills/superspec-archive/SKILL.md",
@@ -88,6 +96,8 @@ const EXPECTED_SCENARIO_PATHS: Record<string, string[]> = {
     ".codex/skills/superspec-propose/SKILL.md",
   ],
   apply_ready: [
+    ".codex/agents/executor.toml",
+    ".codex/prompts/executor.md",
     ".codex/skills/superspec-apply/SKILL.md",
   ],
   review_complete_allow: [
@@ -118,6 +128,8 @@ const EXPECTED_SCENARIO_PATHS: Record<string, string[]> = {
     ".codex/skills/superspec-review/SKILL.md",
   ],
   task_reopen_to_resolved: [
+    ".codex/agents/executor.toml",
+    ".codex/prompts/executor.md",
     ".codex/skills/superspec-apply/SKILL.md",
   ],
   scope_expansion: [
@@ -129,13 +141,13 @@ const EXPECTED_SCENARIO_TOTALS: Record<string, number> = {
   proposal_reviewed: 4589,
   design_complete: 7746,
   test_contract_drafted: 6235,
-  apply_ready: 2194,
-  review_complete_allow: 9545,
+  apply_ready: 6821,
+  review_complete_allow: 11520,
   archive_ready: 1753,
   round2_reviewer_prompt: 1641,
-  request_changes_reopen_tasks: 7967,
-  task_reopen_to_resolved: 2194,
-  scope_expansion: 2194,
+  request_changes_reopen_tasks: 8998,
+  task_reopen_to_resolved: 6821,
+  scope_expansion: 4376,
 };
 const EXPECTED_MATERIALIZED_WORKFLOW_PACKET_TOTALS: Record<string, number> = {
   apply_ready_blocked: 1259,
@@ -166,7 +178,15 @@ const EXPECTED_MATERIALIZED_MARKERS: Record<string, string[]> = {
 };
 
 function chars(path: string): number {
-  return readFileSync(join(REPO, path), "utf8").length;
+  const absPath = join(REPO, path);
+  if (existsSync(absPath)) return readFileSync(absPath, "utf8").length;
+  const skillMatch = /^\.codex\/skills\/([^/]+)\/SKILL\.md$/u.exec(path);
+  if (skillMatch) return readFileSync(join(REPO, "templates", "workflow", "skills", skillMatch[1], "SKILL.md"), "utf8").length;
+  const promptMatch = /^\.codex\/prompts\/([^/]+)\.md$/u.exec(path);
+  if (promptMatch) return readFileSync(join(REPO, "templates", "workflow", "prompts", `${promptMatch[1]}.md`), "utf8").length;
+  const agentMatch = /^\.codex\/agents\/([^/]+)\.toml$/u.exec(path);
+  if (agentMatch) return readFileSync(join(REPO, "adapters", "codex", "agents", `${agentMatch[1]}.toml`), "utf8").length;
+  return readFileSync(absPath, "utf8").length;
 }
 
 function assertMaterializedMeasure(

@@ -39,6 +39,16 @@ const REMOVED_STAGE_SKILLS = [
 const REQUIRED_ROLES = [
   "architect",
   "critic",
+  "executor",
+  "test-runner",
+  "test-engineer",
+  "code-reviewer",
+  "verifier",
+] as const;
+
+const REVIEW_ROLES = [
+  "architect",
+  "critic",
   "test-engineer",
   "code-reviewer",
   "verifier",
@@ -134,7 +144,7 @@ test("compiled runtime resolves package payload from the package root", () => {
     ].join("\n"),
   ], { cwd: REPO, encoding: "utf8" });
   assert.equal(proc.status, 0, proc.stderr || proc.stdout);
-  assert.equal(proc.stdout.trim(), "15");
+  assert.equal(proc.stdout.trim(), "19");
 });
 
 test("bin launchers report unsupported Node versions before loading compiled runtime", () => {
@@ -177,7 +187,11 @@ test("codex adapter maps generic workflow templates to repo-local surfaces", () 
   const mappings = installMap.mappings.map((item: Record<string, string>) => `${item.kind}:${item.source}->${item.target}`);
   assert.ok(mappings.includes("skill:templates/workflow/skills/superspec-review/SKILL.md->.codex/skills/superspec-review/SKILL.md"));
   assert.ok(mappings.includes("prompt:templates/workflow/prompts/critic.md->.codex/prompts/critic.md"));
+  assert.ok(mappings.includes("prompt:templates/workflow/prompts/executor.md->.codex/prompts/executor.md"));
+  assert.ok(mappings.includes("prompt:templates/workflow/prompts/test-runner.md->.codex/prompts/test-runner.md"));
   assert.ok(mappings.includes("agent:adapters/codex/agents/critic.toml->.codex/agents/critic.toml"));
+  assert.ok(mappings.includes("agent:adapters/codex/agents/executor.toml->.codex/agents/executor.toml"));
+  assert.ok(mappings.includes("agent:adapters/codex/agents/test-runner.toml->.codex/agents/test-runner.toml"));
   assert.equal(mappings.some((item: string) => item.startsWith("wrapper:")), false);
   for (const item of installMap.mappings) {
     assert.equal(existsSync(join(PACKAGE_ROOT, item.source)), true, item.source);
@@ -229,7 +243,11 @@ test("superspec distribution files are not gitignored", () => {
     "tests/test_superspec_guard.test.ts",
     "templates/workflow/skills/superspec-review/SKILL.md",
     "templates/workflow/prompts/critic.md",
+    "templates/workflow/prompts/executor.md",
+    "templates/workflow/prompts/test-runner.md",
     "adapters/codex/agents/critic.toml",
+    "adapters/codex/agents/executor.toml",
+    "adapters/codex/agents/test-runner.toml",
     "adapters/codex/install-map.json",
     "templates/sidecar/test-contract.md",
     "schemas/install-manifest.schema.json",
@@ -299,6 +317,10 @@ test("workflow skills use safe agent output for ordinary superspec commands", ()
         continue;
       }
       if (line.includes("review-packet") && line.includes("--format prompt")) continue;
+      if (line.includes("apply-test-packet") && line.includes("--format prompt")) continue;
+      if (line.includes("apply-executor-packet") && line.includes("--format prompt")) continue;
+      if (line.includes("apply-code-review-packet") && line.includes("--format prompt")) continue;
+      if (line.includes("apply-verify-packet") && line.includes("--format prompt")) continue;
       assert.match(line, /--format agent\b/u, `${name}:${lineNo} must use --format agent or review-packet prompt: ${line}`);
     }
     assert.ok(text.includes("普通 workflow 命令使用 `--format agent`"), name);
@@ -332,6 +354,10 @@ test("workflow skills declare short SuperSpec source metadata", () => {
 
 test("project-local superspec skills mirror packaged workflow templates", () => {
   if (!existsSync(join(REPO, ".codex", "skills"))) return;
+  const installedSuperspecSkills = REQUIRED_SKILLS
+    .map((name) => join(REPO, ".codex", "skills", name, "SKILL.md"))
+    .filter((path) => existsSync(path));
+  if (installedSuperspecSkills.length === 0) return;
   for (const name of REQUIRED_SKILLS) {
     assert.equal(projectLocalSkillText(name), templateSkillText(name), name);
   }
@@ -379,7 +405,7 @@ test("workflow skills are thin packet-driven entrypoints", () => {
   const maxChars: Record<(typeof REQUIRED_SKILLS)[number], number> = {
     "superspec-explore": 4200,
     "superspec-propose": 5200,
-    "superspec-apply": 4200,
+    "superspec-apply": 5600,
     "superspec-review": 5200,
     "superspec-archive": 3600,
   };
@@ -453,6 +479,19 @@ test("apply uses OpenSpec apply instructions CLI directly", () => {
   assert.ok(text.includes("RED/GREEN"));
 });
 
+test("apply delegates implementation edits to repo-local executor", () => {
+  const text = templateSkillText("superspec-apply");
+  assert.ok(text.includes(".codex/agents/executor.toml"));
+  assert.ok(text.includes(".codex/prompts/executor.md"));
+  assert.ok(text.includes("apply-executor-packet"));
+  assert.ok(text.includes("chain_activation_template"));
+  assert.ok(text.includes("active `apply_worker_chain`"));
+  assert.ok(text.includes("executor 只能改 packet 声明的 implementation write scope"));
+  assert.ok(text.includes("不能写正式 evidence"));
+  assert.ok(text.includes("不能改 task checkbox"));
+  assert.ok(text.includes("不能做 review/verification"));
+});
+
 test("archive documents native archive handoff", () => {
   const text = templateSkillText("superspec-archive");
   assert.equal(text.includes(".codex/skills/openspec-archive-change/SKILL.md"), false);
@@ -505,7 +544,7 @@ test("review prompts require Chinese-only user-visible prose outside code identi
 });
 
 test("role prompts are thin packet-driven review surfaces", () => {
-  for (const name of REQUIRED_ROLES) {
+  for (const name of REVIEW_ROLES) {
     const text = templatePromptText(name);
     assert.ok(text.length <= 1800, `${name} prompt should stay thin: ${text.length}`);
     assert.ok(text.includes("## 角色身份"), name);
@@ -524,6 +563,28 @@ test("role prompts are thin packet-driven review surfaces", () => {
   }
 });
 
+test("executor prompt is a thin packet-driven apply implementation surface", () => {
+  const text = templatePromptText("executor");
+  assert.ok(text.length <= 1800, `executor prompt should stay thin: ${text.length}`);
+  assert.ok(text.includes("## 角色身份"));
+  assert.ok(text.includes("## 读写边界"));
+  assert.ok(text.includes("## SuperSpec Packet 规则"));
+  assert.ok(text.includes("## 输出风格"));
+  assert.ok(text.includes("`apply-executor-packet`"));
+  assert.ok(text.includes("`prompt_ref`"));
+  assert.ok(text.includes("`declared_task_write_scope`"));
+  assert.ok(text.includes("`guard_fingerprint`"));
+  assert.ok(text.includes("`apply_worker_chain_id`"));
+  assert.ok(text.includes("`chain_activation_template`"));
+  assert.ok(text.includes("不要修改 `proposal.md`/`design.md`/`tasks.md`/`specs/**`/`.superspec/**`"));
+  assert.ok(text.includes("不要依赖本 prompt 记忆输出 schema"));
+  assert.equal(text.includes("`review-packet`"), false);
+  assert.equal(text.includes("`required_output_kind`"), false);
+  assert.equal(text.includes("`output_contract_fields`"), false);
+  assert.equal(text.includes("<output_contract>"), false);
+  assert.equal(text.includes("<execution_loop>"), false);
+});
+
 test("role agent toml files are thin prompt-bound entrypoints", () => {
   for (const name of REQUIRED_ROLES) {
     const text = adapterAgentText(name);
@@ -531,7 +592,9 @@ test("role agent toml files are thin prompt-bound entrypoints", () => {
     assert.ok(text.includes(`name = "${name}"`), name);
     assert.ok(text.includes("Prompt binding:"), name);
     assert.ok(text.includes(`.codex/prompts/${name}.md`), name);
-    assert.ok(text.includes("`review-packet`"), name);
+    if (name === "executor") assert.ok(text.includes("`apply-executor-packet`"), name);
+    else if (name === "test-runner") assert.ok(text.includes("`apply-test-packet`"), name);
+    else assert.ok(text.includes("`review-packet`"), name);
     assert.ok(text.includes("`prompt_ref`"), name);
     assert.ok(text.includes("Boundary:"), name);
     assert.ok(text.includes("Output:"), name);

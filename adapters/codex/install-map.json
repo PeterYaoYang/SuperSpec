@@ -44,6 +44,16 @@
     },
     {
       "kind": "prompt",
+      "source": "templates/workflow/prompts/executor.md",
+      "target": ".codex/prompts/executor.md"
+    },
+    {
+      "kind": "prompt",
+      "source": "templates/workflow/prompts/test-runner.md",
+      "target": ".codex/prompts/test-runner.md"
+    },
+    {
+      "kind": "prompt",
       "source": "templates/workflow/prompts/test-engineer.md",
       "target": ".codex/prompts/test-engineer.md"
     },
@@ -66,6 +76,16 @@
       "kind": "agent",
       "source": "adapters/codex/agents/critic.toml",
       "target": ".codex/agents/critic.toml"
+    },
+    {
+      "kind": "agent",
+      "source": "adapters/codex/agents/executor.toml",
+      "target": ".codex/agents/executor.toml"
+    },
+    {
+      "kind": "agent",
+      "source": "adapters/codex/agents/test-runner.toml",
+      "target": ".codex/agents/test-runner.toml"
     },
     {
       "kind": "agent",

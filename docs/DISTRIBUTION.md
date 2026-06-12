@@ -20,7 +20,7 @@
 1. **安装 footprint 由 guard 的 `check-init` 强制**（见 `superspec_guard.ts` 的 `REQUIRED_*` 常量），是装机清单的权威来源：
    - 前置：PATH 上的 `openspec` 必须满足 SuperSpec 对官方 OpenSpec CLI 的兼容要求：版本 `>= 1.4.1`，且支持 `list/instructions/archive/validate/status --help`（`REQUIRED_OPENSPEC_CLI_SURFACES`）。检测到 `openspec-chinese` 标识、低版本或兼容不完整变体时不能满足此前置；`init` 会自动尝试安装 / 升级官方包，遇到全局 bin 冲突会用覆盖模式重试。
    - OpenSpec bridge 不再依赖 `.codex/skills/openspec-*`；project init 只安装/修复 SuperSpec 自身的 workflow skills、prompts 和 agents。
-   - SuperSpec payload：5 个用户可见 skill（explore/propose/apply/review/archive）+ 5 个 role agent/prompt。project scope 时安装到 `.codex/agents/{architect,critic,test-engineer,code-reviewer,verifier}.toml` + `.codex/prompts/{同 5 名}.md` + `.codex/skills/superspec-{explore,propose,apply,review,archive}/`；user scope 时安装到 Codex user home 的 `agents/`、`prompts/` 和 `skills/`。`init` 由全局 npm bin `superspec init` 承担，`verify` 已合并进 `review`。
+   - SuperSpec payload：5 个用户可见 skill（explore/propose/apply/review/archive）+ 7 个 role agent/prompt（test-runner 负责 apply 测试执行；executor 负责 apply 实现写入；architect/critic/test-engineer/code-reviewer/verifier 负责审查/验证）。project scope 时安装到 `.codex/agents/{architect,critic,executor,test-runner,test-engineer,code-reviewer,verifier}.toml` + `.codex/prompts/{同 7 名}.md` + `.codex/skills/superspec-{explore,propose,apply,review,archive}/`；user scope 时安装到 Codex user home 的 `agents/`、`prompts/` 和 `skills/`。`init` 由全局 npm bin `superspec init` 承担，`verify` 已合并进 `review`。
 2. **命令入口约束**：
   - 包本体通过 GitHub Release tarball 或 npm registry 全局安装；当前内测主路径是 `npm install -g https://github.com/PeterYaoYang/SuperSpec/releases/download/v0.1.0/superspec-0.1.0.tgz`，正式 npm 发布后是 `npm install -g @peterxiaoyang/superspec`。workflow skills 直接调用 `superspec guard ... --format agent` / `superspec init --scope project --format agent`，不依赖目标仓库的 `node_modules/.bin` 或 POSIX shell 环境变量展开。
    - 不安装 project-local wrapper script；正式入口只依赖 npm 生成的跨平台 bin（Unix shim + Windows `.cmd`/PowerShell shim）。
@@ -60,7 +60,7 @@ superspec/
 ├─ templates/              # SuperSpec canonical workflow templates
 │  ├─ workflow/
 │  │  ├─ skills/superspec-*/SKILL.md     (5: explore/propose/apply/review/archive)
-│  │  └─ prompts/*.md                    (5)
+│  │  └─ prompts/*.md                    (7)
 │  └─ sidecar/
 │     ├─ config.yaml                    # 可选默认配置
 │     ├─ discovery.md
@@ -69,7 +69,7 @@ superspec/
 │     └─ archive-preservation.json
 ├─ adapters/
 │  └─ codex/
-│     ├─ agents/*.toml                 (5)
+│     ├─ agents/*.toml                 (7)
 │     └─ install-map.json              # workflow templates -> .codex/... target paths
 └─ schemas/
    └─ install-manifest.schema.json
@@ -116,7 +116,8 @@ Windows PowerShell 可能优先解析 npm 生成的 `.ps1` shim 并受执行策�
     { "path": ".codex/agents/architect.toml",        "sha256": "…", "managed": false, "preexisting": true  }
   ],
   "createdDirs": [".codex/skills/superspec-explore", ".codex/superspec"],
-  "dataGlobs": ["**/.superspec"]
+  "dataGlobs": ["**/.superspec"],
+  "configPatch": { "path": ".codex/config.toml", "retainedOnUninstall": true, "managed": false }
 }
 ```
 
@@ -125,6 +126,7 @@ Windows PowerShell 可能优先解析 npm 生成的 `.ps1` shim 并受执行策�
 - `preexisting=true`（含 `managed=false`）：装机前已存在的同名文件 → **永不删、永不覆盖**（解决通用角色名碰撞）。
 - `sha256`：卸载/升级时比对，**用户改过（不匹配）则跳过 + 警告**。
 - `dataGlobs`：运行时数据，**默认绝不删**。
+- `configPatch`：记录 SuperSpec 对 Codex config 的 merge patch 位置；它不是 `files[]` 删除授权，`uninstall` 默认保留该 config，避免误删用户配置。
 
 ## 6. 命令面
 
@@ -139,7 +141,7 @@ Windows PowerShell 可能优先解析 npm 生成的 `.ps1` shim 并受执行策�
 1. **Preflight**：任意 install scope 下都要求 Node ≥ 20.19.0，且 `openspec` 必须满足官方 OpenSpec CLI 兼容要求：版本 ≥ 1.4.1，并通过 `REQUIRED_OPENSPEC_CLI_SURFACES`（`list/instructions/archive/validate/status --help`）；若缺失、低版本、检测到 `openspec-chinese` 标识或不兼容变体，`init` 会自动尝试安装 / 升级官方包，必要时覆盖冲突的全局 bin。project scope 不再回补 `.codex/skills/openspec-*`，只校验 CLI surface 并安装 SuperSpec Codex surfaces。user scope 只安装 SuperSpec Codex surfaces，不要求当前目录是 OpenSpec 项目。
 2. **逐文件落地**：目标不存在 → 写入并记 `managed=true`；已存在且内容相同 → 记 `managed=true`；已存在且不同 → 记 `preexisting=true,managed=false` 并跳过（`--force` 才覆盖，且先备份 `*.bak`）。
 3. **接线 CLI**：不写 project wrapper；project/user scope 都依赖全局 `superspec` npm bin。
-4. **写 manifest** + 打印安装摘要与下一步（project scope 的 workflow 自检使用 `superspec guard check-init --change <c> --format agent`；诊断脚本可继续用默认 JSON）。
+4. **写 manifest** + 打印安装摘要与下一步；manifest 同时记录 `configPatch`，但 config 不进入 `files[]` 删除集合（project scope 的 workflow 自检使用 `superspec guard check-init --change <c> --format agent`；诊断脚本可继续用默认 JSON）。
 5. 幂等：重复 init = 补齐缺失 + 不动已存在。
 
 ### 6.3 `superspec update`
@@ -158,6 +160,7 @@ Windows PowerShell 可能优先解析 npm 生成的 `.ps1` shim 并受执行策�
 2. managed 且未改 → 删除；managed 但用户改过 → 跳过 + 警告（`--force` 才删）；`preexisting` → 跳过。
 3. 删空目录（仅 `createdDirs` 中、且现已为空者）；共享目录（`.codex/`、`.codex/skills/`）非空则保留。
 4. **`openspec-*` 等非我方文件绝不碰。**
+5. `configPatch.path` 记录的 Codex config 默认保留，不随 manifest-managed surfaces 删除。
 5. 数据：
    - 默认（停用）：保留所有 `.superspec/`；
    - `--purge`：先打包（复用 guard 的 archive-preservation bundle 思路）再删，需显式确认。

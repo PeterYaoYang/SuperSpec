@@ -18,6 +18,16 @@ export type TestContractRecord = {
   invariant_refs: string[];
 };
 
+export type TestCommandResolution = {
+  test_id: string;
+  command: string | null;
+  source: "test_command" | "test_command_ref" | null;
+  command_ref?: string;
+  expected_failure_signature?: string;
+  expected_failure_classifier?: string;
+  blockers: Reason[];
+};
+
 export function parse_tasks(changeRoot: string): Record<string, TaskInfo> {
   const tasksMd = join(changeRoot, "tasks.md");
   if (!existsSync(tasksMd) || !statSync(tasksMd).isFile()) return {};
@@ -127,6 +137,87 @@ export function test_contract_text(changeRoot: string): string {
   const filePath = sidecar_test_contract_path(changeRoot);
   if (!existsSync(filePath) || !statSync(filePath).isFile()) return "";
   return readFileSync(filePath, "utf8");
+}
+
+function test_contract_section_lines(changeRoot: string, testId: string): string[] {
+  const lines = test_contract_text(changeRoot).split(/\r?\n/);
+  const start = lines.findIndex((line) => {
+    const match = line.trim().match(/^###\s+(\S+)\s*$/);
+    return match?.[1] === testId;
+  });
+  if (start < 0) return [];
+  const out: string[] = [];
+  for (const line of lines.slice(start + 1)) {
+    if (/^###\s+\S+/.test(line.trim()) || /^##\s+/.test(line.trim())) break;
+    out.push(line);
+  }
+  return out;
+}
+
+function contractField(line: string): { key: string; value: string } | null {
+  const match = line.match(/^\s*-\s+`?([A-Za-z0-9_-]+)`?\s*:\s*(.*)$/);
+  if (!match) return null;
+  return { key: match[1], value: match[2].trim() };
+}
+
+export function resolve_test_contract_command(changeRoot: string, testId: string, config: JsonMap = {}): TestCommandResolution {
+  const blockers: Reason[] = [];
+  const lines = test_contract_section_lines(changeRoot, testId);
+  if (lines.length === 0) {
+    return { test_id: testId, command: null, source: null, blockers: [reason("missing_test_contract_section", `test contract missing ### ${testId} section`)] };
+  }
+  const fields = new Map<string, string[]>();
+  for (const line of lines) {
+    const field = contractField(line);
+    if (!field) continue;
+    const values = fields.get(field.key) ?? [];
+    values.push(field.value);
+    fields.set(field.key, values);
+  }
+  const commands = fields.get("test_command") ?? [];
+  const refs = fields.get("test_command_ref") ?? [];
+  if (commands.length === 0 && refs.length === 0) blockers.push(reason("missing_test_command", `test contract ${testId} requires exactly one test_command or test_command_ref`));
+  if (commands.length > 1 || refs.length > 1) blockers.push(reason("duplicate_test_command", `test contract ${testId} has duplicate test command fields`));
+  if (commands.length > 0 && refs.length > 0) blockers.push(reason("ambiguous_test_command", `test contract ${testId} must not mix test_command and test_command_ref`));
+  const expected_failure_signature = (fields.get("expected_failure_signature") ?? [])[0];
+  const expected_failure_classifier = (fields.get("expected_failure_classifier") ?? [])[0];
+  if (commands.length === 1 && refs.length === 0) {
+    const command = commands[0];
+    if (!command) blockers.push(reason("missing_test_command", `test contract ${testId} has empty test_command`));
+    return {
+      test_id: testId,
+      command: command || null,
+      source: command ? "test_command" : null,
+      expected_failure_signature,
+      expected_failure_classifier,
+      blockers,
+    };
+  }
+  if (refs.length === 1 && commands.length === 0) {
+    const refValue = refs[0];
+    const match = refValue.match(/^config\.commands\.([A-Za-z0-9_.-]+)$/);
+    if (!match) {
+      blockers.push(reason("untrusted_test_command_ref", `test contract ${testId} test_command_ref must be config.commands.<id>`));
+      return { test_id: testId, command: null, source: null, command_ref: refValue, expected_failure_signature, expected_failure_classifier, blockers };
+    }
+    const commandId = match[1];
+    const commandsConfig = config.commands;
+    const command = commandsConfig && typeof commandsConfig === "object" ? commandsConfig[commandId] : undefined;
+    if (typeof command !== "string" || !command.trim()) {
+      blockers.push(reason("untrusted_test_command_ref", `test contract ${testId} test_command_ref ${refValue} does not resolve to config.commands.${commandId}`));
+      return { test_id: testId, command: null, source: null, command_ref: refValue, expected_failure_signature, expected_failure_classifier, blockers };
+    }
+    return {
+      test_id: testId,
+      command,
+      source: "test_command_ref",
+      command_ref: refValue,
+      expected_failure_signature,
+      expected_failure_classifier,
+      blockers,
+    };
+  }
+  return { test_id: testId, command: null, source: null, expected_failure_signature, expected_failure_classifier, blockers };
 }
 
 export function parse_spec_scenarios(changeRoot: string): string[] {

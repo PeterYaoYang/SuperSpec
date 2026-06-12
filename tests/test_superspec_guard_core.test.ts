@@ -325,6 +325,46 @@ test("packet command surface parses dedicated packet commands", () => {
   assert.equal(ledger.command, "ledger-render");
   assert.equal(ledger.gate, "proposal_reviewed");
   assert.equal(ledger.round, 2);
+
+  const redPacket = guard.parse_argv([
+    "apply-test-packet",
+    "--change", "demo-change",
+    "--task-id", "TASK-001",
+    "--test-id", "TEST-001",
+    "--phase", "red",
+    "--format", "prompt",
+  ]);
+  assert.equal(redPacket.command, "apply-test-packet");
+  assert.equal(redPacket.task_id, "TASK-001");
+  assert.equal(redPacket.test_id, "TEST-001");
+  assert.equal(redPacket.phase, "red");
+  assert.equal(redPacket.packet_format, "prompt");
+
+  const greenPacket = guard.parse_argv([
+    "apply-test-packet",
+    "--change", "demo-change",
+    "--task-id", "TASK-001",
+    "--test-id", "TEST-001",
+    "--phase", "green",
+    "--task-code-review-report-ref", ".superspec/reports/apply/TASK-001/code-review.json",
+    "--format", "agent",
+  ]);
+  assert.equal(greenPacket.command, "apply-test-packet");
+  assert.equal(greenPacket.task_code_review_report_refs?.[0], ".superspec/reports/apply/TASK-001/code-review.json");
+
+  const verifyPacket = guard.parse_argv([
+    "apply-verify-packet",
+    "--change", "demo-change",
+    "--task-id", "TASK-001",
+    "--executor-report-ref", ".superspec/reports/apply/TASK-001/executor.json",
+    "--task-code-review-report-ref", ".superspec/reports/apply/TASK-001/code-review.json",
+    "--green-test-run-evidence-ref", "EV-green-1",
+    "--green-test-run-evidence-ref", "EV-green-2",
+    "--red-test-run-evidence-ref", "EV-red",
+    "--format", "agent",
+  ]);
+  assert.equal(verifyPacket.command, "apply-verify-packet");
+  assert.deepEqual(verifyPacket.green_test_run_evidence_refs, ["EV-green-1", "EV-green-2"]);
 });
 
 test("packet command surface validates packet formats and task-scoped requirements", () => {
@@ -367,6 +407,14 @@ test("packet command surface validates packet formats and task-scoped requiremen
     /--round 必须是大于等于 1 的整数/u,
   );
   assert.throws(
+    () => guard.parse_argv(["apply-test-packet", "--change", "demo-change", "--task-id", "TASK-001", "--test-id", "TEST-001", "--phase", "blue", "--format", "agent"]),
+    /--phase 只允许 red、characterization 或 green/u,
+  );
+  assert.throws(
+    () => guard.parse_argv(["apply-executor-packet", "--change", "demo-change", "--format", "agent"]),
+    /apply-executor-packet 缺少必填参数 --task-id/u,
+  );
+  assert.throws(
     () => guard.parse_argv(["review-packet", "--change", "demo-change", "--gate", "review_complete", "--role", "critic", "--round", "1", "--kind", "final", "--format", "agent"]),
     /--kind 只允许 source_guidance 或 verification_review/u,
   );
@@ -376,6 +424,316 @@ test("A-2 command surface accepts recompute force-unlock", () => {
   const args = guard.parse_argv(["recompute", "--change", "demo-change", "--force-unlock"]);
   assert.equal(args.command, "recompute");
   assert.equal(args.force_unlock, true);
+});
+
+withFixture("apply_worker_chain active marker blocks non-chain task completion", (fx) => {
+  const evidences = [
+    ...prepareProposeComplete(fx),
+    greenEvidence("TASK-001", "TEST-001", ["INV-001"], {
+      runner_origin: "main-thread",
+    }),
+    passEvidence("task_complete", "apply_worker_chain", {
+      evidence_id: "EV-chain-active",
+      task_id: "TASK-001",
+      apply_worker_chain_id: "CHAIN-001",
+      chain_state: "active",
+      executor_packet_fingerprint: "sha256:executor-packet",
+      source_implementation_fingerprint: { fingerprint_digest: "sha256:source" },
+      declared_task_write_scope: ["src/feature.ts"],
+      pre_edit_evidence_refs: ["EV-red"],
+    }),
+    supersededEvidence("EV-chain-active"),
+  ];
+  const decision = guard.check_task_complete("demo-change", status(fx), fx.change, evidences, "TASK-001");
+  assert.equal(decision.allowed, false);
+  assert.ok(codes(decision.block_reasons).includes("apply_worker_chain_active"), JSON.stringify(decision.block_reasons));
+});
+
+withFixture("apply_worker_chain schema rejects malformed lifecycle fields", (fx) => {
+  const malformed = passEvidence("task_complete", "apply_worker_chain", {
+    evidence_id: "EV-chain-malformed",
+    task_id: "TASK-001",
+    apply_worker_chain_id: "CHAIN-001",
+    chain_state: "active",
+    executor_packet_fingerprint: {},
+    source_implementation_fingerprint: null,
+    declared_task_write_scope: [{}],
+    pre_edit_evidence_refs: [{}],
+  });
+  const problems = guard.validate_evidence_schema(malformed, "demo-change", fx.change, fx.repo);
+  assert.ok(codes(problems).includes("apply_worker_chain_invalid"), JSON.stringify(problems));
+});
+
+withFixture("test_run runner_origin test-runner requires pinned worker refs without breaking legacy logs", (fx) => {
+  const legacy = greenEvidence("TASK-001", "TEST-001", ["INV-001"]);
+  assert.equal(codes(guard.validate_evidence_schema(legacy, "demo-change", fx.change, fx.repo)).includes("test_run_worker_ref_missing"), false);
+
+  const workerRun = greenEvidence("TASK-001", "TEST-001", ["INV-001"], {
+    evidence_id: "EV-green-worker",
+    runner_origin: "test-runner",
+  });
+  const problems = guard.validate_evidence_schema(workerRun, "demo-change", fx.change, fx.repo);
+  assert.ok(codes(problems).includes("test_run_worker_ref_missing"), JSON.stringify(problems));
+  assert.ok(codes(problems).includes("test_run_runner_origin_invalid"), JSON.stringify(problems));
+
+  const nonChainWorkerGreen = greenEvidence("TASK-001", "TEST-001", ["INV-001"], {
+    evidence_id: "EV-green-worker-non-chain",
+    runner_origin: "test-runner",
+    phase: "green",
+  });
+  const nonChainWorkerGreenProblems = guard.validate_evidence_schema(nonChainWorkerGreen, "demo-change", fx.change, fx.repo);
+  assert.ok(codes(nonChainWorkerGreenProblems).includes("test_run_runner_origin_invalid"), JSON.stringify(nonChainWorkerGreenProblems));
+
+  const completionDecision = guard.check_task_complete("demo-change", status(fx), fx.change, [
+    ...prepareProposeComplete(fx),
+    nonChainWorkerGreen,
+  ], "TASK-001");
+  assert.equal(completionDecision.allowed, false);
+  assert.ok(codes(completionDecision.block_reasons).includes("missing_green_evidence"), JSON.stringify(completionDecision.block_reasons));
+
+  const executorWorkerRun = greenEvidence("TASK-001", "TEST-001", ["INV-001"], {
+    evidence_id: "EV-green-executor-worker",
+    apply_execution_chain: "executor_worker",
+    apply_worker_chain_id: "CHAIN-001",
+  });
+  const executorProblems = guard.validate_evidence_schema(executorWorkerRun, "demo-change", fx.change, fx.repo);
+  assert.ok(codes(executorProblems).includes("test_run_runner_origin_invalid"), JSON.stringify(executorProblems));
+  assert.ok(codes(executorProblems).includes("test_run_worker_ref_missing"), JSON.stringify(executorProblems));
+});
+
+withFixture("apply worker artifact materializer writes typed refs and rejects unsafe inputs", (fx) => {
+  const sourceFingerprint = { fingerprint_digest: "sha256:source" };
+  const producedFingerprint = { fingerprint_digest: "sha256:produced" };
+  const executorReport = {
+    role: "executor",
+    task_id: "TASK-001",
+    apply_worker_chain_id: "CHAIN-001",
+    guard_fingerprint: "sha256:executor-packet",
+    origin_packet_fingerprint: "sha256:executor-packet",
+    source_implementation_fingerprint: sourceFingerprint,
+    produced_implementation_fingerprint: producedFingerprint,
+    input_ref_digest: "sha256:input",
+    cwd: fx.repo,
+    repo_head: "unknown",
+    changed_files: ["src/feature.ts"],
+    suggested_green_checks: ["TEST-001"],
+    test_invariant_mapping: { "TEST-001": ["INV-001"] },
+    runtime_artifact_refs: ["runtime://executor/report"],
+    risk_notes: [],
+    unverified_items: [],
+  };
+  const executorRef = guard.materialize_apply_worker_artifact_ref(fx.change, {
+    taskId: "TASK-001",
+    kind: "worker_report",
+    role: "executor",
+    filename: "executor-report.json",
+    content: executorReport,
+    workerChainContext: "executor_worker",
+    applyWorkerChainId: "CHAIN-001",
+    originPacketFingerprint: "sha256:executor-packet",
+    sourceImplementationFingerprint: sourceFingerprint,
+    producedImplementationFingerprint: producedFingerprint,
+    inputRefDigest: "sha256:input",
+  });
+  assert.equal(executorRef.path, ".superspec/reports/apply/TASK-001/executor-report.json");
+  assert.equal(executorRef.ref_path, ".superspec/reports/apply/TASK-001/executor-report.ref.json");
+  assert.equal(existsSync(join(fx.change, executorRef.path)), true);
+  assert.equal(existsSync(join(fx.change, executorRef.ref_path)), true);
+  assert.deepEqual(
+    guard.pinned_artifact_ref_reasons(fx.change, executorRef, "executor_report_ref", {
+      kind: "worker_report",
+      role: "executor",
+      taskId: "TASK-001",
+      chainId: "CHAIN-001",
+    }),
+    [],
+  );
+  const incompleteExecutorRef = guard.materialize_apply_worker_artifact_ref(fx.change, {
+    taskId: "TASK-001",
+    kind: "worker_report",
+    role: "executor",
+    filename: "executor-report-incomplete.json",
+    content: { ...executorReport, changed_files: undefined },
+    workerChainContext: "executor_worker",
+    applyWorkerChainId: "CHAIN-001",
+    originPacketFingerprint: "sha256:executor-packet",
+    sourceImplementationFingerprint: sourceFingerprint,
+    producedImplementationFingerprint: producedFingerprint,
+    inputRefDigest: "sha256:input",
+  });
+  const incompleteProblems = guard.pinned_artifact_ref_reasons(fx.change, incompleteExecutorRef, "executor_report_ref", {
+    kind: "worker_report",
+    role: "executor",
+    taskId: "TASK-001",
+    chainId: "CHAIN-001",
+  });
+  assert.ok(incompleteProblems.some((item) => item.code === "pinned_artifact_ref_invalid" && item.message.includes("changed_files")), JSON.stringify(incompleteProblems));
+
+  assert.throws(() => guard.materialize_apply_worker_artifact_ref(fx.change, {
+    taskId: "TASK-001",
+    kind: "worker_report",
+    role: "executor",
+    filename: "executor-report-invalid-refpath.json",
+    content: executorReport,
+    refPath: ".superspec/evidence/TASK-001/executor-report.ref.json",
+    workerChainContext: "executor_worker",
+    applyWorkerChainId: "CHAIN-001",
+    originPacketFingerprint: "sha256:executor-packet",
+    sourceImplementationFingerprint: sourceFingerprint,
+    producedImplementationFingerprint: producedFingerprint,
+    inputRefDigest: "sha256:input",
+  }), /refPath must stay under/u);
+  assert.equal(existsSync(join(fx.change, ".superspec/reports/apply/TASK-001/executor-report-invalid-refpath.json")), false);
+
+  const rawRef = guard.materialize_apply_worker_artifact_ref(fx.change, {
+    taskId: "TASK-001",
+    kind: "raw_transcript",
+    role: "test-runner",
+    filename: "test-runner.log",
+    content: "TEST-001 passed\n",
+    workerChainContext: "none",
+    originPacketFingerprint: "sha256:test-packet",
+    sourceImplementationFingerprint: sourceFingerprint,
+    observedImplementationFingerprint: { fingerprint_digest: "sha256:observed" },
+    inputRefDigest: "sha256:raw-input",
+    command: "npm test -- TEST-001",
+    cwd: fx.repo,
+    phase: "green",
+    testId: "TEST-001",
+    exitCode: 0,
+  });
+  assert.deepEqual(
+    guard.pinned_artifact_ref_reasons(fx.change, rawRef, "raw_log_pinned_refs", {
+      kind: "raw_transcript",
+      role: "test-runner",
+      taskId: "TASK-001",
+    }),
+    [],
+  );
+  const minimalRawRef = {
+    root: "change",
+    path: rawRef.path,
+    blob_sha: rawRef.blob_sha,
+    size_bytes: rawRef.size_bytes,
+    kind: "raw_transcript",
+    role: "test-runner",
+    task_id: "TASK-001",
+    command: rawRef.command,
+    cwd: rawRef.cwd,
+    phase: rawRef.phase,
+    test_id: rawRef.test_id,
+    exit_code: rawRef.exit_code,
+  };
+  const minimalRawProblems = guard.pinned_artifact_ref_reasons(fx.change, minimalRawRef, "raw_log_pinned_refs", {
+    kind: "raw_transcript",
+    role: "test-runner",
+    taskId: "TASK-001",
+  });
+  assert.ok(minimalRawProblems.some((item) => item.message.includes("created_at")), JSON.stringify(minimalRawProblems));
+  assert.ok(minimalRawProblems.some((item) => item.message.includes("origin_packet_fingerprint")), JSON.stringify(minimalRawProblems));
+  assert.ok(minimalRawProblems.some((item) => item.message.includes("input_ref_digest")), JSON.stringify(minimalRawProblems));
+  assert.ok(minimalRawProblems.some((item) => item.message.includes("source_implementation_fingerprint")), JSON.stringify(minimalRawProblems));
+  assert.ok(minimalRawProblems.some((item) => item.message.includes("observed_implementation_fingerprint")), JSON.stringify(minimalRawProblems));
+
+  assert.throws(
+    () => guard.materialize_apply_worker_artifact_ref(fx.change, {
+      taskId: "TASK-001",
+      kind: "raw_transcript",
+      role: "test-runner",
+      filename: "test-runner-command-override.log",
+      content: "TEST-001 passed\n",
+      workerChainContext: "none",
+      originPacketFingerprint: "sha256:test-packet",
+      sourceImplementationFingerprint: sourceFingerprint,
+      observedImplementationFingerprint: { fingerprint_digest: "sha256:observed" },
+      inputRefDigest: "sha256:raw-input",
+      command: "npm test -- TEST-001",
+      cwd: fx.repo,
+      phase: "green",
+      testId: "TEST-001",
+      exitCode: 0,
+      metadata: { command: "forged command" },
+    }),
+    /metadata must not override command/u,
+  );
+  assert.equal(existsSync(join(fx.change, ".superspec/raw/apply/TASK-001/test-runner-command-override.log")), false);
+  assert.equal(existsSync(join(fx.change, ".superspec/raw/apply/TASK-001/test-runner-command-override.ref.json")), false);
+
+  assert.throws(
+    () => guard.materialize_apply_worker_artifact_ref(fx.change, {
+      taskId: "TASK-001",
+      kind: "raw_transcript",
+      role: "test-runner",
+      path: "../escape.log",
+      content: "bad\n",
+      workerChainContext: "none",
+      originPacketFingerprint: "sha256:test-packet",
+      sourceImplementationFingerprint: sourceFingerprint,
+      observedImplementationFingerprint: { fingerprint_digest: "sha256:observed" },
+      inputRefDigest: "sha256:raw-input",
+      command: "npm test -- TEST-001",
+      cwd: fx.repo,
+      phase: "green",
+      testId: "TEST-001",
+      exitCode: 0,
+    }),
+    /apply_worker_artifact_materialize_invalid/u,
+  );
+  assert.throws(
+    () => guard.materialize_apply_worker_artifact_ref(fx.change, {
+      taskId: "TASK-001",
+      kind: "worker_report",
+      role: "executor",
+      content: "",
+      workerChainContext: "executor_worker",
+      applyWorkerChainId: "CHAIN-001",
+      originPacketFingerprint: "sha256:executor-packet",
+      sourceImplementationFingerprint: sourceFingerprint,
+      producedImplementationFingerprint: producedFingerprint,
+      inputRefDigest: "sha256:input",
+    }),
+    /content is empty/u,
+  );
+  assert.throws(
+    () => guard.materialize_apply_worker_artifact_ref(fx.change, {
+      taskId: "TASK-001",
+      kind: "worker_report",
+      role: "executor",
+      content: executorReport,
+      workerChainContext: "executor_worker",
+      applyWorkerChainId: "CHAIN-001",
+      originPacketFingerprint: "sha256:executor-packet",
+      sourceImplementationFingerprint: sourceFingerprint,
+      producedImplementationFingerprint: producedFingerprint,
+      inputRefDigest: "sha256:input",
+      metadata: { path: ".superspec/reports/apply/TASK-001/forged.json" },
+    }),
+    /metadata must not override path/u,
+  );
+  assert.equal(existsSync(join(fx.change, ".superspec/reports/apply/TASK-001/executor-worker_report.json")), false);
+  assert.equal(existsSync(join(fx.change, ".superspec/reports/apply/TASK-001/executor-worker_report.ref.json")), false);
+
+  const blockedRefParent = join(fx.change, ".superspec/reports/apply/TASK-001/ref-parent");
+  mkdirp(dirname(blockedRefParent));
+  writeFileSync(blockedRefParent, "not a directory\n");
+  assert.throws(
+    () => guard.materialize_apply_worker_artifact_ref(fx.change, {
+      taskId: "TASK-001",
+      kind: "worker_report",
+      role: "executor",
+      filename: "executor-report-ref-write-fails.json",
+      content: executorReport,
+      refPath: ".superspec/reports/apply/TASK-001/ref-parent/executor-report.ref.json",
+      workerChainContext: "executor_worker",
+      applyWorkerChainId: "CHAIN-001",
+      originPacketFingerprint: "sha256:executor-packet",
+      sourceImplementationFingerprint: sourceFingerprint,
+      producedImplementationFingerprint: producedFingerprint,
+      inputRefDigest: "sha256:input",
+    }),
+    /EEXIST|ENOTDIR/u,
+  );
+  assert.equal(existsSync(join(fx.change, ".superspec/reports/apply/TASK-001/executor-report-ref-write-fails.json")), false);
 });
 
 test("command surface includes check-task-reopen", () => {

@@ -9,6 +9,7 @@ export * from "./invariants.ts";
 export * from "./git.ts";
 export * from "./state.ts";
 export * from "./archive.ts";
+export * from "./apply_worker_chain.ts";
 export * from "./gates.ts";
 export * from "./install_engine.ts";
 

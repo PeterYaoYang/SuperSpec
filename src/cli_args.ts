@@ -10,9 +10,17 @@ export type ParsedArgs = {
   artifact?: string;
   gate?: string;
   task_id?: string;
+  test_id?: string;
+  phase?: "red" | "characterization" | "green";
   role?: string;
   evidence_kind?: string;
   round?: number;
+  executor_report_refs?: string[];
+  task_code_review_report_refs?: string[];
+  apply_worker_chain_refs?: string[];
+  green_test_run_evidence_refs?: string[];
+  red_test_run_evidence_refs?: string[];
+  characterization_test_run_evidence_refs?: string[];
   create?: boolean;
   force_unlock?: boolean;
   rebuild_corrupt?: boolean;
@@ -39,13 +47,23 @@ const COMMANDS = [
   "check-task-complete",
   "workflow-packet",
   "review-packet",
+  "apply-test-packet",
+  "apply-executor-packet",
+  "apply-code-review-packet",
+  "apply-verify-packet",
   "ledger-render",
 ] as const;
 const COMMAND_LIST = COMMANDS.join(",");
 const COMMAND_CHOICES = COMMANDS.map((item) => `'${item}'`).join(", ");
 
 function isPacketCommand(command: string): boolean {
-  return command === "workflow-packet" || command === "review-packet" || command === "ledger-render";
+  return command === "workflow-packet"
+    || command === "review-packet"
+    || command === "apply-test-packet"
+    || command === "apply-executor-packet"
+    || command === "apply-code-review-packet"
+    || command === "apply-verify-packet"
+    || command === "ledger-render";
 }
 
 function requiredValueFlags(command: string): string[] {
@@ -55,6 +73,10 @@ function requiredValueFlags(command: string): string[] {
   if (command === "check-task-reopen" || command === "check-task-edit" || command === "check-task-complete") flags.push("--task-id");
   if (command === "workflow-packet") flags.push("--gate");
   if (command === "review-packet") flags.push("--gate", "--role", "--round");
+  if (command === "apply-test-packet") flags.push("--task-id", "--test-id", "--phase");
+  if (command === "apply-executor-packet") flags.push("--task-id");
+  if (command === "apply-code-review-packet") flags.push("--task-id", "--executor-report-ref");
+  if (command === "apply-verify-packet") flags.push("--task-id", "--executor-report-ref", "--task-code-review-report-ref", "--green-test-run-evidence-ref");
   if (command === "ledger-render") flags.push("--gate");
   return flags;
 }
@@ -71,19 +93,31 @@ function optionalBooleanFlags(command: string): string[] {
 function optionalValueFlags(command: string): string[] {
   if (command === "workflow-packet") return ["--task-id"];
   if (command === "review-packet") return ["--kind"];
+  if (command === "apply-test-packet") return ["--task-code-review-report-ref"];
+  if (command === "apply-executor-packet") return ["--apply-worker-chain-ref"];
+  if (command === "apply-verify-packet") return ["--red-test-run-evidence-ref", "--characterization-test-run-evidence-ref"];
   if (command === "ledger-render") return ["--round"];
   return [];
 }
 
 function formatUsage(command: string): string | null {
   if (command === "workflow-packet") return "--format {agent}";
-  if (command === "review-packet") return "--format {agent,prompt}";
+  if (command === "review-packet"
+    || command === "apply-test-packet"
+    || command === "apply-executor-packet"
+    || command === "apply-code-review-packet"
+    || command === "apply-verify-packet") return "--format {agent,prompt}";
   if (command === "ledger-render") return null;
   return "[--format {json,agent,user}]";
 }
 
 function requiresFormat(command: string): boolean {
-  return command === "workflow-packet" || command === "review-packet";
+  return command === "workflow-packet"
+    || command === "review-packet"
+    || command === "apply-test-packet"
+    || command === "apply-executor-packet"
+    || command === "apply-code-review-packet"
+    || command === "apply-verify-packet";
 }
 
 function rootUsage(): string {
@@ -187,12 +221,17 @@ export function parse_argv(argv: string[]): ParsedArgs {
   };
   const getValue = (flag: string): string | undefined => getValues(flag)[0];
   const formatValues = getValues("--format");
-  const isPacketOutputCommand = command === "workflow-packet" || command === "review-packet";
+  const isPacketOutputCommand = command === "workflow-packet"
+    || command === "review-packet"
+    || command === "apply-test-packet"
+    || command === "apply-executor-packet"
+    || command === "apply-code-review-packet"
+    || command === "apply-verify-packet";
   const isPacketCommand = isPacketOutputCommand || command === "ledger-render";
   const selectedPacketFormat = formatValues.length > 0 ? formatValues[formatValues.length - 1] : undefined;
   if (isPacketOutputCommand) {
     if (!selectedPacketFormat) throw new GuardError("缺少必填参数 --format");
-    for (const value of formatValues) parsePacketOutputFormat(value, { allowPrompt: command === "review-packet" });
+    for (const value of formatValues) parsePacketOutputFormat(value, { allowPrompt: command !== "workflow-packet" });
   } else {
     for (const value of formatValues) parseDecisionOutputFormat(value);
   }
@@ -246,6 +285,75 @@ export function parse_argv(argv: string[]): ParsedArgs {
       role,
       evidence_kind: evidenceKind,
       round,
+      packet_format: parsePacketOutputFormat(selectedPacketFormat!, { allowPrompt: true }),
+    };
+  }
+  if (command === "apply-test-packet") {
+    const taskId = getValue("--task-id");
+    const testId = getValue("--test-id");
+    const phase = getValue("--phase");
+    if (!taskId) throw new GuardError("apply-test-packet 缺少必填参数 --task-id");
+    if (!testId) throw new GuardError("apply-test-packet 缺少必填参数 --test-id");
+    if (phase !== "red" && phase !== "characterization" && phase !== "green") {
+      throw new GuardError("--phase 只允许 red、characterization 或 green");
+    }
+    return {
+      command,
+      change,
+      task_id: taskId,
+      test_id: testId,
+      phase,
+      task_code_review_report_refs: getValues("--task-code-review-report-ref"),
+      packet_format: parsePacketOutputFormat(selectedPacketFormat!, { allowPrompt: true }),
+    };
+  }
+  if (command === "apply-executor-packet") {
+    const taskId = getValue("--task-id");
+    if (!taskId) throw new GuardError("apply-executor-packet 缺少必填参数 --task-id");
+    return {
+      command,
+      change,
+      task_id: taskId,
+      apply_worker_chain_refs: getValues("--apply-worker-chain-ref"),
+      packet_format: parsePacketOutputFormat(selectedPacketFormat!, { allowPrompt: true }),
+    };
+  }
+  if (command === "apply-code-review-packet") {
+    const taskId = getValue("--task-id");
+    const executorRefs = getValues("--executor-report-ref");
+    if (!taskId) throw new GuardError("apply-code-review-packet 缺少必填参数 --task-id");
+    if (executorRefs.length === 0) throw new GuardError("apply-code-review-packet 缺少必填参数 --executor-report-ref");
+    return {
+      command,
+      change,
+      task_id: taskId,
+      executor_report_refs: executorRefs,
+      packet_format: parsePacketOutputFormat(selectedPacketFormat!, { allowPrompt: true }),
+    };
+  }
+  if (command === "apply-verify-packet") {
+    const taskId = getValue("--task-id");
+    const executorRefs = getValues("--executor-report-ref");
+    const codeReviewRefs = getValues("--task-code-review-report-ref");
+    const greenRefs = getValues("--green-test-run-evidence-ref");
+    const redRefs = getValues("--red-test-run-evidence-ref");
+    const characterizationRefs = getValues("--characterization-test-run-evidence-ref");
+    if (!taskId) throw new GuardError("apply-verify-packet 缺少必填参数 --task-id");
+    if (executorRefs.length === 0) throw new GuardError("apply-verify-packet 缺少必填参数 --executor-report-ref");
+    if (codeReviewRefs.length === 0) throw new GuardError("apply-verify-packet 缺少必填参数 --task-code-review-report-ref");
+    if (greenRefs.length === 0) throw new GuardError("apply-verify-packet 缺少必填参数 --green-test-run-evidence-ref");
+    if (redRefs.length === 0 && characterizationRefs.length === 0) {
+      throw new GuardError("apply-verify-packet requires --red-test-run-evidence-ref or --characterization-test-run-evidence-ref");
+    }
+    return {
+      command,
+      change,
+      task_id: taskId,
+      executor_report_refs: executorRefs,
+      task_code_review_report_refs: codeReviewRefs,
+      green_test_run_evidence_refs: greenRefs,
+      red_test_run_evidence_refs: redRefs,
+      characterization_test_run_evidence_refs: characterizationRefs,
       packet_format: parsePacketOutputFormat(selectedPacketFormat!, { allowPrompt: true }),
     };
   }
