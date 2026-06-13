@@ -52,7 +52,6 @@ import {
   check_task_complete,
   check_task_edit,
   check_task_reopen,
-  apply_worker_chain_lifecycle_reasons,
 } from "./gates.ts";
 import { final_verification_evidences, index_evidence, live_pass, live_user_confirmations } from "./evidence.ts";
 import { file_blob_sha, dirty_worktree_paths } from "./git.ts";
@@ -76,6 +75,7 @@ import {
   worker_input_ref_digest,
   worker_test_run_reasons,
 } from "./apply_worker_chain.ts";
+import { apply_worker_chain_lifecycle_state } from "./apply_worker_chain_lifecycle.ts";
 
 type PacketContext = {
   change: string;
@@ -751,93 +751,9 @@ function active_apply_worker_chain_id(ctx: PacketContext, taskId: string): strin
   return active ? String(active.apply_worker_chain_id) : null;
 }
 
-function terminal_apply_worker_chain_valid(ctx: PacketContext, ev: JsonMap, taskId: string, chainId: string): boolean {
-  const state = String(ev.chain_state ?? "");
-  if (state === "closed") {
-    return shared_pinned_artifact_ref_reasons(ctx.changeRoot, ev.executor_report_ref, "executor_report_ref", { kind: "worker_report", role: "executor", taskId, chainId }).length === 0
-      && shared_pinned_artifact_ref_reasons(ctx.changeRoot, ev.task_code_review_report_ref, "task_code_review_report_ref", { kind: "worker_report", role: "code-reviewer", taskId, chainId }).length === 0
-      && shared_pinned_artifact_ref_reasons(ctx.changeRoot, ev.verifier_report_ref, "verifier_report_ref", { kind: "worker_report", role: "verifier", taskId, chainId }).length === 0;
-  }
-  if (state === "abandoned") {
-    if ("restored_implementation_fingerprint" in ev && fingerprint_digest(ev.restored_implementation_fingerprint)) return true;
-    if ("serial_takeover_baseline_ref" in ev) {
-      return shared_pinned_artifact_ref_reasons(ctx.changeRoot, ev.serial_takeover_baseline_ref, "serial_takeover_baseline_ref", { kind: "status_report", role: "verifier", taskId, chainId }).length === 0
-        && Array.isArray(ev.successor_green_evidence_refs)
-        && ev.successor_green_evidence_refs.length > 0
-        && ev.successor_green_evidence_refs.every((item: unknown) => typeof item === "string" && item.length > 0);
-    }
-  }
-  return false;
-}
-
 function apply_worker_chain_packet_state(ctx: PacketContext, taskId: string): { active: JsonMap | null; blockers: Reason[] } {
-  const chains = ctx.evidences
-    .filter((ev) => isObject(ev) && !ev._invalid && ev.status === "pass" && ev.gate === "task_complete" && ev.kind === "apply_worker_chain" && ev.task_id === taskId)
-    .filter((ev) => typeof ev.apply_worker_chain_id === "string" && ev.apply_worker_chain_id);
-  const blockers: Reason[] = [];
-  const activeByChain = new Map<string, JsonMap[]>();
-  const terminalsByChain = new Map<string, JsonMap[]>();
-  for (const ev of chains) {
-    const chainId = String(ev.apply_worker_chain_id ?? "");
-    if (String(ev.chain_state ?? "") === "active") {
-      const bucket = activeByChain.get(chainId) ?? [];
-      bucket.push(ev);
-      activeByChain.set(chainId, bucket);
-    }
-    if (String(ev.chain_state ?? "") === "closed" || String(ev.chain_state ?? "") === "abandoned") {
-      const bucket = terminalsByChain.get(chainId) ?? [];
-      bucket.push(ev);
-      terminalsByChain.set(chainId, bucket);
-    }
-  }
-  const validTerminalChainIds = new Set(chains
-    .filter((ev) => String(ev.chain_state ?? "") === "closed" || String(ev.chain_state ?? "") === "abandoned")
-    .filter((ev) => terminal_apply_worker_chain_valid(ctx, ev, taskId, String(ev.apply_worker_chain_id ?? "")))
-    .map((ev) => String(ev.apply_worker_chain_id ?? ""))
-    .filter(Boolean));
-  const duplicateActives = [...activeByChain.entries()]
-    .filter(([chainId]) => !validTerminalChainIds.has(chainId))
-    .map(([, items]) => items)
-    .filter((items) => items.length > 1)
-    .flatMap((items) => items.map((ev) => String(ev.evidence_id ?? ev.apply_worker_chain_id ?? "")))
-    .filter(Boolean)
-    .sort();
-  const activeCandidates = [...activeByChain.entries()]
-    .filter(([chainId]) => !validTerminalChainIds.has(chainId))
-    .map(([, items]) => items[0])
-    .filter(Boolean);
-  blockers.push(...apply_worker_chain_lifecycle_reasons(ctx.repoRoot, ctx.changeRoot, ctx.evidences, taskId).filter((item) => (
-    item.code === "apply_worker_chain_active_conflict"
-      || item.code === "apply_worker_chain_terminal_conflict"
-      || item.code === "apply_worker_chain_terminal_invalid"
-      || item.code === "apply_worker_chain_missing_active"
-  )));
-  const parallelActives = activeCandidates.length > 1
-    ? activeCandidates.map((ev) => String(ev.evidence_id ?? ev.apply_worker_chain_id ?? "")).filter(Boolean).sort()
-    : [];
-  const activeConflicts = [...new Set([...duplicateActives, ...parallelActives])].sort();
-  if (activeConflicts.length > 0) {
-    blockers.push(reason("apply_worker_chain_active_conflict", `task ${taskId} has conflicting active apply worker chain markers: ${renderList(activeConflicts)}`, activeConflicts));
-  }
-  const duplicateTerminals = [...terminalsByChain.values()]
-    .filter((items) => items.length > 1)
-    .flatMap((items) => items.map((ev) => String(ev.evidence_id ?? ev.apply_worker_chain_id ?? "")))
-    .filter(Boolean)
-    .sort();
-  if (duplicateTerminals.length > 0) {
-    blockers.push(reason("apply_worker_chain_terminal_conflict", `task ${taskId} has duplicate apply worker chain terminal markers: ${renderList(duplicateTerminals)}`, duplicateTerminals));
-  }
-  const invalidTerminals = chains
-    .filter((ev) => String(ev.chain_state ?? "") === "closed" || String(ev.chain_state ?? "") === "abandoned")
-    .filter((ev) => !terminal_apply_worker_chain_valid(ctx, ev, taskId, String(ev.apply_worker_chain_id ?? "")))
-    .map((ev) => String(ev.evidence_id ?? ev.apply_worker_chain_id ?? ""))
-    .filter(Boolean)
-    .sort();
-  if (invalidTerminals.length > 0) {
-    blockers.push(reason("apply_worker_chain_terminal_invalid", `task ${taskId} has invalid apply worker chain terminal markers: ${renderList(invalidTerminals)}`, invalidTerminals));
-  }
-  const active = activeCandidates[0] ?? null;
-  return { active: blockers.length === 0 ? active : null, blockers };
+  const state = apply_worker_chain_lifecycle_state(ctx.repoRoot, ctx.changeRoot, ctx.evidences, taskId);
+  return { active: state.active, blockers: state.packetBlockers };
 }
 
 function active_apply_worker_chain(ctx: PacketContext, taskId: string): { active: JsonMap | null; blockers: Reason[] } {

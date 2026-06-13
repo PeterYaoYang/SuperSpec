@@ -19,14 +19,9 @@ function findRepoRoot(start: string): string {
 }
 
 const REPO = findRepoRoot(dirname(fileURLToPath(import.meta.url)));
-const EXPECTED_INSTALL_UPPER_BOUND_TOTAL = 44575;
+const EXPECTED_INSTALL_UPPER_BOUND_TOTAL = 30009;
 const EXPECTED_RUNTIME_REQUIRED_SUBSET_TOTAL = 30009;
 const EXPECTED_INSTALL_UPPER_BOUND_PATHS = [
-  ".codex/skills/superspec-apply/SKILL.md",
-  ".codex/skills/superspec-archive/SKILL.md",
-  ".codex/skills/superspec-explore/SKILL.md",
-  ".codex/skills/superspec-propose/SKILL.md",
-  ".codex/skills/superspec-review/SKILL.md",
   "adapters/codex/agents/architect.toml",
   "adapters/codex/agents/code-reviewer.toml",
   "adapters/codex/agents/critic.toml",

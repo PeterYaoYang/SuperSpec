@@ -1325,6 +1325,24 @@ withFixture("apply worker downstream packets validate active chain and typed ref
   assert.equal(greenInvalidTerminal.payload.worker_state, "blocked");
   assert.ok(greenInvalidTerminal.payload.blockers.includes("apply_worker_chain_terminal_invalid"), JSON.stringify(greenInvalidTerminal.payload));
 
+  const validTerminal = withRuntime({
+    dirty_worktree_paths: () => [],
+  }, () => closedChainEvidence(fx, chainId, "EV-green-worker", {
+    evidence_id: "EV-chain-closed-valid-packet-entry",
+  }, [...base, red, green, chain]));
+  const executorAfterValidTerminal = withRuntime({
+    load_context: () => [status(fx), fx.repo, fx.change, [...base, red, green, chain, validTerminal]],
+    dirty_worktree_paths: () => [],
+  }, () => captureMainJson([
+    "apply-executor-packet",
+    "--change", "demo-change",
+    "--task-id", "TASK-001",
+    "--format", "agent",
+  ]));
+  assert.equal(executorAfterValidTerminal.payload.worker_state, "ready", JSON.stringify(executorAfterValidTerminal.payload));
+  assert.equal(executorAfterValidTerminal.payload.blockers, undefined);
+  assert.notEqual(executorAfterValidTerminal.payload.apply_worker_chain_id, chainId);
+
   const duplicateActivePacket = withRuntime({
     load_context: () => [status(fx), fx.repo, fx.change, [
       ...base,

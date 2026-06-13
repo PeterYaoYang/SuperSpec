@@ -198,6 +198,59 @@ test("codex adapter maps generic workflow templates to repo-local surfaces", () 
   }
 });
 
+test("apply worker chain lifecycle uses one shared runtime source", () => {
+  const packetRender = repoText("src/packet_render.ts");
+  const lifecycle = repoText("src/apply_worker_chain_lifecycle.ts");
+
+  assert.equal(packetRender.includes("function terminal_apply_worker_chain_valid"), false);
+  assert.equal(packetRender.includes("terminal_apply_worker_chain_valid("), false);
+  assert.match(packetRender, /apply_worker_chain_lifecycle_state/u);
+  assert.doesNotMatch(lifecycle, /from "\.\/(?:gates|packet_render|core)\.ts"/u);
+});
+
+test("runtime import graph keeps apply worker chain lifecycle acyclic", () => {
+  const files = [
+    "src/apply_worker_chain_lifecycle.ts",
+    "src/apply_worker_chain.ts",
+    "src/evidence.ts",
+    "src/tasks.ts",
+    "src/gates.ts",
+    "src/packet_render.ts",
+    "src/core.ts",
+  ];
+  const fileSet = new Set(files);
+  const graph = new Map<string, string[]>();
+  for (const file of files) {
+    const text = repoText(file);
+    const imports = [...text.matchAll(/(?:import|export)\s+(?:type\s+)?(?:[^"']*?\s+from\s+)?["'](\.\/[^"']+)["']/gu)]
+      .map((match) => `src/${match[1].replace(/^\.\//u, "")}`)
+      .filter((target) => fileSet.has(target));
+    graph.set(file, imports);
+  }
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const stack: string[] = [];
+  const visit = (file: string): void => {
+    if (visited.has(file)) return;
+    if (visiting.has(file)) {
+      const cycle = [...stack.slice(stack.indexOf(file)), file].join(" -> ");
+      assert.fail(`runtime import cycle detected: ${cycle}`);
+    }
+    visiting.add(file);
+    stack.push(file);
+    for (const next of graph.get(file) ?? []) visit(next);
+    stack.pop();
+    visiting.delete(file);
+    visited.add(file);
+  };
+  for (const file of files) visit(file);
+});
+
+test("apply worker chain lifecycle reasons remain exported from package guard entrypoint", async () => {
+  const guard = await import("../superspec_guard.ts");
+  assert.equal(typeof guard.apply_worker_chain_lifecycle_reasons, "function");
+});
+
 test("package carries sidecar templates and install manifest schema", () => {
   for (const name of ["archive-preservation.json", "business-invariants.md", "config.yaml", "discovery.md", "test-contract.md"]) {
     assert.equal(
