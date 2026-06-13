@@ -7,11 +7,12 @@ import { fileURLToPath } from "node:url";
 import {
   measure_packet_surface_report,
 } from "../src/packet_measure.ts";
+import { load_install_map } from "../src/install_engine.ts";
 
 function findRepoRoot(start: string): string {
   let dir = resolve(start);
   while (true) {
-    if (existsSync(join(dir, "package.json")) && existsSync(join(dir, "templates")) && existsSync(join(dir, ".codex"))) return dir;
+    if (existsSync(join(dir, "package.json")) && existsSync(join(dir, "templates")) && existsSync(join(dir, "adapters", "codex", "install-map.json"))) return dir;
     const parent = dirname(dir);
     if (parent === dir) return resolve(start);
     dir = parent;
@@ -65,70 +66,70 @@ const EXPECTED_RUNTIME_REQUIRED_SUBSET_PATHS = [
 ];
 const EXPECTED_SCENARIO_PATHS: Record<string, string[]> = {
   explore_complete: [
-    ".codex/agents/critic.toml",
-    ".codex/prompts/critic.md",
-    ".codex/skills/superspec-explore/SKILL.md",
+    "adapters/codex/agents/critic.toml",
+    "templates/workflow/prompts/critic.md",
+    "templates/workflow/skills/superspec-explore/SKILL.md",
   ],
   proposal_reviewed: [
-    ".codex/agents/critic.toml",
-    ".codex/prompts/critic.md",
-    ".codex/skills/superspec-propose/SKILL.md",
+    "adapters/codex/agents/critic.toml",
+    "templates/workflow/prompts/critic.md",
+    "templates/workflow/skills/superspec-propose/SKILL.md",
   ],
   design_complete: [
-    ".codex/agents/architect.toml",
-    ".codex/agents/critic.toml",
-    ".codex/agents/test-engineer.toml",
-    ".codex/prompts/architect.md",
-    ".codex/prompts/critic.md",
-    ".codex/prompts/test-engineer.md",
-    ".codex/skills/superspec-propose/SKILL.md",
+    "adapters/codex/agents/architect.toml",
+    "adapters/codex/agents/critic.toml",
+    "adapters/codex/agents/test-engineer.toml",
+    "templates/workflow/prompts/architect.md",
+    "templates/workflow/prompts/critic.md",
+    "templates/workflow/prompts/test-engineer.md",
+    "templates/workflow/skills/superspec-propose/SKILL.md",
   ],
   test_contract_drafted: [
-    ".codex/agents/critic.toml",
-    ".codex/agents/test-engineer.toml",
-    ".codex/prompts/critic.md",
-    ".codex/prompts/test-engineer.md",
-    ".codex/skills/superspec-propose/SKILL.md",
+    "adapters/codex/agents/critic.toml",
+    "adapters/codex/agents/test-engineer.toml",
+    "templates/workflow/prompts/critic.md",
+    "templates/workflow/prompts/test-engineer.md",
+    "templates/workflow/skills/superspec-propose/SKILL.md",
   ],
   apply_ready: [
-    ".codex/agents/executor.toml",
-    ".codex/prompts/executor.md",
-    ".codex/skills/superspec-apply/SKILL.md",
+    "adapters/codex/agents/executor.toml",
+    "templates/workflow/prompts/executor.md",
+    "templates/workflow/skills/superspec-apply/SKILL.md",
   ],
   review_complete_allow: [
-    ".codex/agents/architect.toml",
-    ".codex/agents/code-reviewer.toml",
-    ".codex/agents/critic.toml",
-    ".codex/agents/verifier.toml",
-    ".codex/prompts/architect.md",
-    ".codex/prompts/code-reviewer.md",
-    ".codex/prompts/critic.md",
-    ".codex/prompts/verifier.md",
-    ".codex/skills/superspec-review/SKILL.md",
+    "adapters/codex/agents/architect.toml",
+    "adapters/codex/agents/code-reviewer.toml",
+    "adapters/codex/agents/critic.toml",
+    "adapters/codex/agents/verifier.toml",
+    "templates/workflow/prompts/architect.md",
+    "templates/workflow/prompts/code-reviewer.md",
+    "templates/workflow/prompts/critic.md",
+    "templates/workflow/prompts/verifier.md",
+    "templates/workflow/skills/superspec-review/SKILL.md",
   ],
   archive_ready: [
-    ".codex/skills/superspec-archive/SKILL.md",
+    "templates/workflow/skills/superspec-archive/SKILL.md",
   ],
   round2_reviewer_prompt: [
-    ".codex/agents/critic.toml",
-    ".codex/prompts/critic.md",
+    "adapters/codex/agents/critic.toml",
+    "templates/workflow/prompts/critic.md",
   ],
   request_changes_reopen_tasks: [
-    ".codex/agents/architect.toml",
-    ".codex/agents/code-reviewer.toml",
-    ".codex/agents/critic.toml",
-    ".codex/prompts/architect.md",
-    ".codex/prompts/code-reviewer.md",
-    ".codex/prompts/critic.md",
-    ".codex/skills/superspec-review/SKILL.md",
+    "adapters/codex/agents/architect.toml",
+    "adapters/codex/agents/code-reviewer.toml",
+    "adapters/codex/agents/critic.toml",
+    "templates/workflow/prompts/architect.md",
+    "templates/workflow/prompts/code-reviewer.md",
+    "templates/workflow/prompts/critic.md",
+    "templates/workflow/skills/superspec-review/SKILL.md",
   ],
   task_reopen_to_resolved: [
-    ".codex/agents/executor.toml",
-    ".codex/prompts/executor.md",
-    ".codex/skills/superspec-apply/SKILL.md",
+    "adapters/codex/agents/executor.toml",
+    "templates/workflow/prompts/executor.md",
+    "templates/workflow/skills/superspec-apply/SKILL.md",
   ],
   scope_expansion: [
-    ".codex/skills/superspec-apply/SKILL.md",
+    "templates/workflow/skills/superspec-apply/SKILL.md",
   ],
 };
 const EXPECTED_SCENARIO_TOTALS: Record<string, number> = {
@@ -174,14 +175,17 @@ const EXPECTED_MATERIALIZED_MARKERS: Record<string, string[]> = {
 
 function chars(path: string): number {
   const absPath = join(REPO, path);
-  if (existsSync(absPath)) return readFileSync(absPath, "utf8").length;
-  const skillMatch = /^\.codex\/skills\/([^/]+)\/SKILL\.md$/u.exec(path);
-  if (skillMatch) return readFileSync(join(REPO, "templates", "workflow", "skills", skillMatch[1], "SKILL.md"), "utf8").length;
-  const promptMatch = /^\.codex\/prompts\/([^/]+)\.md$/u.exec(path);
-  if (promptMatch) return readFileSync(join(REPO, "templates", "workflow", "prompts", `${promptMatch[1]}.md`), "utf8").length;
-  const agentMatch = /^\.codex\/agents\/([^/]+)\.toml$/u.exec(path);
-  if (agentMatch) return readFileSync(join(REPO, "adapters", "codex", "agents", `${agentMatch[1]}.toml`), "utf8").length;
   return readFileSync(absPath, "utf8").length;
+}
+
+function installMapSources(): Set<string> {
+  const { mappings, problems } = load_install_map(REPO);
+  assert.deepEqual(problems, []);
+  return new Set(
+    mappings
+      .filter((mapping) => mapping.kind === "skill" || mapping.kind === "prompt" || mapping.kind === "agent")
+      .map((mapping) => mapping.source),
+  );
 }
 
 function assertMaterializedMeasure(
@@ -205,6 +209,7 @@ test("packet surface report measures fixed static upper bounds and runtime subse
   const runtimePaths = report.fixed_surface_chars_runtime_required_subset.files.map((item) => item.path);
   assert.deepEqual(installPaths, EXPECTED_INSTALL_UPPER_BOUND_PATHS);
   assert.deepEqual(runtimePaths, EXPECTED_RUNTIME_REQUIRED_SUBSET_PATHS);
+  assert.ok([...installPaths, ...runtimePaths].every((path) => !path.startsWith(".codex/")));
   assert.equal(report.fixed_surface_chars_install_upper_bound.total_chars, EXPECTED_INSTALL_UPPER_BOUND_TOTAL);
   assert.equal(report.fixed_surface_chars_runtime_required_subset.total_chars, EXPECTED_RUNTIME_REQUIRED_SUBSET_TOTAL);
   assert.ok(report.fixed_surface_chars_install_upper_bound.total_chars >= report.fixed_surface_chars_runtime_required_subset.total_chars);
@@ -218,6 +223,7 @@ test("packet surface report measures fixed static upper bounds and runtime subse
 test("packet surface report includes all representative workflow scenarios from the design baseline", () => {
   const report = measure_packet_surface_report(REPO);
   const scenarios = report.representative_loaded_surface_chars.scenarios;
+  const packagePayloadSources = installMapSources();
   const names = scenarios.map((item) => item.name);
   assert.deepEqual(Object.keys(EXPECTED_SCENARIO_PATHS).sort(), [...names].sort());
   assert.deepEqual(Object.keys(EXPECTED_SCENARIO_TOTALS).sort(), [...names].sort());
@@ -230,6 +236,8 @@ test("packet surface report includes all representative workflow scenarios from 
       EXPECTED_SCENARIO_PATHS[scenario.name],
       scenario.name,
     );
+    assert.ok(scenario.files.every((item) => !item.path.startsWith(".codex/")), scenario.name);
+    assert.ok(scenario.files.every((item) => packagePayloadSources.has(item.path)), scenario.name);
     assert.equal(scenario.total_chars, EXPECTED_SCENARIO_TOTALS[scenario.name], scenario.name);
     const measured = scenario.files.reduce((sum, item) => sum + chars(item.path), 0);
     assert.equal(scenario.total_chars, measured, scenario.name);

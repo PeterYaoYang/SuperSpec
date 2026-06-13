@@ -2,11 +2,10 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, wri
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ParsedArgs } from "./cli_args.ts";
+import { load_install_map } from "./install_engine.ts";
 import { dispatch_packet } from "./packet_render.ts";
 import {
   GuardError,
-  REQUIRED_SUPERSPEC_AGENT_ROLES,
-  REQUIRED_SUPERSPEC_WORKFLOW_SKILLS,
   runtime,
   type JsonMap,
 } from "./util.ts";
@@ -62,112 +61,112 @@ type ScenarioSpec = {
 const REPRESENTATIVE_SCENARIOS: readonly ScenarioSpec[] = [
   {
     name: "explore_complete",
-    description: "Post-bridge runtime surface for discovery authoring plus proposal-entry critic review.",
+    description: "Package payload surface for discovery authoring plus proposal-entry critic review.",
     files: [
-      ".codex/skills/superspec-explore/SKILL.md",
-      ".codex/prompts/critic.md",
-      ".codex/agents/critic.toml",
+      "templates/workflow/skills/superspec-explore/SKILL.md",
+      "templates/workflow/prompts/critic.md",
+      "adapters/codex/agents/critic.toml",
     ],
   },
   {
     name: "proposal_reviewed",
-    description: "Post-bridge runtime surface for proposal authoring and proposal critic review.",
+    description: "Package payload surface for proposal authoring and proposal critic review.",
     files: [
-      ".codex/skills/superspec-propose/SKILL.md",
-      ".codex/prompts/critic.md",
-      ".codex/agents/critic.toml",
+      "templates/workflow/skills/superspec-propose/SKILL.md",
+      "templates/workflow/prompts/critic.md",
+      "adapters/codex/agents/critic.toml",
     ],
   },
   {
     name: "design_complete",
-    description: "Post-bridge runtime surface for design authoring and the architect/critic/test-engineer review bundle.",
+    description: "Package payload surface for design authoring and the architect/critic/test-engineer review bundle.",
     files: [
-      ".codex/skills/superspec-propose/SKILL.md",
-      ".codex/prompts/architect.md",
-      ".codex/prompts/critic.md",
-      ".codex/prompts/test-engineer.md",
-      ".codex/agents/architect.toml",
-      ".codex/agents/critic.toml",
-      ".codex/agents/test-engineer.toml",
+      "templates/workflow/skills/superspec-propose/SKILL.md",
+      "templates/workflow/prompts/architect.md",
+      "templates/workflow/prompts/critic.md",
+      "templates/workflow/prompts/test-engineer.md",
+      "adapters/codex/agents/architect.toml",
+      "adapters/codex/agents/critic.toml",
+      "adapters/codex/agents/test-engineer.toml",
     ],
   },
   {
     name: "test_contract_drafted",
-    description: "Post-bridge runtime surface for test-contract authoring and its review lanes.",
+    description: "Package payload surface for test-contract authoring and its review lanes.",
     files: [
-      ".codex/skills/superspec-propose/SKILL.md",
-      ".codex/prompts/critic.md",
-      ".codex/prompts/test-engineer.md",
-      ".codex/agents/critic.toml",
-      ".codex/agents/test-engineer.toml",
+      "templates/workflow/skills/superspec-propose/SKILL.md",
+      "templates/workflow/prompts/critic.md",
+      "templates/workflow/prompts/test-engineer.md",
+      "adapters/codex/agents/critic.toml",
+      "adapters/codex/agents/test-engineer.toml",
     ],
   },
   {
     name: "apply_ready",
-    description: "Post-bridge runtime surface for apply orchestration and bounded executor handoff.",
+    description: "Package payload surface for apply orchestration and bounded executor handoff.",
     files: [
-      ".codex/skills/superspec-apply/SKILL.md",
-      ".codex/prompts/executor.md",
-      ".codex/agents/executor.toml",
+      "templates/workflow/skills/superspec-apply/SKILL.md",
+      "templates/workflow/prompts/executor.md",
+      "adapters/codex/agents/executor.toml",
     ],
   },
   {
     name: "review_complete_allow",
-    description: "Post-bridge runtime surface for merged review + final verification on the allow path.",
+    description: "Package payload surface for merged review + final verification on the allow path.",
     files: [
-      ".codex/skills/superspec-review/SKILL.md",
-      ".codex/prompts/code-reviewer.md",
-      ".codex/prompts/architect.md",
-      ".codex/prompts/critic.md",
-      ".codex/prompts/verifier.md",
-      ".codex/agents/code-reviewer.toml",
-      ".codex/agents/architect.toml",
-      ".codex/agents/critic.toml",
-      ".codex/agents/verifier.toml",
+      "templates/workflow/skills/superspec-review/SKILL.md",
+      "templates/workflow/prompts/code-reviewer.md",
+      "templates/workflow/prompts/architect.md",
+      "templates/workflow/prompts/critic.md",
+      "templates/workflow/prompts/verifier.md",
+      "adapters/codex/agents/code-reviewer.toml",
+      "adapters/codex/agents/architect.toml",
+      "adapters/codex/agents/critic.toml",
+      "adapters/codex/agents/verifier.toml",
     ],
   },
   {
     name: "archive_ready",
-    description: "Post-bridge runtime surface for archive handoff after review passes.",
+    description: "Package payload surface for archive handoff after review passes.",
     files: [
-      ".codex/skills/superspec-archive/SKILL.md",
+      "templates/workflow/skills/superspec-archive/SKILL.md",
     ],
   },
   {
     name: "round2_reviewer_prompt",
-    description: "Post-bridge runtime surface for a round>1 reviewer lane.",
+    description: "Package payload surface for a round>1 reviewer lane.",
     files: [
-      ".codex/prompts/critic.md",
-      ".codex/agents/critic.toml",
+      "templates/workflow/prompts/critic.md",
+      "adapters/codex/agents/critic.toml",
     ],
   },
   {
     name: "request_changes_reopen_tasks",
-    description: "Post-bridge runtime surface for a review round that routes back to apply via reopen_tasks.",
+    description: "Package payload surface for a review round that routes back to apply via reopen_tasks.",
     files: [
-      ".codex/skills/superspec-review/SKILL.md",
-      ".codex/prompts/code-reviewer.md",
-      ".codex/prompts/architect.md",
-      ".codex/prompts/critic.md",
-      ".codex/agents/code-reviewer.toml",
-      ".codex/agents/architect.toml",
-      ".codex/agents/critic.toml",
+      "templates/workflow/skills/superspec-review/SKILL.md",
+      "templates/workflow/prompts/code-reviewer.md",
+      "templates/workflow/prompts/architect.md",
+      "templates/workflow/prompts/critic.md",
+      "adapters/codex/agents/code-reviewer.toml",
+      "adapters/codex/agents/architect.toml",
+      "adapters/codex/agents/critic.toml",
     ],
   },
   {
     name: "task_reopen_to_resolved",
-    description: "Post-bridge runtime surface for reopened apply work from revert through successor executor completion.",
+    description: "Package payload surface for reopened apply work from revert through successor executor completion.",
     files: [
-      ".codex/skills/superspec-apply/SKILL.md",
-      ".codex/prompts/executor.md",
-      ".codex/agents/executor.toml",
+      "templates/workflow/skills/superspec-apply/SKILL.md",
+      "templates/workflow/prompts/executor.md",
+      "adapters/codex/agents/executor.toml",
     ],
   },
   {
     name: "scope_expansion",
-    description: "Post-bridge runtime surface for apply-side user confirmation when task scope expands.",
+    description: "Package payload surface for apply-side user confirmation when task scope expands.",
     files: [
-      ".codex/skills/superspec-apply/SKILL.md",
+      "templates/workflow/skills/superspec-apply/SKILL.md",
     ],
   },
 ] as const;
@@ -232,21 +231,6 @@ function ensureReadableTextFile(repoRoot: string, relPath: string): string {
   const absPath = join(repoRoot, relPath);
   if (existsSync(absPath) && statSync(absPath).isFile()) {
     return readFileSync(absPath, "utf8");
-  }
-  const skillMatch = /^\.codex\/skills\/([^/]+)\/SKILL\.md$/u.exec(relPath);
-  if (skillMatch) {
-    const fallback = join(repoRoot, "templates", "workflow", "skills", skillMatch[1], "SKILL.md");
-    if (existsSync(fallback) && statSync(fallback).isFile()) return readFileSync(fallback, "utf8");
-  }
-  const promptMatch = /^\.codex\/prompts\/([^/]+)\.md$/u.exec(relPath);
-  if (promptMatch) {
-    const fallback = join(repoRoot, "templates", "workflow", "prompts", `${promptMatch[1]}.md`);
-    if (existsSync(fallback) && statSync(fallback).isFile()) return readFileSync(fallback, "utf8");
-  }
-  const agentMatch = /^\.codex\/agents\/([^/]+)\.toml$/u.exec(relPath);
-  if (agentMatch) {
-    const fallback = join(repoRoot, "adapters", "codex", "agents", `${agentMatch[1]}.toml`);
-    if (existsSync(fallback) && statSync(fallback).isFile()) return readFileSync(fallback, "utf8");
   }
   throw new GuardError(`packet_measure_missing_file: ${relPath}`);
 }
@@ -440,26 +424,12 @@ function measureMaterializedSamples(specs: readonly MaterializedSampleSpec[]): M
   }
 }
 
-function templateWorkflowSkillPaths(): string[] {
-  return REQUIRED_SUPERSPEC_WORKFLOW_SKILLS.map((name) => `templates/workflow/skills/${name}/SKILL.md`);
-}
-
-function templatePromptPaths(): string[] {
-  return REQUIRED_SUPERSPEC_AGENT_ROLES.map((name) => `templates/workflow/prompts/${name}.md`);
-}
-
-function adapterAgentPaths(): string[] {
-  return REQUIRED_SUPERSPEC_AGENT_ROLES.map((name) => `adapters/codex/agents/${name}.toml`);
-}
-
-function repoLocalSkillPaths(repoRoot: string): string[] {
-  return REQUIRED_SUPERSPEC_WORKFLOW_SKILLS
-    .map((name) => join(".codex", "skills", name, "SKILL.md"))
-    .filter((relPath) => existsSync(join(repoRoot, relPath)));
-}
-
-function runtimeBridgeSkillPaths(): string[] {
-  return [];
+function installPayloadSourcePaths(repoRoot: string): string[] {
+  const { mappings, problems } = load_install_map(repoRoot);
+  if (problems.length > 0) throw new GuardError(`packet_measure_install_map_invalid: ${problems.join("; ")}`);
+  return mappings
+    .filter((mapping) => mapping.kind === "skill" || mapping.kind === "prompt" || mapping.kind === "agent")
+    .map((mapping) => mapping.source);
 }
 
 export function representative_scenarios(): readonly ScenarioSpec[] {
@@ -467,18 +437,9 @@ export function representative_scenarios(): readonly ScenarioSpec[] {
 }
 
 export function measure_packet_surface_report(repoRoot: string): PacketMeasureReport {
-  const fixedSurfaceInstallUpperBound = measureSurface(repoRoot, [
-    ...templateWorkflowSkillPaths(),
-    ...templatePromptPaths(),
-    ...adapterAgentPaths(),
-    ...repoLocalSkillPaths(repoRoot),
-  ]);
-  const fixedSurfaceRuntimeRequiredSubset = measureSurface(repoRoot, [
-    ...templateWorkflowSkillPaths(),
-    ...templatePromptPaths(),
-    ...adapterAgentPaths(),
-    ...runtimeBridgeSkillPaths(),
-  ]);
+  const packagePayloadSourcePaths = installPayloadSourcePaths(repoRoot);
+  const fixedSurfaceInstallUpperBound = measureSurface(repoRoot, packagePayloadSourcePaths);
+  const fixedSurfaceRuntimeRequiredSubset = measureSurface(repoRoot, packagePayloadSourcePaths);
   const scenarios = REPRESENTATIVE_SCENARIOS.map((scenario) => ({
     name: scenario.name,
     description: scenario.description,
