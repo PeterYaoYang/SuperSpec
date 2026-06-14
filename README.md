@@ -82,7 +82,7 @@ superspec init --scope project
 
 这条命令的意思是：把 SuperSpec 当前可用的工作流入口安装到项目里。
 
-如果当前工具支持 Codex hooks，初始化还会安装托管的 `.codex/hooks.json`。这些 hook 会在写文件、测试命令和子智能体启动/停止时做轻量检查或审计记录；当前定位是 `audit-only`，不是严格安全沙箱。
+初始化还会安装托管的 `.codex/hooks.json`。它会让 Codex 在写文件前、工具执行后、子智能体启动和停止时调用 SuperSpec，做检查和记录。
 
 Windows PowerShell 如果拦截 npm 的 `.ps1` 脚本，请改用：
 
@@ -159,19 +159,17 @@ openspec/changes/<变更ID>/.superspec/
 `.superspec/` 要不要提交到 git，由你的团队决定。
 如果不提交，删掉后就没有 git 历史可以恢复。
 
-## Codex hooks
+## Hook 会做什么
 
-SuperSpec 会安装一组托管 Codex hooks，用于把工具调用事件交给 `superspec-hook` 做策略检查和审计记录。
+SuperSpec 安装的 hook 会在几个关键时机运行：
 
-当前包含：
+- 写文件前：检查是否会改到 SuperSpec 的过程记录、提前归档、绕过任务检查，或写到当前任务不该写的地方
+- 工具执行后：如果刚跑的是测试或验证命令，就记录这次结果
+- 子智能体启动和停止时：记录这次子智能体运行的基本信息
 
-- `PreToolUse`：写入前检查 SuperSpec 状态根、归档命令、受保护任务勾选和活动会话写入范围
-- `PostToolUse`：测试或验证命令执行后记录 audit-only 运行证据
-- `SubagentStart` / `SubagentStop`：记录 audit-only 子智能体启动和停止 runlog
+这些 hook 的默认超时时间是 `120` 秒。这个时间限制的是 hook 自己的检查过程，不限制 `npm test`、构建命令或子智能体本身能运行多久。
 
-这些 hooks 的超时时间默认都是 `120` 秒，状态消息为中文。正常情况下 hook 只做本地 JSON、状态和文件指纹检查，通常会很快结束；超时只是给大型项目、慢文件系统和状态锁等待留余量。
-
-当前 hook profile 仍是 `audit-only fallback`：它可以减少误操作、阻断已覆盖的高风险写入路径，并留下审计线索；但在严格 provenance 和运行时 deny 证明完成前，不宣称 `strict`、`mechanical` 或 `runtime-verified`。
+hook 不是安全沙箱。它能减少误操作、拦住一部分明显会破坏流程记录的写入，并留下审计线索；但不能保证阻止所有绕过，也不能把记录变成不可伪造的安全证明。
 
 ## 重要边界
 
@@ -191,7 +189,7 @@ SuperSpec 能让流程更规范，但它不是安全锁。
 - 阻止恶意伪造记录
 - 替代正式的安全审计、合规审计或法律证明
 
-也就是说，SuperSpec 目前是“流程纪律 + 审计辅助工具”，不是“强制安全系统”。Codex hooks 会增强可见性和部分 fail-closed 检查，但当前仍按 audit-only 语义使用。
+也就是说，SuperSpec 目前是“流程纪律 + 审计辅助工具”，不是“强制安全系统”。hook 会增强可见性和一部分写入检查，但它仍然不能替代正式的安全控制。
 
 ## 常用命令
 
