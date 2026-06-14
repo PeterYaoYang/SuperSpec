@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -142,4 +142,27 @@ test("top-level update local-only skips npm self update", async () => {
   assert.equal(result.status, 0);
   assert.match(result.stdout, /--local-only/u);
   assert.doesNotMatch(result.stderr, /Updating SuperSpec CLI/u);
+});
+
+test("top-level update local-only preserves explicit output formats", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "superspec-top-update-format-"));
+  try {
+    await captureOutput(() => main_superspec(["init", "--path", tmp, "--format", "json"]));
+
+    const jsonResult = await captureOutput(() => main_superspec(["update", "--local-only", "--path", tmp, "--format", "json"]));
+    assert.equal(jsonResult.status, 0, jsonResult.stderr);
+    const json = JSON.parse(jsonResult.stdout);
+    assert.equal(json.allowed, true);
+    assert.equal(json.gate, "project_update");
+    assert.equal(json.install_scope, "project");
+
+    const agentResult = await captureOutput(() => main_superspec(["update", "--local-only", "--path", tmp, "--format", "agent"]));
+    assert.equal(agentResult.status, 0, agentResult.stderr);
+    const agent = JSON.parse(agentResult.stdout);
+    assert.equal(agent.allowed, true);
+    assert.equal(agent.workflow_action, "continue");
+    assert.equal(existsSync(join(tmp, ".codex", "skills", "superspec-explore", "SKILL.md")), true);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 });

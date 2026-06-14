@@ -992,7 +992,7 @@ test("standalone project init creates missing project surfaces without a change"
     return true;
   }) as typeof process.stdout.write;
   try {
-    assert.equal(main_init(["--path", tmp]), 0);
+    assert.equal(main_init(["--path", tmp, "--format", "json"]), 0);
     summary = JSON.parse(writes.join(""));
     assert.equal(summary.allowed, true, JSON.stringify(summary));
     assert.equal(summary.gate, "project_init");
@@ -1008,6 +1008,54 @@ test("standalone project init creates missing project surfaces without a change"
     assert.equal(existsSync(join(tmp, ".superspec")), false);
   } finally {
     process.stdout.write = savedWrite;
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("standalone project init defaults to concise user output", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "superspec-project-init-user-"));
+  try {
+    const text = captureStdoutText(() => {
+      assert.equal(main_init(["--path", tmp]), 0);
+    });
+    assert.match(text, /SuperSpec 初始化完成/u);
+    assert.match(text, /范围：项目级/u);
+    assert.doesNotMatch(text, /"actions"|trust_warnings|block_reasons/u);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("standalone project init default output explains skipped preexisting files", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "superspec-project-init-user-skip-"));
+  try {
+    writeText(join(tmp, ".codex", "skills", "superspec-explore", "SKILL.md"), "custom local skill\n");
+    const text = captureStdoutText(() => {
+      assert.equal(main_init(["--path", tmp]), 0);
+    });
+    assert.match(text, /已跳过 1 项/u);
+    assert.match(text, /跳过项：/u);
+    assert.match(text, /已有不同内容文件已保留；如需覆盖，请使用 --force/u);
+    assert.match(text, /\.codex\/skills\/superspec-explore\/SKILL\.md/u);
+    assert.doesNotMatch(text, /"actions"|trust_warnings|block_reasons/u);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("standalone project update defaults to concise user output", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "superspec-project-update-user-"));
+  try {
+    captureStdoutText(() => {
+      assert.equal(main_init(["--path", tmp, "--format", "json"]), 0);
+    });
+    const text = captureStdoutText(() => {
+      assert.equal(main_init(["--path", tmp, "--update"]), 0);
+    });
+    assert.match(text, /SuperSpec 更新完成/u);
+    assert.match(text, /范围：项目级/u);
+    assert.doesNotMatch(text, /"actions"|trust_warnings|block_reasons/u);
+  } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
 });
@@ -1034,9 +1082,9 @@ test("standalone project init rejects missing format value even with user-facing
     const text = captureStdoutText(() => {
       assert.equal(main_init(["--path", tmp, "--format", "--user-facing"]), 2);
     });
-    const printed = JSON.parse(text);
-    assert.equal(printed.block_reasons[0].code, "guard_error");
-    assert.match(printed.block_reasons[0].message, /--format 缺少取值/u);
+    assert.match(text, /SuperSpec 初始化未完成/u);
+    assert.match(text, /--format 缺少取值/u);
+    assert.doesNotMatch(text, /"block_reasons"/u);
     assert.equal(text.includes("guard_internal_error"), false);
   } finally {
     rmSync(tmp, { recursive: true, force: true });

@@ -389,7 +389,7 @@ test("init cli rejects --update together with --uninstall", () => {
     return true;
   }) as typeof process.stdout.write;
   try {
-    assert.equal(main_init(["--update", "--uninstall"]), 2);
+    assert.equal(main_init(["--update", "--uninstall", "--format", "json"]), 2);
     const summary = JSON.parse(writes.join(""));
     assert.equal(summary.block_reasons[0].code, "guard_error");
     assert.equal(summary.gate_label_zh, "命令执行异常");
@@ -408,7 +408,7 @@ test("init cli --uninstall surfaces engine problems as a block decision", () => 
     return true;
   }) as typeof process.stdout.write;
   try {
-    assert.equal(main_init(["--path", fx.repo, "--uninstall"]), 1);
+    assert.equal(main_init(["--path", fx.repo, "--uninstall", "--format", "json"]), 1);
     const summary = JSON.parse(writes.join(""));
     assert.equal(summary.allowed, false);
     assert.equal(summary.block_reasons[0].code, "project_uninstall_failed");
@@ -718,7 +718,7 @@ test("main init with explicit project scope upgrades openspec before project set
     return true;
   }) as typeof process.stderr.write;
   try {
-    const exitCode = main_init(["--scope", "project", "--path", repo]);
+    const exitCode = main_init(["--scope", "project", "--path", repo, "--format", "json"]);
     assert.equal(exitCode, 0, stderr.join(""));
     assert.equal(existsSync(join(bin, "npm-installed-openspec.txt")), true, "explicit --scope project must trigger OpenSpec upgrade");
     const summary = JSON.parse(stdout.join(""));
@@ -796,7 +796,7 @@ test("main init with user scope blocks when openspec auto install fails", () => 
     return true;
   }) as typeof process.stderr.write;
   try {
-    const exitCode = main_init(["--scope", "user", "--path", repo, "--codex-home", codexHome]);
+    const exitCode = main_init(["--scope", "user", "--path", repo, "--codex-home", codexHome, "--format", "json"]);
     assert.equal(exitCode, 1);
     const summary = JSON.parse(stdout.join(""));
     assert.equal(summary.allowed, false);
@@ -840,7 +840,7 @@ test("main init with explicit user scope installs openspec before user setup", (
     return true;
   }) as typeof process.stderr.write;
   try {
-    const exitCode = main_init(["--scope", "user", "--path", repo, "--codex-home", codexHome]);
+    const exitCode = main_init(["--scope", "user", "--path", repo, "--codex-home", codexHome, "--format", "json"]);
     assert.equal(exitCode, 0, stderr.join(""));
     assert.equal(existsSync(join(bin, "npm-installed-openspec.txt")), true, "explicit --scope user must also trigger OpenSpec upgrade");
     const summary = JSON.parse(stdout.join(""));
