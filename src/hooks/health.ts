@@ -22,26 +22,26 @@ const EXPECTED_HOOK_MATRIX: ExpectedHookEntry[] = [
   {
     eventName: "PreToolUse",
     matcher: "Bash|apply_patch|Edit|Write|mcp__.*",
-    timeout: 10,
-    statusMessage: "SuperSpec hook write policy",
+    timeout: 120,
+    statusMessage: "SuperSpec 写入策略检查",
   },
   {
     eventName: "PostToolUse",
     matcher: "Bash",
-    timeout: 30,
-    statusMessage: "SuperSpec hook runtime evidence",
+    timeout: 120,
+    statusMessage: "SuperSpec 运行证据记录",
   },
   {
     eventName: "SubagentStart",
     matcher: ".*",
-    timeout: 30,
-    statusMessage: "SuperSpec hook subagent start",
+    timeout: 120,
+    statusMessage: "SuperSpec 子智能体启动记录",
   },
   {
     eventName: "SubagentStop",
     matcher: ".*",
-    timeout: 30,
-    statusMessage: "SuperSpec hook subagent stop",
+    timeout: 120,
+    statusMessage: "SuperSpec 子智能体停止记录",
   },
 ];
 

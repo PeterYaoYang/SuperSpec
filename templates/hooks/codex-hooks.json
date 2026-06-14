@@ -12,8 +12,8 @@
           {
             "type": "command",
             "command": "superspec-hook --change \"$SUPERSPEC_CHANGE\"",
-            "timeout": 10,
-            "statusMessage": "SuperSpec hook write policy"
+            "timeout": 120,
+            "statusMessage": "SuperSpec 写入策略检查"
           }
         ]
       }
@@ -25,8 +25,8 @@
           {
             "type": "command",
             "command": "superspec-hook --change \"$SUPERSPEC_CHANGE\"",
-            "timeout": 30,
-            "statusMessage": "SuperSpec hook runtime evidence"
+            "timeout": 120,
+            "statusMessage": "SuperSpec 运行证据记录"
           }
         ]
       }
@@ -38,8 +38,8 @@
           {
             "type": "command",
             "command": "superspec-hook --change \"$SUPERSPEC_CHANGE\"",
-            "timeout": 30,
-            "statusMessage": "SuperSpec hook subagent start"
+            "timeout": 120,
+            "statusMessage": "SuperSpec 子智能体启动记录"
           }
         ]
       }
@@ -51,8 +51,8 @@
           {
             "type": "command",
             "command": "superspec-hook --change \"$SUPERSPEC_CHANGE\"",
-            "timeout": 30,
-            "statusMessage": "SuperSpec hook subagent stop"
+            "timeout": 120,
+            "statusMessage": "SuperSpec 子智能体停止记录"
           }
         ]
       }

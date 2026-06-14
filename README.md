@@ -82,6 +82,8 @@ superspec init --scope project
 
 这条命令的意思是：把 SuperSpec 当前可用的工作流入口安装到项目里。
 
+如果当前工具支持 Codex hooks，初始化还会安装托管的 `.codex/hooks.json`。这些 hook 会在写文件、测试命令和子智能体启动/停止时做轻量检查或审计记录；当前定位是 `audit-only`，不是严格安全沙箱。
+
 Windows PowerShell 如果拦截 npm 的 `.ps1` 脚本，请改用：
 
 ```powershell
@@ -157,6 +159,20 @@ openspec/changes/<变更ID>/.superspec/
 `.superspec/` 要不要提交到 git，由你的团队决定。
 如果不提交，删掉后就没有 git 历史可以恢复。
 
+## Codex hooks
+
+SuperSpec 会安装一组托管 Codex hooks，用于把工具调用事件交给 `superspec-hook` 做策略检查和审计记录。
+
+当前包含：
+
+- `PreToolUse`：写入前检查 SuperSpec 状态根、归档命令、受保护任务勾选和活动会话写入范围
+- `PostToolUse`：测试或验证命令执行后记录 audit-only 运行证据
+- `SubagentStart` / `SubagentStop`：记录 audit-only 子智能体启动和停止 runlog
+
+这些 hooks 的超时时间默认都是 `120` 秒，状态消息为中文。正常情况下 hook 只做本地 JSON、状态和文件指纹检查，通常会很快结束；超时只是给大型项目、慢文件系统和状态锁等待留余量。
+
+当前 hook profile 仍是 `audit-only fallback`：它可以减少误操作、阻断已覆盖的高风险写入路径，并留下审计线索；但在严格 provenance 和运行时 deny 证明完成前，不宣称 `strict`、`mechanical` 或 `runtime-verified`。
+
 ## 重要边界
 
 SuperSpec 能让流程更规范，但它不是安全锁。
@@ -175,7 +191,7 @@ SuperSpec 能让流程更规范，但它不是安全锁。
 - 阻止恶意伪造记录
 - 替代正式的安全审计、合规审计或法律证明
 
-也就是说，SuperSpec v1 是“流程纪律工具”，不是“强制安全系统”。
+也就是说，SuperSpec 目前是“流程纪律 + 审计辅助工具”，不是“强制安全系统”。Codex hooks 会增强可见性和部分 fail-closed 检查，但当前仍按 audit-only 语义使用。
 
 ## 常用命令
 
@@ -223,6 +239,7 @@ superspec doctor
 
 ```text
 .codex/
+  hooks.json
   skills/superspec-explore/
   skills/superspec-propose/
   skills/superspec-apply/
