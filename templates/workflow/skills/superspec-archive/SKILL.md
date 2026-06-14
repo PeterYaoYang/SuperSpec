@@ -26,6 +26,13 @@ Archive 在 `review_complete` allowed 后收尾：确认 archive readiness、保
 
 ## 第一条必跑命令
 
+先尝试建立当前 change 的 SuperSpec hook session。R-1/provenance 未通过时该命令只会记录 audit-only lease 和降级诊断，不代表 mechanical enforcement 已启用：
+
+```text
+superspec guard hook-session-begin --change "<change>" --workflow superspec-archive --entrypoint-token "<fresh-entrypoint-token>" --format agent
+superspec guard hook-session-status --change "<change>" --format agent
+```
+
 ```text
 superspec guard workflow-packet --change "<change>" --gate archive_ready --format agent
 ```
@@ -60,6 +67,7 @@ openspec archive -y "<change>"
 
 ```text
 superspec guard check-archived --change "<change>" --format agent
+superspec guard hook-session-end --change "<change>" --reason archived --format agent
 ```
 
 `.superspec/artifacts/business-invariants.md`、`.superspec/artifacts/test-contract.md`、review/verification evidence、RED/GREEN evidence 和 archive evidence 必须能从 preservation manifest 追溯。

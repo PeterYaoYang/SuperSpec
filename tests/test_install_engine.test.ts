@@ -116,11 +116,12 @@ function installFakeOpenSpecVersion(binDir: string, version: string): void {
 test("real install map loads and every source file exists", () => {
   const { mappings, problems } = guard.load_install_map();
   assert.deepEqual(problems, []);
-  assert.equal(mappings.length, 19, `expected 5 skills, 7 prompts, and 7 agents, got ${mappings.length}`);
+  assert.equal(mappings.length, 20, `expected 5 skills, 1 hook manifest, 7 prompts, and 7 agents, got ${mappings.length}`);
   const targets = mappings.map((item) => item.target);
   for (const name of guard.REQUIRED_SUPERSPEC_WORKFLOW_SKILLS) {
     assert.ok(targets.includes(`.codex/skills/${name}/SKILL.md`), name);
   }
+  assert.ok(targets.includes(".codex/hooks.json"), "managed v2 hooks manifest");
 });
 
 test("command lookup is platform-aware and does not use sh on Windows", () => {

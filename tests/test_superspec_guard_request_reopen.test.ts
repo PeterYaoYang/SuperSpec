@@ -1953,7 +1953,7 @@ withFixture("FIX-13 init surface defenses", (fx) => {
   const decision = guard.check_init("demo-change", brokenStatus, fx.repo, fx.change);
   assert.equal(decision.allowed, false);
   const reasonSet = codes(decision.block_reasons);
-  for (const code of ["missing_openspec_artifacts", "unexpected_openspec_artifacts", "unexpected_apply_requires", "v1_hook_artifact_present", "custom_superspec_schema_present"]) {
+  for (const code of ["missing_openspec_artifacts", "unexpected_openspec_artifacts", "unexpected_apply_requires", "hook_manifest_unmanaged", "custom_superspec_schema_present"]) {
     assert.ok(reasonSet.includes(code), `${code}: ${JSON.stringify(decision.block_reasons)}`);
   }
 });

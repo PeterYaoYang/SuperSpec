@@ -28,6 +28,7 @@ import {
 } from "./util.ts";
 import { all_done, artifact_status_map, get_repo_root, is_done, normalize_gate, openspec_cli_probe } from "./openspec.ts";
 import { read_agent_toml_name, read_skill_frontmatter_name, sidecar_business_invariants_path, sidecar_discovery_path, sidecar_test_contract_path } from "./paths.ts";
+import { hookInitReasons } from "./hooks/health.ts";
 import {
   business_invariant_ids,
   business_invariant_validation_reasons,
@@ -564,7 +565,7 @@ export function check_init(change: string, status: JsonMap, repoRoot: string, ch
   if (!Array.isArray(status.applyRequires) || !new Set(status.applyRequires).has("tasks")) {
     reasons.push(reason("unexpected_apply_requires", "OpenSpec applyRequires must include native tasks artifact"));
   }
-  if (existsSync(join(repoRoot, ".codex", "hooks.json"))) reasons.push(reason("v1_hook_artifact_present", ".codex/hooks.json belongs to superspec v2"));
+  reasons.push(...hookInitReasons(repoRoot));
   if (existsSync(join(repoRoot, "openspec", "schemas", "superspec"))) reasons.push(reason("custom_superspec_schema_present", "openspec/schemas/superspec is not part of superspec v1 overlay"));
   if (reasons.length > 0) return block(change, gate, reasons, { openspec_summary: amap });
   return allow(change, gate, { openspec_summary: amap, gate_summary: { sidecar_root: ".superspec" } });

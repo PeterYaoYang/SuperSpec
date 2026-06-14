@@ -1,0 +1,61 @@
+{
+  "superspec": {
+    "managed": true,
+    "adapter_version": "superspec-hook@2",
+    "strict_profile_default": "audit-only-until-r1-provenance-passes"
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|apply_patch|Edit|Write|mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "superspec-hook --change \"$SUPERSPEC_CHANGE\"",
+            "timeout": 10,
+            "statusMessage": "SuperSpec hook write policy"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "superspec-hook --change \"$SUPERSPEC_CHANGE\"",
+            "timeout": 30,
+            "statusMessage": "SuperSpec hook runtime evidence"
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "superspec-hook --change \"$SUPERSPEC_CHANGE\"",
+            "timeout": 30,
+            "statusMessage": "SuperSpec hook subagent start"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "superspec-hook --change \"$SUPERSPEC_CHANGE\"",
+            "timeout": 30,
+            "statusMessage": "SuperSpec hook subagent stop"
+          }
+        ]
+      }
+    ]
+  }
+}

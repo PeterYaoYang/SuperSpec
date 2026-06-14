@@ -45,6 +45,7 @@ import {
   pinned_artifact_ref_reasons as shared_pinned_artifact_ref_reasons,
   worker_test_run_reasons,
 } from "./apply_worker_chain.ts";
+import { strictRoleRunlogReasons, strictRuntimeEvidenceReasons } from "./hooks/validation.ts";
 
 function file_ref_reasons(baseRoot: string, ev: JsonMap, field: string, code: string): Reason[] {
   const problems: Reason[] = [];
@@ -566,6 +567,7 @@ export function validate_evidence_schema(ev: JsonMap, change: string, changeRoot
   }
   if (ev.kind === "human_confirmation") problems.push(...human_confirmation_reasons(ev));
   if (ev.kind === "test_run") problems.push(...test_run_reasons(ev, changeRoot));
+  problems.push(...strictRuntimeEvidenceReasons(ev));
   if (ev.kind === "apply_worker_chain") problems.push(...apply_worker_chain_reasons(ev, changeRoot));
   // DISC Phase 1: disclosure evidence kinds and reviewer findings[] are schema-checked fail-closed.
   if (ev.kind === "main_review_digest") problems.push(...review_digest_schema_reasons(ev));
@@ -600,6 +602,7 @@ export function validate_evidence_schema(ev: JsonMap, change: string, changeRoot
     const targetRoot = ev.kind === "source_guidance" ? repoRoot : changeRoot;
     problems.push(...role_target_ref_reasons(ev, targetRoot));
     problems.push(...output_ref_target_overlap_reasons(ev, changeRoot, targetRoot));
+    problems.push(...strictRoleRunlogReasons(changeRoot, ev));
   }
   if (ev.kind === "source_guidance") {
     if (!REVIEW_GUIDANCE_ROLES.includes(String(ev.agent_role) as (typeof REVIEW_GUIDANCE_ROLES)[number])) {

@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://superspec.local/schemas/hook-event.schema.json",
+  "title": "SuperSpec Codex Hook Event",
+  "type": "object",
+  "required": ["hook_event_name", "cwd"],
+  "properties": {
+    "session_id": { "type": "string" },
+    "turn_id": { "type": "string" },
+    "transcript_path": { "type": ["string", "null"] },
+    "cwd": { "type": "string" },
+    "hook_event_name": {
+      "type": "string",
+      "enum": ["PreToolUse", "PostToolUse", "SubagentStart", "SubagentStop"]
+    },
+    "permission_mode": { "type": "string" },
+    "tool_name": { "type": "string" },
+    "tool_use_id": { "type": "string" },
+    "tool_input": { "type": "object" },
+    "tool_response": { "type": ["object", "array", "string", "number", "boolean", "null"] },
+    "agent_id": { "type": "string" },
+    "agent_type": { "type": "string" },
+    "agent_transcript_path": { "type": ["string", "null"] },
+    "last_assistant_message": { "type": ["string", "null"] }
+  },
+  "additionalProperties": true
+}

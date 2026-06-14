@@ -12,6 +12,11 @@ export type ParsedArgs = {
   task_id?: string;
   test_id?: string;
   phase?: "red" | "characterization" | "green";
+  event_ref?: string;
+  workflow?: string;
+  entrypoint_token?: string;
+  end_reason?: string;
+  lifecycle_token?: string;
   role?: string;
   evidence_kind?: string;
   round?: number;
@@ -36,6 +41,8 @@ const SIMPLE_COMMANDS = [
   "check-verify-ready",
   "check-archive-ready",
   "check-archived",
+  "hook-health",
+  "hook-session-status",
 ] as const;
 const COMMANDS = [
   "init",
@@ -52,6 +59,13 @@ const COMMANDS = [
   "apply-code-review-packet",
   "apply-verify-packet",
   "ledger-render",
+  "hook-check-write",
+  "hook-check-command",
+  "hook-record-test",
+  "hook-record-subagent-start",
+  "hook-record-subagent-stop",
+  "hook-session-begin",
+  "hook-session-end",
 ] as const;
 const COMMAND_LIST = COMMANDS.join(",");
 const COMMAND_CHOICES = COMMANDS.map((item) => `'${item}'`).join(", ");
@@ -78,6 +92,10 @@ function requiredValueFlags(command: string): string[] {
   if (command === "apply-code-review-packet") flags.push("--task-id", "--executor-report-ref");
   if (command === "apply-verify-packet") flags.push("--task-id", "--executor-report-ref", "--task-code-review-report-ref", "--green-test-run-evidence-ref");
   if (command === "ledger-render") flags.push("--gate");
+  if (command === "hook-check-write" || command === "hook-check-command" || command === "hook-record-test"
+    || command === "hook-record-subagent-start" || command === "hook-record-subagent-stop") flags.push("--event-ref");
+  if (command === "hook-session-begin") flags.push("--workflow", "--entrypoint-token");
+  if (command === "hook-session-end") flags.push("--reason");
   return flags;
 }
 
@@ -97,6 +115,7 @@ function optionalValueFlags(command: string): string[] {
   if (command === "apply-executor-packet") return ["--apply-worker-chain-ref"];
   if (command === "apply-verify-packet") return ["--red-test-run-evidence-ref", "--characterization-test-run-evidence-ref"];
   if (command === "ledger-render") return ["--round"];
+  if (command === "hook-session-end") return ["--lifecycle-token"];
   return [];
 }
 
@@ -365,6 +384,25 @@ export function parse_argv(argv: string[]): ParsedArgs {
     const round = Number.parseInt(roundValue, 10);
     if (!Number.isInteger(round) || round < 1) throw new GuardError("--round 必须是大于等于 1 的整数");
     return { command, change, gate, round };
+  }
+  if (command === "hook-check-write" || command === "hook-check-command" || command === "hook-record-test"
+    || command === "hook-record-subagent-start" || command === "hook-record-subagent-stop") {
+    const eventRef = getValue("--event-ref");
+    if (!eventRef) throw new Error("缺少必填参数 --event-ref");
+    return { command, change, format, event_ref: eventRef };
+  }
+  if (command === "hook-session-begin") {
+    const workflow = getValue("--workflow");
+    const entrypointToken = getValue("--entrypoint-token");
+    if (!workflow) throw new Error("缺少必填参数 --workflow");
+    if (!entrypointToken) throw new Error("缺少必填参数 --entrypoint-token");
+    return { command, change, format, workflow, entrypoint_token: entrypointToken };
+  }
+  if (command === "hook-session-end") {
+    const endReason = getValue("--reason");
+    const lifecycleToken = getValue("--lifecycle-token");
+    if (!endReason) throw new Error("缺少必填参数 --reason");
+    return { command, change, format, end_reason: endReason, lifecycle_token: lifecycleToken ?? "" };
   }
   if (command === "check-task-reopen" || command === "check-task-edit" || command === "check-task-complete") {
     const taskId = getValue("--task-id");

@@ -28,6 +28,11 @@
       "target": ".codex/skills/superspec-archive/SKILL.md"
     },
     {
+      "kind": "hook",
+      "source": "templates/hooks/codex-hooks.json",
+      "target": ".codex/hooks.json"
+    },
+    {
       "kind": "prompt",
       "source": "templates/workflow/prompts/architect.md",
       "target": ".codex/prompts/architect.md"

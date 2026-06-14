@@ -50,6 +50,7 @@ function write_text(path: string, text: string): void {
 
 function excluded_manifest_entry(relPath: string): boolean {
   if (relPath.endsWith(STATE_LOCK_FILENAME) || relPath.endsWith("superspec-state.tmp")) return true;
+  if (relPath === ".superspec/hook-runtime" || relPath.startsWith(".superspec/hook-runtime/")) return true;
   if (relPath === ".superspec/artifacts/archive-preservation.json") return true;
   return false;
 }

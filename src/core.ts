@@ -83,6 +83,17 @@ import {
   openspec_cli_capability_reasons,
   openspec_init_reasons,
 } from "./gates.ts";
+import {
+  hookCheckCommand,
+  hookCheckWrite,
+  hookHealth,
+  hookRecordSubagentStart,
+  hookRecordSubagentStop,
+  hookRecordTest,
+  hookSessionBegin,
+  hookSessionEnd,
+  hookSessionStatus,
+} from "./hooks/guard_api.ts";
 
 const RETRY_WAIT = new Int32Array(new SharedArrayBuffer(4));
 const DEFAULT_MAX_STATE_WRITE_RETRIES = 5;
@@ -106,6 +117,32 @@ export function load_context(change: string): [JsonMap, string, string, JsonMap[
   const repoRoot = get_repo_root(status);
   const evidences = index_evidence(changeRoot);
   return [status, repoRoot, changeRoot, evidences];
+}
+
+function is_hook_command(command: string): boolean {
+  return command === "hook-check-write"
+    || command === "hook-check-command"
+    || command === "hook-record-test"
+    || command === "hook-record-subagent-start"
+    || command === "hook-record-subagent-stop"
+    || command === "hook-health"
+    || command === "hook-session-begin"
+    || command === "hook-session-status"
+    || command === "hook-session-end";
+}
+
+function dispatch_hook_command(args: ParsedArgs): [JsonMap, string] {
+  const change = args.change;
+  if (args.command === "hook-check-write") return [hookCheckWrite(change, args.event_ref ?? ""), "hook"];
+  if (args.command === "hook-check-command") return [hookCheckCommand(change, args.event_ref ?? ""), "hook"];
+  if (args.command === "hook-record-test") return [hookRecordTest(change, args.event_ref ?? ""), "hook"];
+  if (args.command === "hook-record-subagent-start") return [hookRecordSubagentStart(change, args.event_ref ?? ""), "hook"];
+  if (args.command === "hook-record-subagent-stop") return [hookRecordSubagentStop(change, args.event_ref ?? ""), "hook"];
+  if (args.command === "hook-health") return [hookHealth(change), "hook"];
+  if (args.command === "hook-session-begin") return [hookSessionBegin(change, args.workflow ?? "", args.entrypoint_token ?? ""), "hook"];
+  if (args.command === "hook-session-status") return [hookSessionStatus(change), "hook"];
+  if (args.command === "hook-session-end") return [hookSessionEnd(change, args.end_reason ?? "", args.lifecycle_token ?? ""), "hook"];
+  throw new GuardError(`unknown hook command: ${args.command}`);
 }
 
 export function cmd_status(change: string): JsonMap {
@@ -201,6 +238,7 @@ export function cmd_init_summary(change: string, changeRoot: string, decision: J
 function dispatch_once(args: ParsedArgs): [JsonMap, string] {
   const change = args.change;
   const cmd = args.command;
+  if (is_hook_command(cmd)) return dispatch_hook_command(args);
   if (cmd === "check-archived") return [check_archived(change, repo_root_from_cwd()), "archive"];
   const [status, repoRoot, changeRoot, evidences] = runtime.load_context(change) as [JsonMap, string, string, JsonMap[]];
   if (cmd === "recompute" && args.force_unlock) force_unlock_state(changeRoot);

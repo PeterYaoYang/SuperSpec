@@ -7,6 +7,6 @@
     "declaration": true,
     "rewriteRelativeImportExtensions": true
   },
-  "include": ["superspec.ts", "superspec_guard.ts", "superspec_init.ts", "src/**/*.ts"],
+  "include": ["superspec.ts", "superspec_guard.ts", "superspec_init.ts", "superspec_hook.ts", "src/**/*.ts"],
   "exclude": ["tests/**"]
 }

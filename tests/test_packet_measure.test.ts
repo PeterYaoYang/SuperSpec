@@ -20,8 +20,8 @@ function findRepoRoot(start: string): string {
 }
 
 const REPO = findRepoRoot(dirname(fileURLToPath(import.meta.url)));
-const EXPECTED_INSTALL_UPPER_BOUND_TOTAL = 30009;
-const EXPECTED_RUNTIME_REQUIRED_SUBSET_TOTAL = 30009;
+const EXPECTED_INSTALL_UPPER_BOUND_TOTAL = 31852;
+const EXPECTED_RUNTIME_REQUIRED_SUBSET_TOTAL = 31852;
 const EXPECTED_INSTALL_UPPER_BOUND_PATHS = [
   "adapters/codex/agents/architect.toml",
   "adapters/codex/agents/code-reviewer.toml",
@@ -133,17 +133,17 @@ const EXPECTED_SCENARIO_PATHS: Record<string, string[]> = {
   ],
 };
 const EXPECTED_SCENARIO_TOTALS: Record<string, number> = {
-  explore_complete: 3961,
-  proposal_reviewed: 4589,
-  design_complete: 7746,
-  test_contract_drafted: 6235,
-  apply_ready: 6821,
-  review_complete_allow: 11520,
-  archive_ready: 1753,
+  explore_complete: 4313,
+  proposal_reviewed: 4941,
+  design_complete: 8098,
+  test_contract_drafted: 6587,
+  apply_ready: 7171,
+  review_complete_allow: 11871,
+  archive_ready: 2191,
   round2_reviewer_prompt: 1641,
-  request_changes_reopen_tasks: 8998,
-  task_reopen_to_resolved: 6821,
-  scope_expansion: 4376,
+  request_changes_reopen_tasks: 9349,
+  task_reopen_to_resolved: 7171,
+  scope_expansion: 4726,
 };
 const EXPECTED_MATERIALIZED_WORKFLOW_PACKET_TOTALS: Record<string, number> = {
   apply_ready_blocked: 1259,

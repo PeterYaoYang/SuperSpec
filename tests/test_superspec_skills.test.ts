@@ -111,9 +111,11 @@ test("superspec package declares workflow payload surface", () => {
   assert.equal(pkg.engines.node, ">=20.19.0");
   assert.equal(pkg.bin.superspec, "bin/superspec.js");
   assert.equal(pkg.bin["superspec-guard"], "bin/superspec-guard.js");
+  assert.equal(pkg.bin["superspec-hook"], "bin/superspec-hook.js");
   assert.equal(pkg.bin["superspec-init"], "bin/superspec-init.js");
   assert.equal(pkg.exports["."].default, "./dist/superspec.js");
   assert.equal(pkg.exports["./superspec_guard"].default, "./dist/superspec_guard.js");
+  assert.equal(pkg.exports["./superspec_hook"].default, "./dist/superspec_hook.js");
   assert.equal(pkg.exports["./superspec_init"].default, "./dist/superspec_init.js");
   assert.equal(pkg.scripts.build, "node build.js");
   assert.equal(pkg.scripts.prepack, "npm run build");
@@ -128,6 +130,8 @@ test("superspec package declares workflow payload surface", () => {
   assert.equal(pkg.files.includes("tests"), false);
   assert.equal(pkg.files.includes(".codex-plugin"), false);
   assert.equal(pkg.files.includes("skills"), false);
+  const lock = JSON.parse(repoText("package-lock.json"));
+  assert.deepEqual(lock.packages[""].bin, pkg.bin);
 });
 
 test("compiled runtime resolves package payload from the package root", () => {
@@ -144,7 +148,32 @@ test("compiled runtime resolves package payload from the package root", () => {
     ].join("\n"),
   ], { cwd: REPO, encoding: "utf8" });
   assert.equal(proc.status, 0, proc.stderr || proc.stdout);
-  assert.equal(proc.stdout.trim(), "19");
+  assert.equal(proc.stdout.trim(), "20");
+});
+
+test("compiled superspec hook bin initializes core runtime", () => {
+  const build = spawnSync(npmCommand(), ["run", "build"], { cwd: REPO, encoding: "utf8" });
+  assert.equal(build.status, 0, build.stderr || build.stdout);
+  const event = JSON.stringify({
+    hook_event_name: "PreToolUse",
+    tool_name: "Bash",
+    cwd: REPO,
+    tool_input: { command: "echo ok" },
+  });
+  const inert = spawnSync(process.execPath, ["bin/superspec-hook.js"], {
+    cwd: REPO,
+    input: event,
+    encoding: "utf8",
+  });
+  assert.equal(inert.status, 0, inert.stderr || inert.stdout);
+  assert.match(inert.stdout, /SuperSpec hook inert/u);
+
+  const guarded = spawnSync(process.execPath, ["bin/superspec-hook.js", "--change", "demo-change"], {
+    cwd: REPO,
+    input: event,
+    encoding: "utf8",
+  });
+  assert.doesNotMatch(guarded.stderr, /runtime\.load_context/u);
 });
 
 test("bin launchers report unsupported Node versions before loading compiled runtime", () => {
@@ -192,6 +221,7 @@ test("codex adapter maps generic workflow templates to repo-local surfaces", () 
   assert.ok(mappings.includes("agent:adapters/codex/agents/critic.toml->.codex/agents/critic.toml"));
   assert.ok(mappings.includes("agent:adapters/codex/agents/executor.toml->.codex/agents/executor.toml"));
   assert.ok(mappings.includes("agent:adapters/codex/agents/test-runner.toml->.codex/agents/test-runner.toml"));
+  assert.ok(mappings.includes("hook:templates/hooks/codex-hooks.json->.codex/hooks.json"));
   assert.equal(mappings.some((item: string) => item.startsWith("wrapper:")), false);
   for (const item of installMap.mappings) {
     assert.equal(existsSync(join(PACKAGE_ROOT, item.source)), true, item.source);

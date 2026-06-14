@@ -1,7 +1,7 @@
 # SuperSpec 工作流规范源 v0.4
 
 > 状态：v0.4 草案（待评审定稿）。
-> 本文是 **单一规范源**。当前 v1 正式定位为 **audit-only discipline layer**：面向合作型 agent 的 OpenSpec overlay，用于检测流程纪律缺失、保留 evidence、降低无意识跳步概率；它不宣称 mechanical enforcement，也不能机械阻止绕过、伪造 evidence 或跳过 guard。v1 保持 OpenSpec 默认 `spec-driven` schema，不 fork/替换 OpenSpec artifact graph；同步产出 `.codex/skills/superspec-*`、guard 脚本与 sidecar 模板。`.codex/hooks.json` 与 hook adapter 属于 v2，必须在 v1 跑通后再做。
+> 本文是 **单一规范源**。v1 正式定位为 **audit-only discipline layer**：面向合作型 agent 的 OpenSpec overlay，用于检测流程纪律缺失、保留 evidence、降低无意识跳步概率；它不宣称 mechanical enforcement，也不能机械阻止绕过、伪造 evidence 或跳过 guard。v2 已加入 Codex hook adapter、managed `.codex/hooks.json`、hook-facing Guard API、active-session lease、audit telemetry 和 strict evidence validators；但 2026-06-13 的 R-1 spike 没有证明项目 hook deny 在当前 Codex invocation 中真实执行，也没有可用 hook-only provenance。因此当前 strict profile 必须降级为 `unavailable` / `audit-only`，不得宣称 `mechanical` 或 `runtime-verified`。
 > 名称正式定为 **SuperSpec**（技术标识统一用小写 `superspec`：目录/CLI/dotfile/skill 名/状态文件，常量用 `SUPERSPEC_*`，驼峰标识符用 `SuperSpec`）。
 > 用户可见主流程固定为：project init（`superspec-init` / 仓内开发入口 `superspec_init.ts`）-> `explore -> propose -> apply -> review -> archive`。`review` 阶段内含 final verification；`check-verify-ready` / `verify_complete` 仅作为兼容入口，不是独立用户可见主阶段。OpenSpec 的 `proposal/specs/design/tasks` 四件套全部属于 SuperSpec `propose` 阶段内部产物；`test-contract` 是 propose 内部 sidecar，不是主阶段。
 
@@ -17,7 +17,7 @@
 
 0. **明确 v1 定位**：v1 是 `audit-only discipline layer` / `cooperative agent discipline`，不是机械强制层；`must` / `block` / `不得` 等词在 v1 语境下表示 guard 结构判定与流程纪律，不表示运行时不可绕过。
 1. **翻案"零平行状态机"**：v0.1 主张 SuperSpec 完全不持有状态、全靠 `openspec status` 现场推导，导致流程把控力不足。v0.2 引入 **guard-owned 受控状态**（来自双轨方案），区分"可被重新校验的受控状态"（合法）与"可覆盖 OpenSpec 事实的漂移状态"（非法）。
-2. **规划 L4 Codex Hook 强制层（v2）**：已确认 Codex CLI 0.136.0 支持 hooks 框架与 `PreToolUse` deny 接口；真实物理 deny、绕过率和时延必须等 v1 跑通后做 R-1 spike，再决定是否升级为"物理拦截 + 运行时取证 + 事后稽核"三道防线。
+2. **落地 L4 Codex Hook adapter（v2 audit-only fallback）**：已确认 Codex CLI 0.139.0 `hooks` feature 为 stable/effective true，并实现 SuperSpec hook adapter 与 Guard hook API；R-1 spike 未观察到项目/inline hook 对当前 `codex exec` 的真实 deny，因此所有 hook-backed trust 当前只能输出 explicit `audit-only` 降级。
 3. **补入成熟控制面**：规模分级（hotfix/tweak preset）、脏工作区协议、人审阻塞点、单一 transition writer、fingerprint 防漂移。
 4. **纠正 schema 扩展边界**：不再把 `test-contract` 做成 OpenSpec custom artifact；OpenSpec 继续使用默认 `proposal/specs/design/tasks` 流程，`test-contract`、多角色审查、红绿灯证据作为 SuperSpec sidecar gate。
 5. **补齐 critic 对抗审查的剩余 blocker/major**：M5 红绿灯适配、test-contract 兑现校验、§8.4 diff 机制、guard fail-closed、evidence 内容指纹。
@@ -28,11 +28,11 @@
 
 | 边界 | 验证方式 | 影响 |
 |---|---|---|
-| Codex 0.136.0 **支持 hooks 框架**，`PreToolUse` 文档声称可返回 `permissionDecision:"deny"`（接口存在） | `codex --version`（版本已确认）+ 官方文档 developers.openai.com/codex/hooks | L4 接口存在；**deny 的真实行为未实测，见 R-1** |
+| Codex 0.139.0 **支持 hooks 框架**，`hooks` feature stable/effective true，`PreToolUse` 文档声称可返回 `permissionDecision:"deny"`（接口存在） | `codex --version` + `codex features list` + 官方文档 developers.openai.com/codex/hooks | L4 接口存在；但本地 R-1 没有证明当前 invocation 真实执行项目 hook deny |
 | 官方文档显示 `PostToolUse` 可拿到 Bash 命令真实 `exit_code` 与 `tool_response` | 官方文档 | v2 可用于自动生成 RED/GREEN evidence；v1 不依赖、不验收 |
-| 官方文档显示 `SubagentStart/SubagentStop` 提供真实 `agent_id`/`agent_type` | 官方文档 | v2 可用于运行时核验 subagent evidence；v1 不依赖、不验收 |
+| 官方文档显示 `SubagentStart/SubagentStop` 提供真实 `agent_id`/`agent_type` | 官方文档 | v2 adapter 可记录 audit-only runlog；strict runlog 仍需要 hook-only provenance |
 | Codex hook 失败/返回不支持字段时默认 **continue tool call（fail-open）** | 官方文档 | guard-as-hook 必须自捕获异常、主动 `exit 2` 才能 fail-closed |
-| `PreToolUse` 是 guardrail 非完整边界，`unified_exec` 流式 shell 拦不全 | 官方文档原文 | 残留逃逸必须诚实记录，禁止夸大"严格强制" |
+| `PreToolUse` 是 guardrail 非完整边界，`unified_exec` / complex Bash / unsupported MCP or exec-like surfaces 覆盖不完整 | 官方文档 + R-1 spike | 残留逃逸必须诚实记录，禁止夸大"严格强制" |
 | `openspec status --change <c> --json` ≈ 2.6KB；核心字段 `artifacts[].status = done/ready/blocked` + `missingDeps` | `wc -c` 实测 | guard 在脚本内部消化，判定结果才回模型；v2 hook 也复用同一精简输出，不占主上下文 |
 | `openspec schema init --artifacts` 仅接受内置 `proposal,specs,design,tasks`，且 schema 命令标 experimental | `schema init --help` 实测 | v1 不把 SuperSpec 建在 custom schema 上；`test-contract` 改由 sidecar + guard 管控 |
 | 默认 `spec-driven` 下 `openspec archive` 会随 change 目录迁移并保留 `.superspec/` 隐藏目录 | R-2 spike：`/tmp/superspec-archive-spike.PveD8g`，OpenSpec 1.4.1，archive 后 `.superspec/config.yaml`、`superspec-state.json`、`artifacts/test-contract.md`、`evidence/dummy.json` 均保留 | v1 可把 `.superspec/` 放在 change root；仍需回归测试和 preservation manifest 防未来行为变化 |
@@ -98,7 +98,7 @@ effective_allowed = OpenSpec minimum satisfied
 | **L1 OpenSpec 正本轨** | 原生 `spec-driven` artifact 状态 + apply 任务追踪 | 默认 OpenSpec schema | OpenSpec 原生 |
 | **L2 SuperSpec 控制轨** | guard-owned 受控状态 + sidecar artifacts/evidence | `.superspec/superspec-state.json` + `artifacts/` + `evidence/` | 数据契约 |
 | **L3 Sync Guard** | 现场对账两轨，算 allow/block，唯一状态写入器 | guard 脚本 | 逻辑判定 |
-| **L4 Codex Hook**（v2） | 物理拦截违规工具调用 + 运行时取证 | `.codex/hooks.json` + guard | **v2 目标：物理强制（R-1 通过后）** |
+| **L4 Codex Hook Adapter**（v2） | Hook event 翻译、active-session lease、audit telemetry、strict evidence validator | `.codex/hooks.json` + `superspec-hook` + Guard hook API | 当前 `audit-only`；`mechanical`/`runtime-verified` 需 R-1 + provenance 通过 |
 
 ---
 
@@ -124,17 +124,17 @@ effective_allowed = OpenSpec minimum satisfied
 │ L3 Sync Guard  （唯一状态写入器 + 唯一放行器）                   │
 │ effective = OpenSpec minimum AND evidence AND fingerprint ok   │
 └──────────────────────────────────────────────────────────────┘
-                          │ v2: 作为 hook 脚本被调用，判定回传 allow/deny
+                          │ v2: 作为 hook 脚本被调用，判定回传 allow/deny/audit diagnostic
                           ▼
 ┌──────────────────────────────────────────────────────────────┐
-│ L4 Codex Hook Enforcement（v2 target, gated by R-1）            │
-│ PreToolUse(apply_patch/Bash) deny 违规编辑/归档                 │
-│ PostToolUse 捕获真实测试输出 → RED/GREEN evidence               │
-│ SubagentStart/Stop 记录真实 agent_id → evidence 防伪            │
+│ L4 Codex Hook Adapter（v2 audit-only fallback）                 │
+│ PreToolUse 调 Guard hook policy；R-1 未通过前不宣称物理强制      │
+│ PostToolUse 写 audit telemetry；strict runtime evidence 暂禁     │
+│ SubagentStart/Stop 写 audit runlog；trusted runlog 暂禁          │
 └──────────────────────────────────────────────────────────────┘
 ```
 
-> v1 验收范围只有 L1 + L2 + L3（audit-only）。L4 是 v2 overlay，不参与 v1 交付、测试或验收。
+> 当前 release 包含 L1 + L2 + L3 以及 L4 audit-only adapter。Strict L4 enforcement 仍被 R-1/provenance gate 禁用。
 
 ---
 
@@ -471,76 +471,94 @@ v1 不含 L4，**没有任何模型写不了的运行时取证源**（PostToolUs
 
 ---
 
-## 7. L4：Codex Hook 强制层（核心增量，回应 B2）
+## 7. L4：Codex Hook Adapter（v2 audit-only fallback）
 
-> **交付定位：L4 属于 v2（见 §18 分期）。v1 不实现 hook、不产出 `.codex/hooks.json`、不写 hook stdin adapter、也不写 PostToolUse/SubagentStart 运行时取证入口。本章只作为 v2 设计依据；v1 只保留 guard 命令和 evidence schema 的兼容边界。**
+> **当前交付状态**：v2 hook adapter 已实现，但 strict profile 仍为 `unavailable`。2026-06-13 的 R-1 spike 在 Codex CLI 0.139.0 环境中确认 hooks feature stable/effective true，也确认官方 deny/output schema 存在；但项目/inline hook 在当前 `codex exec` 调用里没有实际拦截 SuperSpec spike hook，且没有 hook-only provenance 可区分真实 Codex hook runner 与模型后续 Bash 重放。因此本节描述的是已实现的 adapter/Guard 合约与降级规则，不是 mechanical enforcement 声明。
 
-### 7.1 事实基础
+### 7.1 已实现 surface
 
-Codex 0.136.0 hooks（`~/.codex/hooks.json` 或项目 `.codex/hooks.json`，默认开启）。官方文档显示 `PreToolUse` 支持拦截 `apply_patch`（文件编辑，matcher 可用 `apply_patch`/`Edit`/`Write`）、`Bash`、MCP，并可返回 `{"hookSpecificOutput":{"permissionDecision":"deny",...}}` 或 `exit 2 + stderr`。真实物理 deny 行为、`unified_exec` 绕过率和 guard-as-hook 时延必须在 v2 前置 R-1 spike 中实测。
+| Surface | 入口 | 当前行为 |
+|---|---|---|
+| Managed hook manifest | `templates/hooks/codex-hooks.json` → `.codex/hooks.json` | install map 管理；`check-init` 接受 managed manifest，unmanaged manifest 输出 `hook_manifest_unmanaged` 降级 |
+| Hook adapter | `superspec-hook --change <change>` | 读取 Codex hook stdin，写临时 event-ref，调用 Guard hook API；malformed stdin / Guard error 返回 fail-closed |
+| PreToolUse write/archive policy | `hook-check-write` / `hook-check-command` | 无 active session 时普通 project edits pass-through；SuperSpec state roots、early archive、internal hook writer invocation 仍阻断或使 strict health 失败。State root 按路径相交判断，父目录删除如 `.codex` 或 `openspec/changes/<change>` 会在可能移除 `.codex/superspec/**` 或 `.superspec/**` state 时 deny；`.codex/hooks.json`、`.codex/config.toml`、`.codex/skills/**`、`.codex/prompts/**`、`.codex/agents/**` 不是 SuperSpec 写入保护范围。有 active lease 时 write_scope、tasks checkbox、当前 change 的 OpenSpec canonical 路径、archive、unknown write target 按 Guard API deny；普通 `docs/design.md` / `src/specs/*` 不当作 OpenSpec 正本。missing/deleted lease 对 scoped/protected/unknown writes fail-closed；多 active lease 且缺少 `SUPERSPEC_CHANGE` 时 write-capable event fail-closed |
+| Workflow lease | `hook-session-begin/status/end` | 记录 Guard-owned audit-only active-session lease；direct CLI begin/end 不能创建或关闭 trusted session；active-session record 与 `hook-session-begin/status/end` 输出均不持久化/回显 lifecycle token 或 entrypoint token；兼容 `--lifecycle-token` 输入被忽略；`hook-session-end` 只能在 terminal Guard condition 通过后关闭 audit-only lease：`completed` 需 `review_complete`，`archived` 需 `check-archived`；`cancelled` / `abandoned` 当前缺少可信终止来源，只返回诊断不关闭 lease；corrupt/missing/mismatched/expired lease 不启用 strict |
+| PostToolUse test telemetry | `hook-record-test` | 仅对分类为 test/validation 的 Bash 命令写 `.superspec/raw/` raw event log 与 `.superspec/evidence/hook-audit/` audit-only test telemetry；普通 Bash PostToolUse 不写 test telemetry；不写 trusted runtime evidence |
+| Subagent telemetry | `hook-record-subagent-start/stop` | 写 audit-only `.superspec/subagent-runlog.jsonl`；strict role evidence 只接受 trusted start/stop，因此 direct spoof 不能满足 strict |
+| Strict validators | `validate_evidence_schema` | `trust:"runtime-verified"` test/final evidence 必须有 trusted provenance、token binding、exit code、command fingerprint、pinned raw log；role evidence 必须有 trusted start/stop runlog 和 output binding |
 
-### 7.2 Hook 矩阵
+### 7.2 Strict Profile 降级规则
 
-以下矩阵描述 **v2 目标行为**，不是 v1 验收项。只有 R-1 spike 证明 deny 可靠、绕过率可接受、guard-as-hook 时延可控后，表内效果才允许从设计目标升级为实施承诺。
+当前所有 hook decisions 必须输出：
 
-| Hook | matcher | guard 动作 | v2 目标效果 |
-|---|---|---|---|
-| `PreToolUse` | `apply_patch`/`Edit`/`Write` | 解析 patch 目标文件 → 若命中某 task 的 `write_scope` 且该 task 无 RED pass → deny | **改实现代码前必须有 RED**，物理拦截 |
-| `PreToolUse` | `Bash` | 命令含 `openspec archive` 且 `archive_ready` 未过 → deny；含危险写（`sed -i`/`tee`/`>` 命中正本/scope 外）→ deny | 物理拦截越权归档/越界写 |
-| `PostToolUse` | `Bash` | 命中测试命令（如 `mvn test`）→ 用真实 `exit_code` + `tool_response` 生成 RED/GREEN evidence | 测试 evidence 升级为 `runtime-verified` |
-| `SubagentStart` | `*` | 把真实 `agent_id`/`agent_type`/turn 写入 `subagent-runlog.jsonl` | 为 subagent evidence 提供运行时核验源 |
-| `SubagentStop` | `*` | 记录 subagent 结束 + transcript 路径 | 核验 subagent 确实跑完 |
-
-### 7.3 guard-as-hook 必须 fail-closed
-
-Codex 在 hook 失败 / 返回不支持字段时**默认 continue tool call（fail-open）**。因此 guard hook 包装脚本必须：
-
-```text
-trap 所有异常 → 输出 {"permissionDecision":"deny", reason} 或 exit 2 + stderr
-超时（hook 默认 600s，应设短 timeout 如 30s）也视为 deny
-绝不让脚本自然崩溃（崩溃 = Codex 放行 = 强制失效）
+```json
+{
+  "strict_profile": "unavailable",
+  "trust": "audit-only"
+}
 ```
 
-### 7.4 evidence 运行时防伪（回应 critic B2 第二条）
+并至少包含这些降级原因：
 
-- **subagent 报告**：guard 校验 evidence 的 `agent_id` ∈ `subagent-runlog.jsonl`（L4 SubagentStart 写入的真实启动记录）。主线程自写假报告因 agent_id 不在真实日志中 → block。
-- **RED/GREEN**：优先采用 `PostToolUse` hook 捕获的真实测试 evidence（含真实 exit_code/log）；模型手写的 test_run evidence 标 `trust:self_reported`，不满足"严格"级 gate。
+- `r1_deny_spike_not_passed`
+- `hook_provenance_unavailable`
+- `hook_manifest_missing_or_unmanaged`（当 managed `.codex/hooks.json` 不存在或不匹配时）
 
-### 7.5 启用与信任
+禁止在这些条件未全部解决前输出或文档声称：
 
-- 项目 `.codex/hooks.json` 需经 `/hooks` review + trust 后才生效（按 hash 记录，改了要重新 trust）。
-- 团队/强约束场景：用 `requirements.toml` 的 managed hooks + `[features].hooks=true` pin，使用户无法本地禁用。
+- `mechanical`
+- `runtime-verified`
+- trusted active session
+- trusted runtime test evidence
+- trusted subagent runlog
 
-### 7.6 诚实威胁模型与强制力分级
+### 7.3 Guard-as-hook Fail-closed
 
-**强制力分级**（每个 gate 标注）：
+Hook adapter 是薄翻译层：解析 hook event、提取 tool/path/command，然后调用 Guard API；不得复制 `check_task_edit`、`check_task_complete`、`check_task_reopen`、`check_archive_ready` 等 gate 逻辑。Guard API 是唯一决策核心。
 
-| 级别 | 含义 | 例 |
-|---|---|---|
-| `mechanical` | hook 物理 deny，模型跳不过 | 改 write_scope 内代码无 RED |
-| `runtime-verified` | 证据由 hook 运行时捕获，不可伪造 | RED/GREEN 真实测试结果、subagent agent_id |
-| `audit-only` | 仅事后稽核，靠现场重算发现 | 外部编辑器直接改文件 |
+Codex hook runner 本身存在 fail-open 风险，因此 adapter 规则是：
 
-**残留逃逸（不夸大，必须文档化）**：
+```text
+malformed stdin -> exit 2
+Guard exception -> exit 2
+PreToolUse blocked decision -> permissionDecision:"deny"
+unsupported/unknown write shape during active workflow -> deny/audit diagnostic
+```
 
-1. `unified_exec` 流式 shell 拦截不全 → 可能绕过 `apply_patch` hook 写文件。缓解：PostToolUse + §9.5 事后 diff 稽核兜底。
-2. hooks 可被 `[features].hooks=false` 关闭（除非 requirements.toml pin）。
-3. 未 trust 的项目 hook 不运行。
-4. `read_file`/`grep`/`WebSearch` 无 hook surface（只读，不影响写强制）。
+无 active SuperSpec session 时，普通非 SuperSpec 文件写入 pass-through；这保证 managed hooks 不全局接管仓库。例外只限 SuperSpec state roots：`.superspec/**`、`.codex/superspec/**`、`openspec/changes/*/.superspec/**`。`.codex/hooks.json` 是 Codex hook 接入层配置；删除它会让自动 hook 管控退回到安装 hooks 前的行为，但不属于 SuperSpec state root 写入保护范围。`.codex/config.toml`、`.codex/skills/**`、`.codex/prompts/**`、`.codex/agents/**` 和 `.omx/state/**` 同样不属于 SuperSpec hook protection scope。
 
-**结论（v2 目标）**：若 R-1 spike 证明 deny 可靠且绕过率可接受，L4 才把核心写路径（apply_patch）与归档（Bash）提升到 `mechanical`，把测试与审查证据提升到 `runtime-verified`。在 v1 阶段，这些能力不存在，残留全部交由 `audit-only` 兜底。
+### 7.4 Evidence Trust Contract
+
+- Handwritten `test_run` / `final_test` 继续只算 self-reported/audit-only。
+- `hook-record-test` 现在只写 audit-only telemetry；即使 event JSON 带有 exit code、token-like fields 或复制的 stdin，也不能满足 strict。
+- Strict runtime evidence 未来启用时必须同时满足 trusted hook provenance、Guard token binding、single-use/non-replayed event identity、真实 exit code、command fingerprint、raw log pinned refs。
+- `SubagentStart/Stop` runlog 当前只作 audit telemetry。Strict role evidence 未来启用时必须匹配 trusted start+stop、expected role、prompt/output binding，且一个 run 不能复用为 incompatible roles。
+- Human confirmation 仍是 `trust:self_reported`；本版本不声称机械证明用户意图。
+
+### 7.5 当前 Residual Audit-only Paths
+
+这些路径在当前实现中只能 audit-only，不能宣称 strict：
+
+1. Human confirmation / user intent。
+2. R-1 未通过的 project hook deny 路径，包括 `apply_patch` physical interception。
+3. Complex Bash、`unified_exec`、shell wrapper、package script、archive-like filesystem moves 的完整覆盖；已对常见 `openspec archive` / `sh -c` / `mv openspec/changes/<change>` / trust-root writes 做 conservative deny，但不能证明完备。
+4. Unsupported MCP、Node REPL、exec-like write surfaces；真实 hook runner 覆盖仍不完整。事件实际交付 adapter 时，明显触达 SuperSpec trust roots 的 write-capable/pathless 文本会 fail-closed；否则无 active session 时 pass-through + downgrade，有 active session 且可见 scoped path 时 fail-closed。
+5. Direct CLI calls to `hook-record-*`、`hook-session-begin/end`、`superspec-hook` with fabricated or replayed event JSON。
+6. Copied/replayed event stdin/env/token-like data。
+7. Audit-only active-session lease itself；它不是 workflow progress，也不是 strict authority。
+8. Hooks disabled, untrusted, unmanaged manifest, adapter mismatch, missing provenance, missing R-1 record。
 
 ---
 
 ## 8. 三道防线（L3 + L4 关系）
 
 ```text
-防线1 物理拦截   PreToolUse deny           —— mechanical
-防线2 运行时取证 PostToolUse/SubagentStart —— runtime-verified
+防线1 物理拦截   PreToolUse deny           —— mechanical（当前未启用）
+防线2 运行时取证 PostToolUse/SubagentStart —— runtime-verified（当前未启用）
 防线3 事后稽核   Sync Guard 现场重算+指纹   —— audit-only（兜底 unified_exec 等逃逸）
 ```
 
-v1 只有防线3。防线1/2 是 v2 overlay，只有在 R-1 spike 通过并完成 hook 集成后才参与推进决策；届时推进决策是三者的 AND。
+当前版本已安装 v2 hook adapter，但防线1/2 仍因 R-1/provenance 未通过降级为 audit telemetry。推进决策仍只能依赖防线3与 Guard 结构判定；未来 strict profile 通过后，推进决策才可升级为三者的 AND。
 
 ---
 
@@ -724,7 +742,7 @@ review-phase native-subagent evidence 统一使用 `kind:"source_guidance"`。`c
 - v1：`openspec archive` 前必须通过 Sync Guard / skill 检查；提前或越权 archive 只能由事后检测识别并记录为不可逆偏差。
 - **R-2 已实测**：OpenSpec 1.4.1 默认 `spec-driven` 的 `openspec archive` 会随 change 目录迁移并保留 `.superspec/`。v1 仍必须在 archive 前生成 `.superspec/artifacts/archive-preservation.json` manifest，`check-archived` 通过 archive 目录内 `.superspec/` 与 manifest 比对完成校验。
 - **防回归 fallback**：若未来 OpenSpec 行为改变导致 `.superspec/` 不保留，guard 必须在 archive 前把 `.superspec/` 复制到稳定 preservation bundle（如 archive 目标目录内的 `.superspec-preservation/`），再执行/修复 archive；`check-archived` 只信任 preservation manifest/bundle，不假设 OpenSpec 永远迁移隐藏目录。
-- v2：L4 Bash hook 在 `archive_ready` 未过时物理 deny `openspec archive`（不再只是事后发现）。
+- v2 future strict profile：只有 R-1/provenance 通过后，L4 Bash hook 才能在 `archive_ready` 未过时物理 deny `openspec archive`；当前实现仅按 audit-only fallback 返回 hook deny/audit diagnostic，不声明 mechanical enforcement。
 - archive 后 change 移至 `openspec/changes/archive/<date>-<change>/`，`check-archived` 必须**走 archive 目录查找**，不能再用 `status --change <c>`（可能找不到）。
 - 提前/越权 archive 标记为不可逆 + 文档化检测窗口。
 
@@ -796,7 +814,7 @@ docs/            # 规范源（本目录）
   plans/                           # 修复计划与交接手册
   history/                         # 早期草案和历史对照
   templates/                       # sidecar artifact 模板
-  hooks/                           # v2 planned：hook 配置/adapter 规范源 + tests
+  hooks/                           # v2 hook 配置/adapter 信任模型与残留路径说明
 .superspec/config.yaml               # optional 项目级 SuperSpec 默认配置（唯一项目级配置名；缺失时使用内置 defaults）
 .codex/skills/superspec-{explore,propose,apply,review,archive}/
                                     # 安装：Codex 加载的 5 个用户可见主流程 skill；init 使用 superspec-init，verify 并入 review
@@ -819,7 +837,7 @@ openspec/changes/<change>/         # 运行时（OpenSpec 正本，spec-driven�
 - **Guard 单元**：artifact missing→block；caller 传入 status→ignored；evidence missing→block；角色 evidence 非 `execution_mode:"native_subagent"`→block；角色 evidence 伪装 main-thread adjudication→block；`main_adjudication` 缺 canonical 作者标记（`execution_mode:"direct"` + `created_by:"main-thread"`）或携带 `agent_role`/`agent_id`/`prompt_ref`→block；两轨满足→allow；ledger 含 current_stage→block；非 guard 写 state→block；status 指纹过期→`state_fingerprint_stale` block 后重算写入 `state_freshness:"recomputed"`；guard_route_phase 领先有效路由→block/下调；state 声称 artifact done→block；删 `superspec-state.json` 后可重建；state 文件存在但损坏（不可解析/非 object）→所有命令 block `state_corrupt` 且损坏文件原样保留；`recompute --rebuild-corrupt`→显式重建 + ledger 记 `state_corrupt_rebuilt` 事件；健康 state 上带 `--rebuild-corrupt`→等同普通 recompute、不写重建事件；design_complete 在 explore_complete 未过（缺 discovery/critic 证据）时→block `explore_complete_failed`；test_contract_honored 在 test_contract_drafted 未过时→block `test_contract_drafted_failed`；discovery.md/design.md/test-contract.md 在角色 review 后被改动（evidence 未 pin 当前 blob）→分别 block `stale_explore_review` / `stale_design_review` / `stale_test_contract_review`；discovery/design 改动后 state 指纹（`discovery_fingerprint`/`design_fingerprint`）必须报 `state_fingerprint_stale`；判定后、写入前发生的文件变化不得被吸收进 computed_from（写入必须复用判定时指纹，下次 check 以 `state_fingerprint_stale` 暴露该变化）；篡改 active_gate 不能绕过；RED 意外通过→block；GREEN 缺失→block；勾选无 GREEN→block；path traversal→block；并行写冲突→block；`stale_review`（blob_sha 失配）→block；`test_contract_not_honored`→block；`required_load_refs` 非 `source_refs` 精确子集→block；`loaded_refs` 未按 `(path, blob_sha)` 精确覆盖 `required_load_refs`→block；`blocking_findings` 缺 `finding_id` 或未被 `finding_adjudications[]` 一一响应→block；`claim_adjudications[]` 漏 `required_claim_id` / 重复 / `needs_fix`→block；allow path 的 unknown/non-live `source_evidence_refs` / `verification_evidence_refs`→block；仅有 `gate:"verify_complete"` verification evidence 不得满足 `review_complete`；supersede 指向不存在的 `evidence_id`→block `supersede_target_missing`；跨 gate supersede 无 `supersede_reason`（含空白字符串）→block `supersede_unauthorized`；同 gate supersede 或携带非空理由的跨 gate supersede→不报 supersede 类 reason；dispatch 观察到 supersede→ledger 恰好追加一条 `evidence_superseded` 事件（重复 dispatch 不重复记录）；state 损坏时不写 supersede ledger 事件；未知 `kind`→block `evidence_unknown_kind`，白名单内全部 kind→不报 unknown；`human_confirmation` 缺 `confirmation_text` / 缺 `confirmed_refs[]`（branch_handling 为 `confirmed_paths[]`）/ gate 不在消费集合→block `human_confirmation_invalid`，字段齐备→不报；`apply_isolation`/`scope_expansion` confirmation 缺 `tasks_structure_hash`→block `human_confirmation_invalid`；task_edit/task_complete/task_reopen 无 live `apply_isolation` confirmation→block `apply_isolation_unconfirmed`，有 confirmation→allow；tasks.md 结构（checkbox 不计）在批准后变化→block `scope_expansion_unconfirmed`，补 `scope_expansion` confirmation pin 当前结构→解除；仅勾选 checkbox 不触发 scope 重批；review_complete 存在 fail 状态 verification evidence 且无 `verify_failure_handling` confirmation 覆盖其 evidence_id→block `verify_failure_unconfirmed`，覆盖后→allow；对 fail evidence 的 supersede 不解除 disposition 义务；role evidence `prompt_ref` 不可读→block `evidence_prompt_missing`、内容为空→block `evidence_prompt_empty`、逃逸 change root→`evidence_unsafe_ref`，可读非空→不报；同 change 内重复 `evidence_id`→block `evidence_id_duplicate`，全唯一→不报；`test_run` 缺 `raw_log_refs`→block `test_run_log_missing`、缺 `result_summary`→block `test_run_summary_missing`、日志不可读/为空→block `test_run_log_missing`、逃逸 change root→`evidence_unsafe_ref`；声称的 `test_id` 不在引用日志中→block `test_id_not_in_log`；按运行建档的 `test_ids[]` 清单 + 日志齐备→不报 test_run 类 reason；propose 期同 gate role evidence 复用同一 `output_ref`→block `evidence_output_ref_duplicate`；跨 gate 复用 `output_ref` 无 `review_scope[]` 或 scope 不含本 gate target artifact→block `review_scope_unverified`，scope 覆盖全部被盖章 gate 的 target→allow；`*_evidence_refs`（列表或 lane 映射）引用不存在的 evidence_id→block `dangling_evidence_ref`，全部可解析→不报。**DISC 披露不动点（Phase 1，explore_complete）**：schema 不合法的 digest/decision/authorization/findings→分别 block `review_digest_invalid` / `user_decision_invalid` / `standing_authorization_invalid` / `review_finding_invalid`；material blocker 无 digest→block `missing_review_digest` + `finding_unresolved`；digest 含 `needs_user_decision`→block `needs_user_decision_pending`；本轮 finding 未入 digest→block `finding_undisclosed`；最新轮 review/digest 未 pin 当前 target 集合→block `review_round_stale` / `review_digest_stale`；clean 重审不抹历史 blocker→block `finding_unresolved`；disposition 改写身份字段/summary 非逐字→block `finding_identity_mismatch` / `finding_summary_not_verbatim`；material 终态缺用户锚点或 decision 绑定失败（uid/scope_key/material/blob/结构序任一不匹配）→block `user_decision_unbound`；standing auth 越界（material 未授权/blocker/gate 不符/过期/excluded 优先）→block `standing_authorization_unbound`；option_d_custom 的 requires_artifact_update / requires_rereview 未兑现→block `artifact_update_required` / `rereview_required`；accepted material deviation 未被 clean 轮 ack→block `accepted_deviation_unacknowledged`；round 编号断档或 digest 链断→block `review_round_discontinuous` / `digest_chain_broken`；round k>1 prompt 缺工具渲染 ledger→block `ledger_injection_missing`；超 3 轮未收敛→block `round_budget_exhausted`；完整披露循环（finding→blocked digest→user decision→artifact 更新→supersede 旧轮→注入 ledger 重审→链式 digest 终态）→allow；非 material finding 经有效 standing auth 一轮关闭→allow；旧式无 round evidence→不触发披露检查（grandfathered）。**DISC Phase 2（proposal_reviewed / design_complete）**：`proposal_reviewed` 无任何 round-tagged review + digest→block `missing_proposal_review` + `missing_review_digest`；旧式无 round critic evidence 不能绕过强制披露（born-disclosure gate 无 grandfather 路径）→仍 block `missing_review_digest`；proposal blocker 不经披露直接重审到 clean→block `finding_unresolved`，已披露 finding 被下一轮 digest 丢弃→block `needs_user_decision_pending`；user decision + user_decided disposition 闭环→allow；disposition route 不在全局枚举→schema block `review_digest_invalid`，route 合法但越 gate 子集（如 proposal 上用 `reopen_tasks`）→block `finding_route_invalid`，`return_explore` 在 proposal 上合法；`design_complete`/`propose.design_reviewed` 别名、`propose_complete` 子门、`specs`/`design` artifact entry、`propose.tasks_mapped`/`tasks_complete` 直连入口在缺 `proposal_reviewed` 时全部 block（`proposal_reviewed_failed` 或前置链 code）；design round-tagged review + digest pin 全 glob 集合→allow，digest 后新增 spec 文件（集合不等，P1-6）→block `review_round_stale` + `review_digest_stale`；legacy（无 round）design evidence→不触发披露检查（grandfathered，P2-3）。**DISC Phase 3（invariants_reviewed / test_contract_drafted / tasks_complete）**：round-tagged invariants material blocker 无 digest→block `missing_review_digest` + `finding_unresolved`；upstream business-invariants 改后 digest stale→block `review_digest_stale`；invariants/test_contract 上非法 route（如 `reopen_tasks`/`return_test_contract_drafted` 越界）→block `finding_route_invalid`；test_contract digest 后新增 spec 文件（glob 集合不等）→block `review_digest_stale`；legacy invariants/test_contract evidence（无 round）→不触发披露（grandfathered）；tasks_complete 无 round-tagged review→不触发披露；tasks 一旦出现 round-tagged review 无 digest→block `missing_review_digest`；tasks 上 `return_test_contract_drafted` route 合法→不报 `finding_route_invalid`；pinned target path 用 repo-root 前缀或 `../` 逃逸（target root mismatch，设计 §7 全 propose 期 gate 只认 change-root 相对路径）→集合不等 fail-closed block `review_round_stale` + `review_digest_stale`。
 - **安装引擎单元（D4 / 审计 G-1、G-2）**：真实 install-map 可解析且全部 source 存在；fresh install 拷贝 manifest-managed skill / prompt / agent 文件 + 写 schema-valid manifest（manifest sha256 = managed 基线）；重复 install 幂等（全 ok）；preexisting 不同内容文件→不覆盖、manifest 标 `preexisting/managed:false`，`--force` 才覆盖且先备份 `*.bak`；update 三态：未改→滚动到新版、用户改过→保留用户版 + `*.new`（manifest 保留旧基线 sha 供 uninstall 识别改动）、下架且未改→删除；无 manifest 时 update/uninstall fail-closed；uninstall 只删未改 managed 文件，preexisting/用户改过/`.superspec/` 数据一律不碰，`--dry-run` 不动文件，结束删 manifest；`--update` 与 `--uninstall` 互斥→guard_error；install-map 与 guard 常量一致性（`REQUIRED_SUPERSPEC_WORKFLOW_SKILLS` 全部 skill + `REQUIRED_SUPERSPEC_AGENT_ROLES` 全部 agent/prompt 在 map 中）；check-init 在 superspec workflow skill 缺失→block `superspec_init_missing`、frontmatter name 非法→block `superspec_skill_invalid`，齐备→allow。
 - **真实 OpenSpec CLI 冒烟（D5 / 审计 F-4，opt-in）**：`SUPERSPEC_REAL_OPENSPEC_SMOKE=1` 时（CI `real-openspec-smoke` job：workflow_dispatch + 每周 schedule）对真实 `openspec` CLI 跑：CLI 必须在 PATH（缺失→fail 而非 skip）；临时项目 `openspec init --tools none` + 最小 delta change 后真实 `openspec status --json` 满足 `openspec_status_shape_reasons` 形状契约 + 四 artifact 齐备 + change/repo root 解析；真实 `openspec validate` 通过；guard `status` / `check-enter` 对真实 CLI 端到端 dispatch（status allow + explore block `missing_discovery`）。默认（无环境变量）4 个用例全部 skip。
-- **Hook（L4，v2 acceptance，不属于 v1 测试计划）**：apply_patch 命中 write_scope 无 RED→deny；`openspec archive` 在 archive_ready 未过→deny；PostToolUse 捕获真实 exit_code 生成 RED/GREEN；伪造 agent_id（不在 runlog）→evidence rejected；guard hook 异常→exit 2（fail-closed）。
+- **Hook（L4，当前 v2 audit-only fallback）**：`hook-health` 永不声明 strict；managed `.codex/hooks.json` 被 `check-init` 接受，unmanaged manifest 降级；无 active session 的普通 project edit pass-through，SuperSpec state-root write deny；active audit-only session 下 write_scope 无 RED、checkbox complete/reopen、early archive、complex archive wrapper、internal hook writer invocation、corrupt session、unsupported scoped surface 均 fail-closed；direct `hook-record-test` / `hook-record-subagent-*` / `hook-session-*` spoof 只能产生 audit-only telemetry/lease；strict runtime evidence 缺 trusted provenance/token/exit code/raw pins/runlog 必须 block。
 - **Integration**：status 字段变化只依赖稳定字段/兼容层；sidecar test-contract 缺失时 `test_contract_drafted` block；tasks/test_refs 未兑现时 `test_contract_honored` block；review evidence 存在但 tasks 未完成→block；archive preservation bundle 缺失或 manifest 不匹配→archived block；`check-review-complete` 只接受 `gate:"review_complete"` 的 verification/final-test evidence；`check-verify-ready` 只是同一契约的兼容入口。
 - **E2E fixture**：最小 change 跑 `project init -> explore -> propose -> apply -> review -> archive`，每个主阶段 gate 测"缺→block / 补齐→allow"两次；`design_complete`、`test_contract_drafted`、`tasks_complete` 只作为 propose 内部 gate 测试，`check-verify-ready` 仅测兼容别名。review 阶段必须同时覆盖一条完整 allow path：3 条 `source_guidance`、精确匹配的 pinned `source_refs/required_load_refs/loaded_refs`、完整 `claim_adjudications[]`、完整 `finding_adjudications[]`、`verification_review` + `final_test` 齐备后 allow。
 - **Skill 冒烟（委托原生引擎，见 §11.4）**：`superspec-explore` 必须直接引用 `openspec list --json` 和 `openspec status --change`；`superspec-propose` 必须直接引用 `openspec status --change` 与 `openspec instructions <artifact>`；`superspec-apply` 必须直接引用 `openspec instructions apply`；`superspec-archive` 必须实际使用 `openspec archive -y`（依赖其自带 sync+validate，不暴露 `--skip-specs` / `--no-validate` 分支）。任一 skill 重新要求读取 `.codex/skills/openspec-*`，或出现"徒手 Write/update OpenSpec artifact 而不经 instructions"，即视为回归。
@@ -839,7 +857,7 @@ openspec/changes/<change>/         # 运行时（OpenSpec 正本，spec-driven�
 
 ## 18. 实施路线图（分两期交付）
 
-**架构一次到位，实现分两期。** v1 必须先把 OpenSpec 默认流程、Sync Guard、skills、sidecar artifacts 和一个真实 change 跑稳；hook/L4 只能在 v1 验收后进入 v2。v1 的 Sync Guard 只需保持 **hook-compatible** 边界：命令参数稳定、输出 `allow/block` JSON、evidence schema 预留 `trust`/`agent_id`/`tool_response_ref` 等字段、失败时可映射为 `exit 2`。v1 **不**定义或 stub hook stdin adapter，不解析待应用 patch，不摄取 PostToolUse `tool_response`，不写 SubagentStart/SubagentStop runlog。
+**架构一次到位，实现分两期。** v1 已把 OpenSpec 默认流程、Sync Guard、skills、sidecar artifacts 跑稳；当前 v2 已落地 hook adapter 与 Guard hook API，但因 R-1/provenance 未通过，只能作为 audit-only fallback。Sync Guard 继续保持唯一决策核心；hook adapter 只是事件翻译层。
 
 ### v1（MVP，定位 = `audit-only discipline layer`）
 
@@ -852,14 +870,20 @@ openspec/changes/<change>/         # 运行时（OpenSpec 正本，spec-driven�
 5. 清理/隔离旧测试期流程（无需迁移，见 §15）。
 6. 端到端跑通一个真实 change，**观测"模型是否会跳过 guard 抄近路"——这是决定 v2 必要性的数据**。
 
-### v2（验证后加，强制级别 → `mechanical` / `runtime-verified`）
+### v2（当前：audit-only fallback；未来 strict profile → `mechanical` / `runtime-verified`）
 
-前置条件（满足才启动）：① v1 overlay（guard + skills + sidecar）已通过真实 change 验收；② R-1 spike 确认 PreToolUse 能物理 deny `apply_patch`、`unified_exec` 不会大面积绕过、guard-as-hook 时延可接受；③ v1 实测显示 `audit-only` 不足以约束模型。
+已完成：
 
-7. 落地 hook adapter 与 `.codex/hooks.json`（L4）+ guard-as-hook 包装（fail-closed），接 PreToolUse deny / PostToolUse 取证 / SubagentStart/SubagentStop runlog。
-8. 把核心门禁从 `audit-only` 升到 `mechanical`，evidence 防伪切换到运行时捕获。
+7. 落地 hook adapter 与 managed `.codex/hooks.json`（L4）+ guard-as-hook 包装（fail-closed），接 PreToolUse policy / PostToolUse audit telemetry / SubagentStart/SubagentStop audit runlog。
+8. 增加 strict runtime evidence 与 strict role runlog validators，确保伪造、缺 token、缺 provenance、缺 trusted runlog 时不能满足 strict gate。
 
-> 若环境无 hook（hooks 被禁用 / 未 trust），系统**永久停留 v1 audit-only** 并在 guard 输出中显式告警，不假装拥有 mechanical 强制。
+仍需满足后才可升级 strict：
+
+1. R-1 spike 证明当前 Codex invocation 真实执行 project hook deny，且覆盖 `apply_patch`、archive Bash、主要写 surface。
+2. 选定并通过 hook-only provenance 机制，能抵御 direct CLI、复制 stdin/env、stale/replayed event id、复制 token replay。
+3. 对 unsupported MCP/Node/exec-like surface 给出覆盖证明；未覆盖 surface 继续使 strict unavailable。
+
+> 若 hooks 被禁用、未 trust、unmanaged、未加载、R-1 缺失或 provenance 不可用，系统必须停留 `audit-only` 并显式告警，不假装拥有 mechanical/runtime-verified 强制。
 
 ---
 
@@ -870,11 +894,11 @@ openspec/changes/<change>/         # 运行时（OpenSpec 正本，spec-driven�
 - **D-1 命名**：正式定为 **SuperSpec**（技术标识小写 `superspec`），原占位代号 `irsflow` 已全局替换。
 - **D-2 需求澄清形态**：默认不单独成 OpenSpec artifact（用 skill prompt + `.superspec/artifacts/discovery.md` + guard 现状调查门禁）；备选独立 sidecar `discovery` artifact。
 - **D-3 state 边界**：采纳受控状态 + gpt5.5 指纹对账（已定）。
-- **D-4 强制力（分期）**：v1 定位 = `audit-only discipline layer`（不依赖 hook）；v2 必须在 v1 跑通并完成 R-1 spike 后才加 L4 hook 升 `mechanical` / `runtime-verified`。v1 guard 接口保持 hook-compatible，但不实现 hook adapter；无 hook 环境永久停留 v1 并显式告警。
+- **D-4 强制力（分期）**：v1 定位 = `audit-only discipline layer`（不依赖 hook）；v2 hook adapter 已实现为 Guard-owned audit telemetry / fail-closed policy surface。R-1 未通过前 strict profile 固定为 `unavailable`，所有 hook-backed runtime/subagent claims 降级为 `audit-only`，不得输出 `mechanical` / `runtime-verified`。
 - **D-5 OpenSpec 边界**：v1 固定默认 `spec-driven`，不 fork schema、不新增 OpenSpec artifact、不把 SuperSpec gate 写进 OpenSpec requires 链。
 
 ### 19.2 待验证
 
-- **R-1（部分确认，关键项未测）**：Codex 0.136.0 **支持 hooks 框架、PreToolUse/deny 接口存在** = 已确认（版本 + 官方文档）；但 **PreToolUse 对 `apply_patch` 的真实 deny 行为、`unified_exec` 绕过率、guard-as-hook 端到端时延 = 未实测**。**v2 启动前必须真跑 deny spike**；若 deny 不可靠或 `unified_exec` 大面积绕过，则 `mechanical` 强制在 Codex 下不可达，需重估 v2。
+- **R-1（2026-06-13 已执行，strict 未通过）**：Codex CLI 0.139.0 `hooks` feature stable/effective true，官方文档确认 `PreToolUse` deny schema、`PostToolUse` 限制与不完整 tool interception；但本地 temporary project/inline hooks 未在当前 `codex exec` 路径中执行，`apply_patch` 与 Bash 写入未被 spike hook 拦截，也没有可接受的 hook-only provenance 机制。结论：当前版本只能启用 v2 audit-only fallback，strict/mechanical/runtime-verified 不可声明。
 - **R-2（已验证，保留回归测试）**：OpenSpec 1.4.1 默认 `spec-driven` archive 会保留 `.superspec/`；v1 需把该行为固化为 E2E 回归测试，并保留 §12.3 fallback 以应对未来 OpenSpec 行为变化。
 - **R-3**：`openspec status --json` 字段稳定性。运行时不因 `openspec --version` 本身阻塞；以 status 字段 shape 校验 + `1.4.1` golden fixture + 兼容层发现结构漂移，版本号仅作为诊断信息展示。
