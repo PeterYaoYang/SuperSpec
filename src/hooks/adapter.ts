@@ -233,9 +233,32 @@ function postToolUseOutput(decision: HookDecision): JsonMap {
   };
 }
 
+function isSubagentHookEvent(eventName: string): boolean {
+  return eventName === "SubagentStart" || eventName === "SubagentStop";
+}
+
 function subagentOutput(decision: HookDecision, eventName: string): JsonMap {
+  if (!decision.allowed) {
+    return {
+      systemMessage: `SuperSpec ${eventName} runlog skipped; ${decision.block_reasons.map((item) => item.message).join("; ") || "audit telemetry unavailable"}`,
+      hookSpecificOutput: {
+        hookEventName: eventName,
+        additionalContext: "SuperSpec subagent telemetry is best-effort and did not block the workflow.",
+      },
+    };
+  }
   return {
     systemMessage: `SuperSpec ${eventName} runlog recorded as ${decision.trust}; strict_profile=${decision.strict_profile}`,
+  };
+}
+
+function inertSubagentOutput(eventName: string, message: string): JsonMap {
+  return {
+    systemMessage: message,
+    hookSpecificOutput: {
+      hookEventName: eventName,
+      additionalContext: "SuperSpec subagent telemetry is best-effort and did not block the workflow.",
+    },
   };
 }
 
@@ -251,7 +274,9 @@ function validateHookEvent(event: HookEvent): string | null {
   if (!["PreToolUse", "PostToolUse", "SubagentStart", "SubagentStop"].includes(eventName)) {
     return `unsupported hook_event_name: ${eventName}`;
   }
-  if (typeof event.cwd !== "string" || !event.cwd) return "hook event missing required cwd";
+  if ((eventName === "PreToolUse" || eventName === "PostToolUse") && (typeof event.cwd !== "string" || !event.cwd)) {
+    return "hook event missing required cwd";
+  }
   if (eventName === "PreToolUse") {
     if (typeof event.tool_name !== "string" || !event.tool_name) return "PreToolUse hook event missing required tool_name";
     if (!isObject(event.tool_input)) return "PreToolUse hook event missing required tool_input object";
@@ -262,14 +287,20 @@ function validateHookEvent(event: HookEvent): string | null {
 export function runHookAdapter(argv: string[] = process.argv.slice(2), stdin = readFileSync(0, "utf8")): { code: number; stdout: string; stderr: string } {
   const parsedArgs = parseArgs(argv);
   let event: HookEvent;
+  let eventNameForFailure = "";
   try {
     if (!stdin.trim()) throw new Error("hook stdin is empty");
     const parsed = JSON.parse(stdin);
     if (!isObject(parsed)) throw new Error("hook stdin must be a JSON object");
     event = parsed as HookEvent;
+    eventNameForFailure = typeof event.hook_event_name === "string" ? event.hook_event_name : "";
     const validationError = validateHookEvent(event);
     if (validationError) throw new Error(validationError);
   } catch (err) {
+    if (isSubagentHookEvent(eventNameForFailure)) {
+      const payload = inertSubagentOutput(eventNameForFailure, `SuperSpec ${eventNameForFailure} runlog skipped: ${(err as Error).message}`);
+      return { code: 0, stdout: `${JSON.stringify(payload)}\n`, stderr: "" };
+    }
     return { code: 2, stdout: "", stderr: `SuperSpec hook event parse failed: ${(err as Error).message}\n` };
   }
 
@@ -280,8 +311,9 @@ export function runHookAdapter(argv: string[] = process.argv.slice(2), stdin = r
     return { code: 0, stdout: `${JSON.stringify(payload)}\n`, stderr: "" };
   }
 
-  const eventRef = writeTempEvent(event);
+  let eventRef: string | null = null;
   try {
+    eventRef = writeTempEvent(event);
     const eventName = String(event.hook_event_name ?? "");
     let payload: JsonMap;
     if (eventName === "PreToolUse") {
@@ -299,12 +331,19 @@ export function runHookAdapter(argv: string[] = process.argv.slice(2), stdin = r
     }
     return { code: 0, stdout: `${JSON.stringify(payload)}\n`, stderr: "" };
   } catch (err) {
+    if (isSubagentHookEvent(String(event.hook_event_name ?? ""))) {
+      const eventName = String(event.hook_event_name ?? "");
+      const payload = inertSubagentOutput(eventName, `SuperSpec ${eventName} runlog skipped: ${(err as Error).message}`);
+      return { code: 0, stdout: `${JSON.stringify(payload)}\n`, stderr: "" };
+    }
     return { code: 2, stdout: "", stderr: `SuperSpec hook failed closed: ${(err as Error).message}\n` };
   } finally {
-    try {
-      unlinkSync(resolve(eventRef));
-    } catch {
-      // best effort temp cleanup
+    if (eventRef) {
+      try {
+        unlinkSync(resolve(eventRef));
+      } catch {
+        // best effort temp cleanup
+      }
     }
   }
 }

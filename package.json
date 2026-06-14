@@ -1,6 +1,6 @@
 {
   "name": "@peterxiaoyang/superspec",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "description": "SuperSpec workflow package: guard runtime, generic workflow templates, and Codex adapter payload.",
   "repository": {
     "type": "git",

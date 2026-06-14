@@ -40,9 +40,78 @@ function createEngineFixture(): EngineFixture {
   return { packageRoot, repo, cleanup: () => rmSync(tmp, { recursive: true, force: true }) };
 }
 
+function oldManagedFourHookManifest(): string {
+  return `${JSON.stringify({
+    superspec: {
+      managed: true,
+      adapter_version: "superspec-hook@2",
+      strict_profile_default: "audit-only-until-r1-provenance-passes",
+    },
+    hooks: {
+      PreToolUse: [
+        {
+          matcher: "Bash|apply_patch|Edit|Write|mcp__.*",
+          hooks: [{ type: "command", command: 'superspec-hook --change "$SUPERSPEC_CHANGE"', timeout: 120, statusMessage: "SuperSpec 写入策略检查" }],
+        },
+      ],
+      PostToolUse: [
+        {
+          matcher: "Bash",
+          hooks: [{ type: "command", command: 'superspec-hook --change "$SUPERSPEC_CHANGE"', timeout: 120, statusMessage: "SuperSpec 运行证据记录" }],
+        },
+      ],
+      SubagentStart: [
+        {
+          matcher: ".*",
+          hooks: [{ type: "command", command: 'superspec-hook --change "$SUPERSPEC_CHANGE"', timeout: 120, statusMessage: "SuperSpec 子智能体启动记录" }],
+        },
+      ],
+      SubagentStop: [
+        {
+          matcher: ".*",
+          hooks: [{ type: "command", command: 'superspec-hook --change "$SUPERSPEC_CHANGE"', timeout: 120, statusMessage: "SuperSpec 子智能体停止记录" }],
+        },
+      ],
+    },
+  }, null, 2)}\n`;
+}
+
+function currentManagedHookManifest(): string {
+  return readFileSync(join(process.cwd(), "templates", "hooks", "codex-hooks.json"), "utf8");
+}
+
+function createHookEngineFixture(hookManifest: string = currentManagedHookManifest()): EngineFixture {
+  const tmp = mkdtempSync(join(tmpdir(), "superspec-hook-install-"));
+  const packageRoot = join(tmp, "pkg");
+  const repo = join(tmp, "repo");
+  mkdirSync(repo, { recursive: true });
+  writeText(join(packageRoot, "package.json"), JSON.stringify({ name: "superspec-test", version: "9.9.9" }));
+  writeText(join(packageRoot, "templates", "hooks", "codex-hooks.json"), hookManifest);
+  writeText(join(packageRoot, "adapters", "codex", "install-map.json"), JSON.stringify({
+    adapter: "codex",
+    version: 1,
+    mappings: [
+      { kind: "hook", source: "templates/hooks/codex-hooks.json", target: ".codex/hooks.json" },
+    ],
+  }));
+  return { packageRoot, repo, cleanup: () => rmSync(tmp, { recursive: true, force: true }) };
+}
+
 const SKILL_TARGET = ".codex/skills/superspec-demo/SKILL.md";
 const USER_SKILL_TARGET = "skills/superspec-demo/SKILL.md";
 const WRAPPER_TARGET = "scripts/superspec_demo";
+const HOOK_TARGET = ".codex/hooks.json";
+const USER_HOOK_TARGET = "hooks.json";
+
+function assertSubagentOnlyHookManifest(path: string): void {
+  const parsed = JSON.parse(readFileSync(path, "utf8"));
+  assert.equal(parsed.superspec.managed, true);
+  assert.equal(parsed.hooks.PreToolUse, undefined);
+  assert.equal(parsed.hooks.PostToolUse, undefined);
+  assert.ok(Array.isArray(parsed.hooks.SubagentStart), "SubagentStart hook must be present");
+  assert.ok(Array.isArray(parsed.hooks.SubagentStop), "SubagentStop hook must be present");
+  assert.deepEqual(Object.keys(parsed.hooks).sort(), ["SubagentStart", "SubagentStop"]);
+}
 
 function tomlTable(text: string, table: string): string {
   const match = new RegExp(`(?:^|\\n)\\[${table}\\]\\n?([\\s\\S]*?)(?=\\n\\[[^\\]]+\\]|$)`, "u").exec(text);
@@ -209,6 +278,58 @@ test("fresh install copies files, sets wrapper exec bit, and writes a schema-val
   }
 });
 
+test("fresh install writes subagent-only hooks manifest", () => {
+  const fx = createHookEngineFixture();
+  try {
+    const result = guard.install_workflow(fx.repo, { packageRoot: fx.packageRoot });
+    assert.deepEqual(result.problems, []);
+    assertSubagentOnlyHookManifest(join(fx.repo, HOOK_TARGET));
+    const entry = (result.manifest!.files as any[]).find((item) => item.path === HOOK_TARGET);
+    assert.deepEqual({ managed: entry.managed, preexisting: entry.preexisting }, { managed: true, preexisting: false });
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("init migrates pre-existing managed four-hook manifest to subagent-only manifest", () => {
+  for (const scope of ["project", "user"] as const) {
+    const fx = createHookEngineFixture();
+    try {
+      const target = scope === "user" ? USER_HOOK_TARGET : HOOK_TARGET;
+      writeText(join(fx.repo, target), oldManagedFourHookManifest());
+
+      const result = guard.install_workflow(fx.repo, { packageRoot: fx.packageRoot, scope });
+      assert.deepEqual(result.problems, []);
+      assertSubagentOnlyHookManifest(join(fx.repo, target));
+      const entry = (result.manifest!.files as any[]).find((item) => item.path === target);
+      assert.deepEqual({ managed: entry.managed, preexisting: entry.preexisting }, { managed: true, preexisting: false });
+      assert.ok(result.actions.some((item) => item.action === `install ${target}` && item.status === "updated"), `${scope}: ${JSON.stringify(result.actions)}`);
+    } finally {
+      fx.cleanup();
+    }
+  }
+});
+
+test("init preserves user-modified hooks manifest and writes new baseline aside", () => {
+  for (const scope of ["project", "user"] as const) {
+    const fx = createHookEngineFixture();
+    try {
+      const target = scope === "user" ? USER_HOOK_TARGET : HOOK_TARGET;
+      writeText(join(fx.repo, target), `${oldManagedFourHookManifest()}\n/* user local hook tweak */\n`);
+
+      const result = guard.install_workflow(fx.repo, { packageRoot: fx.packageRoot, scope });
+      assert.deepEqual(result.problems, []);
+      assert.match(readFileSync(join(fx.repo, target), "utf8"), /user local hook tweak/u);
+      assertSubagentOnlyHookManifest(join(fx.repo, `${target}.new`));
+      const entry = (result.manifest!.files as any[]).find((item) => item.path === target);
+      assert.deepEqual({ managed: entry.managed, preexisting: entry.preexisting }, { managed: false, preexisting: true });
+      assert.ok(result.actions.some((item) => item.action === `install ${target}` && item.status === "skipped"), `${scope}: ${JSON.stringify(result.actions)}`);
+    } finally {
+      fx.cleanup();
+    }
+  }
+});
+
 test("user-scope install targets Codex home surfaces and skips project wrappers", () => {
   const fx = createEngineFixture();
   try {
@@ -315,6 +436,45 @@ test("update rolls unmodified files forward and keeps user edits with a *.new si
     assert.notEqual(entry.sha256, guard.sha256_file(join(fx.repo, SKILL_TARGET)));
   } finally {
     fx.cleanup();
+  }
+});
+
+test("update migrates unchanged managed four-hook manifest to subagent-only manifest", () => {
+  for (const scope of ["project", "user"] as const) {
+    const fx = createHookEngineFixture(oldManagedFourHookManifest());
+    try {
+      assert.deepEqual(guard.install_workflow(fx.repo, { packageRoot: fx.packageRoot, scope }).problems, []);
+      const target = scope === "user" ? USER_HOOK_TARGET : HOOK_TARGET;
+      assert.ok(JSON.parse(readFileSync(join(fx.repo, target), "utf8")).hooks.PreToolUse, `${scope}: old baseline should contain PreToolUse before update`);
+      writeText(join(fx.packageRoot, "templates", "hooks", "codex-hooks.json"), currentManagedHookManifest());
+
+      const result = guard.update_workflow(fx.repo, { packageRoot: fx.packageRoot, scope });
+      assert.deepEqual(result.problems, []);
+      assertSubagentOnlyHookManifest(join(fx.repo, target));
+      assert.ok(result.actions.some((item) => item.action === `update ${target}` && item.status === "updated"), `${scope}: ${JSON.stringify(result.actions)}`);
+    } finally {
+      fx.cleanup();
+    }
+  }
+});
+
+test("update preserves user-modified hooks manifest and writes new baseline aside", () => {
+  for (const scope of ["project", "user"] as const) {
+    const fx = createHookEngineFixture(oldManagedFourHookManifest());
+    try {
+      assert.deepEqual(guard.install_workflow(fx.repo, { packageRoot: fx.packageRoot, scope }).problems, []);
+      const target = scope === "user" ? USER_HOOK_TARGET : HOOK_TARGET;
+      writeText(join(fx.repo, target), `${oldManagedFourHookManifest()}\n/* user local hook tweak */\n`);
+      writeText(join(fx.packageRoot, "templates", "hooks", "codex-hooks.json"), currentManagedHookManifest());
+
+      const result = guard.update_workflow(fx.repo, { packageRoot: fx.packageRoot, scope });
+      assert.deepEqual(result.problems, []);
+      assert.match(readFileSync(join(fx.repo, target), "utf8"), /user local hook tweak/u);
+      assertSubagentOnlyHookManifest(join(fx.repo, `${target}.new`));
+      assert.ok(result.actions.some((item) => item.action === `update ${target}` && item.status === "skipped"), `${scope}: ${JSON.stringify(result.actions)}`);
+    } finally {
+      fx.cleanup();
+    }
   }
 });
 

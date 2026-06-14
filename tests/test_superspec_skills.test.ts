@@ -695,6 +695,9 @@ test("business skills use positive overlay instructions", () => {
   assert.equal(combined.includes("Do not create `.codex/hooks.json`"), false);
   assert.equal(combined.includes("Do not create or use `openspec/schemas/superspec`"), false);
   assert.equal(combined.includes("schema: superspec"), false);
+  assert.equal(combined.includes("hook-session-begin"), false);
+  assert.equal(combined.includes("hook-session-status"), false);
+  assert.equal(combined.includes("hook-session-end"), false);
 });
 
 test("skills delegate to openspec instruction engine", () => {

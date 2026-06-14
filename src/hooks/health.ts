@@ -20,18 +20,6 @@ const HOOK_COMMAND = 'superspec-hook --change "$SUPERSPEC_CHANGE"';
 
 const EXPECTED_HOOK_MATRIX: ExpectedHookEntry[] = [
   {
-    eventName: "PreToolUse",
-    matcher: "Bash|apply_patch|Edit|Write|mcp__.*",
-    timeout: 120,
-    statusMessage: "SuperSpec 写入策略检查",
-  },
-  {
-    eventName: "PostToolUse",
-    matcher: "Bash",
-    timeout: 120,
-    statusMessage: "SuperSpec 运行证据记录",
-  },
-  {
     eventName: "SubagentStart",
     matcher: ".*",
     timeout: 120,

@@ -5,32 +5,6 @@
     "strict_profile_default": "audit-only-until-r1-provenance-passes"
   },
   "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash|apply_patch|Edit|Write|mcp__.*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "superspec-hook --change \"$SUPERSPEC_CHANGE\"",
-            "timeout": 120,
-            "statusMessage": "SuperSpec 写入策略检查"
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "superspec-hook --change \"$SUPERSPEC_CHANGE\"",
-            "timeout": 120,
-            "statusMessage": "SuperSpec 运行证据记录"
-          }
-        ]
-      }
-    ],
     "SubagentStart": [
       {
         "matcher": ".*",

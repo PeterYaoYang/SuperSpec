@@ -26,13 +26,6 @@ Explore 只做需求澄清、代码事实调查、范围边界和风险记录。
 
 ## 第一条必跑命令
 
-先尝试建立当前 change 的 SuperSpec hook session。R-1/provenance 未通过时该命令只会记录 audit-only lease 和降级诊断，不代表 mechanical enforcement 已启用：
-
-```text
-superspec guard hook-session-begin --change "<change>" --workflow superspec-explore --entrypoint-token "<fresh-entrypoint-token>" --format agent
-superspec guard hook-session-status --change "<change>" --format agent
-```
-
 ```text
 superspec init --scope project --format agent
 ```

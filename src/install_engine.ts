@@ -60,12 +60,63 @@ const CODEX_CONFIG_ENTRIES = [
   { table: "agents", key: "max_depth", value: String(CODEX_NATIVE_AGENT_MAX_DEPTH) },
 ];
 
+const HOOK_COMMAND = 'superspec-hook --change "$SUPERSPEC_CHANGE"';
+const LEGACY_FOUR_HOOK_MATRIX = [
+  { eventName: "PreToolUse", matcher: "Bash|apply_patch|Edit|Write|mcp__.*", statusMessage: "SuperSpec 写入策略检查" },
+  { eventName: "PostToolUse", matcher: "Bash", statusMessage: "SuperSpec 运行证据记录" },
+  { eventName: "SubagentStart", matcher: ".*", statusMessage: "SuperSpec 子智能体启动记录" },
+  { eventName: "SubagentStop", matcher: ".*", statusMessage: "SuperSpec 子智能体停止记录" },
+] as const;
+
 function package_version(packageRoot: string): string {
   try {
     const pkg = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
     return typeof pkg.version === "string" && pkg.version ? pkg.version : "0.0.0";
   } catch {
     return "0.0.0";
+  }
+}
+
+function has_exact_keys(value: Record<string, any>, keys: readonly string[]): boolean {
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  return actual.length === expected.length && actual.every((key, idx) => key === expected[idx]);
+}
+
+function legacy_hook_entry_matches(entry: any, expected: (typeof LEGACY_FOUR_HOOK_MATRIX)[number]): boolean {
+  if (!isObject(entry) || !has_exact_keys(entry, ["matcher", "hooks"])) return false;
+  if (entry.matcher !== expected.matcher || !Array.isArray(entry.hooks) || entry.hooks.length !== 1) return false;
+  const hook = entry.hooks[0];
+  return isObject(hook)
+    && has_exact_keys(hook, ["type", "command", "timeout", "statusMessage"])
+    && hook.type === "command"
+    && hook.command === HOOK_COMMAND
+    && hook.timeout === 120
+    && hook.statusMessage === expected.statusMessage;
+}
+
+function is_legacy_managed_four_hook_manifest(parsed: any): boolean {
+  if (!isObject(parsed) || !has_exact_keys(parsed, ["superspec", "hooks"])) return false;
+  if (!isObject(parsed.superspec) || !has_exact_keys(parsed.superspec, ["managed", "adapter_version", "strict_profile_default"])) return false;
+  if (parsed.superspec.managed !== true
+    || parsed.superspec.adapter_version !== "superspec-hook@2"
+    || parsed.superspec.strict_profile_default !== "audit-only-until-r1-provenance-passes") {
+    return false;
+  }
+  if (!isObject(parsed.hooks) || !has_exact_keys(parsed.hooks, LEGACY_FOUR_HOOK_MATRIX.map((entry) => entry.eventName))) return false;
+  return LEGACY_FOUR_HOOK_MATRIX.every((expected) => {
+    const entries = parsed.hooks[expected.eventName];
+    return Array.isArray(entries)
+      && entries.length === 1
+      && legacy_hook_entry_matches(entries[0], expected);
+  });
+}
+
+function target_is_legacy_managed_four_hook_manifest(targetAbs: string): boolean {
+  try {
+    return is_legacy_managed_four_hook_manifest(JSON.parse(readFileSync(targetAbs, "utf8")));
+  } catch {
+    return false;
   }
 }
 
@@ -333,12 +384,22 @@ export function install_workflow(repoRoot: string, opts: { force?: boolean; pack
       // Identical content: adopt as managed (idempotent re-init).
       files.push({ path: mapping.target, sha256: sourceSha, managed: true, preexisting: false });
       actions.push({ action: `install ${mapping.target}`, status: "ok" });
+    } else if (mapping.kind === "hook" && target_is_legacy_managed_four_hook_manifest(targetAbs)) {
+      // Previous SuperSpec default hooks installed PreToolUse/PostToolUse. Re-init must migrate
+      // that unmodified managed baseline so old blocking hooks do not stay in the workflow.
+      copyFileSync(sourceAbs, targetAbs);
+      files.push({ path: mapping.target, sha256: sourceSha, managed: true, preexisting: false });
+      actions.push({ action: `install ${mapping.target}`, status: "updated", detail: "legacy managed four-hook manifest migrated to subagent-only manifest" });
     } else if (opts.force) {
       copyFileSync(targetAbs, `${targetAbs}.bak`);
       copyFileSync(sourceAbs, targetAbs);
       if (mapping.kind === "wrapper") chmodSync(targetAbs, 0o755);
       files.push({ path: mapping.target, sha256: sourceSha, managed: true, preexisting: false });
       actions.push({ action: `install ${mapping.target}`, status: "updated", detail: `existing file backed up to ${mapping.target}.bak` });
+    } else if (mapping.kind === "hook") {
+      copyFileSync(sourceAbs, `${targetAbs}.new`);
+      files.push({ path: mapping.target, sha256: targetSha, managed: false, preexisting: true });
+      actions.push({ action: `install ${mapping.target}`, status: "skipped", detail: `pre-existing hooks manifest kept; current SuperSpec manifest written to ${mapping.target}.new` });
     } else {
       // Pre-existing different file: never overwrite, never delete (DISTRIBUTION §5 red line).
       files.push({ path: mapping.target, sha256: targetSha, managed: false, preexisting: true });

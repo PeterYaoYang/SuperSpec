@@ -101,6 +101,14 @@ function validSessionRecord(fx: Fixture, changeId: string, overrides: JsonMap = 
   };
 }
 
+function assertSubagentOnlyHookManifest(manifest: any): void {
+  assert.equal(manifest.hooks?.PreToolUse, undefined);
+  assert.equal(manifest.hooks?.PostToolUse, undefined);
+  assert.ok(Array.isArray((manifest.hooks as JsonMap).SubagentStart), "SubagentStart hook must be present");
+  assert.ok(Array.isArray((manifest.hooks as JsonMap).SubagentStop), "SubagentStop hook must be present");
+  assert.deepEqual(Object.keys(manifest.hooks as JsonMap).sort(), ["SubagentStart", "SubagentStop"]);
+}
+
 function assertNoLifecycleLeak(value: unknown): void {
   const text = JSON.stringify(value);
   assert.doesNotMatch(text, /lifecycle_nonce/u);
@@ -168,7 +176,12 @@ withFixture("no active hook session passes scoped implementation writes through"
   });
 });
 
-withFixture("managed hooks manifest is accepted by init health", (fx) => {
+withFixture("default managed hooks manifest excludes tool hooks", () => {
+  const manifest = JSON.parse(readFileSync(join(process.cwd(), "templates/hooks/codex-hooks.json"), "utf8"));
+  assertSubagentOnlyHookManifest(manifest);
+});
+
+withFixture("managed subagent-only hooks manifest is accepted by init health", (fx) => {
   writeText(join(fx.repo, ".codex", "hooks.json"), readFileSync(join(process.cwd(), "templates/hooks/codex-hooks.json"), "utf8"));
   const decision = guard.check_init("demo-change", status(fx), fx.repo, fx.change);
   assert.equal(decision.allowed, true);
@@ -187,7 +200,7 @@ withFixture("tampered managed hooks manifest downgrades strict profile", (fx) =>
 
 withFixture("tampered managed hooks manifest matcher downgrades strict profile", (fx) => {
   const manifest = JSON.parse(readFileSync(join(process.cwd(), "templates/hooks/codex-hooks.json"), "utf8"));
-  manifest.hooks.PreToolUse[0].matcher = "NotBash|Notapply_patch|NotEdit|NotWrite|Nomcp__";
+  manifest.hooks.SubagentStart[0].matcher = "NotSubagentStart";
   writeText(join(fx.repo, ".codex", "hooks.json"), JSON.stringify(manifest, null, 2));
   const decision = guard.check_init("demo-change", status(fx), fx.repo, fx.change);
   assert.equal(decision.allowed, false);
@@ -2055,6 +2068,68 @@ withFixture("direct hook-record-test spoof creates audit-only telemetry only", (
     assert.equal(evidence.hook_provenance.validation, "audit-only");
     assert.equal(evidence.status, "blocked");
   });
+});
+
+withFixture("hook adapter SubagentStart records audit-only runlog with resolved change", (fx) => {
+  const event = {
+    hook_event_name: "SubagentStart",
+    session_id: "manual-cli-session",
+    turn_id: "turn-1",
+    agent_id: "agent-1",
+    agent_type: "critic",
+    cwd: fx.repo,
+    prompt: "review this",
+  };
+  withRuntime({ load_context: () => [status(fx), fx.repo, fx.change, []] }, () => {
+    const result = runHookAdapter(["--change", "demo-change"], JSON.stringify(event));
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(JSON.parse(result.stdout).systemMessage, /runlog recorded/u);
+    const lines = readFileSync(join(fx.change, ".superspec/subagent-runlog.jsonl"), "utf8").trim().split(/\r?\n/u).map((line) => JSON.parse(line));
+    assert.equal(lines.length, 1);
+    assert.equal(lines[0].kind, "subagent_start");
+    assert.equal(lines[0].trust, "audit-only");
+  });
+});
+
+withFixture("hook adapter SubagentStart without resolved change returns inert success", (fx) => {
+  const result = runHookAdapter([], JSON.stringify({
+    hook_event_name: "SubagentStart",
+    session_id: "manual-cli-session",
+    turn_id: "turn-1",
+    agent_id: "agent-1",
+    agent_type: "critic",
+    cwd: fx.repo,
+    prompt: "review this",
+  }));
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(JSON.parse(result.stdout).systemMessage, /SUPERSPEC_CHANGE\/--change not set/u);
+  assert.equal(existsSync(join(fx.change, ".superspec/subagent-runlog.jsonl")), false);
+});
+
+withFixture("hook adapter SubagentStart telemetry failure returns inert success", (fx) => {
+  withRuntime({ load_context: () => { throw new Error("runtime unavailable"); } }, () => {
+    const result = runHookAdapter(["--change", "demo-change"], JSON.stringify({
+      hook_event_name: "SubagentStart",
+      session_id: "manual-cli-session",
+      turn_id: "turn-1",
+      agent_id: "agent-1",
+      agent_type: "critic",
+      cwd: fx.repo,
+      prompt: "review this",
+    }));
+    assert.equal(result.code, 0, result.stderr);
+    const payload = JSON.parse(result.stdout);
+    assert.match(payload.systemMessage, /runlog skipped/u);
+    assert.match(payload.hookSpecificOutput.additionalContext, /did not block/u);
+  });
+});
+
+withFixture("hook adapter malformed default subagent event returns inert success", () => {
+  const result = runHookAdapter([], JSON.stringify({ hook_event_name: "SubagentStart" }));
+  assert.equal(result.code, 0, result.stderr);
+  const payload = JSON.parse(result.stdout);
+  assert.match(payload.systemMessage, /SUPERSPEC_CHANGE\/--change not set/u);
+  assert.match(payload.hookSpecificOutput?.additionalContext ?? payload.systemMessage, /did not block|not set/u);
 });
 
 withFixture("direct hook-record-subagent spoof creates audit-only runlog only", (fx) => {
