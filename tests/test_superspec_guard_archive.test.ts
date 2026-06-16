@@ -958,8 +958,9 @@ withFixture("legacy irsflow fixture is normalized as superspec test input only",
 });
 
 test("no v1 hook or custom schema artifacts exist", () => {
-  assert.equal(existsSync(join(REPO_ROOT, ".codex", "hooks.json")), false);
-  assert.equal(existsSync(join(REPO_ROOT, "openspec", "schemas", "superspec")), false);
+  const tracked = spawnSync("git", ["ls-files", ".codex/hooks.json", "openspec/schemas/superspec"], { cwd: REPO_ROOT, encoding: "utf8" });
+  assert.equal(tracked.status, 0, tracked.stderr);
+  assert.equal(tracked.stdout.trim(), "");
 });
 
 test("status output includes observability fields", () => {

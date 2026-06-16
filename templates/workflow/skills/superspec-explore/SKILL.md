@@ -35,10 +35,21 @@ Explore 只做需求澄清、代码事实调查、范围边界和风险记录。
 superspec init --scope project --format agent
 ```
 
-随后创建或打开 OpenSpec change，并读取当前上下文：
+随后用 `openspec list --json` 查找匹配 change；若已有则复用，若没有则直接创建，不要先跑 `openspec --help` / `openspec change --help` / `openspec new --help` 探测语法（命令失败或版本报错时才查 help 诊断）。
 
 ```text
 openspec list --json
+```
+
+仅当 `openspec list --json` 没有匹配 change 时运行：
+
+```text
+openspec new change "<change>" --description "<用户需求摘要>"
+```
+
+然后读取当前上下文：
+
+```text
 openspec status --change "<change>" --json
 superspec check check-init --change "<change>" --format agent
 superspec check workflow-packet --change "<change>" --gate explore_complete --format agent
@@ -52,6 +63,7 @@ superspec check workflow-packet --change "<change>" --gate explore_complete --fo
 - 用 `openspec list --json` 和 `openspec status --change "<change>" --json` 确认 change 结构、artifactPaths 和当前状态。
 - OpenSpec 负责 change 结构和后续 artifact 语义；本阶段只补 SuperSpec discovery 证据。
 - 如果发现需要正式方案、规格、设计或任务，先写入 discovery，再交给 `superspec-propose`。
+- 代码事实扫描可由主线程直接完成；若并行创建只读子代理，使用 repo-local `.codex/agents/explore.toml`。该角色只辅助 discovery 覆盖，不能替代 `critic` 审查证据。
 
 ## 专用代理边界
 
