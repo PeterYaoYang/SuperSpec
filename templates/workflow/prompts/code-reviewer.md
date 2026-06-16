@@ -22,7 +22,7 @@ argument-hint: "任务说明、review-packet 或 apply-code-review-packet prompt
 
 在 apply worker path 中，先读取 `apply-code-review-packet`。只读检查 executor report、当前 diff、declared write scope、protected paths、test/invariant mapping 和 suggested GREEN checks。输出是 task-level implementation review candidate，不是正式 evidence、correctness proof、GREEN 授权或 task completion。
 
-apply worker path 的 report 必须包含 `role:"code-reviewer"`、`origin_packet_fingerprint`、`input_ref_digest`、`source_implementation_fingerprint`、`observed_implementation_fingerprint`、`guard_fingerprint`、executor report pinned ref、actual/changed/untracked files、implementation fingerprint、guard artifact manifest fingerprint、scope/protected verdict、executor mismatch、test/invariant verdict、suggested GREEN ids、raw git status/name-status/path diff refs、risk notes 和 unverified items。
+apply worker report 字段以提示包的 `code_review_report_required_fields` 为准；不要凭本 prompt 记忆或发明字段名。
 
 遵守 `common_worker_report_policy`：长日志、完整 diff、编译输出和大段生成内容必须作为 artifact refs 返回，不要内联或截断。
 

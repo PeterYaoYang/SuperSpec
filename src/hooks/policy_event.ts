@@ -2214,7 +2214,9 @@ function tokenAtSameCommand(tokens: string[], idx: number): string | null {
 }
 
 function isHookEntrypointName(name: string): boolean {
-  return name === "superspec-guard"
+  return name === "superspec-check"
+    || name === "superspec-check.js"
+    || name === "superspec-guard"
     || name === "superspec-guard.js"
     || name === "superspec-hook"
     || name === "superspec-hook.js";
@@ -2264,8 +2266,10 @@ function commandLooksLikeInternalHookWriter(command: string, depth = 0): boolean
       const afterNext = tokenAtSameCommand(tokens, commandIdx + 2);
       if (next?.startsWith("hook-record-")) return true;
       if (next === "guard" && afterNext?.startsWith("hook-record-")) return true;
+      if (next === "check" && afterNext?.startsWith("hook-record-")) return true;
     }
     if (name === "superspec-guard" && tokenAtSameCommand(tokens, commandIdx + 1)?.startsWith("hook-record-")) return true;
+    if (name === "superspec-check" && tokenAtSameCommand(tokens, commandIdx + 1)?.startsWith("hook-record-")) return true;
     if (isHookAdapterEntrypointName(name)) return true;
     if (isHookEntrypointName(name) && tokenAtSameCommand(tokens, commandIdx + 1)?.startsWith("hook-record-")) return true;
     const nodeEntrypoint = nodeScriptHookEntrypoint(tokens, commandIdx);
@@ -2304,6 +2308,9 @@ function commandLooksLikeUnsafeLifecycleTermination(command: string, depth = 0):
     }
     const token = shellCommandName(tokens[commandIdx]);
     if (token === "superspec" && tokens[commandIdx + 1] === "guard" && tokens[commandIdx + 2] === "hook-session-end") {
+      if (segmentHasDangerousReason(commandIdx + 3, segmentEnd)) return true;
+    }
+    if (token === "superspec" && tokens[commandIdx + 1] === "check" && tokens[commandIdx + 2] === "hook-session-end") {
       if (segmentHasDangerousReason(commandIdx + 3, segmentEnd)) return true;
     }
     if (token === "superspec" && tokens[commandIdx + 1] === "hook-session-end") {

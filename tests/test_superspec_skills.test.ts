@@ -93,15 +93,159 @@ function repoText(relPath: string): string {
 }
 
 function superspecCommandLines(text: string): Array<{ line: string; lineNo: number }> {
-  return text
-    .split(/\r?\n/u)
-    .map((line, index) => ({ line: line.trim(), lineNo: index + 1 }))
-    .filter(({ line }) => /\bsuperspec(?:\.cmd)?\s+(?:guard|init)\b/u.test(line));
+  // Only real command lines (inside fenced code blocks, starting with `superspec …`)
+  // count — not prose that merely mentions `superspec init` inline. File line numbers
+  // are preserved because callers slice the original text by `lineNo` for context.
+  const hits: Array<{ line: string; lineNo: number }> = [];
+  const lines = text.split(/\r?\n/u);
+  let inFence = false;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index].trim();
+    if (line.startsWith("```")) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence && /^superspec(?:\.cmd)?\s+(?:guard|check|init)\b/u.test(line)) {
+      hits.push({ line, lineNo: index + 1 });
+    }
+  }
+  return hits;
 }
 
 function npmCommand(): string {
   return process.platform === "win32" ? "npm.cmd" : "npm";
 }
+	// ── Step 0: REWRITTEN_SKILLS opt-in + prose terminology detector + command parsability ──
+
+	const REWRITTEN_SKILLS: Set<string> = new Set(["superspec-explore", "superspec-archive", "superspec-review", "superspec-propose", "superspec-apply"]);
+
+	const PROSE_BLACKLIST = [
+	  "guard", "block", "packet", "gate",
+	  "native subagent", "native lane",
+	  "materialize", "pinned ref",
+	  "main_adjudication", "chain_activation_template",
+	  "apply_execution_surface", "completion_proof_kind",
+	  "pre_edit_proof_kind", "serial takeover",
+	];
+
+	const PROSE_WHITELIST = new Set([
+	  "critic", "architect", "executor", "verifier",
+	  "test-engineer", "test-runner", "code-reviewer",
+	  "alternative_verification", "manual_verification",
+	  "final_test", "test_run",
+	]);
+
+	const LEGAL_GATES = new Set([
+	  "status", "init", "recompute", "openspec_preflight",
+	  "project_init", "project_update", "project_uninstall",
+	  "user_install", "user_update", "user_uninstall",
+	  "guard_error", "preset_upgrade", "branch_handling",
+	  "apply_isolation", "scope_expansion", "verify_failure_handling",
+	  "explore_complete", "proposal_reviewed", "design_complete",
+	  "invariants_reviewed", "test_contract_drafted", "test_contract_honored",
+	  "tasks_complete", "propose_complete", "apply_ready",
+	  "task_reopen", "task_edit", "task_complete",
+	  "review_ready", "review_complete", "verify_complete",
+	  "archive_ready", "archived",
+	]);
+
+	const TASK_GATES = new Set(["task_edit", "task_complete", "task_reopen"]);
+
+	const PACKET_COMMANDS = [
+	  "workflow-packet", "review-packet",
+	  "apply-test-packet", "apply-executor-packet",
+	  "apply-code-review-packet", "apply-verify-packet",
+	];
+
+	function stripFencedCodeBlocks(text: string): string {
+	  return text.replace(/```[\s\S]*?```/gu, "");
+	}
+
+	function stripInlineCode(text: string): string {
+	  return text.replace(/`[^`]+`/gu, "");
+	}
+
+	function extractProse(text: string): string {
+	  return stripInlineCode(stripFencedCodeBlocks(text));
+	}
+
+	function extractFencedCodeBlocks(text: string): string[] {
+	  const blocks: string[] = [];
+	  const re = /```[\s\S]*?```/gu;
+	  let match;
+	  while ((match = re.exec(text)) !== null) {
+	    blocks.push(match[0]);
+	  }
+	  return blocks;
+	}
+
+	function wordBoundaryMatch(text: string, term: string): boolean {
+	  if (term.includes(" ")) return text.includes(term);
+	  const escaped = term.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+	  return new RegExp(`\\b${escaped}\\b`, "u").test(text);
+	}
+
+	function assertSkillProseTerminology(name: string, text: string): void {
+	  if (!REWRITTEN_SKILLS.has(name)) return;
+	  const prose = extractProse(text);
+	  for (const term of PROSE_BLACKLIST) {
+	    if (PROSE_WHITELIST.has(term)) continue;
+	    assert.equal(
+	      wordBoundaryMatch(prose, term),
+	      false,
+	      `${name}: prose must not contain "${term}"`,
+	    );
+	  }
+	  // soft-check: gate / block / packet as isolated CJK-adjacent tokens
+	  for (const soft of ["gate", "block", "packet"]) {
+	    if (new RegExp(`[\\u4e00-\\u9fff]${soft}`, "u").test(prose)) {
+	      assert.fail(`${name}: prose contains CJK-adjacent "${soft}" (likely unguarded internal term)`);
+	    }
+	  }
+	}
+
+	function assertSkillCommandParsability(name: string, text: string): void {
+	  if (!REWRITTEN_SKILLS.has(name)) return;
+	  const blocks = extractFencedCodeBlocks(text);
+	  for (const block of blocks) {
+	    const lines = block.split(/\r?\n/u);
+	    for (const rawLine of lines) {
+	      const line = rawLine.trim();
+	      if (!line || line.startsWith("```")) continue;
+	      const hasPacketCmd = PACKET_COMMANDS.some((cmd) => line.includes(cmd));
+	      if (!hasPacketCmd) continue;
+	      assert.match(
+	        line,
+	        /^superspec\s+check\s+/u,
+	        `${name}: packet command line must start with "superspec check": ${line}`,
+	      );
+	      if (line.includes("workflow-packet")) {
+	        const gateMatch = line.match(/--gate\s+(\S+)/u);
+	        if (gateMatch) {
+	          const gate = gateMatch[1];
+	          assert.ok(
+	            LEGAL_GATES.has(gate),
+	            `${name}: workflow-packet --gate "${gate}" is not a legal gate`,
+	          );
+	          if (TASK_GATES.has(gate)) {
+	            assert.match(
+	              line,
+	              /--task-id\s+\S+/u,
+	              `${name}: workflow-packet --gate ${gate} must include --task-id`,
+	            );
+	          }
+	        }
+	      }
+	      if (line.includes("check review-packet ")) {
+	        assert.match(
+	          line,
+	          /--round\s+\d+/u,
+	          `${name}: review-packet must include --round: ${line}`,
+	        );
+	      }
+	    }
+	  }
+	}
 
 test("superspec package declares workflow payload surface", () => {
   const pkg = JSON.parse(repoText("package.json"));
@@ -110,7 +254,7 @@ test("superspec package declares workflow payload surface", () => {
   assert.equal(pkg.type, "module");
   assert.equal(pkg.engines.node, ">=20.19.0");
   assert.equal(pkg.bin.superspec, "bin/superspec.js");
-  assert.equal(pkg.bin["superspec-guard"], "bin/superspec-guard.js");
+  assert.equal(pkg.bin["superspec-check"], "bin/superspec-check.js");
   assert.equal(pkg.bin["superspec-hook"], "bin/superspec-hook.js");
   assert.equal(pkg.bin["superspec-init"], "bin/superspec-init.js");
   assert.equal(pkg.exports["."].default, "./dist/superspec.js");
@@ -319,7 +463,7 @@ test("superspec distribution files are not gitignored", () => {
     "package.json",
     "bin/launch.js",
     "bin/superspec.js",
-    "bin/superspec-guard.js",
+    "bin/superspec-check.js",
     "bin/superspec-init.js",
     "build.js",
     "src/core.ts",
@@ -367,7 +511,7 @@ test("skills call guard before advancing", () => {
   for (const name of REQUIRED_SKILLS) {
     const text = templateSkillText(name);
     assert.ok(text.includes("superspec"), name);
-    assert.ok(text.includes(" guard "), name);
+    assert.ok(text.includes(" check "), name);
     assert.equal(text.includes("SUPERSPEC_CLI"), false, name);
     assert.equal(text.includes("./node_modules/.bin/superspec-guard"), false, name);
     assert.equal(text.includes("SUPERSPEC_GUARD"), false, name);
@@ -375,7 +519,6 @@ test("skills call guard before advancing", () => {
     assert.equal(text.includes("${"), false, name);
     assert.equal(text.includes("test -f "), false, name);
     assert.equal(text.includes("```bash"), false, name);
-    assert.ok(text.includes("guard `block`"), name);
     assert.ok(text.includes("## 语言规则 / Language"), name);
     assert.ok(text.includes("## 命令执行 / Shell"), name);
     assert.ok(text.includes("superspec.cmd"), name);
@@ -404,6 +547,7 @@ test("workflow skills use safe agent output for ordinary superspec commands", ()
       if (line.includes("apply-executor-packet") && line.includes("--format prompt")) continue;
       if (line.includes("apply-code-review-packet") && line.includes("--format prompt")) continue;
       if (line.includes("apply-verify-packet") && line.includes("--format prompt")) continue;
+      if (/\b(?:recompute|status|hook-health|check-init|check-review-ready|check-review-complete|check-archive-ready|check-archived)\b/u.test(line)) continue;
       assert.match(line, /--format agent\b/u, `${name}:${lineNo} must use --format agent or review-packet prompt: ${line}`);
     }
     assert.ok(text.includes("普通 workflow 命令使用 `--format agent`"), name);
@@ -488,7 +632,7 @@ test("workflow skills are thin packet-driven entrypoints", () => {
   const maxChars: Record<(typeof REQUIRED_SKILLS)[number], number> = {
     "superspec-explore": 4200,
     "superspec-propose": 5200,
-    "superspec-apply": 5600,
+    "superspec-apply": 5900,
     "superspec-review": 5200,
     "superspec-archive": 3600,
   };
@@ -497,7 +641,6 @@ test("workflow skills are thin packet-driven entrypoints", () => {
     assert.ok(text.length <= maxChars[name], `${name} should stay thin: ${text.length}`);
     assert.ok(text.includes("## 阶段职责"), name);
     assert.ok(text.includes("## 第一条必跑命令"), name);
-    assert.ok(text.includes("遇到任何 guard `block` 就停止"), name);
     assert.equal(text.includes("## 证据契约"), false, name);
     assert.equal(text.includes("### 严重级别"), false, name);
     assert.equal(text.includes("每个 evidence file 都必须包含通用 schema 字段"), false, name);
@@ -566,13 +709,72 @@ test("apply delegates implementation edits to repo-local executor", () => {
   const text = templateSkillText("superspec-apply");
   assert.ok(text.includes(".codex/agents/executor.toml"));
   assert.ok(text.includes(".codex/prompts/executor.md"));
+  assert.ok(text.includes(".codex/agents/test-runner.toml"));
+  assert.ok(text.includes(".codex/prompts/test-runner.md"));
   assert.ok(text.includes("apply-executor-packet"));
-  assert.ok(text.includes("chain_activation_template"));
-  assert.ok(text.includes("active `apply_worker_chain`"));
-  assert.ok(text.includes("executor 只能改 packet 声明的 implementation write scope"));
-  assert.ok(text.includes("不能写正式 evidence"));
-  assert.ok(text.includes("不能改 task checkbox"));
-  assert.ok(text.includes("不能做 review/verification"));
+});
+
+test("apply execution surface is documented in SPEC and test-engineer prompt", () => {
+  const spec = repoText("docs/SPEC.md");
+  assert.ok(spec.includes("`apply_execution_surface` 枚举"));
+  assert.ok(spec.includes("`implementation` / `runtime_config` / `docs_generated` / `no_code`"));
+  assert.ok(spec.includes("缺省且 `write_scope` 非空时视为 `implementation`"));
+  assert.ok(spec.includes("缺省且 `write_scope` 为空时视为 `no_code`"));
+  assert.ok(spec.includes("RED/characterization/GREEN 由 repo-local `test-runner` worker 产生"));
+  assert.ok(spec.includes("implementation/runtime_config 由 repo-local `executor` worker chain 产生"));
+  assert.ok(spec.includes("bounded `test-engineer` lane"));
+  assert.ok(spec.includes("completion_proof_kind:\"alternative_verification\""));
+  assert.ok(spec.includes("pre_edit_proof_kind:\"no_tdd_declared\""));
+
+  const testEngineer = templatePromptText("test-engineer");
+  assert.ok(testEngineer.includes("新增或修改 RED/characterization 测试文件"));
+  assert.ok(testEngineer.includes("bounded native lane"));
+  assert.ok(testEngineer.includes("正式 RED/characterization/GREEN 运行证据仍由 test-runner packet 生成"));
+});
+
+test("test-runner prompt forbids main-thread formal test evidence", () => {
+  const text = templatePromptText("test-runner");
+  assert.ok(text.includes("只有 test-runner worker 运行结果可以成为正式 RED/characterization/GREEN candidate"));
+  assert.ok(text.includes("不要让主线程代跑或伪造正式 evidence"));
+});
+
+test("verifier prompt documents no-TDD alternative worker-chain proof", () => {
+  const text = templatePromptText("verifier");
+  assert.ok(text.includes("alternative_verification_evidence_refs"));
+  assert.ok(text.includes("active chain no-TDD metadata"));
+});
+
+test("apply guidance documents generic framework-agnostic test evidence semantics", () => {
+  const GENERIC_TEST_EVIDENCE_PHRASES = [
+    "target test identity executed",
+    "command exit code alone is not proof",
+    "blocked before the target test runner",
+    "do not classify environment/build failures as RED or GREEN",
+  ];
+  const MAVEN_JUNIT_TOKENS = [
+    "mvn test",
+    "mvn -pl",
+    "-Dtest",
+    "-DfailIfNoTests",
+    "-Dsurefire.failIfNoSpecifiedTests",
+    "endPosTable",
+    "Surefire",
+    "JUnit",
+  ];
+  const targets = [
+    { label: "apply skill", text: templateSkillText("superspec-apply") },
+    { label: "test-runner prompt", text: templatePromptText("test-runner") },
+    { label: "sidecar test-contract", text: repoText("templates/sidecar/test-contract.md") },
+    { label: "SPEC", text: repoText("docs/SPEC.md") },
+  ];
+  for (const target of targets) {
+    for (const phrase of GENERIC_TEST_EVIDENCE_PHRASES) {
+      assert.ok(target.text.includes(phrase), `${target.label} missing phrase: ${phrase}`);
+    }
+    for (const token of MAVEN_JUNIT_TOKENS) {
+      assert.equal(target.text.includes(token), false, `${target.label} must not contain Maven/JUnit token: ${token}`);
+    }
+  }
 });
 
 test("archive documents native archive handoff", () => {
@@ -604,16 +806,8 @@ test("review requires repo-local native agents", () => {
   assert.ok(text.includes(".codex/prompts/critic.md"));
   assert.ok(text.includes(".codex/agents/verifier.toml"));
   assert.ok(text.includes(".codex/prompts/verifier.md"));
-  assert.ok(text.includes("repo-local native agents"));
-  assert.ok(text.includes("不要调用全局 `$code-review`"));
-  assert.ok(text.includes("native agents"));
-  assert.ok(text.includes("`review_complete` 是 allow-only gate"));
-  assert.ok(text.includes("`request_changes_route`"));
-  assert.ok(text.includes("`execution_mode:\"direct\"` + `created_by:\"main-thread\"`"));
-  assert.ok(text.includes("main_adjudication"));
   assert.ok(text.includes("check-init"));
   assert.ok(text.includes("openspec validate"));
-  assert.ok(text.includes("request-changes round 不生成 allow-path verification"));
 });
 
 test("review prompts require Chinese-only user-visible prose outside code identifiers", () => {
@@ -657,8 +851,6 @@ test("executor prompt is a thin packet-driven apply implementation surface", () 
   assert.ok(text.includes("`prompt_ref`"));
   assert.ok(text.includes("`declared_task_write_scope`"));
   assert.ok(text.includes("`guard_fingerprint`"));
-  assert.ok(text.includes("`apply_worker_chain_id`"));
-  assert.ok(text.includes("`chain_activation_template`"));
   assert.ok(text.includes("不要修改 `proposal.md`/`design.md`/`tasks.md`/`specs/**`/`.superspec/**`"));
   assert.ok(text.includes("不要依赖本 prompt 记忆输出 schema"));
   assert.equal(text.includes("`review-packet`"), false);
@@ -691,7 +883,6 @@ test("role agent toml files are thin prompt-bound entrypoints", () => {
 
 test("business skills use positive overlay instructions", () => {
   const combined = REQUIRED_SKILLS.map((name) => templateSkillText(name)).join("\n");
-  assert.ok(combined.includes("native subagent"));
   assert.equal(combined.includes("Do not create `.codex/hooks.json`"), false);
   assert.equal(combined.includes("Do not create or use `openspec/schemas/superspec`"), false);
   assert.equal(combined.includes("schema: superspec"), false);
@@ -745,4 +936,12 @@ test("human pause points are present", () => {
     assert.ok(combined.includes(phrase), phrase);
   }
   assert.ok(combined.includes("不要使用默认值、历史偏好或沉默作为确认"));
+});
+
+test("REWRITTEN_SKILLS prose detector and command parsability harness (opt-in, activates per-skill on rewrite)", () => {
+  for (const name of REQUIRED_SKILLS) {
+    const text = templateSkillText(name);
+    assertSkillProseTerminology(name, text);
+    assertSkillCommandParsability(name, text);
+  }
 });

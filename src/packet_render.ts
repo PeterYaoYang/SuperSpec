@@ -10,6 +10,7 @@ import {
   GuardError,
   MAIN_ADJUDICATION_REQUIRED_FIELDS,
   MAIN_ADJUDICATION_DECISIONS,
+  NO_TDD_REASONS,
   REQUEST_CHANGES_ROUTES,
   REVIEW_EVIDENCE_REQUIRED_FIELDS,
   ROLE_EVIDENCE_FIELDS,
@@ -39,6 +40,9 @@ import {
 import {
   build_finding_ledger,
   enumerate_review_targets,
+  FINDING_CATEGORIES,
+  FINDING_TYPES,
+  MATERIAL_CATEGORIES,
   render_finding_ledger,
   REVIEW_TARGETS_BY_GATE,
   review_round_number,
@@ -57,7 +61,14 @@ import { final_verification_evidences, index_evidence, live_pass, live_user_conf
 import { file_blob_sha, dirty_worktree_paths } from "./git.ts";
 import { preset_upgrade_reasons, preset_upgrade_required_from_context } from "./archive.ts";
 import { state_corrupt_reasons, state_stale_reasons } from "./state.ts";
-import { parse_tasks, resolve_test_contract_command, splitList, test_contract_invariant_refs_by_test } from "./tasks.ts";
+import {
+  parse_tasks,
+  resolve_test_contract_command,
+  splitList,
+  task_apply_execution_surface,
+  task_apply_execution_surface_reasons,
+  test_contract_invariant_refs_by_test,
+} from "./tasks.ts";
 import {
   APPLY_CODE_REVIEW_REPORT_REQUIRED_FIELDS,
   APPLY_EXECUTOR_REPORT_REQUIRED_FIELDS,
@@ -71,11 +82,38 @@ import {
   fingerprint_matches,
   pinned_artifact_ref_reasons as shared_pinned_artifact_ref_reasons,
   pre_edit_evidence_ref_reasons,
+  pre_edit_worker_test_run_reasons,
   read_pinned_artifact_json,
   worker_input_ref_digest,
   worker_test_run_reasons,
 } from "./apply_worker_chain.ts";
 import { apply_worker_chain_lifecycle_state } from "./apply_worker_chain_lifecycle.ts";
+import { PACKAGE_ROOT } from "./install_engine.ts";
+
+// B (template serving): discovery.md fill rules handed to the model alongside the template skeleton
+// so every model produces the same structure (instead of freehanding a section the gate then has to
+// parse heuristically). Kept here, not in the .md template, so they are versioned with the code that
+// depends on them (the open-questions checkbox convention consumed by discovery_open_question_count).
+const DISCOVERY_RULES: readonly string[] = [
+  "按模板骨架填写 discovery.md，保留全部段落（调查范围 / 现有实现事实 / 隐性合约 / 风险与歧义 / 待确认问题 / Subagent Evidence），不得自创或删减段落骨架。",
+  "所有需要用户拍板的问题写进「## 待确认问题」段，每条用「- [ ]」；用户确认后改成「- [x]」或在项内写「已确认：」。",
+  "explore_complete 检查在该段仍有「- [ ]」或「仍需确认/待确认」项时不会通过。",
+  "段标题含「确认」字样即可被识别（待确认问题 / 需要用户确认的问题 等），不要改成无「确认」字样的标题。",
+];
+
+// Reads the canonical discovery template from the package. packageRoot is parameterized so tests can
+// inject an empty dir to exercise the "unreadable → omit field" path; PACKAGE_ROOT itself is a
+// module-load-time const and cannot be mocked. Returns null (not throws) when missing so a transient
+// read failure never turns the whole packet into an error response.
+export function read_discovery_template(packageRoot: string = PACKAGE_ROOT): string | null {
+  const p = join(packageRoot, "templates", "sidecar", "discovery.md");
+  if (!existsSync(p) || !statSync(p).isFile()) return null;
+  try {
+    return readFileSync(p, "utf8");
+  } catch {
+    return null;
+  }
+}
 
 type PacketContext = {
   change: string;
@@ -236,13 +274,13 @@ function evaluate_workflow_decision(ctx: PacketContext, gateRaw: string, taskId?
 
 function gate_recheck_command(change: string, gate: string, taskId?: string, diagnostic = false): string {
   const format = diagnostic ? "json" : "agent";
-  if (gate === "apply_ready") return `superspec guard check-apply-ready --change "${change}" --format ${format}`;
-  if (gate === "review_complete") return `superspec guard check-review-complete --change "${change}" --format ${format}`;
-  if (gate === "archive_ready") return `superspec guard check-archive-ready --change "${change}" --format ${format}`;
-  if (gate === "task_edit") return `superspec guard check-task-edit --change "${change}" --task-id "${taskId ?? ""}" --format ${format}`;
-  if (gate === "task_complete") return `superspec guard check-task-complete --change "${change}" --task-id "${taskId ?? ""}" --format ${format}`;
-  if (gate === "task_reopen") return `superspec guard check-task-reopen --change "${change}" --task-id "${taskId ?? ""}" --format ${format}`;
-  return `superspec guard check-enter --change "${change}" --gate "${gate}" --format ${format}`;
+  if (gate === "apply_ready") return `superspec check check-apply-ready --change "${change}" --format ${format}`;
+  if (gate === "review_complete") return `superspec check check-review-complete --change "${change}" --format ${format}`;
+  if (gate === "archive_ready") return `superspec check check-archive-ready --change "${change}" --format ${format}`;
+  if (gate === "task_edit") return `superspec check check-task-edit --change "${change}" --task-id "${taskId ?? ""}" --format ${format}`;
+  if (gate === "task_complete") return `superspec check check-task-complete --change "${change}" --task-id "${taskId ?? ""}" --format ${format}`;
+  if (gate === "task_reopen") return `superspec check check-task-reopen --change "${change}" --task-id "${taskId ?? ""}" --format ${format}`;
+  return `superspec check check-enter --change "${change}" --gate "${gate}" --format ${format}`;
 }
 
 function default_allowed_next_action(gate: string): string {
@@ -435,6 +473,13 @@ function workflow_packet(ctx: PacketContext, gateRaw: string, taskId?: string): 
   if (findings.length > 0) packet.must_read_verbatim_findings = findings;
   const decisions = decision_selectors_for_gate(ctx, gate);
   if (decisions.length > 0) packet.must_read_verbatim_decisions = decisions;
+  // B (template serving): hand the model the discovery skeleton + fill rules so its output structure
+  // is uniform. Gate-scoped to explore_complete (the only gate that produces discovery.md).
+  if (gate === "explore_complete") {
+    const tpl = read_discovery_template();
+    if (tpl) packet.discovery_template = tpl;
+    packet.discovery_rules = [...DISCOVERY_RULES];
+  }
   return packet;
 }
 
@@ -477,7 +522,19 @@ function verification_output_fields(): string[] {
 }
 
 function review_output_fields(): string[] {
-  return [...ROLE_EVIDENCE_FIELDS, "review_round_id", "findings", "acknowledged_accepted_deviation_uids"];
+  return [
+    ...ROLE_EVIDENCE_FIELDS,
+    "review_round_id format: <gate>-r<round>",
+    "findings[] object fields: finding_id, finding_uid, finding_type, category, summary",
+    "finding_uid format: <gate>:<evidence_id>:<finding_id>",
+    `finding_type values: ${renderList([...FINDING_TYPES].sort())}`,
+    `category values: ${renderList([...FINDING_CATEGORIES].sort())}`,
+    `material_categories values: ${renderList([...MATERIAL_CATEGORIES].sort())}`,
+    "decision_scope_key required when material_categories is non-empty",
+    "summary must be verbatim disclosure source text",
+    "acknowledged_accepted_deviation_uids must be a string array when present",
+    "findings[].supersedes_finding_uids must be a string array when present",
+  ];
 }
 
 function source_guidance_output_fields(): string[] {
@@ -667,6 +724,7 @@ function apply_worker_stop_conditions(kind: string): string[] {
   if (kind === "apply_test") {
     return [
       "Stop after reporting the bounded test command result only.",
+      "Do not let the main thread run or forge formal RED/characterization/GREEN evidence.",
       "Do not change implementation files.",
       "Return raw logs as pinned artifact refs when output is long.",
     ];
@@ -768,7 +826,7 @@ function require_active_apply_worker_chain(ctx: PacketContext, taskId: string, b
   if (!chainId) {
     blockers.push(reason("missing_apply_worker_chain_active", `task ${taskId} requires an active apply_worker_chain marker before downstream worker packet generation`));
   } else {
-    blockers.push(...pre_edit_evidence_ref_reasons(ctx.evidences, active, taskId, "apply_worker_chain_active_invalid"));
+    blockers.push(...pre_edit_evidence_ref_reasons(ctx.changeRoot, ctx.evidences, active, taskId, "apply_worker_chain_active_invalid"));
   }
   return chainId;
 }
@@ -951,6 +1009,7 @@ function validate_active_apply_worker_chain_refs(
   expectedSourceImplementationFingerprint: unknown,
   expectedDeclaredTaskWriteScope: string[],
   expectedPreEditEvidenceRefs: string[],
+  expectedActiveFields: JsonMap = {},
 ): { refs: JsonMap[]; blockers: Reason[] } {
   if (refs.length === 0) {
     return {
@@ -984,6 +1043,11 @@ function validate_active_apply_worker_chain_refs(
     }
     if (!deepEqual(stringList(value.pre_edit_evidence_refs), stringList(expectedPreEditEvidenceRefs))) {
       fieldBlockers.push(reason("apply_worker_chain_ref_invalid", `${ref}: pre_edit_evidence_refs mismatch`, [ref]));
+    }
+    for (const field of ["pre_edit_proof_kind", "apply_execution_surface", "tdd_required", "no_tdd_reason"]) {
+      if (field in expectedActiveFields && !deepEqual(value[field], expectedActiveFields[field])) {
+        fieldBlockers.push(reason("apply_worker_chain_ref_invalid", `${ref}: ${field} mismatch`, [ref]));
+      }
     }
     return fieldBlockers;
   };
@@ -1033,8 +1097,71 @@ function pre_edit_refs_bound_to_active_chain(ctx: PacketContext, active: JsonMap
     const evidenceId = String(ev.evidence_id ?? "");
     if (!allowed.has(evidenceId)) blockers.push(reason("pinned_evidence_ref_invalid", `${label} evidence ref is not part of active apply_worker_chain pre_edit_evidence_refs: ${evidenceId}`, [evidenceId]));
   }
-  blockers.push(...pre_edit_evidence_ref_reasons(ctx.evidences, active, taskId, "pinned_evidence_ref_invalid"));
+  blockers.push(...pre_edit_evidence_ref_reasons(ctx.changeRoot, ctx.evidences, active, taskId, "pinned_evidence_ref_invalid"));
   return blockers;
+}
+
+function validate_alternative_verification_evidence_refs(
+  ctx: PacketContext,
+  refs: string[],
+  taskId: string,
+): { refs: JsonMap[]; blockers: Reason[] } {
+  if (refs.length === 0) {
+    return {
+      refs: [],
+      blockers: [reason("missing_alternative_verification_evidence_ref", "apply-verify-packet requires --alternative-verification-evidence-ref for no-TDD alternative verification")],
+    };
+  }
+  const resolved: JsonMap[] = [];
+  const blockers: Reason[] = [];
+  for (const ref of refs) {
+    let evidenceId = ref;
+    const maybePath = safe_within(ctx.changeRoot, ref);
+    if (maybePath !== null && existsSync(maybePath) && statSync(maybePath).isFile()) {
+      const loaded = read_json_ref(ctx, ref);
+      blockers.push(...loaded.blockers);
+      if (loaded.value) {
+        if (loaded.value.kind !== "alternative_verification" && loaded.value.kind !== "manual_verification") {
+          blockers.push(reason("pinned_evidence_ref_invalid", `${ref}: kind must be alternative_verification or manual_verification`, [ref]));
+        }
+        if (normalize_gate(String(loaded.value.gate ?? "")) !== "task_complete") blockers.push(reason("pinned_evidence_ref_invalid", `${ref}: gate must be task_complete`, [ref]));
+        if (loaded.value.task_id !== taskId) blockers.push(reason("pinned_evidence_ref_invalid", `${ref}: task_id must be ${taskId}`, [ref]));
+        if (typeof loaded.value.evidence_id === "string" && loaded.value.evidence_id) evidenceId = loaded.value.evidence_id;
+      }
+    }
+    const ev = live_pass(ctx.evidences, { task_id: taskId })
+      .find((item) => String(item.evidence_id ?? "") === evidenceId && (item.kind === "alternative_verification" || item.kind === "manual_verification"));
+    if (!ev) {
+      blockers.push(reason("pinned_evidence_ref_invalid", `alternative verification evidence ref is not live/pass for ${taskId}: ${ref}`, [ref]));
+      continue;
+    }
+    if (normalize_gate(String(ev.gate ?? "")) !== "task_complete") blockers.push(reason("pinned_evidence_ref_invalid", `${ref}: gate must be task_complete`, [ref]));
+    resolved.push(ev);
+  }
+  return { refs: resolved, blockers };
+}
+
+function active_chain_verifier_input_ref(active: JsonMap | null): JsonMap {
+  return {
+    kind: "apply_worker_chain",
+    evidence_id: active?.evidence_id,
+    task_id: active?.task_id,
+    apply_worker_chain_id: active?.apply_worker_chain_id,
+    pre_edit_proof_kind: active?.pre_edit_proof_kind ?? "red_or_characterization",
+    pre_edit_evidence_refs: Array.isArray(active?.pre_edit_evidence_refs) ? active.pre_edit_evidence_refs.map(String).filter(Boolean).sort() : [],
+    ...(active?.apply_execution_surface !== undefined ? { apply_execution_surface: active.apply_execution_surface } : {}),
+    ...(active?.tdd_required !== undefined ? { tdd_required: active.tdd_required } : {}),
+    ...(active?.no_tdd_reason !== undefined ? { no_tdd_reason: active.no_tdd_reason } : {}),
+  };
+}
+
+function alternative_evidence_input_ref(ev: JsonMap): JsonMap {
+  return {
+    kind: ev.kind,
+    evidence_id: ev.evidence_id,
+    gate: ev.gate,
+    task_id: ev.task_id,
+  };
 }
 
 function write_scope_blockers(taskId: string, writeScope: string[]): Reason[] {
@@ -1063,14 +1190,24 @@ function write_scope_blockers(taskId: string, writeScope: string[]): Reason[] {
 function pre_edit_evidence_refs(ctx: PacketContext, taskId: string): string[] {
   return live_pass(ctx.evidences, { gate: "task_edit", kind: "test_run", task_id: taskId })
     .filter((ev) => ev.semantic_status === "expected_failure" || ev.semantic_status === "expected_success")
+    .filter((ev) => pre_edit_worker_test_run_reasons(ctx.changeRoot, ev, taskId).length === 0)
     .map((ev) => String(ev.evidence_id ?? ""))
     .filter(Boolean)
     .sort();
 }
 
 function apply_task_context_fields(ctx: PacketContext, taskId: string, task: ReturnType<typeof parse_tasks>[string] | null, writeScope: string[], expectedGuardRefs: unknown[] = []): JsonMap {
+  const executionSurface = task ? task_apply_execution_surface(task) : "";
   return {
     task_content_ref: change_pinned_ref(ctx.changeRoot, "tasks.md"),
+    apply_execution_surface: executionSurface,
+    apply_execution_surface_source: task?.attrs.apply_execution_surface ? "explicit" : "default",
+    apply_execution_surface_policy: {
+      implementation_requires_executor_worker_chain: true,
+      runtime_config_requires_executor_worker_chain: true,
+      docs_generated_allows_direct_alternative_verification: true,
+      no_code_requires_empty_write_scope: true,
+    },
     task_acceptance_refs: task ? splitList(task.attrs.requirement_refs ?? "") : [],
     task_invariant_refs: task ? splitList(task.attrs.invariant_refs ?? "") : [],
     task_test_refs: task ? splitList(task.attrs.test_refs ?? "") : [],
@@ -1180,15 +1317,30 @@ function apply_executor_packet(ctx: PacketContext, args: ParsedArgs): JsonMap {
   const { task, blockers: taskBlockers } = task_lookup_blockers(ctx, taskId);
   blockers.push(...taskBlockers);
   const writeScope = task ? splitList(task.attrs.write_scope ?? "") : [];
-  blockers.push(...write_scope_blockers(taskId, writeScope));
-  if (task && (task.attrs.tdd_required ?? "true").toLowerCase() === "false") {
-    blockers.push(reason("unsupported_executor_tdd_mode", `task ${taskId} has tdd_required:false and must stay on main-thread apply path`));
+  const executionSurface = task ? task_apply_execution_surface(task) : "";
+  const tddRequired = task ? (task.attrs.tdd_required ?? "true").toLowerCase() !== "false" : true;
+  const noTddReason = task?.attrs.no_tdd_reason;
+  const preEditProofKind = tddRequired ? "red_or_characterization" : "no_tdd_declared";
+  const activePreEditRefs = preEditProofKind === "no_tdd_declared" ? [] : pre_edit_evidence_refs(ctx, taskId);
+  if (task) {
+    blockers.push(...task_apply_execution_surface_reasons(taskId, task));
+    if (executionSurface === "implementation" || executionSurface === "runtime_config") {
+      if (!tddRequired && !NO_TDD_REASONS.has(String(noTddReason ?? ""))) {
+        blockers.push(reason("invalid_no_tdd_reason", `task ${taskId}: no_tdd_reason=${String(noTddReason ?? "")}`));
+      }
+      blockers.push(...write_scope_blockers(taskId, writeScope));
+    } else {
+      blockers.push(reason("executor_handoff_not_required", `task ${taskId} apply_execution_surface=${executionSurface} does not use executor-worker implementation handoff`));
+    }
+  } else {
+    blockers.push(...write_scope_blockers(taskId, writeScope));
   }
   blockers.push(...apply_worker_chain_packet_state(ctx, taskId).blockers);
   const packet = apply_packet_common(ctx, "apply_executor", taskId, "executor_worker", blockers);
   const chainId = active_apply_worker_chain_id(ctx, taskId) ?? generated_apply_worker_chain_id(ctx, taskId, writeScope);
   packet.worker_chain_context = "executor_worker";
   packet.apply_worker_chain_id = chainId;
+  packet.apply_execution_surface = executionSurface;
   packet.declared_task_write_scope = writeScope;
   packet.task_edit = decision_status(taskEdit);
   packet.task_complete = safe_decision_status(ctx, "task_complete", taskId);
@@ -1212,7 +1364,11 @@ function apply_executor_packet(ctx: PacketContext, args: ParsedArgs): JsonMap {
     executor_packet_fingerprint: "",
     source_implementation_fingerprint: implementation_fingerprint(ctx, writeScope),
     declared_task_write_scope: writeScope,
-    pre_edit_evidence_refs: pre_edit_evidence_refs(ctx, taskId),
+    pre_edit_proof_kind: preEditProofKind,
+    apply_execution_surface: executionSurface,
+    tdd_required: tddRequired,
+    ...(tddRequired ? {} : { no_tdd_reason: noTddReason }),
+    pre_edit_evidence_refs: activePreEditRefs,
   };
   if (args.packet_format === "prompt") {
     const expectedPacketFingerprint = apply_worker_packet_fingerprint(packet);
@@ -1225,6 +1381,12 @@ function apply_executor_packet(ctx: PacketContext, args: ParsedArgs): JsonMap {
       packet.chain_activation_template.source_implementation_fingerprint,
       packet.chain_activation_template.declared_task_write_scope,
       packet.chain_activation_template.pre_edit_evidence_refs,
+      {
+        pre_edit_proof_kind: packet.chain_activation_template.pre_edit_proof_kind,
+        apply_execution_surface: packet.chain_activation_template.apply_execution_surface,
+        tdd_required: packet.chain_activation_template.tdd_required,
+        ...(packet.chain_activation_template.no_tdd_reason !== undefined ? { no_tdd_reason: packet.chain_activation_template.no_tdd_reason } : {}),
+      },
     );
     blockers.push(...activeRefs.blockers);
     packet.apply_worker_chain_refs = args.apply_worker_chain_refs ?? [];
@@ -1313,10 +1475,13 @@ function apply_verify_packet(ctx: PacketContext, args: ParsedArgs): JsonMap {
   const { task, blockers: taskBlockers } = task_lookup_blockers(ctx, taskId);
   blockers.push(...taskBlockers);
   const writeScope = task ? splitList(task.attrs.write_scope ?? "") : [];
+  const executionSurface = task ? task_apply_execution_surface(task) : "";
+  const tddRequired = task ? (task.attrs.tdd_required ?? "true").toLowerCase() !== "false" : true;
   blockers.push(...write_scope_blockers(taskId, writeScope));
   const chainId = require_active_apply_worker_chain(ctx, taskId, blockers);
   const activeChain = active_apply_worker_chain(ctx, taskId).active;
   const packet = apply_packet_common(ctx, "apply_verify", taskId, "executor_worker", blockers);
+  const completionProofKind = (args.alternative_verification_evidence_refs ?? []).length > 0 ? "alternative_verification" : "green_tests";
   if (chainId) {
     const executorRefs = validate_worker_report_refs(ctx, args.executor_report_refs ?? [], {
       role: "executor",
@@ -1359,7 +1524,8 @@ function apply_verify_packet(ctx: PacketContext, args: ParsedArgs): JsonMap {
       missingCode: "missing_characterization_test_run_evidence_ref",
       missingMessage: "apply-verify-packet requires --characterization-test-run-evidence-ref",
     });
-    blockers.push(...executorRefs.blockers, ...codeReviewRefs.blockers, ...greenRefs.blockers);
+    const alternativeRefs = validate_alternative_verification_evidence_refs(ctx, args.alternative_verification_evidence_refs ?? [], taskId);
+    blockers.push(...executorRefs.blockers, ...codeReviewRefs.blockers);
     if (executorRefs.refs[0]) {
       blockers.push(...worker_report_origin_blockers(executorRefs.refs[0], activeChain?.executor_packet_fingerprint, "executor_report_ref"));
       if (activeChain) {
@@ -1369,16 +1535,43 @@ function apply_verify_packet(ctx: PacketContext, args: ParsedArgs): JsonMap {
     if (executorRefs.refs[0] && codeReviewRefs.refs[0]) {
       blockers.push(...worker_report_input_blockers(codeReviewRefs.refs[0], [executorRefs.refs[0]], "task_code_review_report_ref"));
     }
-    if ((args.red_test_run_evidence_refs ?? []).length === 0 && (args.characterization_test_run_evidence_refs ?? []).length === 0) {
-      blockers.push(reason("missing_pre_edit_test_run_evidence_ref", "apply-verify-packet requires --red-test-run-evidence-ref or --characterization-test-run-evidence-ref"));
+    if (completionProofKind === "green_tests") {
+      blockers.push(...greenRefs.blockers);
+      if ((args.red_test_run_evidence_refs ?? []).length === 0 && (args.characterization_test_run_evidence_refs ?? []).length === 0) {
+        blockers.push(reason("missing_pre_edit_test_run_evidence_ref", "apply-verify-packet requires --red-test-run-evidence-ref or --characterization-test-run-evidence-ref"));
+      } else {
+        if ((args.red_test_run_evidence_refs ?? []).length > 0) blockers.push(...redRefs.blockers, ...pre_edit_refs_bound_to_active_chain(ctx, activeChain, redRefs.refs, "red", taskId));
+        if ((args.characterization_test_run_evidence_refs ?? []).length > 0) blockers.push(...characterizationRefs.blockers, ...pre_edit_refs_bound_to_active_chain(ctx, activeChain, characterizationRefs.refs, "characterization", taskId));
+      }
     } else {
-      if ((args.red_test_run_evidence_refs ?? []).length > 0) blockers.push(...redRefs.blockers, ...pre_edit_refs_bound_to_active_chain(ctx, activeChain, redRefs.refs, "red", taskId));
-      if ((args.characterization_test_run_evidence_refs ?? []).length > 0) blockers.push(...characterizationRefs.blockers, ...pre_edit_refs_bound_to_active_chain(ctx, activeChain, characterizationRefs.refs, "characterization", taskId));
+      blockers.push(...alternativeRefs.blockers);
+      const activePreIds = Array.isArray(activeChain?.pre_edit_evidence_refs) ? activeChain.pre_edit_evidence_refs.map(String).filter(Boolean) : [];
+      if (activeChain?.pre_edit_proof_kind !== "no_tdd_declared") {
+        blockers.push(reason("apply_worker_chain_active_invalid", "alternative verification requires active apply_worker_chain pre_edit_proof_kind=no_tdd_declared"));
+      }
+      if (activePreIds.length > 0) {
+        blockers.push(reason("apply_worker_chain_active_invalid", `alternative verification requires empty active pre_edit_evidence_refs: ${renderList(activePreIds)}`, activePreIds));
+      }
+      if (tddRequired || activeChain?.tdd_required !== false) {
+        blockers.push(reason("apply_worker_chain_active_invalid", "alternative verification requires task and active apply_worker_chain tdd_required=false"));
+      }
+      if (executionSurface !== "implementation" && executionSurface !== "runtime_config") {
+        blockers.push(reason("alternative_verification_surface_invalid", `alternative verification worker-chain proof requires implementation/runtime_config surface, got ${executionSurface}`));
+      }
+      if (activeChain?.apply_execution_surface !== executionSurface) {
+        blockers.push(reason("apply_worker_chain_active_invalid", "active apply_worker_chain apply_execution_surface must match task surface"));
+      }
+      if (!NO_TDD_REASONS.has(String(activeChain?.no_tdd_reason ?? "")) || activeChain?.no_tdd_reason !== task?.attrs.no_tdd_reason) {
+        blockers.push(reason("apply_worker_chain_active_invalid", "active apply_worker_chain no_tdd_reason must be valid and match task"));
+      }
     }
     packet.apply_worker_chain_id = chainId;
+    packet.completion_proof_kind = completionProofKind;
+    packet.pre_edit_proof_kind = activeChain?.pre_edit_proof_kind ?? "red_or_characterization";
     packet.executor_report_pinned_refs = executorRefs.refs;
     packet.task_code_review_report_pinned_refs = codeReviewRefs.refs;
     packet.green_test_run_evidence_pinned_refs = greenRefs.refs;
+    packet.alternative_verification_evidence_pinned_refs = alternativeRefs.refs;
     packet.red_test_run_evidence_pinned_refs = redRefs.refs;
     packet.characterization_test_run_evidence_pinned_refs = characterizationRefs.refs;
     if (executorRefs.refs[0]) packet.expected_executor_origin_packet_fingerprint = activeChain?.executor_packet_fingerprint;
@@ -1386,13 +1579,14 @@ function apply_verify_packet(ctx: PacketContext, args: ParsedArgs): JsonMap {
     if (executorRefs.refs[0] && codeReviewRefs.refs[0]) {
       packet.expected_code_review_input_ref_digest = worker_input_ref_digest([executorRefs.refs[0]]);
     }
-    if (executorRefs.refs[0] && codeReviewRefs.refs[0] && greenRefs.refs[0]) {
+    if (completionProofKind === "green_tests" && executorRefs.refs[0] && codeReviewRefs.refs[0] && greenRefs.refs[0]) {
       const canonicalGreenRefs = [...greenRefs.refs].sort((a: JsonMap, b: JsonMap) => String(a.evidence_id ?? "").localeCompare(String(b.evidence_id ?? "")));
       const expectedFreshness = compute_apply_worker_freshness(ctx.repoRoot, ctx.changeRoot, ctx.evidences, taskId, chainId, {
         executor_report_ref: executorRefs.refs[0],
         task_code_review_report_ref: codeReviewRefs.refs[0],
         green_test_run_evidence_ref: String(canonicalGreenRefs[0].evidence_id ?? ""),
         green_test_run_evidence_refs: canonicalGreenRefs.map((ev) => String(ev.evidence_id ?? "")).filter(Boolean),
+        completion_proof_kind: "green_tests",
       });
       packet.expected_freshness_fingerprint = expectedFreshness;
       const preEditRefs = [
@@ -1417,9 +1611,33 @@ function apply_verify_packet(ctx: PacketContext, args: ParsedArgs): JsonMap {
       if (Array.isArray(expectedFreshness.protected_dirty_paths) && expectedFreshness.protected_dirty_paths.length > 0) {
         blockers.push(reason("protected_path_dirty", `apply-verify-packet requires protected change artifacts to stay unchanged during executor-worker verification: ${renderList(expectedFreshness.protected_dirty_paths.map(String))}`, expectedFreshness.protected_dirty_paths.map(String)));
       }
+    } else if (completionProofKind === "alternative_verification" && executorRefs.refs[0] && codeReviewRefs.refs[0] && alternativeRefs.refs[0]) {
+      const canonicalAlternativeRefs = [...alternativeRefs.refs].sort((a: JsonMap, b: JsonMap) => String(a.evidence_id ?? "").localeCompare(String(b.evidence_id ?? "")));
+      const expectedFreshness = compute_apply_worker_freshness(ctx.repoRoot, ctx.changeRoot, ctx.evidences, taskId, chainId, {
+        executor_report_ref: executorRefs.refs[0],
+        task_code_review_report_ref: codeReviewRefs.refs[0],
+        alternative_verification_evidence_refs: canonicalAlternativeRefs.map((ev) => String(ev.evidence_id ?? "")).filter(Boolean),
+        completion_proof_kind: "alternative_verification",
+      });
+      packet.expected_freshness_fingerprint = expectedFreshness;
+      packet.expected_verifier_input_ref_digest = worker_input_ref_digest([
+        executorRefs.refs[0],
+        codeReviewRefs.refs[0],
+        ...canonicalAlternativeRefs.map(alternative_evidence_input_ref),
+        active_chain_verifier_input_ref(activeChain),
+      ]);
+      if (!fingerprint_matches(codeReviewRefs.refs[0].observed_implementation_fingerprint, expectedFreshness.implementation_fingerprint)) {
+        blockers.push(reason("task_code_review_implementation_fingerprint_mismatch", "apply-verify-packet requires code-reviewer observed_implementation_fingerprint to match current implementation fingerprint"));
+      }
+      if (Array.isArray(expectedFreshness.protected_dirty_paths) && expectedFreshness.protected_dirty_paths.length > 0) {
+        blockers.push(reason("protected_path_dirty", `apply-verify-packet requires protected change artifacts to stay unchanged during executor-worker verification: ${renderList(expectedFreshness.protected_dirty_paths.map(String))}`, expectedFreshness.protected_dirty_paths.map(String)));
+      }
     }
   }
   packet.declared_task_write_scope = writeScope;
+  packet.apply_execution_surface = executionSurface;
+  packet.tdd_required = tddRequired;
+  if (!tddRequired) packet.no_tdd_reason = task?.attrs.no_tdd_reason;
   packet.task_edit = decision_status(taskEdit);
   packet.task_complete = safe_decision_status(ctx, "task_complete", taskId);
   Object.assign(packet, apply_task_context_fields(ctx, taskId, task, writeScope, [
@@ -1436,20 +1654,30 @@ function apply_verify_packet(ctx: PacketContext, args: ParsedArgs): JsonMap {
     require_scope_verdict: true,
   };
   packet.verification_checks = [
-    "red_or_characterization_pre_edit_evidence_bound_to_active_chain",
+    completionProofKind === "green_tests"
+      ? "red_or_characterization_pre_edit_evidence_bound_to_active_chain"
+      : "no_tdd_declared_active_chain_has_empty_pre_edit_refs",
     "executor_report_same_chain_and_fresh",
     "task_code_review_report_same_chain_and_fresh",
-    "green_test_run_same_chain_and_pinned_transcripts",
+    completionProofKind === "green_tests"
+      ? "green_test_run_same_chain_and_pinned_transcripts"
+      : "alternative_or_manual_verification_refs_live_pass_and_digest_bound",
     "current_freshness_matches_expected_freshness_fingerprint",
     "protected_change_artifacts_clean",
   ];
   packet.executor_report_required_fields = [...APPLY_EXECUTOR_REPORT_REQUIRED_FIELDS];
   packet.code_review_report_required_fields = [...APPLY_CODE_REVIEW_REPORT_REQUIRED_FIELDS];
-  packet.verifier_report_required_fields = [...APPLY_VERIFIER_REPORT_REQUIRED_FIELDS];
+  packet.verifier_report_required_fields = [
+    ...APPLY_VERIFIER_REPORT_REQUIRED_FIELDS,
+    ...(completionProofKind === "green_tests"
+      ? ["green_test_run_evidence_refs", "red_test_run_evidence_refs_or_characterization_test_run_evidence_refs"]
+      : ["alternative_verification_evidence_refs", "apply_execution_surface", "tdd_required", "no_tdd_reason"]),
+  ];
   packet.test_evidence_required_fields = ["command", "cwd", "exit_code", "repo_head", "implementation_fingerprint", "guard_artifact_manifest_fingerprint", "raw_log_pinned_refs"];
   packet.executor_report_refs = args.executor_report_refs ?? [];
   packet.task_code_review_report_refs = args.task_code_review_report_refs ?? [];
   packet.green_test_run_evidence_refs = args.green_test_run_evidence_refs ?? [];
+  packet.alternative_verification_evidence_refs = args.alternative_verification_evidence_refs ?? [];
   packet.red_test_run_evidence_refs = args.red_test_run_evidence_refs ?? [];
   packet.characterization_test_run_evidence_refs = args.characterization_test_run_evidence_refs ?? [];
   packet.worker_state = blockers.length === 0 ? "ready" : "blocked";

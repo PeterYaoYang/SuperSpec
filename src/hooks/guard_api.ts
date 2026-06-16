@@ -566,7 +566,7 @@ export function hookCheckWrite(change: string, eventRef: string): HookDecision {
           block_reasons: blockReasons,
           audit_only_reasons: auditOnlyReasons,
           target_paths: intent.target_paths,
-          next_allowed_actions: ["rerun the relevant superspec guard check and use the expected workflow command surface"],
+          next_allowed_actions: ["rerun the relevant superspec check and use the expected workflow command surface"],
         });
       }
       return hookDecision(ctx, "hook_check_write", true, {
@@ -624,7 +624,7 @@ export function hookCheckWrite(change: string, eventRef: string): HookDecision {
         block_reasons: blockReasons,
         audit_only_reasons: auditOnlyReasons,
         target_paths: intent.target_paths,
-        next_allowed_actions: ["rerun the relevant superspec guard check and use the expected workflow command surface"],
+        next_allowed_actions: ["rerun the relevant superspec check and use the expected workflow command surface"],
       });
     }
 

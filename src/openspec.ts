@@ -223,6 +223,32 @@ export function normalize_gate(gate: string): string {
   return GATE_ALIASES[gate] ?? gate;
 }
 
+export function authorized_supersede_target_ids(evidences: JsonMap[]): Set<string> {
+  const byId = new Map<string, JsonMap>();
+  for (const ev of evidences) {
+    if (!isObject(ev) || ev._invalid) continue;
+    const id = typeof ev.evidence_id === "string" ? ev.evidence_id : "";
+    if (id && !byId.has(id)) byId.set(id, ev);
+  }
+  const out = new Set<string>();
+  for (const ev of evidences) {
+    if (!isObject(ev) || ev._invalid || ev.status !== "superseded") continue;
+    const targetId = typeof ev.supersedes === "string" ? ev.supersedes : "";
+    if (!targetId) continue;
+    const target = byId.get(targetId);
+    if (!target) continue;
+    if (target.status !== "pass") continue;
+    const sameGate = normalize_gate(String(ev.gate ?? "")) === normalize_gate(String(target.gate ?? ""));
+    const supersedeReason = typeof ev.supersede_reason === "string" ? ev.supersede_reason.trim() : "";
+    if (sameGate || supersedeReason) out.add(targetId);
+  }
+  return out;
+}
+
+export function effective_superseded_ids(evidences: JsonMap[]): Set<string> {
+  return authorized_supersede_target_ids(evidences);
+}
+
 export function gate_route_phase(gate: string): string {
   return GATE_ROUTE[normalize_gate(gate)] ?? "propose";
 }

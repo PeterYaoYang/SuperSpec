@@ -1,6 +1,6 @@
 {
   "name": "@peterxiaoyang/superspec",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "description": "SuperSpec workflow package: guard runtime, generic workflow templates, and Codex adapter payload.",
   "repository": {
     "type": "git",
@@ -20,7 +20,7 @@
   },
   "bin": {
     "superspec": "bin/superspec.js",
-    "superspec-guard": "bin/superspec-guard.js",
+    "superspec-check": "bin/superspec-check.js",
     "superspec-hook": "bin/superspec-hook.js",
     "superspec-init": "bin/superspec-init.js"
   },
@@ -56,7 +56,7 @@
   "scripts": {
     "build": "node build.js",
     "typecheck": "tsc --noEmit",
-    "test": "node --test tests/test_install_engine.test.ts tests/test_packet_measure.test.ts tests/test_real_openspec_smoke.test.ts tests/test_superspec_cli.test.ts tests/test_superspec_guard_output.test.ts tests/test_superspec_guard_core.test.ts tests/test_superspec_guard_review.test.ts tests/test_superspec_guard_request_reopen.test.ts tests/test_superspec_guard_archive.test.ts tests/test_superspec_guard_packet.test.ts tests/test_superspec_guard_disclosure.test.ts tests/test_superspec_hooks.test.ts tests/test_superspec_skills.test.ts",
+    "test": "node --test tests/test_install_engine.test.ts tests/test_real_openspec_smoke.test.ts tests/test_superspec_cli.test.ts tests/test_superspec_guard_output.test.ts tests/test_superspec_guard_core.test.ts tests/test_superspec_guard_review.test.ts tests/test_superspec_guard_request_reopen.test.ts tests/test_superspec_guard_archive.test.ts tests/test_superspec_guard_packet.test.ts tests/test_superspec_guard_disclosure.test.ts tests/test_superspec_hooks.test.ts tests/test_superspec_i18n.test.ts tests/test_superspec_skills.test.ts",
     "prepack": "npm run build",
     "prepublishOnly": "npm run build",
     "pack:dry-run": "npm pack --dry-run"

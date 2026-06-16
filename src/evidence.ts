@@ -12,6 +12,7 @@ import {
   FORBIDDEN_FIELDS,
   MAIN_ADJUDICATION_DECISIONS,
   MAIN_ADJUDICATION_REQUIRED_FIELDS,
+  NO_TDD_REASONS,
   REQUEST_CHANGES_ROUTES,
   ROLE_EVIDENCE_FIELDS,
   REVIEW_GUIDANCE_ROLES,
@@ -21,6 +22,7 @@ import {
   TASK_REOPEN_REQUIRED_FIELDS,
   TASK_REOPEN_RESOLVED_REQUIRED_FIELDS,
   VERIFY_EVIDENCE_REQUIRED_FIELDS,
+  confirmation_text_has_pending_wording,
   fingerprint_obj,
   isObject,
   reason,
@@ -31,9 +33,10 @@ import {
   safe_within,
   sha256_file,
   toPosix,
+  UNCHECKED_CHECKBOX_RE,
   walkFiles,
 } from "./util.ts";
-import { normalize_gate } from "./openspec.ts";
+import { effective_superseded_ids, normalize_gate } from "./openspec.ts";
 import { superspec_dir } from "./paths.ts";
 import {
   findings_schema_reasons,
@@ -189,6 +192,22 @@ function string_list_field_reasons(ev: JsonMap, field: string, code: string, opt
   return [];
 }
 
+const APPLY_WORKER_CHAIN_SURFACES = new Set(["implementation", "runtime_config"]);
+
+function apply_worker_chain_ref_ids(ev: JsonMap, singleField: string, listField: string): string[] {
+  const refs = new Set<string>();
+  const single = ev[singleField];
+  if (isObject(single) && typeof single.evidence_id === "string" && single.evidence_id) refs.add(single.evidence_id);
+  else if (typeof single === "string" && single) refs.add(single);
+  if (Array.isArray(ev[listField])) {
+    for (const item of ev[listField]) {
+      if (isObject(item) && typeof item.evidence_id === "string" && item.evidence_id) refs.add(item.evidence_id);
+      else if (typeof item === "string" && item) refs.add(item);
+    }
+  }
+  return [...refs].sort();
+}
+
 function fingerprint_field_reasons(ev: JsonMap, field: string, code: string): Reason[] {
   const raw = ev[field];
   if (typeof raw === "string") {
@@ -213,7 +232,36 @@ function pinned_artifact_ref_item_reasons(
 }
 
 export function role_target_ref_reasons(ev: JsonMap, targetRoot: string): Reason[] {
-  return pinned_ref_reasons(ev, "target_refs", targetRoot, "stale_review");
+  const problems: Reason[] = [];
+  const raw = ev.target_refs;
+  if (!Array.isArray(raw)) {
+    problems.push(reason("target_ref_invalid", `${ev._path}: target_refs must be a list of {path, blob_sha}`));
+    return problems;
+  }
+  for (const refItem of raw) {
+    if (!isObject(refItem)) {
+      problems.push(reason("target_ref_invalid", `${ev._path}: target_refs item must be object`));
+      continue;
+    }
+    const rel = refItem.path;
+    const expected = refItem.blob_sha;
+    if (typeof rel !== "string" || !rel || typeof expected !== "string" || !expected) {
+      problems.push(reason("target_ref_invalid", `${ev._path}: target_refs requires path and blob_sha`));
+      continue;
+    }
+    const target = safe_within(targetRoot, rel);
+    if (target === null) {
+      problems.push(reason("evidence_unsafe_ref", `${ev._path}: target_refs escapes allowed root: ${rel}`));
+      continue;
+    }
+    if (!existsSync(target) || !statSync(target).isFile()) {
+      problems.push(reason("stale_review", `${ev._path}: target_refs is not readable: ${rel}`));
+      continue;
+    }
+    const actual = runtime.file_blob_sha(target);
+    if (actual !== expected) problems.push(reason("stale_review", `${ev._path}: target_refs stale for ${rel}`));
+  }
+  return problems;
 }
 
 export function loaded_ref_reasons(ev: JsonMap, repoRoot: string): Reason[] {
@@ -411,6 +459,16 @@ function human_confirmation_reasons(ev: JsonMap): Reason[] {
     && (typeof ev.tasks_structure_hash !== "string" || !ev.tasks_structure_hash.trim())) {
     problems.push(reason("human_confirmation_invalid", `${ev._path}: ${gate} human_confirmation requires tasks_structure_hash pinning the approved tasks.md structure`));
   }
+  // B3: a pass confirmation must not carry unresolved signals. Strong signal: an unchecked checkbox
+  // "[ ]" pasted into confirmation_text (the agent copied an open question list into the confirmation).
+  // Weak signal: confirmation-pending wording shared with the explore gate (仍需确认 / 待确认 / ...),
+  // scoped to confirmation semantics so legitimate "细节仍需在 propose 细化" prose is not flagged.
+  // Real incident: secondment-hour-unit-support sealed status:"pass" while its confirmation_text said
+  // "还需要评估..." — the gate's presence-check then let propose through with 8 open questions.
+  const ctext = typeof ev.confirmation_text === "string" ? ev.confirmation_text : "";
+  if (UNCHECKED_CHECKBOX_RE.test(ctext) || confirmation_text_has_pending_wording(ctext)) {
+    problems.push(reason("human_confirmation_invalid", `${ev._path}: confirmation_text carries unresolved signals (unchecked checkbox or 「仍需确认/待确认」wording); do not record pass while open items remain`));
+  }
   return problems;
 }
 
@@ -513,7 +571,26 @@ function apply_worker_chain_reasons(ev: JsonMap, changeRoot: string): Reason[] {
     problems.push(...fingerprint_field_reasons(ev, "executor_packet_fingerprint", "apply_worker_chain_invalid"));
     problems.push(...fingerprint_field_reasons(ev, "source_implementation_fingerprint", "apply_worker_chain_invalid"));
     problems.push(...string_list_field_reasons(ev, "declared_task_write_scope", "apply_worker_chain_invalid"));
-    problems.push(...string_list_field_reasons(ev, "pre_edit_evidence_refs", "apply_worker_chain_invalid"));
+    const proofKind = String(ev.pre_edit_proof_kind ?? "red_or_characterization");
+    if (proofKind !== "red_or_characterization" && proofKind !== "no_tdd_declared") {
+      problems.push(reason("apply_worker_chain_invalid", `${ev._path}: active apply_worker_chain pre_edit_proof_kind must be red_or_characterization or no_tdd_declared`));
+    } else if (proofKind === "no_tdd_declared") {
+      problems.push(...string_list_field_reasons(ev, "pre_edit_evidence_refs", "apply_worker_chain_invalid", { allowEmpty: true }));
+      if (Array.isArray(ev.pre_edit_evidence_refs) && ev.pre_edit_evidence_refs.length > 0) {
+        problems.push(reason("apply_worker_chain_invalid", `${ev._path}: no_tdd_declared active apply_worker_chain requires empty pre_edit_evidence_refs`));
+      }
+      if (ev.tdd_required !== false) {
+        problems.push(reason("apply_worker_chain_invalid", `${ev._path}: no_tdd_declared active apply_worker_chain requires tdd_required=false`));
+      }
+      if (!APPLY_WORKER_CHAIN_SURFACES.has(String(ev.apply_execution_surface ?? ""))) {
+        problems.push(reason("apply_worker_chain_invalid", `${ev._path}: no_tdd_declared active apply_worker_chain requires apply_execution_surface implementation or runtime_config`));
+      }
+      if (!NO_TDD_REASONS.has(String(ev.no_tdd_reason ?? ""))) {
+        problems.push(reason("apply_worker_chain_invalid", `${ev._path}: no_tdd_declared active apply_worker_chain requires valid no_tdd_reason`));
+      }
+    } else {
+      problems.push(...string_list_field_reasons(ev, "pre_edit_evidence_refs", "apply_worker_chain_invalid"));
+    }
   }
   if (state === "closed") {
     const taskId = typeof ev.task_id === "string" ? ev.task_id : undefined;
@@ -525,8 +602,15 @@ function apply_worker_chain_reasons(ev: JsonMap, changeRoot: string): Reason[] {
     ];
     problems.push(...refProblems);
     if (refProblems.length > 0) problems.push(reason("apply_worker_chain_invalid", `${ev._path}: closed apply_worker_chain report refs must be pinned same-chain worker reports`));
-    if (!isObject(ev.green_test_run_evidence_ref) && typeof ev.green_test_run_evidence_ref !== "string") {
-      problems.push(reason("apply_worker_chain_invalid", `${ev._path}: closed apply_worker_chain requires green_test_run_evidence_ref`));
+    const proofKind = String(ev.completion_proof_kind ?? "green_tests");
+    if (proofKind !== "green_tests" && proofKind !== "alternative_verification") {
+      problems.push(reason("apply_worker_chain_invalid", `${ev._path}: closed apply_worker_chain completion_proof_kind must be green_tests or alternative_verification`));
+    } else if (proofKind === "green_tests") {
+      if (apply_worker_chain_ref_ids(ev, "green_test_run_evidence_ref", "green_test_run_evidence_refs").length === 0) {
+        problems.push(reason("apply_worker_chain_invalid", `${ev._path}: green_tests closed apply_worker_chain requires green_test_run_evidence_ref(s)`));
+      }
+    } else if (apply_worker_chain_ref_ids(ev, "alternative_verification_evidence_ref", "alternative_verification_evidence_refs").length === 0) {
+      problems.push(reason("apply_worker_chain_invalid", `${ev._path}: alternative_verification closed apply_worker_chain requires alternative_verification_evidence_ref(s)`));
     }
     problems.push(...fingerprint_field_reasons(ev, "observed_freshness_fingerprint", "apply_worker_chain_invalid"));
   }
@@ -535,6 +619,9 @@ function apply_worker_chain_reasons(ev: JsonMap, changeRoot: string): Reason[] {
     const chainId = typeof ev.apply_worker_chain_id === "string" ? ev.apply_worker_chain_id : undefined;
     if ("restored_implementation_fingerprint" in ev) {
       problems.push(...fingerprint_field_reasons(ev, "restored_implementation_fingerprint", "apply_worker_chain_invalid"));
+    }
+    if ("restored_implementation_fingerprint" in ev && "serial_takeover_baseline_ref" in ev) {
+      problems.push(reason("apply_worker_chain_invalid", `${ev._path}: abandoned apply_worker_chain restored_implementation_fingerprint and serial_takeover_baseline_ref are mutually exclusive`));
     }
     if (!("restored_implementation_fingerprint" in ev) && !("serial_takeover_baseline_ref" in ev)) {
       problems.push(reason("apply_worker_chain_invalid", `${ev._path}: abandoned apply_worker_chain requires restored_implementation_fingerprint or serial_takeover_baseline_ref`));
@@ -548,7 +635,12 @@ function apply_worker_chain_reasons(ev: JsonMap, changeRoot: string): Reason[] {
       );
       problems.push(...baselineProblems);
       if (baselineProblems.length > 0) problems.push(reason("apply_worker_chain_invalid", `${ev._path}: abandoned apply_worker_chain serial_takeover_baseline_ref must be a pinned same-chain status_report`));
-      problems.push(...string_list_field_reasons(ev, "successor_green_evidence_refs", "apply_worker_chain_invalid"));
+      if (typeof ev.takeover_confirmation_evidence_id !== "string" || !ev.takeover_confirmation_evidence_id) {
+        problems.push(reason("apply_worker_chain_invalid", `${ev._path}: abandoned apply_worker_chain serial takeover requires takeover_confirmation_evidence_id`));
+      }
+      if ("successor_green_evidence_refs" in ev) {
+        problems.push(...string_list_field_reasons(ev, "successor_green_evidence_refs", "apply_worker_chain_invalid"));
+      }
     }
   }
   return problems;
@@ -930,7 +1022,7 @@ export function find_pass(evidences: JsonMap[], filters: { gate?: string | null;
 }
 
 export function superseded_ids(evidences: JsonMap[]): Set<string> {
-  return new Set(evidences.filter((ev) => ev.status === "superseded" && ev.supersedes).map((ev) => ev.supersedes));
+  return effective_superseded_ids(evidences);
 }
 
 // FIX-6 (audit C-2): supersede is a rollback mechanism, so it needs an authorization model.

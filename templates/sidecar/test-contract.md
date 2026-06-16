@@ -13,12 +13,13 @@
 - `invariant_refs`: INV-xxx
 - `expected_red`: <实现前因何失败>
 - `expected_green`: <实现后通过的判据>
-- `test_command`: <如 mvn test -Dtest=XxxTest#method>
+- `test_command`: <framework-agnostic command that runs exactly the target test identity>
 
 ## Iron Law
 
 - 没有正在失败的测试，不准写实现代码。
 - 每个实现型 task：先有 RED evidence 才能改实现代码，先有 GREEN evidence 才能勾选。
+- 测试证据语义（框架无关）：`target test identity executed` 才算有效运行；`command exit code alone is not proof`，退出码 0 不等于目标测试跑过/通过；命令在到达测试 runner 之前失败属于 `blocked before the target test runner`，不是 RED/GREEN；`do not classify environment/build failures as RED or GREEN`。
 
 ## 与 tasks 的映射约定
 

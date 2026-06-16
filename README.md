@@ -246,10 +246,10 @@ superspec doctor
 SuperSpec 内部还有一些检查命令，例如：
 
 ```bash
-superspec guard check-init --change <变更ID>
-superspec guard check-apply-ready --change <变更ID>
-superspec guard check-review-ready --change <变更ID>
-superspec guard check-archive-ready --change <变更ID>
+superspec check check-init --change <变更ID>
+superspec check check-apply-ready --change <变更ID>
+superspec check check-review-ready --change <变更ID>
+superspec check check-archive-ready --change <变更ID>
 ```
 
 普通使用者通常不需要手动运行这些命令；对应的阶段入口会在需要时使用它们。

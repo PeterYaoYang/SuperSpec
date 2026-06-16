@@ -22,7 +22,7 @@
    - OpenSpec bridge 不再依赖 `.codex/skills/openspec-*`；project init 只安装/修复 SuperSpec 自身的 workflow skills、prompts 和 agents。
    - SuperSpec payload：5 个用户可见 skill（explore/propose/apply/review/archive）+ 7 个 role agent/prompt（test-runner 负责 apply 测试执行；executor 负责 apply 实现写入；architect/critic/test-engineer/code-reviewer/verifier 负责审查/验证）。project scope 时安装到 `.codex/agents/{architect,critic,executor,test-runner,test-engineer,code-reviewer,verifier}.toml` + `.codex/prompts/{同 7 名}.md` + `.codex/skills/superspec-{explore,propose,apply,review,archive}/`；user scope 时安装到 Codex user home 的 `agents/`、`prompts/` 和 `skills/`。`init` 由全局 npm bin `superspec init` 承担，`verify` 已合并进 `review`。
 2. **命令入口约束**：
-  - 包本体通过 GitHub Release tarball 或 npm registry 全局安装；当前内测主路径是 `npm install -g https://github.com/PeterYaoYang/SuperSpec/releases/download/v0.1.0/superspec-0.1.0.tgz`，正式 npm 发布后是 `npm install -g @peterxiaoyang/superspec`。workflow skills 直接调用 `superspec guard ... --format agent` / `superspec init --scope project --format agent`，不依赖目标仓库的 `node_modules/.bin` 或 POSIX shell 环境变量展开。
+  - 包本体通过 GitHub Release tarball 或 npm registry 全局安装；当前内测主路径是 `npm install -g https://github.com/PeterYaoYang/SuperSpec/releases/download/v0.1.0/superspec-0.1.0.tgz`，正式 npm 发布后是 `npm install -g @peterxiaoyang/superspec`。workflow skills 直接调用 `superspec check ... --format agent` / `superspec init --scope project --format agent`，不依赖目标仓库的 `node_modules/.bin` 或 POSIX shell 环境变量展开。
    - 不安装 project-local wrapper script；正式入口只依赖 npm 生成的跨平台 bin（Unix shim + Windows `.cmd`/PowerShell shim）。
    - 环境假设：Node ≥ 20.19.0（运行编译后的 ESM JavaScript）、官方 OpenSpec CLI ≥ 1.4.1，openspec 必须先 init。
 3. **没有 git 安全网**：
@@ -76,20 +76,20 @@ superspec/
 ```
 
 - `package.json` 关键字段：
-  - `"bin": { "superspec": "./bin/superspec.js", "superspec-guard": "./bin/superspec-guard.js", "superspec-init": "./bin/superspec-init.js" }`
+  - `"bin": { "superspec": "./bin/superspec.js", "superspec-check": "./bin/superspec-check.js", "superspec-hook": "./bin/superspec-hook.js", "superspec-init": "./bin/superspec-init.js" }`
     - npm 自动生成跨平台 shim（Windows 也有 `.cmd`/PowerShell shim），**消除 workflow skill 的仓库相对路径耦合**。
     - JS launcher 在加载 `dist/*.js` runtime 前先校验 Node ≥ 20.19.0，避免旧 Node 直接报不可读的 ESM/syntax 错误。
   - `"files": ["README.md","bin","dist","templates","adapters","schemas"]`，`"type":"module"`，`"engines": { "node": ">=20.19.0" }`。
   - workflow skill 的唯一包内来源是 `templates/workflow/skills/`；不维护根目录 `skills/` 副本，也不依赖 `.codex-plugin/plugin.json`；每个 SuperSpec skill 在 frontmatter `metadata.author/source` 中声明短来源 `SuperSpec`。
   - `"build": "node build.js"`，`prepack` / `prepublishOnly` 自动 build；TS 源码和 `tests/` 用于开发/CI，不随 npm 包发布。运行用户需要 Node ≥ 20.19.0；仓库开发/CI 仍使用 Node 24，因为测试直接执行 `.ts` 文件。
-- 聚合 CLI：`superspec init/update/uninstall/guard/doctor`，并支持 `superspec --version` / `superspec -v` / `superspec version`；`superspec-init` / `superspec-guard` 保留为兼容入口。
+- 聚合 CLI：`superspec init/update/uninstall/check/doctor`（`guard` 仍作为 `check` 的兼容命令别名），并支持 `superspec --version` / `superspec -v` / `superspec version`；`superspec-init` 保留为兼容入口，`superspec-guard` 二进制已更名为 `superspec-check`。
 
 ## 4. CLI 接线方案
 
 `superspec init --scope project` 不生成 `scripts/superspec_guard` / `scripts/superspec_init`。skills 默认走全局 `superspec`，命令示例保持 shell-neutral：
 
 ```text
-superspec guard check-init --change "<change>" --format agent
+superspec check check-init --change "<change>" --format agent
 superspec init --scope project --format agent
 superspec doctor
 ```
@@ -141,7 +141,7 @@ Windows PowerShell 可能优先解析 npm 生成的 `.ps1` shim 并受执行策�
 1. **Preflight**：任意 install scope 下都要求 Node ≥ 20.19.0，且 `openspec` 必须满足官方 OpenSpec CLI 兼容要求：版本 ≥ 1.4.1，并通过 `REQUIRED_OPENSPEC_CLI_SURFACES`（`list/instructions/archive/validate/status --help`）；若缺失、低版本、检测到 `openspec-chinese` 标识或不兼容变体，`init` 会自动尝试安装 / 升级官方包，必要时覆盖冲突的全局 bin。project scope 不再回补 `.codex/skills/openspec-*`，只校验 CLI surface 并安装 SuperSpec Codex surfaces。user scope 只安装 SuperSpec Codex surfaces，不要求当前目录是 OpenSpec 项目。
 2. **逐文件落地**：目标不存在 → 写入并记 `managed=true`；已存在且内容相同 → 记 `managed=true`；已存在且不同 → 记 `preexisting=true,managed=false` 并跳过（`--force` 才覆盖，且先备份 `*.bak`）。
 3. **接线 CLI**：不写 project wrapper；project/user scope 都依赖全局 `superspec` npm bin。
-4. **写 manifest** + 打印安装摘要与下一步；manifest 同时记录 `configPatch`，但 config 不进入 `files[]` 删除集合（project scope 的 workflow 自检使用 `superspec guard check-init --change <c> --format agent`；诊断脚本可继续用默认 JSON）。
+4. **写 manifest** + 打印安装摘要与下一步；manifest 同时记录 `configPatch`，但 config 不进入 `files[]` 删除集合（project scope 的 workflow 自检使用 `superspec check check-init --change <c> --format agent`；诊断脚本可继续用默认 JSON）。
 5. 幂等：重复 init = 补齐缺失 + 不动已存在。
 
 ### 6.3 `superspec update`
@@ -171,7 +171,7 @@ Windows PowerShell 可能优先解析 npm 生成的 `.ps1` shim 并受执行策�
 > 升级=「按 manifest 移除旧 managed（保数据/保用户改）+ 装新 + 重写 manifest」，与卸载 **共用同一 manifest 引擎**。
 
 ## 7. 跨平台
-- 依赖 npm `bin`（`superspec` / `superspec-guard`）→ npm 在 Windows 自动生成 `.cmd`/`.ps1` shim，免手写。
+- 依赖 npm `bin`（`superspec` / `superspec-check`）→ npm 在 Windows 自动生成 `.cmd`/`.ps1` shim，免手写。
 - 不发布/安装 bash wrapper；Windows、Ubuntu、macOS 都直接走全局 npm bin `superspec`。
 - 安装器用 Node 内置（`fs`/`path`/`crypto`），不 shell out 拷文件，保证跨平台。
 
@@ -179,7 +179,7 @@ Windows PowerShell 可能优先解析 npm 生成的 `.ps1` shim 并受执行策�
 1. **通用角色名碰撞**：guard 的 `REQUIRED_SUPERSPEC_AGENT_ROLES` 用裸名（architect/critic/…），与用户既有同名文件可能撞 → 靠 `preexisting` 检测 + checksum 兜住。**后续可考虑**让 guard 支持角色名前缀/配置化（属 guard 改动，Codex 负责，列为 follow-up）。
 2. **数据丢失**：`.superspec/` 默认保留、`--purge` 才删且先打包 —— 最高优先级红线。
 3. **monorepo / 多 openspec home**：init/uninstall 以「当前仓库根（openspec planningHome）」为作用域；多 home 需分别执行。
-4. **CI 可复现**：CI 可 `npm i -g @peterxiaoyang/superspec` 后执行 `superspec init --scope project` 与 `superspec guard check-init` 校验脚手架完整。
+4. **CI 可复现**：CI 可 `npm i -g @peterxiaoyang/superspec` 后执行 `superspec init --scope project` 与 `superspec check check-init` 校验脚手架完整。
 5. **状态 schema 迁移**：`update` 跨 `SCHEMA_VERSION` 时必须处理 `.superspec/state.json`。
 
 ## 9. 与 guard 契约的依赖（single source of truth）
@@ -201,10 +201,10 @@ Windows PowerShell 可能优先解析 npm 生成的 `.ps1` shim 并受执行策�
 - **P3**：实现 `uninstall`（三档范围、dry-run、审计摘要）+ `update`（共用引擎、状态迁移）。
 - **P4**：tarball/git/私有三渠道冒烟 + Windows 冒烟 + 「templates ↔ guard 常量」一致性测试。
 
-> **实施状态 2026-06-10（Phase 5 / D4；standalone 迁移后）**：manifest 引擎已在独立项目根布局落地——`src/install_engine.ts`（install/update/uninstall 共用一套 manifest 引擎，project manifest 写 `.codex/superspec/install-manifest.json`，user manifest 写 Codex home `superspec/install-manifest.json`），CLI 入口 `superspec init/update/uninstall/guard` + 兼容入口 `superspec-init` / `superspec-guard`，`superspec init` 在 TTY 中交互选择 project/user scope 且默认 project；分发链路已改为 TS 开发源码经 `tsconfig.build.json` 编译到 `dist/*.js`，GitHub Release tarball 由 `npm pack`/`prepack` build，未来 npm 发布由 `prepublishOnly` build，bin launcher 运行编译后 JS；`project_init` 改为 manifest-driven 安装 SuperSpec 自身 surfaces，`check-init` 纳入 superspec-* skill 健康检查（`superspec_init_missing` / `superspec_skill_invalid`），并带「install-map ↔ guard 常量」一致性测试。未实施部分：`--purge` 打包删除、真实 Windows 冒烟、`guardSchemaVersion` 跨版本状态迁移。
+> **实施状态 2026-06-10（Phase 5 / D4；standalone 迁移后）**：manifest 引擎已在独立项目根布局落地——`src/install_engine.ts`（install/update/uninstall 共用一套 manifest 引擎，project manifest 写 `.codex/superspec/install-manifest.json`，user manifest 写 Codex home `superspec/install-manifest.json`），CLI 入口 `superspec init/update/uninstall/check`（`guard` 兼容别名）+ 兼容入口 `superspec-init` / `superspec-check`，`superspec init` 在 TTY 中交互选择 project/user scope 且默认 project；分发链路已改为 TS 开发源码经 `tsconfig.build.json` 编译到 `dist/*.js`，GitHub Release tarball 由 `npm pack`/`prepack` build，未来 npm 发布由 `prepublishOnly` build，bin launcher 运行编译后 JS；`project_init` 改为 manifest-driven 安装 SuperSpec 自身 surfaces，`check-init` 纳入 superspec-* skill 健康检查（`superspec_init_missing` / `superspec_skill_invalid`），并带「install-map ↔ guard 常量」一致性测试。未实施部分：`--purge` 打包删除、真实 Windows 冒烟、`guardSchemaVersion` 跨版本状态迁移。
 
 ## 12. 验收清单（DoD）
-- [ ] `npm i -g https://github.com/PeterYaoYang/SuperSpec/releases/download/v0.1.1/superspec-0.1.1.tgz` 后，`superspec init` 可交互选择 project/user；project scope 下 `superspec guard check-init --change <c>` 全绿（无 `*_missing`）。
+- [ ] `npm i -g https://github.com/PeterYaoYang/SuperSpec/releases/download/v0.1.1/superspec-0.1.1.tgz` 后，`superspec init` 可交互选择 project/user；project scope 下 `superspec check check-init --change <c>` 全绿（无 `*_missing`）。
 - [ ] `init` 对已存在同名文件不覆盖（除非 `--force`），manifest 正确标 `preexisting`。
 - [ ] `uninstall` 默认保留所有 `.superspec/` 数据；`--purge` 先打包后删并需确认；`--dry-run` 不动文件。
 - [ ] `uninstall` 跳过用户改过的 managed 文件并警告；不触碰 `openspec-*` 与 `preexisting` 文件。

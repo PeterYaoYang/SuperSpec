@@ -7,6 +7,7 @@ import {
   GuardError,
   REQUIRED_SUPERSPEC_AGENT_ROLES,
   REQUIRED_SUPERSPEC_WORKFLOW_SKILLS,
+  NO_TDD_REASONS,
   isObject,
   reason,
   renderList,
@@ -15,6 +16,7 @@ import {
   sha256_text,
 } from "./util.ts";
 import { dirty_worktree_paths, file_blob_sha } from "./git.ts";
+import { effective_superseded_ids } from "./openspec.ts";
 
 export type ArtifactRefExpected = {
   kind?: string;
@@ -129,6 +131,8 @@ export const APPLY_CODE_REVIEW_REPORT_REQUIRED_FIELDS = [
 
 export const APPLY_VERIFIER_REPORT_REQUIRED_FIELDS = [
   "role",
+  "completion_proof_kind",
+  "pre_edit_proof_kind",
   "verification_status_candidate",
   "task_completion_verdict",
   "chain_consistency_verdict",
@@ -141,7 +145,6 @@ export const APPLY_VERIFIER_REPORT_REQUIRED_FIELDS = [
   "expected_freshness_fingerprint",
   "observed_freshness_fingerprint",
   "freshness_verdict",
-  "green_test_run_evidence_refs",
   "executor_report_ref",
   "task_code_review_report_ref",
   "actual_changed_files",
@@ -371,26 +374,34 @@ function evidence_file_ref(changeRoot: string, ev: JsonMap | undefined): JsonMap
 
 export function apply_worker_executor_input_ref_digest(evidences: JsonMap[], active: JsonMap): string {
   const preIds = Array.isArray(active.pre_edit_evidence_refs) ? active.pre_edit_evidence_refs.map(String).filter(Boolean).sort() : [];
+  const activeInput: JsonMap = {
+    kind: "apply_worker_chain",
+    evidence_id: active.evidence_id,
+    task_id: active.task_id,
+    apply_worker_chain_id: active.apply_worker_chain_id,
+    executor_packet_fingerprint: active.executor_packet_fingerprint,
+    source_implementation_fingerprint: active.source_implementation_fingerprint,
+    declared_task_write_scope: active.declared_task_write_scope,
+    pre_edit_evidence_refs: preIds,
+  };
+  for (const field of ["pre_edit_proof_kind", "apply_execution_surface", "tdd_required", "no_tdd_reason"]) {
+    if (active[field] !== undefined) activeInput[field] = active[field];
+  }
   return worker_input_ref_digest([
-    {
-      kind: "apply_worker_chain",
-      evidence_id: active.evidence_id,
-      task_id: active.task_id,
-      apply_worker_chain_id: active.apply_worker_chain_id,
-      executor_packet_fingerprint: active.executor_packet_fingerprint,
-      source_implementation_fingerprint: active.source_implementation_fingerprint,
-      declared_task_write_scope: active.declared_task_write_scope,
-      pre_edit_evidence_refs: preIds,
-    },
+    activeInput,
     ...preIds.map((id) => evidence_summary(evidences.find((ev) => String(ev.evidence_id ?? "") === id))).filter(Boolean),
   ]);
 }
 
 export function apply_worker_guard_artifact_manifest_fingerprint(items: JsonMap): JsonMap {
   const stable = {
+    completion_proof_kind: items.completion_proof_kind ?? "green_tests",
+    pre_edit_proof_kind: items.pre_edit_proof_kind ?? "red_or_characterization",
     pre_edit_evidence: Array.isArray(items.pre_edit_evidence) ? items.pre_edit_evidence : [],
     green_test_run: items.green_test_run ?? null,
     green_test_runs: Array.isArray(items.green_test_runs) ? items.green_test_runs : [],
+    alternative_verification: items.alternative_verification ?? null,
+    alternative_verifications: Array.isArray(items.alternative_verifications) ? items.alternative_verifications : [],
     executor_report_ref: pinned_summary(items.executor_report_ref),
     task_code_review_report_ref: pinned_summary(items.task_code_review_report_ref),
     accepted_test_runner_report_ref: pinned_summary(items.accepted_test_runner_report_ref),
@@ -660,7 +671,11 @@ const WORKER_REPORT_FIELD_TYPES: Record<string, WorkerReportFieldType> = {
   expected_freshness_fingerprint: "fingerprint",
   observed_freshness_fingerprint: "fingerprint",
   freshness_verdict: "string",
+  completion_proof_kind: "string",
+  pre_edit_proof_kind: "string",
   green_test_run_evidence_refs: "array",
+  alternative_verification_evidence_refs: "array",
+  apply_execution_surface: "string",
   task_code_review_report_ref: "ref",
   unexpected_guard_owned_dirty_paths: "array",
   executor_code_review_mismatch: "mismatch",
@@ -813,8 +828,44 @@ function validate_worker_report_content(content: JsonMap | null, refItem: JsonMa
   }
   if (expected.role === "verifier") {
     problems.push(...report_required_field_reasons(content, APPLY_VERIFIER_REPORT_REQUIRED_FIELDS, label, code));
-    if (!Array.isArray(content.red_test_run_evidence_refs) && !Array.isArray(content.characterization_test_run_evidence_refs)) {
-      problems.push(reason(code, `${label}: verifier report requires red_test_run_evidence_refs or characterization_test_run_evidence_refs`, [label]));
+    const proofKind = String(content.completion_proof_kind ?? "green_tests");
+    if (proofKind !== "green_tests" && proofKind !== "alternative_verification") {
+      problems.push(reason(code, `${label}: verifier report completion_proof_kind must be green_tests or alternative_verification`, [label]));
+    } else if (proofKind === "green_tests") {
+      if (String(content.pre_edit_proof_kind ?? "red_or_characterization") !== "red_or_characterization") {
+        problems.push(reason(code, `${label}: green_tests verifier report requires pre_edit_proof_kind=red_or_characterization`, [label]));
+      }
+      if (!Array.isArray(content.green_test_run_evidence_refs) || content.green_test_run_evidence_refs.length === 0) {
+        problems.push(reason(code, `${label}: green_tests verifier report requires green_test_run_evidence_refs`, [label]));
+      }
+      if (!Array.isArray(content.red_test_run_evidence_refs) && !Array.isArray(content.characterization_test_run_evidence_refs)) {
+        problems.push(reason(code, `${label}: green_tests verifier report requires red_test_run_evidence_refs or characterization_test_run_evidence_refs`, [label]));
+      }
+    } else {
+      if (content.pre_edit_proof_kind !== "no_tdd_declared") {
+        problems.push(reason(code, `${label}: alternative_verification verifier report requires pre_edit_proof_kind=no_tdd_declared`, [label]));
+      }
+      if (!Array.isArray(content.alternative_verification_evidence_refs) || content.alternative_verification_evidence_refs.length === 0) {
+        problems.push(reason(code, `${label}: alternative_verification verifier report requires alternative_verification_evidence_refs`, [label]));
+      }
+      if (Array.isArray(content.green_test_run_evidence_refs) && content.green_test_run_evidence_refs.length > 0) {
+        problems.push(reason(code, `${label}: alternative_verification verifier report must not claim green_test_run_evidence_refs`, [label]));
+      }
+      if (Array.isArray(content.red_test_run_evidence_refs) && content.red_test_run_evidence_refs.length > 0) {
+        problems.push(reason(code, `${label}: alternative_verification verifier report must not claim red_test_run_evidence_refs`, [label]));
+      }
+      if (Array.isArray(content.characterization_test_run_evidence_refs) && content.characterization_test_run_evidence_refs.length > 0) {
+        problems.push(reason(code, `${label}: alternative_verification verifier report must not claim characterization_test_run_evidence_refs`, [label]));
+      }
+      if (content.tdd_required !== false) {
+        problems.push(reason(code, `${label}: alternative_verification verifier report requires tdd_required=false`, [label]));
+      }
+      if (content.apply_execution_surface !== "implementation" && content.apply_execution_surface !== "runtime_config") {
+        problems.push(reason(code, `${label}: alternative_verification verifier report requires implementation/runtime_config apply_execution_surface`, [label]));
+      }
+      if (!NO_TDD_REASONS.has(String(content.no_tdd_reason ?? ""))) {
+        problems.push(reason(code, `${label}: alternative_verification verifier report requires valid no_tdd_reason`, [label]));
+      }
     }
     problems.push(...report_pass_verdict_reasons(content, [
       "verification_status_candidate",
@@ -1062,10 +1113,28 @@ export function worker_test_run_reasons(
   return problems;
 }
 
+export function pre_edit_worker_test_run_reasons(
+  changeRoot: string,
+  ev: JsonMap,
+  taskId: string,
+  code = "pre_edit_test_run_invalid",
+): Reason[] {
+  const problems: Reason[] = [];
+  if (ev.kind !== "test_run") problems.push(reason(code, `${ev._path}: pre-edit evidence must be kind=test_run`));
+  if (ev.gate !== "task_edit") problems.push(reason(code, `${ev._path}: pre-edit evidence must be gate=task_edit`));
+  if (ev.task_id !== taskId) problems.push(reason(code, `${ev._path}: pre-edit evidence task_id must be ${taskId}`));
+  const phase = typeof ev.phase === "string" ? ev.phase : "";
+  const redOk = ev.semantic_status === "expected_failure" && (phase === "" || phase === "red");
+  const characterizationOk = ev.semantic_status === "expected_success" && phase === "characterization";
+  if (!redOk && !characterizationOk) {
+    problems.push(reason(code, `${ev._path}: pre-edit evidence must be worker RED or characterization test_run`));
+  }
+  problems.push(...worker_test_run_reasons(changeRoot, ev, taskId, null, code));
+  return problems;
+}
+
 function superseded_ids(evidences: JsonMap[]): Set<string> {
-  return new Set(evidences
-    .filter((ev) => isObject(ev) && ev.status === "superseded" && typeof ev.supersedes === "string" && ev.supersedes)
-    .map((ev) => String(ev.supersedes)));
+  return effective_superseded_ids(evidences);
 }
 
 function live_pass_by_id(evidences: JsonMap[], evidenceId: string): JsonMap | undefined {
@@ -1078,6 +1147,7 @@ function live_pass_by_id(evidences: JsonMap[], evidenceId: string): JsonMap | un
 }
 
 export function pre_edit_evidence_ref_reasons(
+  changeRoot: string,
   evidences: JsonMap[],
   active: JsonMap | null | undefined,
   taskId: string,
@@ -1086,6 +1156,21 @@ export function pre_edit_evidence_ref_reasons(
   const problems: Reason[] = [];
   if (!isObject(active)) return [reason(code, `task ${taskId} requires an active apply_worker_chain marker for pre-edit evidence validation`)];
   const preIds = Array.isArray(active.pre_edit_evidence_refs) ? active.pre_edit_evidence_refs.map(String).filter(Boolean) : [];
+  const proofKind = String(active.pre_edit_proof_kind ?? "red_or_characterization");
+  if (proofKind !== "red_or_characterization" && proofKind !== "no_tdd_declared") {
+    return [reason(code, `task ${taskId} active apply_worker_chain has invalid pre_edit_proof_kind=${proofKind}`)];
+  }
+  if (proofKind === "no_tdd_declared") {
+    if (preIds.length > 0) problems.push(reason(code, `task ${taskId} active apply_worker_chain no_tdd_declared must have empty pre_edit_evidence_refs`, preIds));
+    if (active.tdd_required !== false) problems.push(reason(code, `task ${taskId} active apply_worker_chain no_tdd_declared requires tdd_required=false`));
+    if (active.apply_execution_surface !== "implementation" && active.apply_execution_surface !== "runtime_config") {
+      problems.push(reason(code, `task ${taskId} active apply_worker_chain no_tdd_declared requires implementation/runtime_config apply_execution_surface`));
+    }
+    if (!NO_TDD_REASONS.has(String(active.no_tdd_reason ?? ""))) {
+      problems.push(reason(code, `task ${taskId} active apply_worker_chain no_tdd_declared requires valid no_tdd_reason`));
+    }
+    return problems;
+  }
   if (preIds.length === 0) return [reason(code, `task ${taskId} active apply_worker_chain has no pre_edit_evidence_refs`)];
   for (const evidenceId of preIds) {
     const ev = live_pass_by_id(evidences, evidenceId);
@@ -1093,15 +1178,8 @@ export function pre_edit_evidence_ref_reasons(
       problems.push(reason(code, `pre_edit_evidence_ref is not live/pass: ${evidenceId}`, [evidenceId]));
       continue;
     }
-    if (ev.kind !== "test_run") problems.push(reason(code, `${evidenceId}: pre-edit evidence must be kind=test_run`, [evidenceId]));
-    if (ev.gate !== "task_edit") problems.push(reason(code, `${evidenceId}: pre-edit evidence must be gate=task_edit`, [evidenceId]));
-    if (ev.task_id !== taskId) problems.push(reason(code, `${evidenceId}: pre-edit evidence task_id must be ${taskId}`, [evidenceId]));
-    const phase = typeof ev.phase === "string" ? ev.phase : "";
-    const redOk = ev.semantic_status === "expected_failure" && (phase === "" || phase === "red");
-    const characterizationOk = ev.semantic_status === "expected_success" && phase === "characterization";
-    if (!redOk && !characterizationOk) {
-      problems.push(reason(code, `${evidenceId}: pre-edit evidence must be RED or characterization test_run`, [evidenceId]));
-    }
+    problems.push(...pre_edit_worker_test_run_reasons(changeRoot, ev, taskId, code)
+      .map((item) => ({ ...item, refs: item.refs.length > 0 ? item.refs : [evidenceId] })));
   }
   return problems;
 }
@@ -1112,7 +1190,15 @@ export function compute_apply_worker_freshness(
   evidences: JsonMap[],
   taskId: string,
   chainId: string,
-  refs: { executor_report_ref: unknown; task_code_review_report_ref: unknown; green_test_run_evidence_ref: string; green_test_run_evidence_refs?: string[]; verifier_report_ref?: unknown },
+  refs: {
+    executor_report_ref: unknown;
+    task_code_review_report_ref: unknown;
+    green_test_run_evidence_ref?: string;
+    green_test_run_evidence_refs?: string[];
+    alternative_verification_evidence_refs?: string[];
+    completion_proof_kind?: "green_tests" | "alternative_verification";
+    verifier_report_ref?: unknown;
+  },
 ): JsonMap {
   const passEvidences = evidences.filter((ev) => isObject(ev) && !ev._invalid && ev.status === "pass");
   const active = passEvidences
@@ -1126,6 +1212,13 @@ export function compute_apply_worker_freshness(
     .filter((ev) => ev.gate === "task_complete" && ev.kind === "test_run" && ev.task_id === taskId)
     .find((ev) => String(ev.evidence_id ?? "") === greenId)).filter((ev): ev is JsonMap => isObject(ev));
   const green = greens[0];
+  const alternativeIds = [...new Set((Array.isArray(refs.alternative_verification_evidence_refs) ? refs.alternative_verification_evidence_refs : []).map(String).filter(Boolean))].sort();
+  const alternatives = alternativeIds.map((evidenceId) => passEvidences
+    .filter((ev) => (ev.kind === "alternative_verification" || ev.kind === "manual_verification") && ev.task_id === taskId)
+    .find((ev) => String(ev.evidence_id ?? "") === evidenceId)).filter((ev): ev is JsonMap => isObject(ev));
+  const alternative = alternatives[0];
+  const completionProofKind = refs.completion_proof_kind ?? (alternativeIds.length > 0 ? "alternative_verification" : "green_tests");
+  const preEditProofKind = String(active?.pre_edit_proof_kind ?? "red_or_characterization");
   const preIds = Array.isArray(active?.pre_edit_evidence_refs) ? active.pre_edit_evidence_refs.map(String) : [];
   const preEditEvidence = preIds.map((id) => evidences.find((ev) => String(ev.evidence_id ?? "") === id)).filter((ev): ev is JsonMap => isObject(ev));
   const preEdit = preEditEvidence.map(evidence_summary).filter(Boolean);
@@ -1135,6 +1228,7 @@ export function compute_apply_worker_freshness(
     evidence_file_ref(changeRoot, active),
     ...preEditEvidence.map((ev) => evidence_file_ref(changeRoot, ev)),
     ...greens.map((ev) => evidence_file_ref(changeRoot, ev)),
+    ...alternatives.map((ev) => evidence_file_ref(changeRoot, ev)),
   ].filter((item): item is JsonMap => isObject(item));
   const expectedGuardRefs = [
     refs.executor_report_ref,
@@ -1148,9 +1242,13 @@ export function compute_apply_worker_freshness(
   const implementation = apply_worker_implementation_fingerprint(repoRoot, changeRoot, expectedGuardRefs, { declaredTaskWriteScope: activeScope });
   const greenImplementationDigest = fingerprint_digest(green?.implementation_fingerprint);
   const guardArtifact = apply_worker_guard_artifact_manifest_fingerprint({
+    completion_proof_kind: completionProofKind,
+    pre_edit_proof_kind: preEditProofKind,
     pre_edit_evidence: preEdit,
     green_test_run: evidence_summary(green),
     green_test_runs: greens.map(evidence_summary).filter(Boolean),
+    alternative_verification: evidence_summary(alternative),
+    alternative_verifications: alternatives.map(evidence_summary).filter(Boolean),
     executor_report_ref: refs.executor_report_ref,
     task_code_review_report_ref: refs.task_code_review_report_ref,
     accepted_test_runner_report_ref: green?.accepted_test_runner_report_ref,
@@ -1165,11 +1263,17 @@ export function compute_apply_worker_freshness(
       source_implementation_fingerprint: active.source_implementation_fingerprint,
       declared_task_write_scope: active.declared_task_write_scope,
       pre_edit_evidence_refs: active.pre_edit_evidence_refs,
+      pre_edit_proof_kind: active.pre_edit_proof_kind,
+      apply_execution_surface: active.apply_execution_surface,
+      tdd_required: active.tdd_required,
+      no_tdd_reason: active.no_tdd_reason,
     } : null,
   });
   const stable = {
     task_id: taskId,
     apply_worker_chain_id: chainId,
+    completion_proof_kind: completionProofKind,
+    pre_edit_proof_kind: preEditProofKind,
     repo_head: repo_head(repoRoot),
     implementation_fingerprint: {
       repo_head: implementation.repo_head,
@@ -1188,6 +1292,8 @@ export function compute_apply_worker_freshness(
     pre_edit_evidence_refs: preIds,
     green_test_run_evidence_ref: refs.green_test_run_evidence_ref,
     green_test_run_evidence_refs: greenIds,
+    alternative_verification_evidence_ref: alternativeIds[0] ?? null,
+    alternative_verification_evidence_refs: alternativeIds,
     executor_report_ref: pinned_summary(refs.executor_report_ref),
     task_code_review_report_ref: pinned_summary(refs.task_code_review_report_ref),
   };

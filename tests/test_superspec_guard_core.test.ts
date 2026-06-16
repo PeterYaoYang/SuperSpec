@@ -116,6 +116,114 @@ import {
 } from "./helpers/superspec_guard_fixture.ts";
 import type { JsonMap, Fixture } from "./helpers/superspec_guard_fixture.ts";
 
+function workerRedEvidence(fx: Fixture, overrides: JsonMap = {}): JsonMap {
+  const taskId = String(overrides.task_id ?? "TASK-001");
+  const testId = String(overrides.test_id ?? "TEST-001");
+  const invariantRefs = Array.isArray(overrides.invariant_refs) ? overrides.invariant_refs : ["INV-001"];
+  const packetFingerprint = "sha256:test-runner-red-packet";
+  const inputDigest = "sha256:test-runner-red-input";
+  const rawRel = `.superspec/raw/apply/${taskId}/test-runner-red-${testId}.log`;
+  const rawPath = join(fx.change, rawRel);
+  mkdirp(dirname(rawPath));
+  writeText(rawPath, `test runner transcript: ${testId} red executed for ${taskId}\n`);
+  const sourceFingerprint = { fingerprint_digest: "sha256:source" };
+  const rawLogRef: JsonMap = {
+    root: "change",
+    path: rawRel,
+    blob_sha: guard.file_blob_sha(rawPath),
+    size_bytes: statSync(rawPath).size,
+    kind: "raw_transcript",
+    role: "test-runner",
+    task_id: taskId,
+    created_at: "2026-06-12T00:00:00.000Z",
+    worker_chain_context: "none",
+    guard_fingerprint: packetFingerprint,
+    origin_packet_fingerprint: packetFingerprint,
+    input_ref_digest: inputDigest,
+    source_implementation_fingerprint: sourceFingerprint,
+    observed_implementation_fingerprint: { fingerprint_digest: "sha256:observed" },
+    command: `npm test -- ${testId}`,
+    cwd: fx.repo,
+    phase: "red",
+    test_id: testId,
+    exit_code: 1,
+  };
+  const implementationFingerprint = withRuntime(
+    { dirty_worktree_paths: () => [] },
+    () => guard.apply_worker_implementation_fingerprint(fx.repo, fx.change, [rawLogRef], { declaredTaskWriteScope: ["src/feature.ts"] }),
+  );
+  const reportRel = `.superspec/reports/apply/${taskId}/test-runner-red-${testId}-report.json`;
+  const reportPath = join(fx.change, reportRel);
+  mkdirp(dirname(reportPath));
+  writeText(reportPath, `${JSON.stringify({
+    role: "test-runner",
+    task_id: taskId,
+    command: rawLogRef.command,
+    command_source: "test_command",
+    cwd: fx.repo,
+    phase: "red",
+    test_id: testId,
+    exit_code: 1,
+    semantic_status_candidate: "expected_failure",
+    result_summary: `${testId} red completed`,
+    runtime_raw_transcript_ref: rawRel,
+    repo_head: "unknown",
+    pre_dirty_state: {},
+    post_dirty_state: {},
+    changed_files: [],
+    untracked_files: [],
+    invariant_refs: invariantRefs,
+    source_refs: [{ path: ".superspec/artifacts/test-contract.md" }],
+    guard_fingerprint: packetFingerprint,
+    origin_packet_fingerprint: packetFingerprint,
+    input_ref_digest: inputDigest,
+    source_implementation_fingerprint: sourceFingerprint,
+    observed_implementation_fingerprint: implementationFingerprint,
+    unverified_items: [],
+  }, null, 2)}\n`);
+  const testRunnerReportRef: JsonMap = {
+    root: "change",
+    path: reportRel,
+    blob_sha: guard.file_blob_sha(reportPath),
+    size_bytes: statSync(reportPath).size,
+    kind: "worker_report",
+    role: "test-runner",
+    task_id: taskId,
+    created_at: "2026-06-12T00:00:00.000Z",
+    worker_chain_context: "none",
+    guard_fingerprint: packetFingerprint,
+    origin_packet_fingerprint: packetFingerprint,
+    input_ref_digest: inputDigest,
+    source_implementation_fingerprint: sourceFingerprint,
+    observed_implementation_fingerprint: implementationFingerprint,
+  };
+  const guardArtifactFingerprint = guard.apply_worker_guard_artifact_manifest_fingerprint({
+    raw_log_pinned_refs: [rawLogRef],
+    accepted_test_runner_report_ref: testRunnerReportRef,
+  });
+  return redEvidence(taskId, testId, invariantRefs, {
+    evidence_id: "EV-red-worker-test-runner",
+    phase: "red",
+    runner_origin: "test-runner",
+    raw_log_refs: [rawRel],
+    accepted_test_runner_report_ref: testRunnerReportRef,
+    raw_log_pinned_refs: [rawLogRef],
+    command: rawLogRef.command,
+    cwd: fx.repo,
+    exit_code: 1,
+    repo_head: "unknown",
+    pre_dirty_state: {},
+    post_dirty_state: {},
+    changed_files: [],
+    untracked_files: [],
+    source_refs: [{ path: ".superspec/artifacts/test-contract.md" }],
+    guard_fingerprint: packetFingerprint,
+    implementation_fingerprint: implementationFingerprint,
+    guard_artifact_manifest_fingerprint: guardArtifactFingerprint,
+    ...overrides,
+  });
+}
+
 withFixture("sidecar layout creates required v1 directories", (fx) => {
   guard.ensure_sidecar_layout(fx.change);
   const base = join(fx.change, ".superspec");
@@ -746,7 +854,7 @@ test("cli root help matches argparse-style surface", () => {
   const proc = spawnSync(process.execPath, [GUARD_TS, "--help"], { encoding: "utf8" });
   assert.equal(proc.status, 0);
   assert.equal(proc.stderr, "");
-  assert.ok(proc.stdout.includes("usage: superspec_guard [-h]"));
+  assert.ok(proc.stdout.includes("usage: superspec [-h]"));
   assert.ok(proc.stdout.includes("SuperSpec 守护检查（v1）"));
   assert.ok(proc.stdout.includes("check-task-complete"));
   assert.ok(proc.stdout.includes("check-task-reopen"));
@@ -760,7 +868,7 @@ test("cli missing command emits usage to stderr", () => {
   const proc = spawnSync(process.execPath, [GUARD_TS], { encoding: "utf8" });
   assert.equal(proc.status, 2);
   assert.equal(proc.stdout, "");
-  assert.ok(proc.stderr.includes("usage: superspec_guard [-h]"));
+  assert.ok(proc.stderr.includes("usage: superspec [-h]"));
   assert.ok(proc.stderr.includes("缺少必填参数：command"));
   assert.equal(proc.stderr.includes("guard_error"), false);
   assert.equal(proc.stderr.includes("the following arguments are required"), false);
@@ -817,24 +925,24 @@ test("cli subcommand help emits usage to stdout", () => {
   const proc = spawnSync(process.execPath, [GUARD_TS, "check-artifact", "--help"], { encoding: "utf8" });
   assert.equal(proc.status, 0);
   assert.equal(proc.stderr, "");
-  assert.ok(proc.stdout.includes("usage: superspec_guard check-artifact [-h] --change CHANGE --artifact ARTIFACT"));
+  assert.ok(proc.stdout.includes("usage: superspec check-artifact [-h] --change CHANGE --artifact ARTIFACT"));
 });
 
 test("packet subcommand help shows packet-specific options", () => {
   const workflow = spawnSync(process.execPath, [GUARD_TS, "workflow-packet", "--help"], { encoding: "utf8" });
   assert.equal(workflow.status, 0);
   assert.equal(workflow.stderr, "");
-  assert.ok(workflow.stdout.includes("usage: superspec_guard workflow-packet [-h] --change CHANGE --gate GATE --format {agent} [--task-id TASK_ID]"));
+  assert.ok(workflow.stdout.includes("usage: superspec workflow-packet [-h] --change CHANGE --gate GATE --format {agent} [--task-id TASK_ID]"));
 
   const review = spawnSync(process.execPath, [GUARD_TS, "review-packet", "--help"], { encoding: "utf8" });
   assert.equal(review.status, 0);
   assert.equal(review.stderr, "");
-  assert.ok(review.stdout.includes("usage: superspec_guard review-packet [-h] --change CHANGE --gate GATE --role ROLE --round ROUND --format {agent,prompt} [--kind KIND]"));
+  assert.ok(review.stdout.includes("usage: superspec review-packet [-h] --change CHANGE --gate GATE --role ROLE --round ROUND --format {agent,prompt} [--kind KIND]"));
 
   const ledger = spawnSync(process.execPath, [GUARD_TS, "ledger-render", "--help"], { encoding: "utf8" });
   assert.equal(ledger.status, 0);
   assert.equal(ledger.stderr, "");
-  assert.ok(ledger.stdout.includes("usage: superspec_guard ledger-render [-h] --change CHANGE --gate GATE [--round ROUND]"));
+  assert.ok(ledger.stdout.includes("usage: superspec ledger-render [-h] --change CHANGE --gate GATE [--round ROUND]"));
 });
 
 test("packet parse failures use packet-specific stdout contract", () => {
@@ -1137,6 +1245,160 @@ withFixture("explore complete blocks until discovery is human confirmed", (fx) =
   ], "explore_complete");
   assert.equal(allowed.allowed, true, JSON.stringify(allowed));
 });
+
+withFixture("B1 explore_complete blocks when discovery 待确认问题 has unchecked items", (fx) => {
+  const discoveryPath = join(fx.change, ".superspec", "artifacts", "discovery.md");
+  writeText(discoveryPath, "## 调查范围\n- facts\n\n## 待确认问题\n- [ ] open question one\n- [ ] open question two\n");
+  const evidences = [
+    roleEvidence(fx, "explore_complete", "critic"),
+    passEvidence("explore_complete", "human_confirmation"),
+  ];
+  const decision = guard.check_superspec_gate("demo-change", status(fx), fx.change, evidences, "explore_complete");
+  assert.equal(decision.allowed, false, JSON.stringify(decision));
+  const reason = decision.block_reasons.find((r) => r.code === "explore_open_questions_unresolved");
+  assert.ok(reason, JSON.stringify(decision.block_reasons));
+  assert.match(reason.message, /2/);
+});
+
+withFixture("B1 explore_complete passes when all 待确认问题 items are checked", (fx) => {
+  const discoveryPath = join(fx.change, ".superspec", "artifacts", "discovery.md");
+  writeText(discoveryPath, "## 待确认问题\n- [x] resolved one\n- [x] resolved two\n");
+  const evidences = [
+    roleEvidence(fx, "explore_complete", "critic"),
+    passEvidence("explore_complete", "human_confirmation"),
+  ];
+  const decision = guard.check_superspec_gate("demo-change", status(fx), fx.change, evidences, "explore_complete");
+  assert.equal(decision.allowed, true, JSON.stringify(decision));
+  assert.ok(!codes(decision.block_reasons).includes("explore_open_questions_unresolved"));
+});
+
+withFixture("B1 explore_complete grandfathers discovery without a 待确认问题 section", (fx) => {
+  writeText(join(fx.change, ".superspec", "artifacts", "discovery.md"), "source anchors and facts\n");
+  const evidences = [
+    roleEvidence(fx, "explore_complete", "critic"),
+    passEvidence("explore_complete", "human_confirmation"),
+  ];
+  const decision = guard.check_superspec_gate("demo-change", status(fx), fx.change, evidences, "explore_complete");
+  assert.equal(decision.allowed, true, JSON.stringify(decision));
+  assert.ok(!codes(decision.block_reasons).includes("explore_open_questions_unresolved"));
+});
+
+withFixture("B1 explore_complete blocks the real secondment-hour-unit-support incident shape", (fx) => {
+  // Real incident: heading 「## 需要用户确认的问题」 (需要 + 用户 + 确认) with numbered list items
+  // where 1./2. are 「已确认：」 and 3.-10. are 「仍需确认：」 — no checkboxes at all.
+  const discoveryPath = join(fx.change, ".superspec", "artifacts", "discovery.md");
+  writeText(discoveryPath, [
+    "## 需要用户确认的问题",
+    "1. 已确认：小时借调改变实际排班，并按整日切换。",
+    "2. 已确认：时长默认自动计算，最终以提交值为准。",
+    "3. 仍需确认：是否允许同一天多段小时借调？",
+    "4. 仍需确认：跨天小时借调 duration 如何拆？",
+    "5. 仍需确认：导入、OA、OpenAPI 是否同步支持小时？",
+    "6. 仍需确认：分摊日报是否采用主岗行 + 借入行展示？",
+    "7. 仍需确认：是否新增独立日分摊表？",
+    "8. 仍需确认：报表是否展示 secondmentHours？",
+    "9. 仍需确认：DAY 借调是否保持一条 100% 借入行？",
+    "10. 仍需确认：分摊月报是否改为汇总日分摊结果？",
+    "",
+    "## critic 审查摘要",
+    "- scope 是最高优先级语义确认。",
+    "",
+  ].join("\n"));
+  const evidences = [
+    roleEvidence(fx, "explore_complete", "critic"),
+    passEvidence("explore_complete", "human_confirmation"),
+  ];
+  const decision = guard.check_superspec_gate("demo-change", status(fx), fx.change, evidences, "explore_complete");
+  assert.equal(decision.allowed, false, JSON.stringify(decision));
+  const reason = decision.block_reasons.find((r) => r.code === "explore_open_questions_unresolved");
+  assert.ok(reason, JSON.stringify(decision.block_reasons));
+  assert.match(reason.message, /8/);
+});
+
+withFixture("B1 open-question section is recognized under a single-level heading", (fx) => {
+  const discoveryPath = join(fx.change, ".superspec", "artifacts", "discovery.md");
+  writeText(discoveryPath, "# 待确认问题\n- [ ] unresolved\n");
+  const decision = guard.check_superspec_gate("demo-change", status(fx), fx.change, [
+    roleEvidence(fx, "explore_complete", "critic"),
+    passEvidence("explore_complete", "human_confirmation"),
+  ], "explore_complete");
+  assert.equal(decision.allowed, false);
+  assert.ok(codes(decision.block_reasons).includes("explore_open_questions_unresolved"));
+});
+
+withFixture("B1 open-question count stops at the next heading", (fx) => {
+  const discoveryPath = join(fx.change, ".superspec", "artifacts", "discovery.md");
+  writeText(discoveryPath, [
+    "## 待确认问题",
+    "- [ ] real open item",
+    "## Subagent Evidence",
+    "- [ ] must not be counted",
+    "- [ ] must not be counted either",
+    "",
+  ].join("\n"));
+  const decision = guard.check_superspec_gate("demo-change", status(fx), fx.change, [
+    roleEvidence(fx, "explore_complete", "critic"),
+    passEvidence("explore_complete", "human_confirmation"),
+  ], "explore_complete");
+  const reason = decision.block_reasons.find((r) => r.code === "explore_open_questions_unresolved");
+  assert.ok(reason, JSON.stringify(decision.block_reasons));
+  assert.match(reason.message, /1/);
+});
+
+withFixture("B1 mixed section counts only open items (checkbox or 仍需确认)", (fx) => {
+  const discoveryPath = join(fx.change, ".superspec", "artifacts", "discovery.md");
+  writeText(discoveryPath, [
+    "## 待确认问题",
+    "- [x] 已确认A",
+    "- [ ] 未决B",
+    "3. 仍需确认：自由文本C",
+    "4. 已确认：自由文本D",
+    "",
+  ].join("\n"));
+  const decision = guard.check_superspec_gate("demo-change", status(fx), fx.change, [
+    roleEvidence(fx, "explore_complete", "critic"),
+    passEvidence("explore_complete", "human_confirmation"),
+  ], "explore_complete");
+  const reason = decision.block_reasons.find((r) => r.code === "explore_open_questions_unresolved");
+  assert.ok(reason, JSON.stringify(decision.block_reasons));
+  assert.match(reason.message, /2/); // B + C
+});
+
+withFixture("B1 full-width space inside brackets is not treated as an unchecked box", (fx) => {
+  // GitHub task-list semantics: only literal half-width "[ ]" is an unchecked box. A full-width
+  // "　" (U+3000) is a typo, not a box; the line carries no pending wording so it is ignored.
+  const discoveryPath = join(fx.change, ".superspec", "artifacts", "discovery.md");
+  writeText(discoveryPath, "## 待确认问题\n- [　] typo box only\n");
+  const decision = guard.check_superspec_gate("demo-change", status(fx), fx.change, [
+    roleEvidence(fx, "explore_complete", "critic"),
+    passEvidence("explore_complete", "human_confirmation"),
+  ], "explore_complete");
+  assert.ok(!codes(decision.block_reasons).includes("explore_open_questions_unresolved"), JSON.stringify(decision.block_reasons));
+});
+
+withFixture("B1 explore_open_questions_unresolved propagates to proposal_reviewed", (fx) => {
+  writeText(join(fx.change, ".superspec", "artifacts", "discovery.md"), "## 待确认问题\n- [ ] open\n");
+  const decision = guard.check_superspec_gate("demo-change", status(fx), fx.change, [
+    roleEvidence(fx, "explore_complete", "critic"),
+    passEvidence("explore_complete", "human_confirmation"),
+    roleEvidence(fx, "proposal_reviewed", "critic"),
+  ], "proposal_reviewed");
+  assert.equal(decision.allowed, false);
+  assert.ok(codes(decision.block_reasons).includes("explore_open_questions_unresolved"), JSON.stringify(decision.block_reasons));
+});
+
+withFixture("B1 explore_open_questions_unresolved propagates to design_complete", (fx) => {
+  writeText(join(fx.change, ".superspec", "artifacts", "discovery.md"), "## 待确认问题\n- [ ] open\n");
+  const decision = guard.check_superspec_gate("demo-change", status(fx), fx.change, [
+    roleEvidence(fx, "explore_complete", "critic"),
+    passEvidence("explore_complete", "human_confirmation"),
+    roleEvidence(fx, "proposal_reviewed", "critic"),
+    roleEvidence(fx, "design_complete", "architect"),
+  ], "design_complete");
+  assert.equal(decision.allowed, false);
+  assert.ok(codes(decision.block_reasons).includes("explore_open_questions_unresolved"), JSON.stringify(decision.block_reasons));
+});
+
 
 withFixture("FIX-4 explore complete blocks stale discovery review after discovery edit", (fx) => {
   const discoveryPath = join(fx.change, ".superspec", "artifacts", "discovery.md");
@@ -1505,7 +1767,7 @@ withFixture("task edit requires evidence invariant refs to match test contract r
   );
   const decision = guard.check_task_edit("demo-change", status(fx), fx.change, [
     ...evidences,
-    passEvidence("task_edit", "test_run", { task_id: "TASK-001", test_id: "TEST-001", invariant_refs: ["INV-002"], semantic_status: "expected_failure" }),
+    workerRedEvidence(fx, { invariant_refs: ["INV-002"] }),
   ], "TASK-001");
   assert.equal(decision.allowed, false);
   assert.ok(codes(decision.block_reasons).includes("invariant_not_honored"));
@@ -1525,6 +1787,61 @@ withFixture("tasks complete blocks parallel write scope conflict", (fx) => {
   const decision = guard.check_superspec_gate("demo-change", status(fx), fx.change, [], "tasks_complete");
   assert.equal(decision.allowed, false);
   assert.ok(codes(decision.block_reasons).includes("write_scope_conflict"));
+});
+
+withFixture("tasks complete validates apply execution surface", (fx) => {
+  const decisionFor = (tasksText: string) => {
+    const evidences = prepareProposeComplete(fx, { tasksText });
+    return guard.check_superspec_gate("demo-change", status(fx), fx.change, evidences, "tasks_complete");
+  };
+  const taskText = (attrs: string) =>
+    "- [ ] TASK-001 Implement\n" +
+    "  - invariant_refs: INV-001\n" +
+    "  - test_refs: TEST-001\n" +
+    attrs;
+
+  const defaultImplementation = decisionFor(taskText("  - write_scope: src/feature.ts\n"));
+  assert.equal(defaultImplementation.allowed, true, JSON.stringify(defaultImplementation));
+  assert.equal(guard.task_apply_execution_surface(guard.parse_tasks(fx.change)["TASK-001"]), "implementation");
+
+  const defaultNoCode = decisionFor(taskText(""));
+  assert.equal(defaultNoCode.allowed, true, JSON.stringify(defaultNoCode));
+  assert.equal(guard.task_apply_execution_surface(guard.parse_tasks(fx.change)["TASK-001"]), "no_code");
+
+  const unknown = decisionFor(taskText("  - write_scope: src/feature.ts\n  - apply_execution_surface: mystery\n"));
+  assert.equal(unknown.allowed, false);
+  assert.ok(codes(unknown.block_reasons).includes("invalid_apply_execution_surface"), JSON.stringify(unknown.block_reasons));
+
+  const noCodeWithScope = decisionFor(taskText("  - write_scope: docs/readme.md\n  - apply_execution_surface: no_code\n"));
+  assert.equal(noCodeWithScope.allowed, false);
+  assert.ok(codes(noCodeWithScope.block_reasons).includes("invalid_apply_execution_surface_write_scope"), JSON.stringify(noCodeWithScope.block_reasons));
+
+  const docsGenerated = decisionFor(taskText("  - write_scope: docs/guide.md, README.md, templates/workflow/example.md\n  - apply_execution_surface: docs_generated\n"));
+  assert.equal(docsGenerated.allowed, true, JSON.stringify(docsGenerated));
+
+  const docsGeneratedSource = decisionFor(taskText("  - write_scope: src/feature.ts\n  - apply_execution_surface: docs_generated\n"));
+  assert.equal(docsGeneratedSource.allowed, false);
+  assert.ok(codes(docsGeneratedSource.block_reasons).includes("invalid_docs_generated_write_scope"), JSON.stringify(docsGeneratedSource.block_reasons));
+
+  const docsGeneratedTraversal = decisionFor(taskText("  - write_scope: docs/../src/foo.md, templates/../src/foo.md\n  - apply_execution_surface: docs_generated\n"));
+  assert.equal(docsGeneratedTraversal.allowed, false);
+  assert.ok(codes(docsGeneratedTraversal.block_reasons).includes("invalid_docs_generated_write_scope"), JSON.stringify(docsGeneratedTraversal.block_reasons));
+
+  const docsGeneratedAmbiguousSegments = decisionFor(taskText("  - write_scope: docs//guide.md, docs/./guide.md, templates//workflow/example.md, templates/./workflow/example.md\n  - apply_execution_surface: docs_generated\n"));
+  assert.equal(docsGeneratedAmbiguousSegments.allowed, false);
+  assert.ok(codes(docsGeneratedAmbiguousSegments.block_reasons).includes("invalid_docs_generated_write_scope"), JSON.stringify(docsGeneratedAmbiguousSegments.block_reasons));
+
+  const docsGeneratedNonCanonical = decisionFor(taskText("  - write_scope: ./docs/guide.md, docs/guide.md/, ./templates/workflow/example.md, templates/workflow/example.md/, README.md/\n  - apply_execution_surface: docs_generated\n"));
+  assert.equal(docsGeneratedNonCanonical.allowed, false);
+  assert.ok(codes(docsGeneratedNonCanonical.block_reasons).includes("invalid_docs_generated_write_scope"), JSON.stringify(docsGeneratedNonCanonical.block_reasons));
+
+  const docsGeneratedRootCodeLike = decisionFor(taskText("  - write_scope: README.ts, CHANGELOG.json\n  - apply_execution_surface: docs_generated\n"));
+  assert.equal(docsGeneratedRootCodeLike.allowed, false);
+  assert.ok(codes(docsGeneratedRootCodeLike.block_reasons).includes("invalid_docs_generated_write_scope"), JSON.stringify(docsGeneratedRootCodeLike.block_reasons));
+
+  const runtimeConfigMissingScope = decisionFor(taskText("  - apply_execution_surface: runtime_config\n"));
+  assert.equal(runtimeConfigMissingScope.allowed, false);
+  assert.ok(codes(runtimeConfigMissingScope.block_reasons).includes("missing_write_scope"), JSON.stringify(runtimeConfigMissingScope.block_reasons));
 });
 
 withFixture("propose complete requires all internal gates", (fx) => {
@@ -1600,6 +1917,42 @@ withFixture("task edit rejects red evidence from wrong gate", (fx) => {
   assert.ok(codes(decision.block_reasons).includes("missing_red_evidence"));
 });
 
+withFixture("task edit rejects main-thread RED evidence", (fx) => {
+  const evidences = [
+    ...prepareProposeComplete(fx),
+    redEvidence("TASK-001", "TEST-001", ["INV-001"], { phase: "red", runner_origin: "main-thread" }),
+  ];
+  const decision = guard.check_task_edit("demo-change", status(fx), fx.change, evidences, "TASK-001");
+  assert.equal(decision.allowed, false);
+  assert.ok(codes(decision.block_reasons).includes("missing_worker_red_evidence"), JSON.stringify(decision.block_reasons));
+  assert.ok(codes(decision.block_reasons).includes("pre_edit_test_run_invalid"), JSON.stringify(decision.block_reasons));
+});
+
+withFixture("task edit rejects main-thread characterization evidence", (fx) => {
+  const evidences = prepareProposeComplete(fx, {
+    tasksText:
+      "- [ ] TASK-001 Refactor\n" +
+      "  - invariant_refs: INV-001\n" +
+      "  - test_refs: TEST-001\n" +
+      "  - write_scope: src/feature.ts\n" +
+      "  - tdd_mode: behavior-preserving-refactor\n",
+  });
+  const characterization = passEvidence("task_edit", "test_run", {
+    task_id: "TASK-001",
+    test_id: "TEST-001",
+    invariant_refs: ["INV-001"],
+    semantic_status: "expected_success",
+    phase: "characterization",
+    runner_origin: "main-thread",
+    raw_log_refs: [DEFAULT_RUN_LOG],
+    result_summary: "characterization passed",
+  });
+  const decision = guard.check_task_edit("demo-change", status(fx), fx.change, [...evidences, characterization], "TASK-001");
+  assert.equal(decision.allowed, false);
+  assert.ok(codes(decision.block_reasons).includes("missing_worker_characterization"), JSON.stringify(decision.block_reasons));
+  assert.ok(codes(decision.block_reasons).includes("pre_edit_test_run_invalid"), JSON.stringify(decision.block_reasons));
+});
+
 withFixture("task complete after propose complete requires green", (fx) => {
   const evidences = [
     ...prepareProposeComplete(fx),
@@ -1646,7 +1999,7 @@ withFixture("task complete requires green for every declared test ref", (fx) => 
   assert.ok(codes(decision.block_reasons).includes("missing_declared_test_evidence"));
 });
 
-withFixture("task complete allows when every declared test ref has green", (fx) => {
+withFixture("task complete rejects main-thread green evidence even when declared tests pass", (fx) => {
   const evidences = prepareProposeComplete(fx, {
     testContract: testContractRowsText([
       { test_id: "TEST-001", scenario: "Scenario A", invariant_refs: "INV-001" },
@@ -1662,7 +2015,8 @@ withFixture("task complete allows when every declared test ref has green", (fx) 
     greenEvidence("TASK-001", "TEST-001", ["INV-001"]),
     greenEvidence("TASK-001", "TEST-002", ["INV-001"], { evidence_id: "EV-green-002" }),
   ], "TASK-001");
-  assert.equal(decision.allowed, true, JSON.stringify(decision));
+  assert.equal(decision.allowed, false);
+  assert.ok(codes(decision.block_reasons).includes("missing_green_evidence"), JSON.stringify(decision.block_reasons));
 });
 
 withFixture("task complete no tdd requires alternative verification", (fx) => {
@@ -1676,6 +2030,60 @@ withFixture("task complete no tdd requires alternative verification", (fx) => {
   const decision = guard.check_task_complete("demo-change", status(fx), fx.change, evidences, "TASK-001");
   assert.equal(decision.allowed, false);
   assert.ok(codes(decision.block_reasons).includes("missing_alternative_verification"));
+});
+
+withFixture("task complete no tdd implementation rejects direct alternative verification", (fx) => {
+  const evidences = prepareProposeComplete(fx, {
+    tasksText:
+      "- [ ] TASK-001 Implement without TDD\n" +
+      "  - invariant_refs: INV-001\n" +
+      "  - test_refs: TEST-001\n" +
+      "  - write_scope: src/feature.ts\n" +
+      "  - tdd_required: false\n" +
+      "  - no_tdd_reason: mechanical-rename\n",
+  });
+  const decision = guard.check_task_complete("demo-change", status(fx), fx.change, [
+    ...evidences,
+    alternativeVerificationEvidence("TASK-001"),
+  ], "TASK-001");
+  assert.equal(decision.allowed, false);
+  assert.ok(codes(decision.block_reasons).includes("missing_alternative_verification"), JSON.stringify(decision.block_reasons));
+});
+
+withFixture("task complete no tdd runtime config rejects direct manual verification", (fx) => {
+  const evidences = prepareProposeComplete(fx, {
+    tasksText:
+      "- [ ] TASK-001 Runtime config\n" +
+      "  - invariant_refs: INV-001\n" +
+      "  - test_refs: TEST-001\n" +
+      "  - write_scope: config/app.yml\n" +
+      "  - apply_execution_surface: runtime_config\n" +
+      "  - tdd_required: false\n" +
+      "  - no_tdd_reason: configuration-only\n",
+  });
+  const decision = guard.check_task_complete("demo-change", status(fx), fx.change, [
+    ...evidences,
+    alternativeVerificationEvidence("TASK-001", { kind: "manual_verification" }),
+  ], "TASK-001");
+  assert.equal(decision.allowed, false);
+  assert.ok(codes(decision.block_reasons).includes("missing_alternative_verification"), JSON.stringify(decision.block_reasons));
+});
+
+withFixture("task complete no tdd no-code allows direct alternative verification", (fx) => {
+  const evidences = prepareProposeComplete(fx, {
+    tasksText:
+      "- [ ] TASK-001 No code\n" +
+      "  - invariant_refs: INV-001\n" +
+      "  - test_refs: TEST-001\n" +
+      "  - apply_execution_surface: no_code\n" +
+      "  - tdd_required: false\n" +
+      "  - no_tdd_reason: non-executable-spec-change\n",
+  });
+  const decision = guard.check_task_complete("demo-change", status(fx), fx.change, [
+    ...evidences,
+    alternativeVerificationEvidence("TASK-001"),
+  ], "TASK-001");
+  assert.equal(decision.allowed, true, JSON.stringify(decision.block_reasons));
 });
 
 withFixture("review ready blocks checked task without green", (fx) => {
@@ -1727,7 +2135,7 @@ withFixture("review ready blocks write scope change without red", (fx) => {
   });
 });
 
-withFixture("review ready allows write scope change with red and green", (fx) => {
+withFixture("review ready blocks write scope change with main-thread red and green", (fx) => {
   const evidences = [
     ...prepareProposeComplete(fx, {
       checked: true,
@@ -1742,6 +2150,7 @@ withFixture("review ready allows write scope change with red and green", (fx) =>
     dirty_worktree_paths: () => ["src/service.py"],
   }, () => {
     const decision = guard.check_review_ready("demo-change", status(fx), fx.change, evidences);
-    assert.equal(decision.allowed, true, JSON.stringify(decision));
+    assert.equal(decision.allowed, false);
+    assert.ok(codes(decision.block_reasons).includes("missing_green_evidence"), JSON.stringify(decision.block_reasons));
   });
 });

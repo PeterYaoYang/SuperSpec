@@ -256,6 +256,76 @@ export function task_test_refs(tasks: Record<string, TaskInfo>): Set<string> {
   return refs;
 }
 
+export const APPLY_EXECUTION_SURFACES = new Set(["implementation", "runtime_config", "docs_generated", "no_code"]);
+export type ApplyExecutionSurface = "implementation" | "runtime_config" | "docs_generated" | "no_code";
+
+function cleanWriteScope(scope: string): string {
+  return scope.trim().replace(/\\/g, "/");
+}
+
+function unsafeWriteScope(scope: string): boolean {
+  const parts = scope.split("/");
+  return scope === "" || scope === "." || scope.startsWith("/") || parts.some((part) => part === "" || part === "." || part === "..");
+}
+
+function rootMarkdown(scope: string): boolean {
+  return !scope.includes("/") && /\.(?:md|mdx|rst|adoc)$/iu.test(scope);
+}
+
+function rootReadmeOrChangelog(scope: string): boolean {
+  if (scope.includes("/")) return false;
+  return /^(?:README|CHANGELOG)(?:\.(?:md|mdx|rst|adoc))?$/iu.test(scope);
+}
+
+function docsGeneratedScopeAllowed(scope: string): boolean {
+  if (unsafeWriteScope(scope)) return false;
+  if (scope.startsWith("docs/") || scope.startsWith("doc/")) return true;
+  if (rootMarkdown(scope) || rootReadmeOrChangelog(scope)) return true;
+  return scope.startsWith("templates/") && scope.endsWith(".md");
+}
+
+export function docs_generated_write_scope_reasons(writeScope: string[], taskId = ""): Reason[] {
+  const invalid = writeScope
+    .map(cleanWriteScope)
+    .filter((scope) => !docsGeneratedScopeAllowed(scope))
+    .sort();
+  if (invalid.length === 0) return [];
+  const prefix = taskId ? `task ${taskId} ` : "";
+  return [reason(
+    "invalid_docs_generated_write_scope",
+    `${prefix}apply_execution_surface=docs_generated only allows docs/**, doc/**, root README/CHANGELOG/markdown, and templates/**/*.md write_scope entries: ${renderList(invalid)}`,
+    invalid,
+  )];
+}
+
+export function task_apply_execution_surface(task: TaskInfo): ApplyExecutionSurface | string {
+  const explicit = task.attrs.apply_execution_surface?.trim();
+  if (explicit) return explicit;
+  return splitList(task.attrs.write_scope ?? "").length > 0 ? "implementation" : "no_code";
+}
+
+export function task_apply_execution_surface_reasons(taskId: string, task: TaskInfo): Reason[] {
+  const surface = task_apply_execution_surface(task);
+  const writeScope = splitList(task.attrs.write_scope ?? "");
+  if (!APPLY_EXECUTION_SURFACES.has(surface)) {
+    return [reason("invalid_apply_execution_surface", `task ${taskId}: apply_execution_surface=${surface}`)];
+  }
+  if (surface === "implementation" || surface === "runtime_config") {
+    return writeScope.length === 0
+      ? [reason("missing_write_scope", `task ${taskId} apply_execution_surface=${surface} requires non-empty write_scope`)]
+      : [];
+  }
+  if (surface === "no_code") {
+    return writeScope.length === 0
+      ? []
+      : [reason("invalid_apply_execution_surface_write_scope", `task ${taskId} apply_execution_surface=no_code requires empty write_scope`, writeScope)];
+  }
+  if (writeScope.length === 0) {
+    return [reason("missing_write_scope", `task ${taskId} apply_execution_surface=docs_generated requires non-empty write_scope`)];
+  }
+  return docs_generated_write_scope_reasons(writeScope, taskId);
+}
+
 export function write_scope_conflict_reasons(tasks: Record<string, TaskInfo>): Reason[] {
   const byGroup: Record<string, Record<string, string[]>> = {};
   for (const [taskId, task] of Object.entries(tasks)) {

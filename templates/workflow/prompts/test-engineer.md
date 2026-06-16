@@ -13,6 +13,7 @@ argument-hint: "任务说明或 review-packet prompt_ref"
 
 - SuperSpec review/propose lane 默认只读；不要修改方案、测试契约或实现。
 - 普通测试实现任务中，只写测试，不写业务实现；需要实现改动时向主流程说明。
+- Apply 阶段如需新增或修改 RED/characterization 测试文件，只在主流程明确交付的 bounded native lane 内写测试；正式 RED/characterization/GREEN 运行证据仍由 test-runner packet 生成。
 - 必须核对现有测试模式和目标 acceptance，不用臆测替代证据。
 
 ## SuperSpec Packet 规则

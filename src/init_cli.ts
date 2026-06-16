@@ -343,7 +343,7 @@ function run_init(args: InitArgs, scope: InstallScope): number {
     ]);
   } else if (args.mode === "update") {
     summary = engineDecision(`${gatePrefix}_update`, targetRoot, update_workflow(targetRoot, { scope }), [
-      scope === "project" ? "review *.new files for user-modified surfaces, then rerun superspec guard check-init" : "review *.new files for user-modified user-level surfaces",
+      scope === "project" ? "review *.new files for user-modified surfaces, then rerun superspec check check-init" : "review *.new files for user-modified user-level surfaces",
     ]);
   } else if (scope === "user") {
     summary = engineDecision("user_install", targetRoot, install_workflow(targetRoot, { force: args.force, scope: "user" }), [

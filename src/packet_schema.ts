@@ -33,6 +33,10 @@ export type WorkflowPacket = {
   must_read_verbatim_findings?: FindingSelector[];
   must_read_verbatim_decisions?: DecisionSelector[];
   diagnostic_command?: string;
+  // B (template serving): explore_complete only. The model fills discovery.md from this skeleton +
+  // rules so output structure is uniform across models instead of freehanded and gate-heuristic-parsed.
+  discovery_template?: string;
+  discovery_rules?: string[];
 };
 
 export type ReviewPacket = {

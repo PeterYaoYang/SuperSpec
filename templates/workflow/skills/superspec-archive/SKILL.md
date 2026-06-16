@@ -10,7 +10,7 @@ metadata:
 
 ## 语言规则 / Language
 
-- 默认使用简体中文写人类可读内容；命令、路径、字段名、gate 名、task/test id、代码标识符保留原文。
+- 默认使用简体中文写人类可读内容；命令、路径、字段名、阶段门名、task/test id、代码标识符保留原文。
 - 用户可见文案不得使用“裁决”描述用户动作；统一说“确认”“范围取舍”“处理方式选择”或“用户确认记录”。
 - 不把内部证据种类、reason code、JSON 字段大全直接转述给用户；需要诊断时才引用原文。
 - 普通 workflow 命令使用 `--format agent`；`--format json` 只用于诊断，不作为默认上下文。
@@ -27,10 +27,10 @@ Archive 在 `review_complete` allowed 后收尾：确认 archive readiness、保
 ## 第一条必跑命令
 
 ```text
-superspec guard workflow-packet --change "<change>" --gate archive_ready --format agent
+superspec check workflow-packet --change "<change>" --gate archive_ready --format agent
 ```
 
-遇到任何 guard `block` 就停止，不归档。
+遇到 `block` 就停止，不归档。
 
 ## OpenSpec 边界
 
@@ -47,7 +47,7 @@ superspec guard workflow-packet --change "<change>" --gate archive_ready --forma
 确认后运行会写 preservation manifest 的 readiness check：
 
 ```text
-superspec guard check-archive-ready --change "<change>" --format agent
+superspec check check-archive-ready --change "<change>" --format agent
 ```
 
 然后运行 OpenSpec archive：
@@ -59,7 +59,7 @@ openspec archive -y "<change>"
 最后验证 archived sidecar preservation：
 
 ```text
-superspec guard check-archived --change "<change>" --format agent
+superspec check check-archived --change "<change>" --format agent
 ```
 
 `.superspec/artifacts/business-invariants.md`、`.superspec/artifacts/test-contract.md`、review/verification evidence、RED/GREEN evidence 和 archive evidence 必须能从 preservation manifest 追溯。

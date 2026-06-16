@@ -24,6 +24,7 @@ export type ParsedArgs = {
   task_code_review_report_refs?: string[];
   apply_worker_chain_refs?: string[];
   green_test_run_evidence_refs?: string[];
+  alternative_verification_evidence_refs?: string[];
   red_test_run_evidence_refs?: string[];
   characterization_test_run_evidence_refs?: string[];
   create?: boolean;
@@ -80,6 +81,14 @@ function isPacketCommand(command: string): boolean {
     || command === "ledger-render";
 }
 
+function isHookEventCommand(command: string): boolean {
+  return command === "hook-check-write"
+    || command === "hook-check-command"
+    || command === "hook-record-test"
+    || command === "hook-record-subagent-start"
+    || command === "hook-record-subagent-stop";
+}
+
 function requiredValueFlags(command: string): string[] {
   const flags = ["--change"];
   if (command === "check-artifact") flags.push("--artifact");
@@ -90,10 +99,9 @@ function requiredValueFlags(command: string): string[] {
   if (command === "apply-test-packet") flags.push("--task-id", "--test-id", "--phase");
   if (command === "apply-executor-packet") flags.push("--task-id");
   if (command === "apply-code-review-packet") flags.push("--task-id", "--executor-report-ref");
-  if (command === "apply-verify-packet") flags.push("--task-id", "--executor-report-ref", "--task-code-review-report-ref", "--green-test-run-evidence-ref");
+  if (command === "apply-verify-packet") flags.push("--task-id", "--executor-report-ref", "--task-code-review-report-ref");
   if (command === "ledger-render") flags.push("--gate");
-  if (command === "hook-check-write" || command === "hook-check-command" || command === "hook-record-test"
-    || command === "hook-record-subagent-start" || command === "hook-record-subagent-stop") flags.push("--event-ref");
+  if (isHookEventCommand(command)) flags.push("--event-ref");
   if (command === "hook-session-begin") flags.push("--workflow", "--entrypoint-token");
   if (command === "hook-session-end") flags.push("--reason");
   return flags;
@@ -113,7 +121,7 @@ function optionalValueFlags(command: string): string[] {
   if (command === "review-packet") return ["--kind"];
   if (command === "apply-test-packet") return ["--task-code-review-report-ref"];
   if (command === "apply-executor-packet") return ["--apply-worker-chain-ref"];
-  if (command === "apply-verify-packet") return ["--red-test-run-evidence-ref", "--characterization-test-run-evidence-ref"];
+  if (command === "apply-verify-packet") return ["--green-test-run-evidence-ref", "--alternative-verification-evidence-ref", "--red-test-run-evidence-ref", "--characterization-test-run-evidence-ref"];
   if (command === "ledger-render") return ["--round"];
   if (command === "hook-session-end") return ["--lifecycle-token"];
   return [];
@@ -140,7 +148,7 @@ function requiresFormat(command: string): boolean {
 }
 
 function rootUsage(): string {
-  return `usage: superspec_guard [-h]\n                     {${COMMAND_LIST}}\n                     ...\n`;
+  return `usage: superspec [-h]\n                     {${COMMAND_LIST}}\n                     ...\n`;
 }
 
 function rootHelp(): string {
@@ -160,7 +168,7 @@ function commandUsage(command: string): string {
     ...requiredBooleanFlags(command),
     ...optionalBooleanFlags(command),
   ];
-  return `usage: superspec_guard ${command} ${usageFlags.join(" ")}\n`;
+  return `usage: superspec ${command} ${usageFlags.join(" ")}\n`;
 }
 
 function commandHelp(command: string): string {
@@ -197,7 +205,7 @@ function missingRequiredFlags(command: string, args: string[]): string[] {
 
 export function emitArgparsePreamble(argv: string[]): number | null {
   if (argv.length === 0) {
-    process.stderr.write(`${rootUsage()}superspec_guard：错误：缺少必填参数：command\n`);
+    process.stderr.write(`${rootUsage()}superspec：错误：缺少必填参数：command\n`);
     return 2;
   }
   const command = argv[0];
@@ -206,7 +214,7 @@ export function emitArgparsePreamble(argv: string[]): number | null {
     return 0;
   }
   if (!COMMANDS.includes(command as any)) {
-    process.stderr.write(`${rootUsage()}superspec_guard：错误：命令无效：'${command}'；可选值：${COMMAND_CHOICES}\n`);
+    process.stderr.write(`${rootUsage()}superspec：错误：命令无效：'${command}'；可选值：${COMMAND_CHOICES}\n`);
     return 2;
   }
   const args = argv.slice(1);
@@ -217,7 +225,11 @@ export function emitArgparsePreamble(argv: string[]): number | null {
   if (!isPacketCommand(command)) {
     const missing = missingRequiredFlags(command, args);
     if (missing.length > 0) {
-      process.stderr.write(`${commandUsage(command)}superspec_guard ${command}：错误：缺少必填参数：${missing.join(", ")}\n`);
+      if (isHookEventCommand(command) && missing.length === 1 && missing[0] === "--event-ref") {
+        process.stderr.write(`${commandUsage(command)}superspec ${command}：错误：--event-ref must point to a readable hook event JSON file\n`);
+        return 2;
+      }
+      process.stderr.write(`${commandUsage(command)}superspec ${command}：错误：缺少必填参数：${missing.join(", ")}\n`);
       return 2;
     }
   }
@@ -355,14 +367,23 @@ export function parse_argv(argv: string[]): ParsedArgs {
     const executorRefs = getValues("--executor-report-ref");
     const codeReviewRefs = getValues("--task-code-review-report-ref");
     const greenRefs = getValues("--green-test-run-evidence-ref");
+    const alternativeRefs = getValues("--alternative-verification-evidence-ref");
     const redRefs = getValues("--red-test-run-evidence-ref");
     const characterizationRefs = getValues("--characterization-test-run-evidence-ref");
     if (!taskId) throw new GuardError("apply-verify-packet 缺少必填参数 --task-id");
     if (executorRefs.length === 0) throw new GuardError("apply-verify-packet 缺少必填参数 --executor-report-ref");
     if (codeReviewRefs.length === 0) throw new GuardError("apply-verify-packet 缺少必填参数 --task-code-review-report-ref");
-    if (greenRefs.length === 0) throw new GuardError("apply-verify-packet 缺少必填参数 --green-test-run-evidence-ref");
-    if (redRefs.length === 0 && characterizationRefs.length === 0) {
+    if (greenRefs.length === 0 && alternativeRefs.length === 0) {
+      throw new GuardError("apply-verify-packet requires --green-test-run-evidence-ref or --alternative-verification-evidence-ref");
+    }
+    if (greenRefs.length > 0 && alternativeRefs.length > 0) {
+      throw new GuardError("apply-verify-packet requires either GREEN refs or alternative verification refs, not both");
+    }
+    if (greenRefs.length > 0 && redRefs.length === 0 && characterizationRefs.length === 0) {
       throw new GuardError("apply-verify-packet requires --red-test-run-evidence-ref or --characterization-test-run-evidence-ref");
+    }
+    if (alternativeRefs.length > 0 && (redRefs.length > 0 || characterizationRefs.length > 0)) {
+      throw new GuardError("apply-verify-packet alternative verification branch must not include RED or characterization refs");
     }
     return {
       command,
@@ -371,6 +392,7 @@ export function parse_argv(argv: string[]): ParsedArgs {
       executor_report_refs: executorRefs,
       task_code_review_report_refs: codeReviewRefs,
       green_test_run_evidence_refs: greenRefs,
+      alternative_verification_evidence_refs: alternativeRefs,
       red_test_run_evidence_refs: redRefs,
       characterization_test_run_evidence_refs: characterizationRefs,
       packet_format: parsePacketOutputFormat(selectedPacketFormat!, { allowPrompt: true }),
@@ -385,10 +407,9 @@ export function parse_argv(argv: string[]): ParsedArgs {
     if (!Number.isInteger(round) || round < 1) throw new GuardError("--round 必须是大于等于 1 的整数");
     return { command, change, gate, round };
   }
-  if (command === "hook-check-write" || command === "hook-check-command" || command === "hook-record-test"
-    || command === "hook-record-subagent-start" || command === "hook-record-subagent-stop") {
+  if (isHookEventCommand(command)) {
     const eventRef = getValue("--event-ref");
-    if (!eventRef) throw new Error("缺少必填参数 --event-ref");
+    if (!eventRef) throw new GuardError("--event-ref must point to a readable hook event JSON file");
     return { command, change, format, event_ref: eventRef };
   }
   if (command === "hook-session-begin") {

@@ -10,7 +10,7 @@ metadata:
 
 ## 语言规则 / Language
 
-- 默认使用简体中文写人类可读内容；命令、路径、字段名、gate 名、task/test id、代码标识符保留原文。
+- 默认使用简体中文写人类可读内容；命令、路径、字段名、阶段门名、task/test id、代码标识符保留原文。
 - 用户可见文案不得使用“裁决”描述用户动作；统一说“确认”“范围取舍”“处理方式选择”或“用户确认记录”。
 - 不把内部证据种类、reason code、JSON 字段大全直接转述给用户；需要诊断时才引用原文。
 - 普通 workflow 命令使用 `--format agent`；`--format json` 只用于诊断，不作为默认上下文。
@@ -22,52 +22,47 @@ metadata:
 
 ## 阶段职责
 
-Apply 按 OpenSpec tasks 执行实现，负责 RED/GREEN 证据、任务勾选和 review request-changes 后的 reopen 修复。不扩大范围，不改 proposal package 语义。
+Apply 按 OpenSpec tasks 实现，负责 RED/GREEN 证据、任务勾选和 review request-changes 后的 reopen 修复；不扩大范围，不改 proposal package 语义。
 
 ## 第一条必跑命令
 
 ```text
-superspec guard workflow-packet --change "<change>" --gate apply_ready --format agent
+superspec check workflow-packet --change "<change>" --gate apply_ready --format agent
 ```
 
-遇到任何 guard `block` 就停止。未 allowed 前不要编辑实现。
+遇到任何返回状态为 `block` 就停止；未 allowed 前不要编辑实现。
 
 ## OpenSpec 边界
 
 - 直接使用 OpenSpec CLI surface，不读取 repo-local `openspec-*` skill 文本。
-- task list、`contextFiles`、progress 和 dynamic instruction 来自：
+- task list、`contextFiles`、progress、dynamic instruction 来自：
 
 ```text
 openspec instructions apply --change "<change>" --json
 ```
 
-不要自行发明 task list，也不要跳过 OpenSpec 返回的 context files。
+不要发明 task list，也不要跳过 OpenSpec 返回的 context files。
 
 ## Task Guard 边界
 
-实现编辑前读取 task packet：
+实现编辑前读取 `task_edit` 检查结果；勾选 task 前读取 `task_complete` 检查结果：
 
 ```text
-superspec guard workflow-packet --change "<change>" --gate task_edit --task-id "<task-id>" --format agent
-```
-
-勾选 task 前读取 completion packet：
-
-```text
-superspec guard workflow-packet --change "<change>" --gate task_complete --task-id "<task-id>" --format agent
+superspec check workflow-packet --change "<change>" --gate task_edit --task-id "<task-id>" --format agent
+superspec check workflow-packet --change "<change>" --gate task_complete --task-id "<task-id>" --format agent
 ```
 
 `task_edit` 未 allowed 不得编辑实现；`task_complete` 未 allowed 不得把 checkbox 改成 done。
 
 ## Reopen 边界
 
-如果 review 给出 `request_changes_route:"reopen_tasks"`，先生成完整 reopen package，再检查：
+review 给出 `request_changes_route:"reopen_tasks"` 时，先生成完整 reopen package，再检查：
 
 ```text
-superspec guard workflow-packet --change "<change>" --gate task_reopen --task-id "<task-id>" --format agent
+superspec check workflow-packet --change "<change>" --gate task_reopen --task-id "<task-id>" --format agent
 ```
 
-只有 `task_reopen` allowed 后，才允许把目标 task 从 checked 改回 unchecked 并重新 RED/GREEN。修完后写 `task_reopen_resolved`，再重新进入 review。若 route 是 `change_update`，停止 apply 并回 propose/change update。
+只有 `task_reopen` allowed 后，才允许把目标 task 从 checked 改回 unchecked 并重新 RED/GREEN。修完写 `task_reopen_resolved`，再进 review。若 route 是 `change_update`，停止 apply 并回 propose/change update。
 
 ## 用户确认边界
 
@@ -75,44 +70,74 @@ superspec guard workflow-packet --change "<change>" --gate task_reopen --task-id
 - 分支状态、dirty worktree、scope expands 或需要改变 task scope 时必须停止并确认。
 - 不要使用默认值、历史偏好或沉默作为确认。
 
-## Native Subagent 边界
+## 专用代理边界
 
-Apply 主流程负责 evidence、审核接收、task checkbox 和 `task_complete`；worker report 只是 candidate。repo-local native agents 必须来自 `.codex/agents/*.toml` 与 `.codex/prompts/*.md`，不能由主线程自审替代。
+主线程只负责用检查命令生成各角色提示、分派专用代理、审核代理报告、登记证据、推进任务勾选。专用代理来自 `.codex/agents/*.toml` 与 `.codex/prompts/*.md`，不能由主线程自审替代。代理报告只是候选材料，通过检查的才是正式证据。当前 CLI 没有登记证据的命令；代理报告返回后，由主线程按检查命令的 output contract 字段手动写入 `.superspec/evidence/` 对应目录。
 
-可选 RED/characterization 测试 worker：
-
-```text
-superspec guard apply-test-packet --change "<change>" --task-id "<task-id>" --test-id "<test-id>" --phase red --format prompt
-```
-
-使用 `.codex/agents/test-runner.toml` / `.codex/prompts/test-runner.md` 执行 packet 指定命令。主线程审查 test-runner report 和 raw transcript，materialize 为 pinned refs 后，才写正式 `test_run` evidence。
-
-可选 executor-worker chain：
+RED/characterization/GREEN 测试必须由 `.codex/agents/test-runner.toml` + `.codex/prompts/test-runner.md` 执行；主线程不得代跑或伪造 formal `test_run` evidence。新增或修改测试文件时用 `test-engineer` 专用代理。
 
 ```text
-superspec guard apply-executor-packet --change "<change>" --task-id "<task-id>" --apply-worker-chain-ref "<active-chain-ref>" --format prompt
+superspec check apply-test-packet --change "<change>" --task-id "<task-id>" --test-id "<test-id>" --phase red --format prompt
 ```
 
-使用 `.codex/agents/executor.toml` / `.codex/prompts/executor.md`。先记录 packet 的 `chain_activation_template` 为 active `apply_worker_chain` evidence；缺 active marker 不得 spawn executor。executor 只能改 packet 声明的 implementation write scope，不能写正式 evidence、不能改 task checkbox、不能做 review/verification。
+用 test-runner 执行检查命令指定的测试命令；主线程审核报告/原始日志并登记为证据后，才写正式 `test_run` 证据。
 
-executor 返回后先 materialize executor report pinned ref，再生成 task-level review：
+测试证据语义（框架无关，审核 worker report 时用）：只有 `target test identity executed` 才算有效运行；`command exit code alone is not proof`，退出码 0 不证明目标测试真正跑过/通过；命令在到达测试 runner 之前失败属于 `blocked before the target test runner`，不算 RED/GREEN；`do not classify environment/build failures as RED or GREEN`。
+
+`apply_execution_surface`：缺省有 `write_scope` 为 `implementation`，无 `write_scope` 为 `no_code`；显式允许 `implementation`、`runtime_config`、`docs_generated`、`no_code`。`implementation` / `runtime_config` 必须走 executor-worker chain；`tdd_required:false` 也只能用 closed `apply_worker_chain` 的 `completion_proof_kind:"alternative_verification"` 完成。`docs_generated` / `no_code` 可用 direct alternative/manual verification。
+
+编码实现必须由 `.codex/agents/executor.toml` + `.codex/prompts/executor.md` 执行，并通过 active -> closed `apply_worker_chain` 收敛；主线程不得直接改实现代码来完成 task。
 
 ```text
-superspec guard apply-code-review-packet --change "<change>" --task-id "<task-id>" --executor-report-ref "<ref>" --format prompt
+superspec check apply-executor-packet --change "<change>" --task-id "<task-id>" --apply-worker-chain-ref "<active-chain-ref>" --format prompt
 ```
 
-用 `.codex/agents/code-reviewer.toml` 检查明显缺陷、scope/protected paths、executor report 与 diff 一致性、test/invariant mapping 和 suggested GREEN checks。code-reviewer report 不是 correctness proof。
+使用 `.codex/agents/executor.toml` / `.codex/prompts/executor.md`。先把检查命令给出的激活模板登记为工作链证据；缺激活标记不能启动 executor。TDD 与 no-TDD 的激活标记不同（具体字段以检查命令输出为准）。executor 只能改检查命令声明的实现写范围（implementation/runtime_config write scope），不能写正式 evidence，不能改 task checkbox，不能做 review/verification。
 
-code-review 审核通过后，GREEN 只走同一 executor-worker chain：
+executor 返回后把报告登记为证据，再生成任务级审查：
 
 ```text
-superspec guard apply-test-packet --change "<change>" --task-id "<task-id>" --test-id "<test-id>" --phase green --task-code-review-report-ref "<ref>" --format prompt
+superspec check apply-code-review-packet --change "<change>" --task-id "<task-id>" --executor-report-ref "<ref>" --format prompt
 ```
 
-GREEN report 经主线程审核通过并登记为正式 evidence 后，生成 post-GREEN verification：
+用 `.codex/agents/code-reviewer.toml` 检查 scope/protected paths、executor report 与 diff、test/invariant mapping 和 suggested GREEN checks。
+
+code-review 通过后，GREEN 只走同一 executor-worker chain：
 
 ```text
-superspec guard apply-verify-packet --change "<change>" --task-id "<task-id>" --executor-report-ref "<ref>" --task-code-review-report-ref "<ref>" --green-test-run-evidence-ref "<ref>" --red-test-run-evidence-ref "<ref>" --format prompt
+superspec check apply-test-packet --change "<change>" --task-id "<task-id>" --test-id "<test-id>" --phase green --task-code-review-report-ref "<ref>" --format prompt
 ```
 
-用 `.codex/agents/verifier.toml` 检查 RED/characterization -> executor -> code-review -> GREEN -> current worktree 的证据链和 freshness。verifier report 经主线程审核通过后写 closed `apply_worker_chain` evidence，再运行 `task_complete`。中途转串行 fallback 前，先写 abandoned `apply_worker_chain` evidence，并保留恢复或 serial takeover baseline proof。
+GREEN report 审核并登记为 evidence 后，生成 GREEN verification：
+
+```text
+superspec check apply-verify-packet --change "<change>" --task-id "<task-id>" --executor-report-ref "<ref>" --task-code-review-report-ref "<ref>" --green-test-run-evidence-ref "<ref>" --red-test-run-evidence-ref "<ref>" --format prompt
+```
+
+no-TDD implementation/runtime_config 先登记 live/pass `alternative_verification` 或 `manual_verification`，再生成 alternative verification：
+
+```text
+superspec check apply-verify-packet --change "<change>" --task-id "<task-id>" --executor-report-ref "<ref>" --task-code-review-report-ref "<ref>" --alternative-verification-evidence-ref "<ref>" --format prompt
+```
+
+用 `.codex/agents/verifier.toml` 检查完成方式分支：GREEN 绑定 RED/characterization、GREEN 和当前工作区；alternative 绑定 no-TDD 激活标记、实际替代/人工验证引用、surface/no-TDD 元数据和当前工作区。审核 verifier 报告后写关闭的工作链证据，再跑 `task_complete`。异常终止只取消旧工作链，不授权完成。
+
+## 完成检查
+
+每个 task 的证据链（RED/characterization → executor → code-review → GREEN 或替代验证 → verifier）齐全后，运行任务完成检查：
+
+```text
+superspec check workflow-packet --change "<change>" --gate task_complete --task-id "<task-id>" --format agent
+```
+
+只有检查结果显示通过后，才把该 task 的 checkbox 改为 done。所有 task 完成后进入 `superspec-review`。
+
+## 异常恢复
+
+状态文件损坏时重建：
+
+```text
+superspec check recompute --change "<change>" --rebuild-corrupt
+```
+
+状态指纹过期时，重跑对应检查命令即可（检查命令会自动重算并刷新指纹）；不要手写状态文件。

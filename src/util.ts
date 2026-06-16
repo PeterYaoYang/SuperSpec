@@ -127,8 +127,21 @@ export const HUMAN_CONFIRMATION_GATES = new Set([
   "branch_handling",
   "apply_isolation",
   "scope_expansion",
+  "serial_takeover",
   "verify_failure_handling",
 ]);
+// Pending-confirmation wording shared by two defenses so they cannot drift:
+//  - the explore_complete open-questions gate (B1) counts list items inside discovery.md's
+//    "待确认问题" section that carry this wording;
+//  - the human_confirmation self-pending guard (B3) rejects confirmation_text that carries it.
+// Worded to confirmation semantics only: "仍需/还需要 + 评估/细化" (legitimate follow-up prose,
+// not an unresolved confirmation) is intentionally excluded because it does not end in 确认.
+export const PENDING_CONFIRMATION_RE = /仍需确认|待确认|尚未确认|未确认完|还需要[^，。；\n]{0,20}确认/u;
+export const UNCHECKED_CHECKBOX_RE = /\[ \]/u;
+export const CHECKED_CHECKBOX_RE = /\[[xX]\]/u;
+export function confirmation_text_has_pending_wording(text: string): boolean {
+  return PENDING_CONFIRMATION_RE.test(text);
+}
 export const NO_TDD_REASONS = new Set([
   "documentation-only",
   "configuration-only",

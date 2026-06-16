@@ -21,6 +21,7 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import * as guard from "../superspec_guard.ts";
+import { read_discovery_template } from "../src/packet_render.ts";
 import { main_init } from "../src/init_cli.ts";
 import { reason_message_zh, translate_action_zh } from "../src/i18n.ts";
 import { project_init } from "../src/project_init.ts";
@@ -120,9 +121,13 @@ function isJsonMap(value: unknown): value is JsonMap {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+function safeWorkerName(value: string): string {
+  return value.replace(/[^A-Za-z0-9_.-]/g, "_");
+}
+
 function writePinnedWorkerReportRef(fx: Fixture, role: string, chainId: string, overrides: JsonMap = {}): string {
   const taskId = overrides.task_id ?? "TASK-001";
-  const refBasename = typeof overrides.ref_basename === "string" && overrides.ref_basename ? overrides.ref_basename : role;
+  const refBasename = safeWorkerName(typeof overrides.ref_basename === "string" && overrides.ref_basename ? overrides.ref_basename : `${role}-${chainId}`);
   const localOverrides = { ...overrides };
   delete localOverrides.ref_basename;
   const declaredTaskWriteScope = Array.isArray(overrides.declared_task_write_scope)
@@ -185,6 +190,8 @@ function writePinnedWorkerReportRef(fx: Fixture, role: string, chainId: string, 
     runtime_raw_git_diff_name_status_transcript_ref: `${runtimeRef}/git-diff-name-status`,
     runtime_path_scoped_diff_transcript_refs: [`${runtimeRef}/path-diff`],
   } : role === "verifier" ? {
+    completion_proof_kind: "green_tests",
+    pre_edit_proof_kind: "red_or_characterization",
     task_completion_verdict: "pass",
     chain_consistency_verdict: "pass",
     acceptance_coverage_verdict: "pass",
@@ -302,11 +309,15 @@ function pinnedRawTranscriptRef(fx: Fixture, chainId: string, taskId = "TASK-001
   };
 }
 
-function pinnedStandaloneTestRunnerReportRef(fx: Fixture, taskId = "TASK-001"): JsonMap {
+function pinnedStandaloneTestRunnerReportRef(fx: Fixture, taskId = "TASK-001", testId = "TEST-001", phase = "red"): JsonMap {
   const dir = join(fx.change, ".superspec", "reports", "apply", taskId);
   mkdirp(dir);
-  const reportRel = `.superspec/reports/apply/${taskId}/test-runner-red-report.json`;
+  const reportRel = `.superspec/reports/apply/${taskId}/test-runner-${phase}-${testId}-report.json`;
   const reportPath = join(fx.change, reportRel);
+  const semanticStatus = phase === "red" ? "expected_failure" : "expected_success";
+  const exitCode = phase === "red" ? 1 : 0;
+  const packetFingerprint = `sha256:test-runner-${phase}-packet`;
+  const inputDigest = `sha256:test-runner-${phase}-input`;
   const implementationFingerprint = withRuntime(
     { dirty_worktree_paths: () => [] },
     () => guard.apply_worker_implementation_fingerprint(fx.repo, fx.change),
@@ -314,15 +325,15 @@ function pinnedStandaloneTestRunnerReportRef(fx: Fixture, taskId = "TASK-001"): 
   writeText(reportPath, `${JSON.stringify({
     role: "test-runner",
     task_id: taskId,
-    command: "npm test -- TEST-001",
+    command: `npm test -- ${testId}`,
     command_source: "test_command",
     cwd: fx.repo,
-    phase: "red",
-    test_id: "TEST-001",
-    exit_code: 1,
-    semantic_status_candidate: "expected_failure",
-    result_summary: "TEST-001 failed as expected",
-    runtime_raw_transcript_ref: "runtime://test-runner/red/raw",
+    phase,
+    test_id: testId,
+    exit_code: exitCode,
+    semantic_status_candidate: semanticStatus,
+    result_summary: `${testId} ${phase} completed`,
+    runtime_raw_transcript_ref: `runtime://test-runner/${phase}/raw`,
     repo_head: "unknown",
     pre_dirty_state: {},
     post_dirty_state: {},
@@ -330,9 +341,9 @@ function pinnedStandaloneTestRunnerReportRef(fx: Fixture, taskId = "TASK-001"): 
     untracked_files: [],
     invariant_refs: ["INV-001"],
     source_refs: [{ path: ".superspec/artifacts/test-contract.md" }],
-    guard_fingerprint: "sha256:test-runner-red-packet",
-    origin_packet_fingerprint: "sha256:test-runner-red-packet",
-    input_ref_digest: "sha256:test-runner-red-input",
+    guard_fingerprint: packetFingerprint,
+    origin_packet_fingerprint: packetFingerprint,
+    input_ref_digest: inputDigest,
     source_implementation_fingerprint: { fingerprint_digest: "sha256:source" },
     observed_implementation_fingerprint: implementationFingerprint,
     unverified_items: [],
@@ -347,9 +358,9 @@ function pinnedStandaloneTestRunnerReportRef(fx: Fixture, taskId = "TASK-001"): 
     task_id: taskId,
     created_at: "2026-06-12T00:00:00.000Z",
     worker_chain_context: "none",
-    guard_fingerprint: "sha256:test-runner-red-packet",
-    origin_packet_fingerprint: "sha256:test-runner-red-packet",
-    input_ref_digest: "sha256:test-runner-red-input",
+    guard_fingerprint: packetFingerprint,
+    origin_packet_fingerprint: packetFingerprint,
+    input_ref_digest: inputDigest,
     source_implementation_fingerprint: { fingerprint_digest: "sha256:source" },
     observed_implementation_fingerprint: implementationFingerprint,
   };
@@ -371,9 +382,9 @@ function pinnedStandaloneRawTranscriptRef(fx: Fixture, taskId = "TASK-001", test
     task_id: taskId,
     created_at: "2026-06-12T00:00:00.000Z",
     worker_chain_context: "none",
-    guard_fingerprint: "sha256:test-runner-red-packet",
-    origin_packet_fingerprint: "sha256:test-runner-red-packet",
-    input_ref_digest: "sha256:test-runner-red-input",
+    guard_fingerprint: `sha256:test-runner-${phase}-packet`,
+    origin_packet_fingerprint: `sha256:test-runner-${phase}-packet`,
+    input_ref_digest: `sha256:test-runner-${phase}-input`,
     source_implementation_fingerprint: { fingerprint_digest: "sha256:source" },
     observed_implementation_fingerprint: { fingerprint_digest: "sha256:observed" },
     command: `npm test -- ${testId}`,
@@ -388,7 +399,7 @@ function workerRedEvidence(fx: Fixture, overrides: JsonMap = {}): JsonMap {
   const taskId = String(overrides.task_id ?? "TASK-001");
   const testId = String(overrides.test_id ?? "TEST-001");
   const rawLogRef = pinnedStandaloneRawTranscriptRef(fx, taskId, testId, "red");
-  const testRunnerReportRef = pinnedStandaloneTestRunnerReportRef(fx, taskId);
+  const testRunnerReportRef = pinnedStandaloneTestRunnerReportRef(fx, taskId, testId, "red");
   const implementationFingerprint = withRuntime(
     { dirty_worktree_paths: () => [] },
     () => guard.apply_worker_implementation_fingerprint(fx.repo, fx.change, [rawLogRef, testRunnerReportRef], { declaredTaskWriteScope: ["src/feature.ts"] }),
@@ -411,6 +422,43 @@ function workerRedEvidence(fx: Fixture, overrides: JsonMap = {}): JsonMap {
     untracked_files: [],
     source_refs: [{ path: ".superspec/artifacts/test-contract.md" }],
     guard_fingerprint: "sha256:test-runner-red-packet",
+    implementation_fingerprint: implementationFingerprint,
+    guard_artifact_manifest_fingerprint: guardArtifactFingerprint,
+    ...overrides,
+  });
+}
+
+function workerCharacterizationEvidence(fx: Fixture, overrides: JsonMap = {}): JsonMap {
+  const taskId = String(overrides.task_id ?? "TASK-001");
+  const testId = String(overrides.test_id ?? "TEST-001");
+  const rawLogRef = pinnedStandaloneRawTranscriptRef(fx, taskId, testId, "characterization");
+  const testRunnerReportRef = pinnedStandaloneTestRunnerReportRef(fx, taskId, testId, "characterization");
+  const implementationFingerprint = withRuntime(
+    { dirty_worktree_paths: () => [] },
+    () => guard.apply_worker_implementation_fingerprint(fx.repo, fx.change, [rawLogRef, testRunnerReportRef], { declaredTaskWriteScope: ["src/feature.ts"] }),
+  );
+  const guardArtifactFingerprint = guard.apply_worker_guard_artifact_manifest_fingerprint({ raw_log_pinned_refs: [rawLogRef], accepted_test_runner_report_ref: testRunnerReportRef });
+  return passEvidence("task_edit", "test_run", {
+    task_id: taskId,
+    test_id: testId,
+    invariant_refs: ["INV-001"],
+    semantic_status: "expected_success",
+    evidence_id: "EV-characterization-worker-test-runner",
+    phase: "characterization",
+    runner_origin: "test-runner",
+    raw_log_refs: [String(rawLogRef.path)],
+    accepted_test_runner_report_ref: testRunnerReportRef,
+    raw_log_pinned_refs: [rawLogRef],
+    command: rawLogRef.command,
+    cwd: fx.repo,
+    exit_code: 0,
+    repo_head: "unknown",
+    pre_dirty_state: {},
+    post_dirty_state: {},
+    changed_files: [],
+    untracked_files: [],
+    source_refs: [{ path: ".superspec/artifacts/test-contract.md" }],
+    guard_fingerprint: "sha256:test-runner-characterization-packet",
     implementation_fingerprint: implementationFingerprint,
     guard_artifact_manifest_fingerprint: guardArtifactFingerprint,
     ...overrides,
@@ -497,7 +545,16 @@ function pinnedStatusReportRef(fx: Fixture, chainId = "CHAIN-001", taskId = "TAS
   };
 }
 
-function activeChainEvidence(chainId = "CHAIN-001", preEditEvidenceRefs: string[] = ["EV-red-worker"]): JsonMap {
+function serialTakeoverConfirmation(active: JsonMap, baselineRef: JsonMap, overrides: JsonMap = {}): JsonMap {
+  return passEvidence("serial_takeover", "human_confirmation", {
+    evidence_id: "EV-serial-takeover-confirmation",
+    confirmed_refs: [String(active.evidence_id ?? ""), String(baselineRef.path ?? "")].filter(Boolean),
+    confirmation_text: "user explicitly authorizes serial takeover from the active worker chain to the pinned baseline",
+    ...overrides,
+  });
+}
+
+function activeChainEvidence(chainId = "CHAIN-001", preEditEvidenceRefs: string[] = ["EV-red-worker"], overrides: JsonMap = {}): JsonMap {
   return passEvidence("task_complete", "apply_worker_chain", {
     evidence_id: `EV-chain-active-${chainId}`,
     task_id: "TASK-001",
@@ -507,13 +564,18 @@ function activeChainEvidence(chainId = "CHAIN-001", preEditEvidenceRefs: string[
     source_implementation_fingerprint: { fingerprint_digest: "sha256:source" },
     declared_task_write_scope: ["src/feature.ts"],
     pre_edit_evidence_refs: preEditEvidenceRefs,
+    ...overrides,
   });
 }
 
 function closedChainEvidence(fx: Fixture, chainId = "CHAIN-001", greenEvidenceId = "EV-green-worker", overrides: JsonMap = {}, evidenceContext: JsonMap[] = []): JsonMap {
+  const completionProofKind = String(overrides.completion_proof_kind ?? "green_tests");
   const greenEvidenceRefs = Array.isArray(overrides.green_test_run_evidence_refs)
     ? overrides.green_test_run_evidence_refs.map(String).filter(Boolean).sort()
-    : [greenEvidenceId];
+    : (completionProofKind === "green_tests" ? [greenEvidenceId] : []);
+  const alternativeEvidenceRefs = Array.isArray(overrides.alternative_verification_evidence_refs)
+    ? overrides.alternative_verification_evidence_refs.map(String).filter(Boolean).sort()
+    : (typeof overrides.alternative_verification_evidence_ref === "string" ? [overrides.alternative_verification_evidence_ref] : []);
   const active = evidenceContext.find((ev) => ev.kind === "apply_worker_chain" && ev.chain_state === "active" && ev.apply_worker_chain_id === chainId);
   const executorReportRef = isJsonMap(overrides.executor_report_ref)
     ? overrides.executor_report_ref
@@ -529,8 +591,14 @@ function closedChainEvidence(fx: Fixture, chainId = "CHAIN-001", greenEvidenceId
   const observedFreshness = guard.compute_apply_worker_freshness(fx.repo, fx.change, evidenceContext, "TASK-001", chainId, {
     executor_report_ref: executorReportRef,
     task_code_review_report_ref: codeReviewReportRef,
-    green_test_run_evidence_ref: greenEvidenceId,
-    green_test_run_evidence_refs: greenEvidenceRefs,
+    ...(completionProofKind === "green_tests" ? {
+      green_test_run_evidence_ref: greenEvidenceId,
+      green_test_run_evidence_refs: greenEvidenceRefs,
+      completion_proof_kind: "green_tests" as const,
+    } : {
+      alternative_verification_evidence_refs: alternativeEvidenceRefs,
+      completion_proof_kind: "alternative_verification" as const,
+    }),
   });
   const preEditInputRefs = Array.isArray(active?.pre_edit_evidence_refs)
     ? active.pre_edit_evidence_refs.map((evidenceId: unknown) => {
@@ -540,26 +608,68 @@ function closedChainEvidence(fx: Fixture, chainId = "CHAIN-001", greenEvidenceId
         : { kind: "test_run", evidence_id: String(evidenceId) };
     })
     : [];
-  const verifierInputRefs = [
-    executorReportRef,
-    codeReviewReportRef,
-    ...greenEvidenceRefs.map((evidenceId) => ({ kind: "test_run", evidence_id: evidenceId, phase: "green", semantic_status: "expected_success" })),
-    ...preEditInputRefs,
-  ];
+  const activeInputRef = active ? {
+    kind: "apply_worker_chain",
+    evidence_id: active.evidence_id,
+    task_id: active.task_id,
+    apply_worker_chain_id: active.apply_worker_chain_id,
+    pre_edit_proof_kind: active.pre_edit_proof_kind ?? "red_or_characterization",
+    pre_edit_evidence_refs: Array.isArray(active.pre_edit_evidence_refs) ? active.pre_edit_evidence_refs.map(String).filter(Boolean).sort() : [],
+    ...(active.apply_execution_surface !== undefined ? { apply_execution_surface: active.apply_execution_surface } : {}),
+    ...(active.tdd_required !== undefined ? { tdd_required: active.tdd_required } : {}),
+    ...(active.no_tdd_reason !== undefined ? { no_tdd_reason: active.no_tdd_reason } : {}),
+  } : null;
+  const verifierInputRefs = completionProofKind === "green_tests"
+    ? [
+      executorReportRef,
+      codeReviewReportRef,
+      ...greenEvidenceRefs.map((evidenceId) => ({ kind: "test_run", evidence_id: evidenceId, phase: "green", semantic_status: "expected_success" })),
+      ...preEditInputRefs,
+    ]
+    : [
+      executorReportRef,
+      codeReviewReportRef,
+      ...alternativeEvidenceRefs.map((evidenceId) => {
+        const ev = evidenceContext.find((item) => String(item.evidence_id ?? "") === evidenceId);
+        return { kind: ev?.kind ?? "alternative_verification", evidence_id: evidenceId, gate: ev?.gate ?? "task_complete", task_id: ev?.task_id ?? "TASK-001" };
+      }),
+      ...(activeInputRef ? [activeInputRef] : []),
+    ];
   const verifierReportRef = pinnedWorkerReportObject(fx, "verifier", chainId, {
     observed_freshness_fingerprint: observedFreshness,
     input_ref_digest: guard.worker_input_ref_digest(verifierInputRefs),
+    completion_proof_kind: completionProofKind,
+    pre_edit_proof_kind: active?.pre_edit_proof_kind ?? (completionProofKind === "green_tests" ? "red_or_characterization" : "no_tdd_declared"),
+    ...(completionProofKind === "green_tests" ? {
+      green_test_run_evidence_refs: greenEvidenceRefs,
+      red_test_run_evidence_refs: Array.isArray(active?.pre_edit_evidence_refs) ? active.pre_edit_evidence_refs.map(String).filter(Boolean) : ["EV-red-worker"],
+    } : {
+      green_test_run_evidence_refs: [],
+      red_test_run_evidence_refs: [],
+      characterization_test_run_evidence_refs: [],
+      alternative_verification_evidence_refs: alternativeEvidenceRefs,
+      apply_execution_surface: active?.apply_execution_surface ?? "implementation",
+      tdd_required: false,
+      no_tdd_reason: active?.no_tdd_reason ?? "mechanical-rename",
+    }),
   });
+  const proofFields = completionProofKind === "green_tests" ? {
+    green_test_run_evidence_ref: greenEvidenceId,
+    green_test_run_evidence_refs: greenEvidenceRefs,
+  } : {
+    alternative_verification_evidence_ref: alternativeEvidenceRefs[0],
+    alternative_verification_evidence_refs: alternativeEvidenceRefs,
+  };
   return passEvidence("task_complete", "apply_worker_chain", {
     evidence_id: `EV-chain-closed-${chainId}`,
     task_id: "TASK-001",
     apply_worker_chain_id: chainId,
     chain_state: "closed",
+    completion_proof_kind: completionProofKind,
     executor_report_ref: executorReportRef,
     task_code_review_report_ref: codeReviewReportRef,
     verifier_report_ref: verifierReportRef,
-    green_test_run_evidence_ref: greenEvidenceId,
-    green_test_run_evidence_refs: greenEvidenceRefs,
+    ...proofFields,
     observed_freshness_fingerprint: observedFreshness,
     ...overrides,
   });
@@ -581,6 +691,8 @@ withFixture("workflow-packet matches representative gate reality without widenin
     "must_read_verbatim_findings",
     "must_read_verbatim_decisions",
     "diagnostic_command",
+    "discovery_template",
+    "discovery_rules",
   ]);
   const proposeReady = prepareProposeComplete(fx);
   const reviewReady = archiveReadyEvidences(fx);
@@ -668,6 +780,14 @@ withFixture("workflow-packet matches representative gate reality without widenin
       if (item.gate === "task_edit") assert.ok(payload.openspec_cli_surfaces.includes('openspec instructions apply --change "demo-change" --json'), item.gate);
       if (item.gate === "review_complete") assert.ok(payload.openspec_cli_surfaces.includes('openspec validate "demo-change"'), item.gate);
       if (item.gate === "archive_ready") assert.ok(payload.openspec_cli_surfaces.includes('openspec archive -y "demo-change"'), item.gate);
+      if (item.gate === "explore_complete") {
+        assert.equal(typeof payload.discovery_template, "string", item.gate);
+        assert.ok(String(payload.discovery_template).includes("## 待确认问题"), item.gate);
+        assert.ok(Array.isArray(payload.discovery_rules) && payload.discovery_rules.length > 0, item.gate);
+      } else {
+        assert.equal(payload.discovery_template, undefined, `${item.gate}: should not carry discovery_template`);
+        assert.equal(payload.discovery_rules, undefined, `${item.gate}: should not carry discovery_rules`);
+      }
       for (const key of Object.keys(payload)) {
         assert.equal(workflowKeys.has(key), true, `${item.gate}: unexpected key ${key}`);
       }
@@ -679,6 +799,20 @@ withFixture("workflow-packet matches representative gate reality without widenin
       }
     }
   });
+});
+
+test("B read_discovery_template returns packaged template and null for missing path", { concurrency: false }, () => {
+  const tpl = read_discovery_template();
+  assert.equal(typeof tpl, "string");
+  assert.ok(String(tpl).includes("## 待确认问题"));
+  assert.ok(String(tpl).includes("- [ ]"));
+  // inject an empty dir → null (unreadable path omits the field rather than throwing)
+  const tmp = mkdtempSync(join(tmpdir(), "superspec-empty-pkg-"));
+  try {
+    assert.equal(read_discovery_template(tmp), null);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 withFixture("workflow-packet mirrors request_changes, scope expansion, verify failure, and reopened apply paths", (fx) => {
@@ -805,8 +939,9 @@ withFixture("workflow-packet mirrors request_changes, scope expansion, verify fa
       "--format", "agent",
     ]));
     assert.equal(reopenedPacket.exitCode, 0);
-    assert.equal(reopenedPacket.payload.status, "allowed");
-    assert.equal(reopenedExpected.allowed, true);
+    assert.equal(reopenedPacket.payload.status, "blocked");
+    assert.equal(reopenedExpected.allowed, false);
+    assert.deepEqual(reopenedPacket.payload.top_blockers, [...new Set(codes(reopenedExpected.block_reasons))].slice(0, 5));
   });
 });
 
@@ -849,8 +984,37 @@ withFixture("apply worker packets render ready and blocked worker prompts", (fx)
   assert.deepEqual(red.payload.expected_worktree_side_effects, []);
   assert.deepEqual(red.payload.required_invariant_refs, ["INV-001"]);
 
+  const redPrompt = withRuntime({
+    load_context: () => [status(fx), fx.repo, fx.change, evidences],
+    dirty_worktree_paths: () => [],
+  }, () => captureMain([
+    "apply-test-packet",
+    "--change", "demo-change",
+    "--task-id", "TASK-001",
+    "--test-id", "TEST-001",
+    "--phase", "red",
+    "--format", "prompt",
+  ]));
+  assert.equal(redPrompt.exitCode, 0);
+  assert.match(redPrompt.stdout, /Do not let the main thread run or forge formal RED\/characterization\/GREEN evidence/u);
+
+  const characterizationPrompt = withRuntime({
+    load_context: () => [status(fx), fx.repo, fx.change, evidences],
+    dirty_worktree_paths: () => [],
+  }, () => captureMain([
+    "apply-test-packet",
+    "--change", "demo-change",
+    "--task-id", "TASK-001",
+    "--test-id", "TEST-001",
+    "--phase", "characterization",
+    "--format", "prompt",
+  ]));
+  assert.equal(characterizationPrompt.exitCode, 0);
+  assert.match(characterizationPrompt.stdout, /Do not let the main thread run or forge formal RED\/characterization\/GREEN evidence/u);
+
+  const workerRed = workerRedEvidence(fx);
   const greenPrompt = withRuntime({
-    load_context: () => [status(fx), fx.repo, fx.change, [...evidences, redEvidence()]],
+    load_context: () => [status(fx), fx.repo, fx.change, [...evidences, workerRed]],
     dirty_worktree_paths: () => [],
   }, () => captureMain([
     "apply-test-packet",
@@ -865,7 +1029,7 @@ withFixture("apply worker packets render ready and blocked worker prompts", (fx)
   assert.match(greenPrompt.stdout, /task-code-review-report-ref/u);
 
   const executor = withRuntime({
-    load_context: () => [status(fx), fx.repo, fx.change, [...evidences, redEvidence()]],
+    load_context: () => [status(fx), fx.repo, fx.change, [...evidences, workerRed]],
     dirty_worktree_paths: () => [],
   }, () => captureMainJson([
     "apply-executor-packet",
@@ -882,7 +1046,7 @@ withFixture("apply worker packets render ready and blocked worker prompts", (fx)
   assert.equal(executor.payload.chain_activation_template.chain_state, "active");
 
   const executorPrompt = withRuntime({
-    load_context: () => [status(fx), fx.repo, fx.change, [...evidences, redEvidence()]],
+    load_context: () => [status(fx), fx.repo, fx.change, [...evidences, workerRed]],
     dirty_worktree_paths: () => [],
   }, () => captureMain([
     "apply-executor-packet",
@@ -899,7 +1063,7 @@ withFixture("apply worker packets render ready and blocked worker prompts", (fx)
     evidence_id: `EV-chain-active-${executor.payload.apply_worker_chain_id}`,
   });
   const executorReadyPrompt = withRuntime({
-    load_context: () => [status(fx), fx.repo, fx.change, [...evidences, redEvidence(), activeChain]],
+    load_context: () => [status(fx), fx.repo, fx.change, [...evidences, workerRed, activeChain]],
     dirty_worktree_paths: () => [],
   }, () => captureMain([
     "apply-executor-packet",
@@ -920,7 +1084,7 @@ withFixture("apply worker packets render ready and blocked worker prompts", (fx)
     declared_task_write_scope: ["src/other.ts"],
   });
   const scopeMismatchPrompt = withRuntime({
-    load_context: () => [status(fx), fx.repo, fx.change, [...evidences, redEvidence(), scopeMismatchActiveChain]],
+    load_context: () => [status(fx), fx.repo, fx.change, [...evidences, workerRed, scopeMismatchActiveChain]],
     dirty_worktree_paths: () => [],
   }, () => captureMain([
     "apply-executor-packet",
@@ -940,7 +1104,7 @@ withFixture("apply worker packets render ready and blocked worker prompts", (fx)
     pre_edit_evidence_refs: [preEditMismatchEvidenceId],
   });
   const preEditMismatchPrompt = withRuntime({
-    load_context: () => [status(fx), fx.repo, fx.change, [...evidences, redEvidence(), preEditMismatchActiveChain]],
+    load_context: () => [status(fx), fx.repo, fx.change, [...evidences, workerRed, preEditMismatchActiveChain]],
     dirty_worktree_paths: () => [],
   }, () => captureMain([
     "apply-executor-packet",
@@ -952,6 +1116,80 @@ withFixture("apply worker packets render ready and blocked worker prompts", (fx)
   assert.equal(preEditMismatchPrompt.exitCode, 0);
   assert.match(preEditMismatchPrompt.stdout, /^DO NOT SPAWN IMPLEMENTATION EXECUTOR/u);
   assert.match(preEditMismatchPrompt.stdout, /pre_edit_evidence_refs mismatch/u);
+});
+
+withFixture("apply-executor-packet exposes apply execution surface", (fx) => {
+  const implementationEvidences = prepareProposeComplete(fx, {
+    tasksText:
+      "- [ ] TASK-001 Implement\n" +
+      "  - invariant_refs: INV-001\n" +
+      "  - test_refs: TEST-001\n" +
+      "  - write_scope: src/feature.ts\n",
+  });
+  const implementationRed = workerRedEvidence(fx, {
+    evidence_id: "EV-red-implementation-surface",
+  });
+  const implementation = withRuntime({
+    load_context: () => [status(fx), fx.repo, fx.change, [...implementationEvidences, implementationRed]],
+    dirty_worktree_paths: () => [],
+  }, () => captureMainJson([
+    "apply-executor-packet",
+    "--change", "demo-change",
+    "--task-id", "TASK-001",
+    "--format", "agent",
+  ]));
+  assert.equal(implementation.exitCode, 0);
+  assert.equal(implementation.payload.apply_execution_surface, "implementation");
+  assert.equal(implementation.payload.worker_state, "ready", JSON.stringify(implementation.payload.block_reasons ?? []));
+  assert.deepEqual(implementation.payload.declared_task_write_scope, ["src/feature.ts"]);
+
+  const noTddImplementationEvidences = prepareProposeComplete(fx, {
+    tasksText:
+      "- [ ] TASK-001 Implement without TDD\n" +
+      "  - invariant_refs: INV-001\n" +
+      "  - test_refs: TEST-001\n" +
+      "  - write_scope: src/feature.ts\n" +
+      "  - tdd_required: false\n" +
+      "  - no_tdd_reason: mechanical-rename\n",
+  });
+  const noTddImplementation = withRuntime({
+    load_context: () => [status(fx), fx.repo, fx.change, noTddImplementationEvidences],
+    dirty_worktree_paths: () => [],
+  }, () => captureMainJson([
+    "apply-executor-packet",
+    "--change", "demo-change",
+    "--task-id", "TASK-001",
+    "--format", "agent",
+  ]));
+  assert.equal(noTddImplementation.exitCode, 0);
+  assert.equal(noTddImplementation.payload.apply_execution_surface, "implementation");
+  assert.equal(noTddImplementation.payload.worker_state, "ready", JSON.stringify(noTddImplementation.payload.block_reasons ?? []));
+  assert.equal(noTddImplementation.payload.chain_activation_template.pre_edit_proof_kind, "no_tdd_declared");
+  assert.deepEqual(noTddImplementation.payload.chain_activation_template.pre_edit_evidence_refs, []);
+  assert.equal(noTddImplementation.payload.chain_activation_template.tdd_required, false);
+  assert.equal(noTddImplementation.payload.chain_activation_template.no_tdd_reason, "mechanical-rename");
+
+  const noCodeEvidences = prepareProposeComplete(fx, {
+    tasksText:
+      "- [ ] TASK-001 No code\n" +
+      "  - invariant_refs: INV-001\n" +
+      "  - test_refs: TEST-001\n" +
+      "  - tdd_required: false\n" +
+      "  - no_tdd_reason: non-executable-spec-change\n" +
+      "  - apply_execution_surface: no_code\n",
+  });
+  const noCode = withRuntime({
+    load_context: () => [status(fx), fx.repo, fx.change, noCodeEvidences],
+    dirty_worktree_paths: () => [],
+  }, () => captureMainJson([
+    "apply-executor-packet",
+    "--change", "demo-change",
+    "--task-id", "TASK-001",
+    "--format", "agent",
+  ]));
+  assert.equal(noCode.exitCode, 0);
+  assert.equal(noCode.payload.apply_execution_surface, "no_code");
+  assert.ok(noCode.payload.blockers.includes("executor_handoff_not_required"), JSON.stringify(noCode.payload.block_reasons));
 });
 
 withFixture("apply-test-packet blocks missing or untrusted test contract commands", (fx) => {
@@ -1076,6 +1314,23 @@ withFixture("non-chain test-runner red evidence remains valid for task_edit", (f
   assert.equal(decision.allowed, true, JSON.stringify(decision.block_reasons));
 });
 
+withFixture("non-chain test-runner characterization evidence remains valid for task_edit", (fx) => {
+  const evidences = prepareProposeComplete(fx, {
+    tasksText:
+      "- [ ] TASK-001 Refactor\n" +
+      "  - invariant_refs: INV-001\n" +
+      "  - test_refs: TEST-001\n" +
+      "  - write_scope: src/feature.ts\n" +
+      "  - tdd_mode: behavior-preserving-refactor\n",
+  });
+  const characterization = workerCharacterizationEvidence(fx);
+  const problems = guard.validate_evidence_schema(characterization, "demo-change", fx.change, fx.repo);
+  assert.equal(codes(problems).includes("test_run_worker_ref_missing"), false, JSON.stringify(problems));
+  assert.equal(codes(problems).includes("test_run_runner_origin_invalid"), false, JSON.stringify(problems));
+  const decision = guard.check_task_edit("demo-change", status(fx), fx.change, [...evidences, characterization], "TASK-001");
+  assert.equal(decision.allowed, true, JSON.stringify(decision.block_reasons));
+});
+
 withFixture("worker test_run evidence must match accepted report and raw transcript refs", (fx) => {
   const green = workerGreenEvidence(fx, "CHAIN-001");
   const okProblems = guard.validate_evidence_schema(green, "demo-change", fx.change, fx.repo);
@@ -1118,9 +1373,8 @@ withFixture("apply worker downstream packets validate active chain and typed ref
     tasksText: "- [ ] TASK-001 Implement\n  - invariant_refs: INV-001\n  - test_refs: TEST-001\n  - write_scope: src/feature.ts\n",
   });
   writeText(join(fx.change, DEFAULT_RUN_LOG), "test run output: TEST-001 executed\n");
-  const red = redEvidence("TASK-001", "TEST-001", ["INV-001"], {
+  const red = workerRedEvidence(fx, {
     evidence_id: "EV-red-worker",
-    phase: "red",
   });
   const green = workerGreenEvidence(fx, chainId, { test_runner_ref_basename: "test-runner-green-main" });
   const chain = activeChainEvidence(chainId);
@@ -1450,9 +1704,9 @@ withFixture("apply worker downstream packets validate active chain and typed ref
   assert.equal(verifyForgedGreenRef.payload.worker_state, "blocked");
   assert.ok(verifyForgedGreenRef.payload.blockers.includes("pinned_evidence_ref_invalid"));
 
-  const unrelatedRed = redEvidence("TASK-001", "TEST-001", ["INV-001"], {
+  const unrelatedRed = workerRedEvidence(fx, {
     evidence_id: "EV-red-unrelated",
-    phase: "red",
+    test_id: "TEST-UNRELATED",
   });
   const verifyWrongPreEdit = withRuntime({
     load_context: () => [status(fx), fx.repo, fx.change, [...base, red, unrelatedRed, green, chain]],
@@ -1467,7 +1721,7 @@ withFixture("apply worker downstream packets validate active chain and typed ref
     "--red-test-run-evidence-ref", "EV-red-unrelated",
     "--format", "agent",
   ]));
-  assert.equal(verifyWrongPreEdit.payload.worker_state, "blocked");
+  assert.equal(verifyWrongPreEdit.payload.worker_state, "blocked", JSON.stringify(verifyWrongPreEdit.payload));
   assert.ok(verifyWrongPreEdit.payload.blockers.includes("pinned_evidence_ref_invalid"));
 
   const verifyMissingObservedCodeReview = withRuntime({
@@ -1571,16 +1825,16 @@ withFixture("apply worker downstream packets validate active chain and typed ref
 
 withFixture("apply worker chain terminal marker must be same-chain and pinned", (fx) => {
   const chainId = "CHAIN-001";
+  const baseActive = activeChainEvidence(chainId);
   const evidences = [
     ...prepareProposeComplete(fx, {
       tasksText: "- [ ] TASK-001 Implement\n  - invariant_refs: INV-001\n  - test_refs: TEST-001\n  - write_scope: src/feature.ts\n",
     }),
-    redEvidence("TASK-001", "TEST-001", ["INV-001"], {
+    workerRedEvidence(fx, {
       evidence_id: "EV-red-worker",
-      phase: "red",
     }),
     workerGreenEvidence(fx, chainId),
-    activeChainEvidence(chainId),
+    baseActive,
   ];
 
   const forgedClosed = passEvidence("task_complete", "apply_worker_chain", {
@@ -1742,36 +1996,42 @@ withFixture("apply worker chain terminal marker must be same-chain and pinned", 
   assert.equal(restoredDecision.allowed, false);
   assert.ok(codes(restoredDecision.block_reasons).includes("apply_worker_chain_terminal_invalid"), JSON.stringify(restoredDecision.block_reasons));
 
+  const takeoverBaselineRef = pinnedStatusReportRef(fx, chainId);
   const baselineAbandoned = passEvidence("task_complete", "apply_worker_chain", {
     evidence_id: "EV-chain-abandoned-baseline",
     task_id: "TASK-001",
-	    apply_worker_chain_id: chainId,
-	    chain_state: "abandoned",
-	    serial_takeover_baseline_ref: pinnedStatusReportRef(fx, chainId),
-	    successor_green_evidence_refs: ["EV-green-serial-after-abandoned"],
-	  });
+    apply_worker_chain_id: chainId,
+    chain_state: "abandoned",
+    serial_takeover_baseline_ref: takeoverBaselineRef,
+    successor_green_evidence_refs: ["EV-green-serial-after-abandoned"],
+  });
+  const baselineAbandonedWithConfirmationId = {
+    ...baselineAbandoned,
+    evidence_id: "EV-chain-abandoned-baseline-confirmed",
+    takeover_confirmation_evidence_id: "EV-serial-takeover-confirmation",
+  };
   const baselineDecision = guard.check_task_complete("demo-change", status(fx), fx.change, [...evidences, baselineAbandoned], "TASK-001");
-	  assert.equal(baselineDecision.allowed, false);
-	  assert.ok(codes(baselineDecision.block_reasons).includes("missing_green_evidence"), JSON.stringify(baselineDecision.block_reasons));
+  assert.equal(baselineDecision.allowed, false);
+  assert.ok(codes(baselineDecision.block_reasons).includes("apply_worker_chain_terminal_invalid"), JSON.stringify(baselineDecision.block_reasons));
 
-	  const oldSerialSameFingerprint = greenEvidence("TASK-001", "TEST-001", ["INV-001"], {
-	    evidence_id: "EV-green-old-serial-same-fingerprint",
-	    runner_origin: "main-thread",
-	    implementation_fingerprint: withRuntime(
-	      { dirty_worktree_paths: () => [] },
-	      () => guard.apply_worker_implementation_fingerprint(fx.repo, fx.change),
-	    ),
-	  });
-	  const baselineWithOldSerialDecision = guard.check_task_complete("demo-change", status(fx), fx.change, [
-	    ...evidences,
-	    baselineAbandoned,
-	    oldSerialSameFingerprint,
-	  ], "TASK-001");
-	  assert.equal(baselineWithOldSerialDecision.allowed, false);
-	  assert.ok(codes(baselineWithOldSerialDecision.block_reasons).includes("apply_worker_chain_takeover_green_mismatch"), JSON.stringify(baselineWithOldSerialDecision.block_reasons));
+  const oldSerialSameFingerprint = greenEvidence("TASK-001", "TEST-001", ["INV-001"], {
+    evidence_id: "EV-green-old-serial-same-fingerprint",
+    runner_origin: "main-thread",
+    implementation_fingerprint: withRuntime(
+      { dirty_worktree_paths: () => [] },
+      () => guard.apply_worker_implementation_fingerprint(fx.repo, fx.change),
+    ),
+  });
+  const baselineWithOldSerialDecision = guard.check_task_complete("demo-change", status(fx), fx.change, [
+    ...evidences,
+    baselineAbandonedWithConfirmationId,
+    oldSerialSameFingerprint,
+  ], "TASK-001");
+  assert.equal(baselineWithOldSerialDecision.allowed, false);
+  assert.ok(codes(baselineWithOldSerialDecision.block_reasons).includes("apply_worker_chain_terminal_invalid"), JSON.stringify(baselineWithOldSerialDecision.block_reasons));
 
-	  const serialAfterAbandoned = greenEvidence("TASK-001", "TEST-001", ["INV-001"], {
-	    evidence_id: "EV-green-serial-after-abandoned",
+  const serialAfterAbandoned = greenEvidence("TASK-001", "TEST-001", ["INV-001"], {
+    evidence_id: "EV-green-serial-after-abandoned",
     runner_origin: "main-thread",
     implementation_fingerprint: withRuntime(
       { dirty_worktree_paths: () => [] },
@@ -1780,10 +2040,71 @@ withFixture("apply worker chain terminal marker must be same-chain and pinned", 
   });
   const baselineWithSerialDecision = guard.check_task_complete("demo-change", status(fx), fx.change, [
     ...evidences,
-    baselineAbandoned,
+    baselineAbandonedWithConfirmationId,
     serialAfterAbandoned,
   ], "TASK-001");
-  assert.equal(baselineWithSerialDecision.allowed, true, JSON.stringify(baselineWithSerialDecision.block_reasons));
+  assert.equal(baselineWithSerialDecision.allowed, false);
+  assert.ok(codes(baselineWithSerialDecision.block_reasons).includes("apply_worker_chain_terminal_invalid"), JSON.stringify(baselineWithSerialDecision.block_reasons));
+
+  const uncoveredTakeoverConfirmation = serialTakeoverConfirmation(baseActive, takeoverBaselineRef, {
+    evidence_id: "EV-serial-takeover-confirmation-uncovered",
+    confirmed_refs: [String(takeoverBaselineRef.path ?? "")],
+  });
+  const uncoveredTakeoverDecision = guard.check_task_complete("demo-change", status(fx), fx.change, [
+    ...evidences,
+    {
+      ...baselineAbandoned,
+      evidence_id: "EV-chain-abandoned-baseline-uncovered",
+      takeover_confirmation_evidence_id: "EV-serial-takeover-confirmation-uncovered",
+    },
+    serialAfterAbandoned,
+    uncoveredTakeoverConfirmation,
+  ], "TASK-001");
+  assert.equal(uncoveredTakeoverDecision.allowed, false);
+  assert.ok(codes(uncoveredTakeoverDecision.block_reasons).includes("apply_worker_chain_terminal_invalid"), JSON.stringify(uncoveredTakeoverDecision.block_reasons));
+
+  const wrongGateTakeoverConfirmation = serialTakeoverConfirmation(baseActive, takeoverBaselineRef, {
+    evidence_id: "EV-serial-takeover-confirmation-wrong-gate",
+    gate: "branch_handling",
+  });
+  const wrongGateTakeoverDecision = guard.check_task_complete("demo-change", status(fx), fx.change, [
+    ...evidences,
+    {
+      ...baselineAbandoned,
+      evidence_id: "EV-chain-abandoned-baseline-wrong-gate",
+      takeover_confirmation_evidence_id: "EV-serial-takeover-confirmation-wrong-gate",
+    },
+    wrongGateTakeoverConfirmation,
+  ], "TASK-001");
+  assert.equal(wrongGateTakeoverDecision.allowed, false);
+  assert.ok(codes(wrongGateTakeoverDecision.block_reasons).includes("apply_worker_chain_terminal_invalid"), JSON.stringify(wrongGateTakeoverDecision.block_reasons));
+
+  const failedTakeoverConfirmation = serialTakeoverConfirmation(baseActive, takeoverBaselineRef, {
+    evidence_id: "EV-serial-takeover-confirmation-failed",
+    status: "fail",
+  });
+  const failedTakeoverDecision = guard.check_task_complete("demo-change", status(fx), fx.change, [
+    ...evidences,
+    {
+      ...baselineAbandoned,
+      evidence_id: "EV-chain-abandoned-baseline-failed-confirmation",
+      takeover_confirmation_evidence_id: "EV-serial-takeover-confirmation-failed",
+    },
+    failedTakeoverConfirmation,
+  ], "TASK-001");
+  assert.equal(failedTakeoverDecision.allowed, false);
+  assert.ok(codes(failedTakeoverDecision.block_reasons).includes("apply_worker_chain_terminal_invalid"), JSON.stringify(failedTakeoverDecision.block_reasons));
+
+  const takeoverConfirmation = serialTakeoverConfirmation(baseActive, takeoverBaselineRef);
+  const confirmedTakeoverDecision = guard.check_task_complete("demo-change", status(fx), fx.change, [
+    ...evidences,
+    baselineAbandonedWithConfirmationId,
+    serialAfterAbandoned,
+    takeoverConfirmation,
+  ], "TASK-001");
+  assert.equal(confirmedTakeoverDecision.allowed, false);
+  assert.equal(codes(confirmedTakeoverDecision.block_reasons).includes("apply_worker_chain_terminal_invalid"), false, JSON.stringify(confirmedTakeoverDecision.block_reasons));
+  assert.ok(codes(confirmedTakeoverDecision.block_reasons).includes("missing_green_evidence"), JSON.stringify(confirmedTakeoverDecision.block_reasons));
 
   const restoredCurrentFingerprint = withRuntime({
     dirty_worktree_paths: () => [],
@@ -1824,8 +2145,37 @@ withFixture("apply worker chain terminal marker must be same-chain and pinned", 
     restoredGreen,
     restoredActive,
     restoredBaselineAbandoned,
+	  ], "TASK-001"));
+  assert.equal(restoredBaselineDecision.allowed, false);
+  assert.ok(codes(restoredBaselineDecision.block_reasons).includes("missing_green_evidence"), JSON.stringify(restoredBaselineDecision.block_reasons));
+
+  const mixedRestoredSerialBaselineRef = pinnedStatusReportRef(fx, "CHAIN-RESTORED");
+  const mixedRestoredSerialAbandoned = passEvidence("task_complete", "apply_worker_chain", {
+    evidence_id: "EV-chain-abandoned-restored-and-serial",
+    task_id: "TASK-001",
+    apply_worker_chain_id: "CHAIN-RESTORED",
+    chain_state: "abandoned",
+    restored_implementation_fingerprint: restoredCurrentFingerprint,
+    serial_takeover_baseline_ref: mixedRestoredSerialBaselineRef,
+    takeover_confirmation_evidence_id: "EV-serial-takeover-restored",
+  });
+  const mixedRestoredSerialProblems = guard.validate_evidence_schema(mixedRestoredSerialAbandoned, "demo-change", fx.change, fx.repo);
+  assert.ok(codes(mixedRestoredSerialProblems).includes("apply_worker_chain_invalid"), JSON.stringify(mixedRestoredSerialProblems));
+  const mixedRestoredSerialDecision = withRuntime({
+    dirty_worktree_paths: () => [],
+  }, () => guard.check_task_complete("demo-change", status(fx), fx.change, [
+    ...prepareProposeComplete(fx, {
+      tasksText: "- [ ] TASK-001 Implement\n  - invariant_refs: INV-001\n  - test_refs: TEST-001\n  - write_scope: src/feature.ts\n",
+    }),
+    restoredRed,
+    restoredActive,
+    mixedRestoredSerialAbandoned,
+    serialTakeoverConfirmation(restoredActive, mixedRestoredSerialBaselineRef, {
+      evidence_id: "EV-serial-takeover-restored",
+    }),
   ], "TASK-001"));
-  assert.equal(restoredBaselineDecision.allowed, true, JSON.stringify(restoredBaselineDecision.block_reasons));
+  assert.equal(mixedRestoredSerialDecision.allowed, false);
+  assert.ok(codes(mixedRestoredSerialDecision.block_reasons).includes("apply_worker_chain_terminal_invalid"), JSON.stringify(mixedRestoredSerialDecision.block_reasons));
 
   const semanticChainId = "CHAIN-PRE-SEMANTIC";
   const semanticGreen = workerGreenEvidence(fx, semanticChainId, {
@@ -1839,6 +2189,60 @@ withFixture("apply worker chain terminal marker must be same-chain and pinned", 
   const semanticDecision = guard.check_task_complete("demo-change", status(fx), fx.change, [...evidences, semanticGreen, semanticActive, semanticClosed], "TASK-001");
   assert.equal(semanticDecision.allowed, false);
   assert.ok(codes(semanticDecision.block_reasons).includes("apply_worker_chain_terminal_invalid"), JSON.stringify(semanticDecision.block_reasons));
+
+  const mainThreadPreEditChainId = "CHAIN-MAIN-PRE";
+  const mainThreadPreEditRed = redEvidence("TASK-001", "TEST-001", ["INV-001"], {
+    evidence_id: "EV-red-main-thread-pre-edit",
+    phase: "red",
+    runner_origin: "main-thread",
+  });
+  const mainThreadPreEditGreen = workerGreenEvidence(fx, mainThreadPreEditChainId, {
+    evidence_id: "EV-green-main-thread-pre-edit",
+    test_runner_ref_basename: "test-runner-main-thread-pre-edit",
+  });
+  const mainThreadPreEditActive = activeChainEvidence(mainThreadPreEditChainId, ["EV-red-main-thread-pre-edit"]);
+  const mainThreadPreEditClosed = closedChainEvidence(fx, mainThreadPreEditChainId, "EV-green-main-thread-pre-edit", {
+    evidence_id: "EV-chain-closed-main-thread-pre-edit",
+  }, [...evidences, mainThreadPreEditRed, mainThreadPreEditGreen, mainThreadPreEditActive]);
+  const mainThreadPreEditDecision = guard.check_task_complete("demo-change", status(fx), fx.change, [
+    ...evidences,
+    mainThreadPreEditRed,
+    mainThreadPreEditGreen,
+    mainThreadPreEditActive,
+    mainThreadPreEditClosed,
+  ], "TASK-001");
+  assert.equal(mainThreadPreEditDecision.allowed, false);
+  assert.ok(codes(mainThreadPreEditDecision.block_reasons).includes("apply_worker_chain_terminal_invalid"), JSON.stringify(mainThreadPreEditDecision.block_reasons));
+
+  const mainThreadCharacterizationChainId = "CHAIN-MAIN-CHAR";
+  const mainThreadPreEditCharacterization = passEvidence("task_edit", "test_run", {
+    evidence_id: "EV-characterization-main-thread-pre-edit",
+    task_id: "TASK-001",
+    test_id: "TEST-001",
+    invariant_refs: ["INV-001"],
+    semantic_status: "expected_success",
+    phase: "characterization",
+    runner_origin: "main-thread",
+    raw_log_refs: [DEFAULT_RUN_LOG],
+    result_summary: "main-thread characterization must not satisfy worker pre-edit proof",
+  });
+  const mainThreadCharacterizationGreen = workerGreenEvidence(fx, mainThreadCharacterizationChainId, {
+    evidence_id: "EV-green-main-thread-characterization",
+    test_runner_ref_basename: "test-runner-main-thread-characterization",
+  });
+  const mainThreadCharacterizationActive = activeChainEvidence(mainThreadCharacterizationChainId, ["EV-characterization-main-thread-pre-edit"]);
+  const mainThreadCharacterizationClosed = closedChainEvidence(fx, mainThreadCharacterizationChainId, "EV-green-main-thread-characterization", {
+    evidence_id: "EV-chain-closed-main-thread-characterization",
+  }, [...evidences, mainThreadPreEditCharacterization, mainThreadCharacterizationGreen, mainThreadCharacterizationActive]);
+  const mainThreadCharacterizationDecision = guard.check_task_complete("demo-change", status(fx), fx.change, [
+    ...evidences,
+    mainThreadPreEditCharacterization,
+    mainThreadCharacterizationGreen,
+    mainThreadCharacterizationActive,
+    mainThreadCharacterizationClosed,
+  ], "TASK-001");
+  assert.equal(mainThreadCharacterizationDecision.allowed, false);
+  assert.ok(codes(mainThreadCharacterizationDecision.block_reasons).includes("apply_worker_chain_terminal_invalid"), JSON.stringify(mainThreadCharacterizationDecision.block_reasons));
 
   const staleObservedCodeReviewRef = pinnedWorkerReportObject(fx, "code-reviewer", chainId, {
     ref_basename: "code-reviewer-closed-stale-observed",
@@ -2028,13 +2432,12 @@ withFixture("apply worker chain completion binds every GREEN ref to the same clo
     "- `test_command`: npm test -- TEST-002",
     "",
   ].join("\n");
-  const red = redEvidence("TASK-001", "TEST-001", ["INV-001"], {
+  const red = workerRedEvidence(fx, {
     evidence_id: "EV-red-worker",
-    phase: "red",
   });
-  const redTwo = redEvidence("TASK-001", "TEST-002", ["INV-001"], {
+  const redTwo = workerRedEvidence(fx, {
     evidence_id: "EV-red-worker-2",
-    phase: "red",
+    test_id: "TEST-002",
   });
   const greenOne = workerGreenEvidence(fx, chainId, {
     evidence_id: "EV-green-worker-1",
@@ -2145,7 +2548,364 @@ withFixture("apply worker chain completion binds every GREEN ref to the same clo
   assert.ok(codes(mixedDecision.block_reasons).includes("apply_worker_chain_terminal_invalid"), JSON.stringify(mixedDecision.block_reasons));
 });
 
-withFixture("abandoned apply worker takeover only counts declared successor serial GREEN coverage", (fx) => {
+withFixture("no-TDD implementation completion requires closed alternative worker chain proof", (fx) => {
+  const chainId = "CHAIN-NO-TDD-ALT";
+  const active = activeChainEvidence(chainId, [], {
+    pre_edit_proof_kind: "no_tdd_declared",
+    apply_execution_surface: "implementation",
+    tdd_required: false,
+    no_tdd_reason: "mechanical-rename",
+  });
+  const alternative = alternativeVerificationEvidence("TASK-001", {
+    evidence_id: "EV-alt-worker",
+  });
+  const evidences = [
+    ...prepareProposeComplete(fx, {
+      tasksText:
+        "- [ ] TASK-001 Implement without TDD\n" +
+        "  - invariant_refs: INV-001\n" +
+        "  - test_refs: TEST-001\n" +
+        "  - write_scope: src/feature.ts\n" +
+        "  - tdd_required: false\n" +
+        "  - no_tdd_reason: mechanical-rename\n",
+    }),
+    alternative,
+    active,
+  ];
+  const executorRef = writePinnedWorkerReportRef(fx, "executor", chainId, {
+    ref_basename: "executor-no-tdd-alt",
+    input_ref_digest: guard.apply_worker_executor_input_ref_digest(evidences, active),
+  });
+  const executorRefObject = readJson(join(fx.change, executorRef));
+  const codeReviewRef = writePinnedWorkerReportRef(fx, "code-reviewer", chainId, {
+    ref_basename: "code-reviewer-no-tdd-alt",
+    input_ref_digest: guard.worker_input_ref_digest([executorRefObject]),
+    executor_report_ref: executorRefObject,
+  });
+
+  const verifyReady = withRuntime({
+    load_context: () => [status(fx), fx.repo, fx.change, evidences],
+    dirty_worktree_paths: () => [],
+  }, () => captureMainJson([
+    "apply-verify-packet",
+    "--change", "demo-change",
+    "--task-id", "TASK-001",
+    "--executor-report-ref", executorRef,
+    "--task-code-review-report-ref", codeReviewRef,
+    "--alternative-verification-evidence-ref", "EV-alt-worker",
+    "--format", "agent",
+  ]));
+  assert.equal(verifyReady.payload.worker_state, "ready", JSON.stringify(verifyReady.payload));
+  assert.equal(verifyReady.payload.completion_proof_kind, "alternative_verification");
+  assert.equal(verifyReady.payload.pre_edit_proof_kind, "no_tdd_declared");
+  assert.equal(verifyReady.payload.tdd_required, false);
+  assert.equal(verifyReady.payload.apply_execution_surface, "implementation");
+  assert.ok(verifyReady.payload.expected_freshness_fingerprint?.fingerprint_digest);
+  assert.equal(typeof verifyReady.payload.expected_verifier_input_ref_digest, "string");
+  assert.deepEqual(verifyReady.payload.green_test_run_evidence_refs, []);
+  assert.deepEqual(verifyReady.payload.red_test_run_evidence_refs, []);
+
+  const validClosed = withRuntime({
+    dirty_worktree_paths: () => [],
+  }, () => closedChainEvidence(fx, chainId, "EV-unused-green", {
+    completion_proof_kind: "alternative_verification",
+    alternative_verification_evidence_refs: ["EV-alt-worker"],
+  }, evidences));
+  const validDecision = withRuntime({
+    dirty_worktree_paths: () => [],
+  }, () => guard.check_task_complete("demo-change", status(fx), fx.change, [...evidences, validClosed], "TASK-001"));
+  assert.equal(validDecision.allowed, true, JSON.stringify(validDecision.block_reasons));
+
+  const supersededClosedDecision = withRuntime({
+    dirty_worktree_paths: () => [],
+  }, () => guard.check_task_complete("demo-change", status(fx), fx.change, [...evidences, validClosed, supersededEvidence(String(validClosed.evidence_id))], "TASK-001"));
+  assert.equal(supersededClosedDecision.allowed, false, JSON.stringify(supersededClosedDecision));
+  assert.ok(codes(supersededClosedDecision.block_reasons).includes("missing_alternative_verification"), JSON.stringify(supersededClosedDecision.block_reasons));
+
+  const metadataMismatchChainId = "CHAIN-NO-TDD-METADATA-MISMATCH";
+  const metadataMismatchActive = activeChainEvidence(metadataMismatchChainId, [], {
+    pre_edit_proof_kind: "no_tdd_declared",
+    apply_execution_surface: "runtime_config",
+    tdd_required: false,
+    no_tdd_reason: "configuration-only",
+  });
+  const metadataMismatchContext = [
+    ...prepareProposeComplete(fx, {
+      tasksText:
+        "- [ ] TASK-001 Implement without TDD\n" +
+        "  - invariant_refs: INV-001\n" +
+        "  - test_refs: TEST-001\n" +
+        "  - write_scope: src/feature.ts\n" +
+        "  - tdd_required: false\n" +
+        "  - no_tdd_reason: mechanical-rename\n",
+    }),
+    alternative,
+    metadataMismatchActive,
+  ];
+  const metadataMismatchClosed = withRuntime({
+    dirty_worktree_paths: () => [],
+  }, () => closedChainEvidence(fx, metadataMismatchChainId, "EV-unused-green", {
+    completion_proof_kind: "alternative_verification",
+    alternative_verification_evidence_refs: ["EV-alt-worker"],
+  }, metadataMismatchContext));
+  const metadataMismatchDecision = withRuntime({
+    dirty_worktree_paths: () => [],
+  }, () => guard.check_task_complete("demo-change", status(fx), fx.change, [...metadataMismatchContext, metadataMismatchClosed], "TASK-001"));
+  assert.equal(metadataMismatchDecision.allowed, false, JSON.stringify(metadataMismatchDecision));
+  assert.ok(codes(metadataMismatchDecision.block_reasons).includes("apply_worker_chain_active_invalid"), JSON.stringify(metadataMismatchDecision.block_reasons));
+
+  const schemaProblems = guard.validate_evidence_schema(validClosed, "demo-change", fx.change, fx.repo);
+  assert.equal(codes(schemaProblems).includes("apply_worker_chain_invalid"), false, JSON.stringify(schemaProblems));
+  assert.equal(codes(schemaProblems).includes("pinned_artifact_ref_invalid"), false, JSON.stringify(schemaProblems));
+
+  const assertInvalidClosed = (label: string, context: JsonMap[], closed: JsonMap): void => {
+    const decision = withRuntime({
+      dirty_worktree_paths: () => [],
+    }, () => guard.check_task_complete("demo-change", status(fx), fx.change, [...context, closed], "TASK-001"));
+    assert.equal(decision.allowed, false, label);
+    assert.ok(codes(decision.block_reasons).includes("apply_worker_chain_terminal_invalid"), `${label}: ${JSON.stringify(decision.block_reasons)}`);
+  };
+
+  const failAlternative = alternativeVerificationEvidence("TASK-001", {
+    evidence_id: "EV-alt-fail",
+    status: "fail",
+  });
+  assertInvalidClosed("fail alternative ref blocks", [...evidences, failAlternative], withRuntime({
+    dirty_worktree_paths: () => [],
+  }, () => closedChainEvidence(fx, chainId, "EV-unused-green", {
+    evidence_id: "EV-chain-closed-alt-fail-ref",
+    completion_proof_kind: "alternative_verification",
+    alternative_verification_evidence_refs: ["EV-alt-fail"],
+  }, [...evidences, failAlternative])));
+
+  const wrongTaskAlternative = alternativeVerificationEvidence("TASK-OTHER", {
+    evidence_id: "EV-alt-wrong-task",
+  });
+  assertInvalidClosed("wrong task alternative ref blocks", [...evidences, wrongTaskAlternative], withRuntime({
+    dirty_worktree_paths: () => [],
+  }, () => closedChainEvidence(fx, chainId, "EV-unused-green", {
+    evidence_id: "EV-chain-closed-alt-wrong-task",
+    completion_proof_kind: "alternative_verification",
+    alternative_verification_evidence_refs: ["EV-alt-wrong-task"],
+  }, [...evidences, wrongTaskAlternative])));
+
+  const wrongKindAlternative = passEvidence("task_complete", "review", {
+    evidence_id: "EV-alt-wrong-kind",
+    task_id: "TASK-001",
+  });
+  assertInvalidClosed("wrong kind alternative ref blocks", [...evidences, wrongKindAlternative], withRuntime({
+    dirty_worktree_paths: () => [],
+  }, () => closedChainEvidence(fx, chainId, "EV-unused-green", {
+    evidence_id: "EV-chain-closed-alt-wrong-kind",
+    completion_proof_kind: "alternative_verification",
+    alternative_verification_evidence_refs: ["EV-alt-wrong-kind"],
+  }, [...evidences, wrongKindAlternative])));
+
+  assertInvalidClosed("superseded alternative ref blocks", [...evidences, supersededEvidence("EV-alt-worker")], withRuntime({
+    dirty_worktree_paths: () => [],
+  }, () => closedChainEvidence(fx, chainId, "EV-unused-green", {
+    evidence_id: "EV-chain-closed-alt-superseded",
+    completion_proof_kind: "alternative_verification",
+    alternative_verification_evidence_refs: ["EV-alt-worker"],
+  }, [...evidences, supersededEvidence("EV-alt-worker")])));
+
+  const badVerifierRef = pinnedWorkerReportObject(fx, "verifier", chainId, {
+    ref_basename: "verifier-no-tdd-alt-bad-input",
+    observed_freshness_fingerprint: validClosed.observed_freshness_fingerprint,
+    input_ref_digest: "sha256:not-bound-to-alternative",
+    completion_proof_kind: "alternative_verification",
+    pre_edit_proof_kind: "no_tdd_declared",
+    green_test_run_evidence_refs: [],
+    red_test_run_evidence_refs: [],
+    characterization_test_run_evidence_refs: [],
+    alternative_verification_evidence_refs: ["EV-alt-worker"],
+    apply_execution_surface: "implementation",
+    tdd_required: false,
+    no_tdd_reason: "mechanical-rename",
+  });
+  assertInvalidClosed("verifier digest missing alternative binding blocks", evidences, {
+    ...validClosed,
+    evidence_id: "EV-chain-closed-alt-bad-verifier-input",
+    verifier_report_ref: badVerifierRef,
+  });
+});
+
+withFixture("no-TDD alternative worker chain proof-kind matrix fails closed", (fx) => {
+  const base = prepareProposeComplete(fx, {
+    tasksText:
+      "- [ ] TASK-001 Implement without TDD\n" +
+      "  - invariant_refs: INV-001\n" +
+      "  - test_refs: TEST-001\n" +
+      "  - write_scope: src/feature.ts\n" +
+      "  - tdd_required: false\n" +
+      "  - no_tdd_reason: mechanical-rename\n",
+  });
+  const alternative = alternativeVerificationEvidence("TASK-001", {
+    evidence_id: "EV-alt-matrix",
+  });
+  const red = workerRedEvidence(fx, {
+    evidence_id: "EV-red-matrix",
+  });
+  const green = workerGreenEvidence(fx, "CHAIN-GREEN-NO-TDD", {
+    evidence_id: "EV-green-matrix",
+  });
+  const noTddActive = activeChainEvidence("CHAIN-GREEN-NO-TDD", [], {
+    pre_edit_proof_kind: "no_tdd_declared",
+    apply_execution_surface: "implementation",
+    tdd_required: false,
+    no_tdd_reason: "mechanical-rename",
+  });
+  const greenWithNoTddActive = withRuntime({
+    dirty_worktree_paths: () => [],
+  }, () => closedChainEvidence(fx, "CHAIN-GREEN-NO-TDD", "EV-green-matrix", {}, [...base, alternative, red, green, noTddActive]));
+  const greenWithNoTddDecision = withRuntime({
+    dirty_worktree_paths: () => [],
+  }, () => guard.check_task_complete("demo-change", status(fx), fx.change, [...base, alternative, red, green, noTddActive, greenWithNoTddActive], "TASK-001"));
+  assert.equal(greenWithNoTddDecision.allowed, false);
+  assert.ok(codes(greenWithNoTddDecision.block_reasons).includes("apply_worker_chain_terminal_invalid"), JSON.stringify(greenWithNoTddDecision.block_reasons));
+
+  const redOrCharacterizationActive = activeChainEvidence("CHAIN-ALT-RED-PRE", ["EV-red-matrix"]);
+  const altWithRedPreEdit = withRuntime({
+    dirty_worktree_paths: () => [],
+  }, () => closedChainEvidence(fx, "CHAIN-ALT-RED-PRE", "EV-unused-green", {
+    completion_proof_kind: "alternative_verification",
+    alternative_verification_evidence_refs: ["EV-alt-matrix"],
+  }, [...base, alternative, red, redOrCharacterizationActive]));
+  const altWithRedPreEditDecision = withRuntime({
+    dirty_worktree_paths: () => [],
+  }, () => guard.check_task_complete("demo-change", status(fx), fx.change, [...base, alternative, red, redOrCharacterizationActive, altWithRedPreEdit], "TASK-001"));
+  assert.equal(altWithRedPreEditDecision.allowed, false);
+  assert.ok(codes(altWithRedPreEditDecision.block_reasons).includes("apply_worker_chain_terminal_invalid"), JSON.stringify(altWithRedPreEditDecision.block_reasons));
+
+  const tddTrueActive = activeChainEvidence("CHAIN-ALT-TDD-TRUE", [], {
+    pre_edit_proof_kind: "no_tdd_declared",
+    apply_execution_surface: "implementation",
+    tdd_required: true,
+    no_tdd_reason: "mechanical-rename",
+  });
+  const altWithTddTrue = withRuntime({
+    dirty_worktree_paths: () => [],
+  }, () => closedChainEvidence(fx, "CHAIN-ALT-TDD-TRUE", "EV-unused-green", {
+    completion_proof_kind: "alternative_verification",
+    alternative_verification_evidence_refs: ["EV-alt-matrix"],
+  }, [...base, alternative, tddTrueActive]));
+  const altWithTddTrueDecision = withRuntime({
+    dirty_worktree_paths: () => [],
+  }, () => guard.check_task_complete("demo-change", status(fx), fx.change, [...base, alternative, tddTrueActive, altWithTddTrue], "TASK-001"));
+  assert.equal(altWithTddTrueDecision.allowed, false);
+  assert.ok(codes(altWithTddTrueDecision.block_reasons).includes("apply_worker_chain_terminal_invalid"), JSON.stringify(altWithTddTrueDecision.block_reasons));
+
+  const noTddNonEmptyPreEditActive = activeChainEvidence("CHAIN-ALT-NONEMPTY-PRE", ["EV-red-matrix"], {
+    pre_edit_proof_kind: "no_tdd_declared",
+    apply_execution_surface: "implementation",
+    tdd_required: false,
+    no_tdd_reason: "mechanical-rename",
+  });
+  const altWithNonEmptyPreEdit = withRuntime({
+    dirty_worktree_paths: () => [],
+  }, () => closedChainEvidence(fx, "CHAIN-ALT-NONEMPTY-PRE", "EV-unused-green", {
+    completion_proof_kind: "alternative_verification",
+    alternative_verification_evidence_refs: ["EV-alt-matrix"],
+  }, [...base, alternative, red, noTddNonEmptyPreEditActive]));
+  const altWithNonEmptyPreEditDecision = withRuntime({
+    dirty_worktree_paths: () => [],
+  }, () => guard.check_task_complete("demo-change", status(fx), fx.change, [...base, alternative, red, noTddNonEmptyPreEditActive, altWithNonEmptyPreEdit], "TASK-001"));
+  assert.equal(altWithNonEmptyPreEditDecision.allowed, false);
+  assert.ok(codes(altWithNonEmptyPreEditDecision.block_reasons).includes("apply_worker_chain_terminal_invalid"), JSON.stringify(altWithNonEmptyPreEditDecision.block_reasons));
+});
+
+const noTddImplementationTasksText =
+  "- [ ] TASK-001 Implement without TDD\n" +
+  "  - invariant_refs: INV-001\n" +
+  "  - test_refs: TEST-001\n" +
+  "  - write_scope: src/feature.ts\n" +
+  "  - tdd_required: false\n" +
+  "  - no_tdd_reason: mechanical-rename\n";
+
+withFixture("no-TDD alternative closed chain requires non-empty alternative verification refs", (fx) => {
+  const chainId = "CHAIN-NO-TDD-EMPTY-ALT";
+  const active = activeChainEvidence(chainId, [], {
+    pre_edit_proof_kind: "no_tdd_declared",
+    apply_execution_surface: "implementation",
+    tdd_required: false,
+    no_tdd_reason: "mechanical-rename",
+  });
+  const context = [...prepareProposeComplete(fx, { tasksText: noTddImplementationTasksText }), active];
+  const emptyClosed = withRuntime({ dirty_worktree_paths: () => [] }, () =>
+    closedChainEvidence(fx, chainId, "EV-unused-green", {
+      completion_proof_kind: "alternative_verification",
+      alternative_verification_evidence_refs: [],
+    }, context));
+  const decision = withRuntime({ dirty_worktree_paths: () => [] }, () =>
+    guard.check_task_complete("demo-change", status(fx), fx.change, [...context, emptyClosed], "TASK-001"));
+  assert.equal(decision.allowed, false);
+  assert.ok(codes(decision.block_reasons).includes("apply_worker_chain_terminal_invalid"), JSON.stringify(decision.block_reasons));
+});
+
+withFixture("no-TDD alternative closed chain fails when code-review observed implementation fingerprint drifts", (fx) => {
+  const chainId = "CHAIN-NO-TDD-ALT-STALE-CR";
+  const active = activeChainEvidence(chainId, [], {
+    pre_edit_proof_kind: "no_tdd_declared",
+    apply_execution_surface: "implementation",
+    tdd_required: false,
+    no_tdd_reason: "mechanical-rename",
+  });
+  const alternative = alternativeVerificationEvidence("TASK-001", { evidence_id: "EV-alt-stale-cr" });
+  const context = [...prepareProposeComplete(fx, { tasksText: noTddImplementationTasksText }), alternative, active];
+  const executorRef = pinnedWorkerReportObject(fx, "executor", chainId, {
+    ref_basename: "executor-no-tdd-stale-cr",
+    input_ref_digest: guard.apply_worker_executor_input_ref_digest(context, active),
+  });
+  const staleCodeReviewRef = pinnedWorkerReportObject(fx, "code-reviewer", chainId, {
+    ref_basename: "code-reviewer-no-tdd-stale-cr",
+    input_ref_digest: guard.worker_input_ref_digest([executorRef]),
+    executor_report_ref: executorRef,
+    observed_implementation_fingerprint: { fingerprint_digest: "sha256:stale-alternative-implementation" },
+  });
+  const staleClosed = withRuntime({ dirty_worktree_paths: () => [] }, () =>
+    closedChainEvidence(fx, chainId, "EV-unused-green", {
+      completion_proof_kind: "alternative_verification",
+      alternative_verification_evidence_refs: ["EV-alt-stale-cr"],
+      task_code_review_report_ref: staleCodeReviewRef,
+    }, context));
+  const decision = withRuntime({ dirty_worktree_paths: () => [] }, () =>
+    guard.check_task_complete("demo-change", status(fx), fx.change, [...context, staleClosed], "TASK-001"));
+  assert.equal(decision.allowed, false);
+  assert.ok(codes(decision.block_reasons).includes("apply_worker_chain_terminal_invalid"), JSON.stringify(decision.block_reasons));
+});
+
+withFixture("green_tests verifier report rejects no_tdd_declared pre_edit_proof_kind", (fx) => {
+  const chainId = "CHAIN-GREEN-BAD-VERIFIER";
+  const red = workerRedEvidence(fx, { evidence_id: "EV-red-bad-verifier" });
+  const green = workerGreenEvidence(fx, chainId, { evidence_id: "EV-green-bad-verifier" });
+  const active = activeChainEvidence(chainId, ["EV-red-bad-verifier"]);
+  const context = [...prepareProposeComplete(fx), red, green, active];
+  const badVerifier = pinnedWorkerReportObject(fx, "verifier", chainId, {
+    ref_basename: "verifier-green-bad-pre-edit",
+    completion_proof_kind: "green_tests",
+    pre_edit_proof_kind: "no_tdd_declared",
+  });
+  const closedBadVerifier = withRuntime({ dirty_worktree_paths: () => [] }, () =>
+    closedChainEvidence(fx, chainId, "EV-green-bad-verifier", {
+      verifier_report_ref: badVerifier,
+    }, context));
+  const schemaProblems = guard.validate_evidence_schema(closedBadVerifier, "demo-change", fx.change, fx.repo);
+  assert.ok(codes(schemaProblems).includes("pinned_artifact_ref_invalid"), JSON.stringify(schemaProblems));
+
+  const correctVerifier = pinnedWorkerReportObject(fx, "verifier", chainId, {
+    ref_basename: "verifier-green-correct-pre-edit",
+    completion_proof_kind: "green_tests",
+    pre_edit_proof_kind: "red_or_characterization",
+  });
+  const closedCorrectVerifier = withRuntime({ dirty_worktree_paths: () => [] }, () =>
+    closedChainEvidence(fx, chainId, "EV-green-correct-verifier", {
+      verifier_report_ref: correctVerifier,
+    }, context));
+  const correctSchemaProblems = guard.validate_evidence_schema(closedCorrectVerifier, "demo-change", fx.change, fx.repo);
+  assert.equal(codes(correctSchemaProblems).includes("pinned_artifact_ref_invalid"), false, JSON.stringify(correctSchemaProblems));
+});
+
+withFixture("abandoned apply worker takeover does not complete with successor serial GREEN coverage", (fx) => {
   const chainId = "CHAIN-TAKEOVER-COVERAGE";
   const contract = [
     "## 测试覆盖矩阵",
@@ -2164,13 +2924,12 @@ withFixture("abandoned apply worker takeover only counts declared successor seri
     "- `test_command`: npm test -- TEST-002",
     "",
   ].join("\n");
-  const redOne = redEvidence("TASK-001", "TEST-001", ["INV-001"], {
+  const redOne = workerRedEvidence(fx, {
     evidence_id: "EV-red-takeover-1",
-    phase: "red",
   });
-  const redTwo = redEvidence("TASK-001", "TEST-002", ["INV-001"], {
+  const redTwo = workerRedEvidence(fx, {
     evidence_id: "EV-red-takeover-2",
-    phase: "red",
+    test_id: "TEST-002",
   });
   const active = activeChainEvidence(chainId, ["EV-red-takeover-1", "EV-red-takeover-2"]);
   const baselineRef = pinnedStatusReportRef(fx, chainId);
@@ -2206,6 +2965,11 @@ withFixture("abandoned apply worker takeover only counts declared successor seri
     chain_state: "abandoned",
     serial_takeover_baseline_ref: baselineRef,
     successor_green_evidence_refs: ["EV-green-takeover-successor-1"],
+    takeover_confirmation_evidence_id: "EV-serial-takeover-confirmation-partial",
+  });
+  const partialTakeoverConfirmation = serialTakeoverConfirmation(active, baselineRef, {
+    evidence_id: "EV-serial-takeover-confirmation-partial",
+    confirmed_refs: [String(active.evidence_id ?? "")],
   });
   const partialDecision = withRuntime({
     dirty_worktree_paths: () => [],
@@ -2214,14 +2978,19 @@ withFixture("abandoned apply worker takeover only counts declared successor seri
     partialTakeover,
     successorGreenOne,
     unlistedGreenTwo,
+    partialTakeoverConfirmation,
   ], "TASK-001"));
   assert.equal(partialDecision.allowed, false);
-  assert.ok(codes(partialDecision.block_reasons).includes("missing_declared_test_evidence"), JSON.stringify(partialDecision.block_reasons));
+  assert.ok(codes(partialDecision.block_reasons).includes("apply_worker_chain_terminal_invalid"), JSON.stringify(partialDecision.block_reasons));
 
   const completeTakeover = passEvidence("task_complete", "apply_worker_chain", {
     ...partialTakeover,
     evidence_id: "EV-chain-abandoned-takeover-complete",
     successor_green_evidence_refs: ["EV-green-takeover-successor-1", "EV-green-takeover-successor-2"],
+    takeover_confirmation_evidence_id: "EV-serial-takeover-confirmation-complete",
+  });
+  const completeTakeoverConfirmation = serialTakeoverConfirmation(active, baselineRef, {
+    evidence_id: "EV-serial-takeover-confirmation-complete",
   });
   const completeDecision = withRuntime({
     dirty_worktree_paths: () => [],
@@ -2230,8 +2999,11 @@ withFixture("abandoned apply worker takeover only counts declared successor seri
     completeTakeover,
     successorGreenOne,
     successorGreenTwo,
+    completeTakeoverConfirmation,
   ], "TASK-001"));
-  assert.equal(completeDecision.allowed, true, JSON.stringify(completeDecision.block_reasons));
+  assert.equal(completeDecision.allowed, false);
+  assert.equal(codes(completeDecision.block_reasons).includes("apply_worker_chain_terminal_invalid"), false, JSON.stringify(completeDecision.block_reasons));
+  assert.ok(codes(completeDecision.block_reasons).includes("missing_green_evidence"), JSON.stringify(completeDecision.block_reasons));
 });
 
 withFixture("apply worker fingerprints bind semantic inputs and dirty file content", (fx) => {
@@ -2580,6 +3352,57 @@ withFixture("review-packet supports separate critic source guidance and verifica
     assert.equal(invalidDisclosureKind.exitCode, 2);
     assert.equal(invalidDisclosureKind.payload.error_code, "guard_error");
     assert.match(invalidDisclosureKind.payload.message, /--kind is only supported for review_complete role lanes/u);
+  });
+});
+
+withFixture("review-packet exposes nested findings contract for disclosure review lanes", (fx) => {
+  const evidences = [
+    ...exploreConfirmedEvidences(fx),
+  ];
+  withRuntime({
+    load_context: () => [status(fx), fx.repo, fx.change, evidences],
+  }, () => {
+    const packet = captureMainJson([
+      "review-packet",
+      "--change", "demo-change",
+      "--gate", "proposal_reviewed",
+      "--role", "critic",
+      "--round", "1",
+      "--format", "agent",
+    ]);
+    assert.equal(packet.exitCode, 0);
+    assert.equal(packet.payload.required_output_kind, "review");
+    const fields = packet.payload.output_contract_fields as string[];
+    const required = [
+      "review_round_id format: <gate>-r<round>",
+      "findings[] object fields: finding_id, finding_uid, finding_type, category, summary",
+      "finding_uid format: <gate>:<evidence_id>:<finding_id>",
+      "decision_scope_key required when material_categories is non-empty",
+      "summary must be verbatim disclosure source text",
+      "acknowledged_accepted_deviation_uids must be a string array when present",
+      "findings[].supersedes_finding_uids must be a string array when present",
+    ];
+    for (const item of required) assert.ok(fields.includes(item), item);
+    assert.ok(fields.some((item) => item.startsWith("finding_type values:") && item.includes("blocker") && item.includes("non_blocking_finding")));
+    assert.ok(fields.some((item) => item.startsWith("category values:") && item.includes("business_semantics") && item.includes("process")));
+    assert.ok(fields.some((item) => item.startsWith("material_categories values:") && item.includes("design_boundary") && item.includes("scope")));
+
+    const prompt = captureMain([
+      "review-packet",
+      "--change", "demo-change",
+      "--gate", "proposal_reviewed",
+      "--role", "critic",
+      "--round", "1",
+      "--format", "prompt",
+    ]);
+    assert.equal(prompt.exitCode, 0);
+    assert.ok(prompt.stdout.includes("- review_round_id format: <gate>-r<round>"));
+    assert.ok(prompt.stdout.includes("- findings[] object fields: finding_id, finding_uid, finding_type, category, summary"));
+    assert.ok(prompt.stdout.includes("- finding_uid format: <gate>:<evidence_id>:<finding_id>"));
+    assert.ok(prompt.stdout.includes("finding_type values:"));
+    assert.ok(prompt.stdout.includes("category values:"));
+    assert.ok(prompt.stdout.includes("material_categories values:"));
+    assert.ok(prompt.stdout.includes("- summary must be verbatim disclosure source text"));
   });
 });
 

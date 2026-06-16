@@ -122,8 +122,16 @@ withFixture("review complete requires diff contract fields", (fx) => {
     reviewEvidence(fx, "critic"),
   ];
   const evidences = [
-    ...prepareProposeComplete(fx, { checked: true }),
-    greenEvidence(),
+    ...prepareProposeComplete(fx, {
+      checked: true,
+      tasksText:
+        "- [x] TASK-001 Implement\n" +
+        "  - invariant_refs: INV-001\n" +
+        "  - test_refs: TEST-001\n" +
+        "  - tdd_required: false\n" +
+        "  - no_tdd_reason: non-executable-spec-change\n",
+    }),
+    alternativeVerificationEvidence("TASK-001"),
     ...guidance,
     mainAdjudication(fx, guidance),
     verifyEvidence(fx, "verifier"),
@@ -143,8 +151,16 @@ withFixture("review complete blocks when reviewed files miss diff", (fx) => {
     reviewEvidence(fx, "critic", { reviewed_files: ["tasks.md", "src/service.py"] }),
   ];
   const evidences = [
-    ...prepareProposeComplete(fx, { checked: true }),
-    greenEvidence(),
+    ...prepareProposeComplete(fx, {
+      checked: true,
+      tasksText:
+        "- [x] TASK-001 Implement\n" +
+        "  - invariant_refs: INV-001\n" +
+        "  - test_refs: TEST-001\n" +
+        "  - tdd_required: false\n" +
+        "  - no_tdd_reason: non-executable-spec-change\n",
+    }),
+    alternativeVerificationEvidence("TASK-001"),
     ...guidance,
     mainAdjudication(fx, guidance),
     verifyEvidence(fx, "verifier"),
@@ -169,8 +185,16 @@ withFixture("review complete blocks non-string base and head refs", (fx) => {
     reviewEvidence(fx, "critic"),
   ];
   const evidences = [
-    ...prepareProposeComplete(fx, { checked: true }),
-    greenEvidence(),
+    ...prepareProposeComplete(fx, {
+      checked: true,
+      tasksText:
+        "- [x] TASK-001 Implement\n" +
+        "  - invariant_refs: INV-001\n" +
+        "  - test_refs: TEST-001\n" +
+        "  - tdd_required: false\n" +
+        "  - no_tdd_reason: non-executable-spec-change\n",
+    }),
+    alternativeVerificationEvidence("TASK-001"),
     ...guidance,
     mainAdjudication(fx, guidance),
     verifyEvidence(fx, "verifier"),
@@ -190,8 +214,16 @@ withFixture("review complete allows when reviewed files cover diff", (fx) => {
     reviewEvidence(fx, "critic", { reviewed_files: ["tasks.md", "src/service.py"] }),
   ];
   const evidences = [
-    ...prepareProposeComplete(fx, { checked: true }),
-    greenEvidence(),
+    ...prepareProposeComplete(fx, {
+      checked: true,
+      tasksText:
+        "- [x] TASK-001 Implement\n" +
+        "  - invariant_refs: INV-001\n" +
+        "  - test_refs: TEST-001\n" +
+        "  - tdd_required: false\n" +
+        "  - no_tdd_reason: non-executable-spec-change\n",
+    }),
+    alternativeVerificationEvidence("TASK-001"),
     ...guidance,
     mainAdjudication(fx, guidance),
     verifyEvidence(fx, "verifier"),
@@ -214,8 +246,16 @@ withFixture("review complete blocks missing architect guidance", (fx) => {
     reviewEvidence(fx, "critic", { reviewed_files: ["tasks.md", "src/service.py"] }),
   ];
   const evidences = [
-    ...prepareProposeComplete(fx, { checked: true }),
-    greenEvidence(),
+    ...prepareProposeComplete(fx, {
+      checked: true,
+      tasksText:
+        "- [x] TASK-001 Implement\n" +
+        "  - invariant_refs: INV-001\n" +
+        "  - test_refs: TEST-001\n" +
+        "  - tdd_required: false\n" +
+        "  - no_tdd_reason: non-executable-spec-change\n",
+    }),
+    alternativeVerificationEvidence("TASK-001"),
     ...guidance,
     mainAdjudication(fx, guidance),
     verifyEvidence(fx, "verifier"),
@@ -248,8 +288,16 @@ withFixture("review ready preserves propose actions without generic fallback", (
 
 withFixture("review complete blocks legacy workflow evidence without main adjudication", (fx) => {
   const evidences = [
-    ...prepareProposeComplete(fx, { checked: true }),
-    greenEvidence(),
+    ...prepareProposeComplete(fx, {
+      checked: true,
+      tasksText:
+        "- [x] TASK-001 Implement\n" +
+        "  - invariant_refs: INV-001\n" +
+        "  - test_refs: TEST-001\n" +
+        "  - tdd_required: false\n" +
+        "  - no_tdd_reason: non-executable-spec-change\n",
+    }),
+    alternativeVerificationEvidence("TASK-001"),
     legacyCodeReviewWorkflowEvidence(fx),
     reviewEvidence(fx, "critic"),
     verifyEvidence(fx, "verifier"),
@@ -269,8 +317,16 @@ withFixture("review complete blocks when main adjudication omits required claim"
     reviewEvidence(fx, "critic", { required_claim_ids: ["CLAIM-CRITIC-001", "CLAIM-CRITIC-002"] }),
   ];
   const evidences = [
-    ...prepareProposeComplete(fx, { checked: true }),
-    greenEvidence(),
+    ...prepareProposeComplete(fx, {
+      checked: true,
+      tasksText:
+        "- [x] TASK-001 Implement\n" +
+        "  - invariant_refs: INV-001\n" +
+        "  - test_refs: TEST-001\n" +
+        "  - tdd_required: false\n" +
+        "  - no_tdd_reason: non-executable-spec-change\n",
+    }),
+    alternativeVerificationEvidence("TASK-001"),
     ...guidance,
     mainAdjudication(fx, guidance, {
       claim_adjudications: [
@@ -296,8 +352,16 @@ withFixture("A-5 request_changes uses shared adjudication coverage helper", (fx)
     reviewEvidence(fx, "critic", { required_claim_ids: ["CLAIM-CRITIC-001", "CLAIM-CRITIC-002"] }),
   ];
   const evidences = [
-    ...prepareProposeComplete(fx, { checked: true }),
-    greenEvidence(),
+    ...prepareProposeComplete(fx, {
+      checked: true,
+      tasksText:
+        "- [x] TASK-001 Implement\n" +
+        "  - invariant_refs: INV-001\n" +
+        "  - test_refs: TEST-001\n" +
+        "  - tdd_required: false\n" +
+        "  - no_tdd_reason: non-executable-spec-change\n",
+    }),
+    alternativeVerificationEvidence("TASK-001"),
     ...guidance,
     mainAdjudication(fx, guidance, {
       review_decision: "request_changes",
@@ -326,8 +390,16 @@ withFixture("review complete blocks when main adjudication omits required load",
   ];
   const missingLoad = guidance[2].required_load_refs[0];
   const evidences = [
-    ...prepareProposeComplete(fx, { checked: true }),
-    greenEvidence(),
+    ...prepareProposeComplete(fx, {
+      checked: true,
+      tasksText:
+        "- [x] TASK-001 Implement\n" +
+        "  - invariant_refs: INV-001\n" +
+        "  - test_refs: TEST-001\n" +
+        "  - tdd_required: false\n" +
+        "  - no_tdd_reason: non-executable-spec-change\n",
+    }),
+    alternativeVerificationEvidence("TASK-001"),
     ...guidance,
     mainAdjudication(fx, guidance, {
       loaded_refs: guidance
@@ -352,8 +424,16 @@ withFixture("review complete blocks when main adjudication omits verification ev
     reviewEvidence(fx, "critic"),
   ];
   const evidences = [
-    ...prepareProposeComplete(fx, { checked: true }),
-    greenEvidence(),
+    ...prepareProposeComplete(fx, {
+      checked: true,
+      tasksText:
+        "- [x] TASK-001 Implement\n" +
+        "  - invariant_refs: INV-001\n" +
+        "  - test_refs: TEST-001\n" +
+        "  - tdd_required: false\n" +
+        "  - no_tdd_reason: non-executable-spec-change\n",
+    }),
+    alternativeVerificationEvidence("TASK-001"),
     ...guidance,
     mainAdjudication(fx, guidance, { verification_evidence_refs: ["EV-verifier-verification", "EV-final-test"] }),
     verifyEvidence(fx, "verifier"),
@@ -373,8 +453,16 @@ withFixture("review complete blocks unknown source evidence refs on allow path",
     reviewEvidence(fx, "critic"),
   ];
   const evidences = [
-    ...prepareProposeComplete(fx, { checked: true }),
-    greenEvidence(),
+    ...prepareProposeComplete(fx, {
+      checked: true,
+      tasksText:
+        "- [x] TASK-001 Implement\n" +
+        "  - invariant_refs: INV-001\n" +
+        "  - test_refs: TEST-001\n" +
+        "  - tdd_required: false\n" +
+        "  - no_tdd_reason: non-executable-spec-change\n",
+    }),
+    alternativeVerificationEvidence("TASK-001"),
     ...guidance,
     mainAdjudication(fx, guidance, {
       source_evidence_refs: [...guidance.map((ev) => ev.evidence_id), "EV-fake-guidance"],
@@ -396,8 +484,16 @@ withFixture("review complete blocks unknown verification evidence refs on allow 
     reviewEvidence(fx, "critic"),
   ];
   const evidences = [
-    ...prepareProposeComplete(fx, { checked: true }),
-    greenEvidence(),
+    ...prepareProposeComplete(fx, {
+      checked: true,
+      tasksText:
+        "- [x] TASK-001 Implement\n" +
+        "  - invariant_refs: INV-001\n" +
+        "  - test_refs: TEST-001\n" +
+        "  - tdd_required: false\n" +
+        "  - no_tdd_reason: non-executable-spec-change\n",
+    }),
+    alternativeVerificationEvidence("TASK-001"),
     ...guidance,
     mainAdjudication(fx, guidance, {
       verification_evidence_refs: ["EV-verifier-verification", "EV-critic-verification", "EV-final-test", "EV-fake-final"],
@@ -423,8 +519,16 @@ withFixture("review complete blocks wrong-kind verification evidence refs on all
     agent_role: "verifier",
   });
   const evidences = [
-    ...prepareProposeComplete(fx, { checked: true }),
-    greenEvidence(),
+    ...prepareProposeComplete(fx, {
+      checked: true,
+      tasksText:
+        "- [x] TASK-001 Implement\n" +
+        "  - invariant_refs: INV-001\n" +
+        "  - test_refs: TEST-001\n" +
+        "  - tdd_required: false\n" +
+        "  - no_tdd_reason: non-executable-spec-change\n",
+    }),
+    alternativeVerificationEvidence("TASK-001"),
     ...guidance,
     mainAdjudication(fx, guidance, {
       verification_evidence_refs: ["EV-verifier-verification", "EV-critic-verification", "EV-final-test", "EV-wrong-kind-verifier"],
@@ -450,8 +554,16 @@ withFixture("review complete blocks when blocking finding lacks adjudication", (
     }),
   ];
   const evidences = [
-    ...prepareProposeComplete(fx, { checked: true }),
-    greenEvidence(),
+    ...prepareProposeComplete(fx, {
+      checked: true,
+      tasksText:
+        "- [x] TASK-001 Implement\n" +
+        "  - invariant_refs: INV-001\n" +
+        "  - test_refs: TEST-001\n" +
+        "  - tdd_required: false\n" +
+        "  - no_tdd_reason: non-executable-spec-change\n",
+    }),
+    alternativeVerificationEvidence("TASK-001"),
     ...guidance,
     mainAdjudication(fx, guidance, { finding_adjudications: [] }),
     verifyEvidence(fx, "verifier"),
@@ -471,8 +583,16 @@ withFixture("review complete requires final test evidence", (fx) => {
     reviewEvidence(fx, "critic"),
   ];
   const evidences = [
-    ...prepareProposeComplete(fx, { checked: true }),
-    greenEvidence(),
+    ...prepareProposeComplete(fx, {
+      checked: true,
+      tasksText:
+        "- [x] TASK-001 Implement\n" +
+        "  - invariant_refs: INV-001\n" +
+        "  - test_refs: TEST-001\n" +
+        "  - tdd_required: false\n" +
+        "  - no_tdd_reason: non-executable-spec-change\n",
+    }),
+    alternativeVerificationEvidence("TASK-001"),
     ...guidance,
     mainAdjudication(fx, guidance),
     verifyEvidence(fx, "verifier"),
@@ -500,8 +620,16 @@ withFixture("review complete validate failure only recommends validate fix", (fx
     reviewEvidence(fx, "critic"),
   ];
   const evidences = [
-    ...prepareProposeComplete(fx, { checked: true }),
-    greenEvidence(),
+    ...prepareProposeComplete(fx, {
+      checked: true,
+      tasksText:
+        "- [x] TASK-001 Implement\n" +
+        "  - invariant_refs: INV-001\n" +
+        "  - test_refs: TEST-001\n" +
+        "  - tdd_required: false\n" +
+        "  - no_tdd_reason: non-executable-spec-change\n",
+    }),
+    alternativeVerificationEvidence("TASK-001"),
     ...guidance,
     mainAdjudication(fx, guidance),
     verifyEvidence(fx, "verifier"),
@@ -521,8 +649,16 @@ withFixture("review complete missing final tests does not suggest verification r
     reviewEvidence(fx, "critic"),
   ];
   const evidences = [
-    ...prepareProposeComplete(fx, { checked: true }),
-    greenEvidence(),
+    ...prepareProposeComplete(fx, {
+      checked: true,
+      tasksText:
+        "- [x] TASK-001 Implement\n" +
+        "  - invariant_refs: INV-001\n" +
+        "  - test_refs: TEST-001\n" +
+        "  - tdd_required: false\n" +
+        "  - no_tdd_reason: non-executable-spec-change\n",
+    }),
+    alternativeVerificationEvidence("TASK-001"),
     ...guidance,
     mainAdjudication(fx, guidance),
     verifyEvidence(fx, "verifier", { test_evidence_refs: ["EV-task_complete"] }),
@@ -543,8 +679,16 @@ withFixture("review complete ignores verification evidence recorded only under v
     reviewEvidence(fx, "critic"),
   ];
   const evidences = [
-    ...prepareProposeComplete(fx, { checked: true }),
-    greenEvidence(),
+    ...prepareProposeComplete(fx, {
+      checked: true,
+      tasksText:
+        "- [x] TASK-001 Implement\n" +
+        "  - invariant_refs: INV-001\n" +
+        "  - test_refs: TEST-001\n" +
+        "  - tdd_required: false\n" +
+        "  - no_tdd_reason: non-executable-spec-change\n",
+    }),
+    alternativeVerificationEvidence("TASK-001"),
     ...guidance,
     mainAdjudication(fx, guidance, { verification_evidence_refs: [] }),
     verifyEvidence(fx, "verifier", { gate: "verify_complete" }),
@@ -565,8 +709,16 @@ withFixture("review complete blocks missing verification reference file", (fx) =
     reviewEvidence(fx, "critic"),
   ];
   const evidences = [
-    ...prepareProposeComplete(fx, { checked: true }),
-    greenEvidence(),
+    ...prepareProposeComplete(fx, {
+      checked: true,
+      tasksText:
+        "- [x] TASK-001 Implement\n" +
+        "  - invariant_refs: INV-001\n" +
+        "  - test_refs: TEST-001\n" +
+        "  - tdd_required: false\n" +
+        "  - no_tdd_reason: non-executable-spec-change\n",
+    }),
+    alternativeVerificationEvidence("TASK-001"),
     ...guidance,
     mainAdjudication(fx, guidance),
     verifyEvidence(fx, "verifier", {
@@ -593,8 +745,16 @@ withFixture("review complete requires invariant matrix reference", (fx) => {
   const verifier = verifyEvidence(fx, "verifier", { invariant_matrix_ref: ".superspec/reports/verifier-invariant-matrix.md" });
   unlinkSync(join(fx.change, ".superspec", "reports", "verifier-invariant-matrix.md"));
   const evidences = [
-    ...prepareProposeComplete(fx, { checked: true }),
-    greenEvidence(),
+    ...prepareProposeComplete(fx, {
+      checked: true,
+      tasksText:
+        "- [x] TASK-001 Implement\n" +
+        "  - invariant_refs: INV-001\n" +
+        "  - test_refs: TEST-001\n" +
+        "  - tdd_required: false\n" +
+        "  - no_tdd_reason: non-executable-spec-change\n",
+    }),
+    alternativeVerificationEvidence("TASK-001"),
     ...guidance,
     mainAdjudication(fx, guidance),
     verifier,
@@ -616,8 +776,16 @@ withFixture("review complete rejects empty invariant matrix", (fx) => {
   const verifier = verifyEvidence(fx, "verifier", { invariant_matrix_ref: ".superspec/reports/verifier-invariant-matrix.md" });
   writeText(join(fx.change, ".superspec", "reports", "verifier-invariant-matrix.md"), "");
   const evidences = [
-    ...prepareProposeComplete(fx, { checked: true }),
-    greenEvidence(),
+    ...prepareProposeComplete(fx, {
+      checked: true,
+      tasksText:
+        "- [x] TASK-001 Implement\n" +
+        "  - invariant_refs: INV-001\n" +
+        "  - test_refs: TEST-001\n" +
+        "  - tdd_required: false\n" +
+        "  - no_tdd_reason: non-executable-spec-change\n",
+    }),
+    alternativeVerificationEvidence("TASK-001"),
     ...guidance,
     mainAdjudication(fx, guidance),
     verifier,
@@ -639,8 +807,16 @@ withFixture("review complete rejects invariant matrix paragraph token without ta
   const verifier = verifyEvidence(fx, "verifier", { invariant_matrix_ref: ".superspec/reports/verifier-invariant-matrix.md" });
   writeText(join(fx.change, ".superspec", "reports", "verifier-invariant-matrix.md"), "INV-001 pass EV-final-test\n");
   const evidences = [
-    ...prepareProposeComplete(fx, { checked: true }),
-    greenEvidence(),
+    ...prepareProposeComplete(fx, {
+      checked: true,
+      tasksText:
+        "- [x] TASK-001 Implement\n" +
+        "  - invariant_refs: INV-001\n" +
+        "  - test_refs: TEST-001\n" +
+        "  - tdd_required: false\n" +
+        "  - no_tdd_reason: non-executable-spec-change\n",
+    }),
+    alternativeVerificationEvidence("TASK-001"),
     ...guidance,
     mainAdjudication(fx, guidance),
     verifier,
@@ -662,8 +838,16 @@ withFixture("review complete rejects invariant matrix confirmed status", (fx) =>
   const verifier = verifyEvidence(fx, "verifier", { invariant_matrix_ref: ".superspec/reports/verifier-invariant-matrix.md" });
   writeText(join(fx.change, ".superspec", "reports", "verifier-invariant-matrix.md"), invariantMatrixText([{ status: "confirmed", evidence: "EV-final-test" }]));
   const evidences = [
-    ...prepareProposeComplete(fx, { checked: true }),
-    greenEvidence(),
+    ...prepareProposeComplete(fx, {
+      checked: true,
+      tasksText:
+        "- [x] TASK-001 Implement\n" +
+        "  - invariant_refs: INV-001\n" +
+        "  - test_refs: TEST-001\n" +
+        "  - tdd_required: false\n" +
+        "  - no_tdd_reason: non-executable-spec-change\n",
+    }),
+    alternativeVerificationEvidence("TASK-001"),
     ...guidance,
     mainAdjudication(fx, guidance),
     verifier,
@@ -685,8 +869,16 @@ withFixture("review complete rejects invariant matrix unknown evidence id", (fx)
   const verifier = verifyEvidence(fx, "verifier", { invariant_matrix_ref: ".superspec/reports/verifier-invariant-matrix.md" });
   writeText(join(fx.change, ".superspec", "reports", "verifier-invariant-matrix.md"), invariantMatrixText([{ evidence: "EV-missing-final-test" }]));
   const evidences = [
-    ...prepareProposeComplete(fx, { checked: true }),
-    greenEvidence(),
+    ...prepareProposeComplete(fx, {
+      checked: true,
+      tasksText:
+        "- [x] TASK-001 Implement\n" +
+        "  - invariant_refs: INV-001\n" +
+        "  - test_refs: TEST-001\n" +
+        "  - tdd_required: false\n" +
+        "  - no_tdd_reason: non-executable-spec-change\n",
+    }),
+    alternativeVerificationEvidence("TASK-001"),
     ...guidance,
     mainAdjudication(fx, guidance),
     verifier,
@@ -708,8 +900,16 @@ withFixture("review complete validates verifier and critic invariant matrices in
   const criticVerification = verifyEvidence(fx, "critic", { invariant_matrix_ref: ".superspec/reports/critic-invariant-matrix.md" });
   writeText(join(fx.change, ".superspec", "reports", "critic-invariant-matrix.md"), invariantMatrixText([{ inv_id: "INV-OTHER", evidence: "EV-final-test" }]));
   const evidences = [
-    ...prepareProposeComplete(fx, { checked: true }),
-    greenEvidence(),
+    ...prepareProposeComplete(fx, {
+      checked: true,
+      tasksText:
+        "- [x] TASK-001 Implement\n" +
+        "  - invariant_refs: INV-001\n" +
+        "  - test_refs: TEST-001\n" +
+        "  - tdd_required: false\n" +
+        "  - no_tdd_reason: non-executable-spec-change\n",
+    }),
+    alternativeVerificationEvidence("TASK-001"),
     ...guidance,
     mainAdjudication(fx, guidance),
     verifyEvidence(fx, "verifier"),
@@ -740,8 +940,16 @@ withFixture("review complete accepts non EV-prefixed evidence id in invariant ma
   writeText(join(fx.change, ".superspec", "reports", "verifier-invariant-matrix.md"), invariantMatrixText([{ evidence: "`final-test-custom`" }]));
   writeText(join(fx.change, ".superspec", "reports", "critic-invariant-matrix.md"), invariantMatrixText([{ evidence: "[final-test-custom](../raw/final-test.log)" }]));
   const evidences = [
-    ...prepareProposeComplete(fx, { checked: true }),
-    greenEvidence(),
+    ...prepareProposeComplete(fx, {
+      checked: true,
+      tasksText:
+        "- [x] TASK-001 Implement\n" +
+        "  - invariant_refs: INV-001\n" +
+        "  - test_refs: TEST-001\n" +
+        "  - tdd_required: false\n" +
+        "  - no_tdd_reason: non-executable-spec-change\n",
+    }),
+    alternativeVerificationEvidence("TASK-001"),
     ...guidance,
     mainAdjudication(fx, guidance, { verification_evidence_refs: ["EV-verifier-verification", "EV-critic-verification", "final-test-custom"] }),
     verifier,
@@ -760,8 +968,16 @@ withFixture("review complete blocks unknown test evidence ref", (fx) => {
     reviewEvidence(fx, "critic"),
   ];
   const evidences = [
-    ...prepareProposeComplete(fx, { checked: true }),
-    greenEvidence(),
+    ...prepareProposeComplete(fx, {
+      checked: true,
+      tasksText:
+        "- [x] TASK-001 Implement\n" +
+        "  - invariant_refs: INV-001\n" +
+        "  - test_refs: TEST-001\n" +
+        "  - tdd_required: false\n" +
+        "  - no_tdd_reason: non-executable-spec-change\n",
+    }),
+    alternativeVerificationEvidence("TASK-001"),
     ...guidance,
     mainAdjudication(fx, guidance),
     verifyEvidence(fx, "verifier", { test_evidence_refs: ["EV-missing"] }),

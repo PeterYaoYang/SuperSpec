@@ -28,14 +28,14 @@ function help(): string {
     "  init        install SuperSpec Codex surfaces (asks project/user; default project)",
     "  update      update SuperSpec CLI, then update manifest-managed surfaces",
     "  uninstall   remove manifest-managed SuperSpec surfaces",
-    "  guard       run the SuperSpec guard command surface",
+    "  check       run the SuperSpec check command surface",
     "  doctor      diagnose SuperSpec/OpenSpec/npm/PATH wiring",
     "  version     print SuperSpec CLI version",
     "",
     "examples:",
     "  superspec init --scope project",
     "  superspec init --scope user",
-    "  superspec guard check-init --change <change> --format agent",
+    "  superspec check check-init --change <change> --format agent",
     "  superspec doctor",
     "",
   ].join("\n");
@@ -82,10 +82,10 @@ export async function main_superspec(argv: string[] = process.argv.slice(2)): Pr
     return main_init_async([...updateArgs, "--update"]);
   }
   if (command === "uninstall") return main_init_async([...rest, "--uninstall"]);
-  if (command === "guard") return main(rest);
+  if (command === "check" || command === "guard") return main(rest);
   if (command === "doctor") return main_doctor(rest);
 
-  // Convenience fallback: `superspec check-init ...` behaves like `superspec guard check-init ...`.
+  // Convenience fallback: `superspec check-init ...` behaves like `superspec check check-init ...`.
   if (command.startsWith("check-") || command === "status" || command === "recompute" || command === "init") {
     return main(argv);
   }

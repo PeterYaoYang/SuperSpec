@@ -8,13 +8,13 @@
 
 - `superspec-hook --change <change>` 从 stdin 读取 Codex hook JSON event。
 - 面向 Guard 的 API：
-  - `superspec guard hook-check-write --change <change> --event-ref <json>`
-  - `superspec guard hook-check-command --change <change> --event-ref <json>`
-  - `superspec guard hook-record-test --change <change> --event-ref <json>`
-  - `superspec guard hook-record-subagent-start --change <change> --event-ref <json>`
-  - `superspec guard hook-record-subagent-stop --change <change> --event-ref <json>`
-  - `superspec guard hook-health --change <change>`
-  - `superspec guard hook-session-begin/status/end --change <change> ...`
+  - `superspec check hook-check-write --change <change> --event-ref <path-to-hook-event.json>`
+  - `superspec check hook-check-command --change <change> --event-ref <path-to-hook-event.json>`
+  - `superspec check hook-record-test --change <change> --event-ref <path-to-hook-event.json>`
+  - `superspec check hook-record-subagent-start --change <change> --event-ref <path-to-hook-event.json>`
+  - `superspec check hook-record-subagent-stop --change <change> --event-ref <path-to-hook-event.json>`
+  - `superspec check hook-health --change <change>`
+  - `superspec check hook-session-begin/status/end --change <change> ...`
 
 adapter 会规范化 event 并调用 Guard API。显式/manual `PreToolUse` event 无法解析 change 时，会对 SuperSpec state roots、archive 命令、内部 hook writer、非可信生命周期终止、仓库外 target、歧义 active session 等路径采取保守 fail-closed 检查。默认子智能体 telemetry 是 best-effort：无法解析 change 时返回成功诊断，不阻塞 workflow。
 

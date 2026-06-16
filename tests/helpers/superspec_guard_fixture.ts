@@ -713,8 +713,16 @@ export function archiveReadyEvidences(fx: Fixture): JsonMap[] {
     reviewEvidence(fx, "critic"),
   ];
   return [
-    ...prepareProposeComplete(fx, { checked: true }),
-    greenEvidence(),
+    ...prepareProposeComplete(fx, {
+      checked: true,
+      tasksText:
+        "- [x] TASK-001 Implement\n" +
+        "  - invariant_refs: INV-001\n" +
+        "  - test_refs: TEST-001\n" +
+        "  - tdd_required: false\n" +
+        "  - no_tdd_reason: non-executable-spec-change\n",
+    }),
+    alternativeVerificationEvidence("TASK-001"),
     ...guidance,
     mainAdjudication(fx, guidance),
     verifyEvidence(fx, "verifier"),

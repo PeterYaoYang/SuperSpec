@@ -25,8 +25,11 @@ import {
   sha256_text,
   runtime,
   toPosix,
+  PENDING_CONFIRMATION_RE,
+  UNCHECKED_CHECKBOX_RE,
+  CHECKED_CHECKBOX_RE,
 } from "./util.ts";
-import { all_done, artifact_status_map, get_repo_root, is_done, normalize_gate, openspec_cli_probe } from "./openspec.ts";
+import { all_done, artifact_status_map, effective_superseded_ids, get_repo_root, is_done, normalize_gate, openspec_cli_probe } from "./openspec.ts";
 import { read_agent_toml_name, read_skill_frontmatter_name, sidecar_business_invariants_path, sidecar_discovery_path, sidecar_test_contract_path } from "./paths.ts";
 import { hookInitReasons } from "./hooks/health.ts";
 import {
@@ -51,6 +54,8 @@ import {
   parse_test_contract_records,
   red_green_test_ids,
   splitList,
+  task_apply_execution_surface,
+  task_apply_execution_surface_reasons,
   tasks_structure_hash,
   task_alternative_verification,
   task_test_evidence,
@@ -76,12 +81,11 @@ import {
 import { review_disclosure_reasons } from "./disclosure.ts";
 import { archive_manifest_path } from "./archive.ts";
 import {
-  fingerprint_matches,
+  pre_edit_worker_test_run_reasons,
 } from "./apply_worker_chain.ts";
 import {
   apply_worker_chain_lifecycle_reasons as shared_apply_worker_chain_lifecycle_reasons,
   apply_worker_chain_lifecycle_state,
-  serial_completion_green,
 } from "./apply_worker_chain_lifecycle.ts";
 
 function action_list(...items: Array<string | null | undefined | false>): string[] {
@@ -537,8 +541,14 @@ export function openspec_cli_capability_reasons(): Reason[] {
 }
 
 export function evidence_schema_guard(change: string, changeRoot: string, repoRoot: string, evidences: JsonMap[]): Reason[] {
+  const effectiveDead = effective_superseded_ids(evidences);
   return [
-    ...evidences.flatMap((ev) => validate_evidence_schema(ev, change, changeRoot, repoRoot)),
+    ...evidences.flatMap((ev) => {
+      const problems = validate_evidence_schema(ev, change, changeRoot, repoRoot);
+      const id = typeof ev.evidence_id === "string" ? ev.evidence_id : "";
+      if (!id || !effectiveDead.has(id) || !ev.agent_role) return problems;
+      return problems.filter((item) => item.code !== "stale_review");
+    }),
     ...duplicate_evidence_id_reasons(evidences),
     ...dangling_evidence_ref_reasons(evidences),
     ...supersede_reasons(evidences),
@@ -587,6 +597,49 @@ function stale_artifact_review_reasons(reviews: JsonMap[], changeRoot: string, a
   return reasons;
 }
 
+// B1: count unresolved open questions inside discovery.md's "待确认问题" section before explore_complete
+// can pass. The section is located by a heading whose text carries confirmation semantics
+// (待确认 / 需要用户确认 / open question / pending confirmation), tolerating inserted words such as
+// 「用户」between 需要 and 确认 (the real secondment-hour-unit-support incident title was
+// 「## 需要用户确认的问题」, which a naive contiguous 「需要确认」 substring would miss).
+//
+// Within a matched section, a list item ("- " / "* " / "+ " / "1. ") counts as open if it carries an
+// unchecked checkbox ("[ ]", literal half-width space — full-width U+3000 is not treated as a box,
+// matching GitHub task-list semantics) OR pending-confirmation wording (PENDING_CONFIRMATION_RE,
+// shared with the B3 confirmation guard). An item is closed (not counted) if it begins with 「已确认」
+// after its list marker or carries a checked box "[x]". Plain prose bullets with neither signal are
+// ignored. When the section is absent the count is 0 (grandfathered: legacy changes with no such
+// section are not retroactively blocked, matching this repo's treatment of legacy evidence).
+const OPEN_QUESTION_SECTION_RE = /(待|需要|需)[^\n]{0,6}确认|待澄清|开放问题|open question|pending confirmation/iu;
+const OPEN_QUESTION_LIST_ITEM_RE = /^\s*(?:[-*+]|\d+\.)\s+(.*)$/u;
+
+function classify_open_question_line(line: string): "open" | "closed" | "none" {
+  const m = line.match(OPEN_QUESTION_LIST_ITEM_RE);
+  if (!m) return "none";
+  const body = m[1].trimStart();
+  if (CHECKED_CHECKBOX_RE.test(line)) return "closed";
+  if (UNCHECKED_CHECKBOX_RE.test(line)) return "open";
+  if (/^已确认/u.test(body)) return "closed";
+  if (PENDING_CONFIRMATION_RE.test(line)) return "open";
+  return "none";
+}
+
+export function discovery_open_question_count(discoveryPath: string): number {
+  if (!existsSync(discoveryPath) || !statSync(discoveryPath).isFile()) return 0;
+  const text = readFileSync(discoveryPath, "utf8");
+  if (!text.trim()) return 0;
+  let inSection = false;
+  let count = 0;
+  for (const line of text.split(/\r?\n/u)) {
+    if (/^#{1,6}\s/u.test(line)) {
+      inSection = OPEN_QUESTION_SECTION_RE.test(line);
+      continue;
+    }
+    if (inSection && classify_open_question_line(line) === "open") count += 1;
+  }
+  return count;
+}
+
 export function check_superspec_gate(change: string, status: JsonMap, changeRoot: string, evidences: JsonMap[], gateRaw: string): Decision {
   const gate = normalize_gate(gateRaw);
   const amap = artifact_status_map(status);
@@ -605,6 +658,16 @@ export function check_superspec_gate(change: string, status: JsonMap, changeRoot
     // DISC Phase 1: material findings raised by explore reviews must be disclosed to the user
     // (main_review_digest + user_review_decision) before the gate can pass.
     reasons.push(...review_disclosure_reasons("explore_complete", changeRoot, evidences));
+    // B1: discovery.md must not still carry unresolved open questions. Without this the gate is a
+    // presence-check on human_confirmation and will pass even when discovery lists 「仍需确认」items
+    // (real incident: secondment-hour-unit-support entered propose with 8 open questions).
+    const openQuestionCount = discovery_open_question_count(discovery);
+    if (openQuestionCount > 0) {
+      reasons.push(reason(
+        "explore_open_questions_unresolved",
+        `${discovery}: discovery.md 待确认问题段仍有 ${openQuestionCount} 条未勾选/「仍需确认」项，逐条与用户确认并改为已确认后才能进入 propose`,
+      ));
+    }
   } else if (gate === "proposal_reviewed") {
     // DISC Phase 2: proposal review is an internal gate, not an advisory note. It is born inside
     // the disclosure loop, so round-tagged critic evidence + digest are unconditionally required.
@@ -727,6 +790,9 @@ export function check_superspec_gate(change: string, status: JsonMap, changeRoot
     const tasks = parse_tasks(changeRoot);
     if (Object.keys(tasks).length === 0) reasons.push(reason("invalid_task_graph", "tasks.md has no structured tasks"));
     reasons.push(...write_scope_conflict_reasons(tasks));
+    for (const [taskId, task] of Object.entries(tasks)) {
+      reasons.push(...task_apply_execution_surface_reasons(taskId, task));
+    }
     // DISC Phase 3: tasks_complete enters the disclosure loop only once round-tagged review
     // evidence appears (design: no mandatory role review on this gate until then).
     reasons.push(...review_disclosure_reasons("tasks_complete", changeRoot, evidences));
@@ -804,6 +870,18 @@ function task_reopen_history(evidences: JsonMap[], taskId: string): TaskReopenHi
 
 function task_reopen_match_key(ev: JsonMap): string {
   return `${String(ev.evidence_id ?? "")}\u0000${String(ev.reopen_id ?? "")}\u0000${String(ev.task_id ?? "")}`;
+}
+
+function worker_pre_edit_test_evidence(changeRoot: string, evidences: JsonMap[], taskId: string, semanticStatus: string): { valid: JsonMap[]; invalid_reasons: Reason[]; candidate_count: number } {
+  const candidates = task_test_evidence(evidences, taskId, semanticStatus, "task_edit");
+  const valid: JsonMap[] = [];
+  const invalidReasons: Reason[] = [];
+  for (const ev of candidates) {
+    const problems = pre_edit_worker_test_run_reasons(changeRoot, ev, taskId, "pre_edit_test_run_invalid");
+    if (problems.length === 0) valid.push(ev);
+    else invalidReasons.push(...problems);
+  }
+  return { valid, invalid_reasons: invalidReasons, candidate_count: candidates.length };
 }
 
 function matching_reopen_resolutions(evidences: JsonMap[], reopen: JsonMap): JsonMap[] {
@@ -1251,15 +1329,29 @@ export function check_task_edit(change: string, status: JsonMap, changeRoot: str
     const nr = attrs.no_tdd_reason;
     if (!NO_TDD_REASONS.has(nr)) reasons.push(reason("invalid_no_tdd_reason", `task ${taskId}: no_tdd_reason=${repr(nr)}`));
   } else if (tddMode === "behavior-preserving-refactor") {
-    const characterization = task_test_evidence(evidences, taskId, "expected_success", "task_edit");
-    if (characterization.length === 0) reasons.push(reason("missing_characterization", `task ${taskId} (behavior-preserving-refactor) needs GREEN characterization test first`));
+    const characterizationProof = worker_pre_edit_test_evidence(changeRoot, evidences, taskId, "expected_success");
+    const characterization = characterizationProof.valid;
+    if (characterization.length === 0) {
+      reasons.push(reason(
+        characterizationProof.candidate_count === 0 ? "missing_characterization" : "missing_worker_characterization",
+        `task ${taskId} (behavior-preserving-refactor) needs test-runner characterization evidence before edit`,
+      ));
+      reasons.push(...characterizationProof.invalid_reasons);
+    }
     reasons.push(...evidence_test_id_reasons(characterization, taskId, declared, contractIds, "characterization"));
     reasons.push(...declared_test_evidence_reasons(characterization, taskId, declared, "characterization"));
     reasons.push(...evidence_invariant_ref_reasons(characterization, taskId, declaredInvariants, validInvariantIds, "characterization"));
     reasons.push(...evidence_test_contract_invariant_reasons(characterization, taskId, test_contract_invariant_refs_by_test(changeRoot), "characterization"));
   } else {
-    const red = task_test_evidence(evidences, taskId, "expected_failure", "task_edit");
-    if (red.length === 0) reasons.push(reason("missing_red_evidence", `task ${taskId} requires RED evidence (expected_failure) before edit`));
+    const redProof = worker_pre_edit_test_evidence(changeRoot, evidences, taskId, "expected_failure");
+    const red = redProof.valid;
+    if (red.length === 0) {
+      reasons.push(reason(
+        redProof.candidate_count === 0 ? "missing_red_evidence" : "missing_worker_red_evidence",
+        `task ${taskId} requires test-runner RED evidence before edit`,
+      ));
+      reasons.push(...redProof.invalid_reasons);
+    }
     reasons.push(...evidence_test_id_reasons(red, taskId, declared, contractIds, "RED"));
     reasons.push(...declared_test_evidence_reasons(red, taskId, declared, "RED"));
     reasons.push(...evidence_invariant_ref_reasons(red, taskId, declaredInvariants, validInvariantIds, "RED"));
@@ -1288,6 +1380,32 @@ export function apply_worker_chain_lifecycle_reasons(repoRoot: string, changeRoo
   return shared_apply_worker_chain_lifecycle_reasons(repoRoot, changeRoot, evidences, taskId);
 }
 
+function apply_worker_chain_ref_ids(ev: JsonMap, singular: string, plural: string): string[] {
+  const ids = new Set<string>();
+  if (Array.isArray(ev[plural])) {
+    for (const item of ev[plural]) {
+      if (isObject(item) && typeof item.evidence_id === "string" && item.evidence_id) ids.add(item.evidence_id);
+      else if (typeof item === "string" && item) ids.add(item);
+    }
+  }
+  const single = ev[singular];
+  if (isObject(single) && typeof single.evidence_id === "string" && single.evidence_id) ids.add(single.evidence_id);
+  else if (typeof single === "string" && single) ids.add(single);
+  return [...ids].sort();
+}
+
+function active_no_tdd_metadata_matches(active: JsonMap | undefined, executionSurface: string, noTddReason: string | undefined): boolean {
+  const preIds = Array.isArray(active?.pre_edit_evidence_refs) ? active.pre_edit_evidence_refs.map(String).filter(Boolean) : [];
+  return isObject(active)
+    && active.pre_edit_proof_kind === "no_tdd_declared"
+    && preIds.length === 0
+    && active.tdd_required === false
+    && active.apply_execution_surface === executionSurface
+    && typeof noTddReason === "string"
+    && active.no_tdd_reason === noTddReason
+    && NO_TDD_REASONS.has(noTddReason);
+}
+
 export function check_task_complete(change: string, status: JsonMap, changeRoot: string, evidences: JsonMap[], taskId: string): Decision {
   const gate = "task_complete";
   const reasons: Reason[] = [];
@@ -1300,6 +1418,7 @@ export function check_task_complete(change: string, status: JsonMap, changeRoot:
   reasons.push(...apply_scope_confirmation_reasons(changeRoot, evidences));
   const task = parse_tasks(changeRoot)[taskId];
   if (!task) return block(change, gate, [reason("unknown_task", `task ${taskId} not found`)], { task_id: taskId });
+  reasons.push(...task_apply_execution_surface_reasons(taskId, task));
   const workerChainState = apply_worker_chain_lifecycle_state(get_repo_root(status), changeRoot, evidences, taskId);
   reasons.push(...workerChainState.completionReasons);
   const reopenHistory = task_reopen_history(evidences, taskId);
@@ -1320,24 +1439,12 @@ export function check_task_complete(change: string, status: JsonMap, changeRoot:
   if (!TDD_MODES.has(tddMode)) reasons.push(reason("invalid_tdd_mode", `task ${taskId}: tdd_mode=${repr(tddMode)}`));
   if (tddRequired) {
     const allGreen = task_test_evidence(evidences, taskId, "expected_success", "task_complete");
-    const green = workerChainState.validClosedGreenEvidenceIds.size > 0
-      ? allGreen.filter((ev) => (
-        ev.apply_execution_chain === "executor_worker"
-        && workerChainState.validClosedChainIds.has(String(ev.apply_worker_chain_id ?? ""))
-        && workerChainState.validClosedGreenEvidenceIds.has(String(ev.evidence_id ?? ""))
-      ))
-      : workerChainState.takeoverBaselines.length > 0
-        ? allGreen.filter((ev) => serial_completion_green(ev) && workerChainState.takeoverBaselines.some((baseline) => (
-          baseline.successorGreenRefs.includes(String(ev.evidence_id ?? ""))
-          && fingerprint_matches(ev.implementation_fingerprint, baseline.fingerprint)
-        )))
-        : allGreen.filter(serial_completion_green);
+    const green = allGreen.filter((ev) => (
+      ev.apply_execution_chain === "executor_worker"
+      && workerChainState.validClosedChainIds.has(String(ev.apply_worker_chain_id ?? ""))
+      && workerChainState.validClosedGreenEvidenceIds.has(String(ev.evidence_id ?? ""))
+    ));
     if (green.length === 0) reasons.push(reason("missing_green_evidence", `task ${taskId} requires GREEN evidence (expected_success) before completion`));
-    if (workerChainState.validClosedGreenEvidenceIds.size === 0 && workerChainState.takeoverBaselines.length > 0) {
-      if (green.length === 0) {
-        reasons.push(reason("apply_worker_chain_takeover_green_mismatch", `task ${taskId} requires declared successor serial GREEN evidence after takeover baseline with matching implementation fingerprint`));
-      }
-    }
     const declared = new Set(splitList(attrs.test_refs ?? ""));
     const declaredInvariants = new Set(splitList(attrs.invariant_refs ?? ""));
     if (declared.size === 0) reasons.push(reason("missing_task_test_refs", `task ${taskId} requires test_refs for GREEN evidence`));
@@ -1372,8 +1479,46 @@ export function check_task_complete(change: string, status: JsonMap, changeRoot:
   } else {
     const nr = attrs.no_tdd_reason;
     if (!NO_TDD_REASONS.has(nr)) reasons.push(reason("invalid_no_tdd_reason", `task ${taskId}: no_tdd_reason=${repr(nr)}`));
-    const verifications = task_alternative_verification(evidences, taskId);
-    if (verifications.length === 0) reasons.push(reason("missing_alternative_verification", `task ${taskId} has tdd_required:false and needs alternative verification evidence`));
+    const executionSurface = task_apply_execution_surface(task);
+    const directAlternativeAllowed = executionSurface === "docs_generated" || executionSurface === "no_code";
+    const implementationAlternativeRequired = executionSurface === "implementation" || executionSurface === "runtime_config";
+    const allVerifications = task_alternative_verification(evidences, taskId);
+    let validAlternativeEvidenceIds = workerChainState.validClosedAlternativeEvidenceIds;
+    if (implementationAlternativeRequired) {
+      const activeByChain = new Map(
+        live_pass(evidences, { gate: "task_complete", kind: "apply_worker_chain", task_id: taskId })
+          .filter((ev) => ev.chain_state === "active" && typeof ev.apply_worker_chain_id === "string")
+          .map((ev) => [String(ev.apply_worker_chain_id), ev]),
+      );
+      const closedAlternativeChains = live_pass(evidences, { gate: "task_complete", kind: "apply_worker_chain", task_id: taskId })
+        .filter((ev) => (
+          ev.chain_state === "closed"
+          && String(ev.completion_proof_kind ?? "green_tests") === "alternative_verification"
+          && workerChainState.validClosedAlternativeChainIds.has(String(ev.apply_worker_chain_id ?? ""))
+        ));
+      const matchingClosedAlternativeChains = closedAlternativeChains.filter((ev) => (
+        active_no_tdd_metadata_matches(activeByChain.get(String(ev.apply_worker_chain_id ?? "")), executionSurface, nr)
+      ));
+      const metadataMismatchChains = closedAlternativeChains
+        .filter((ev) => !matchingClosedAlternativeChains.includes(ev))
+        .map((ev) => String(ev.apply_worker_chain_id ?? ev.evidence_id ?? ""))
+        .filter(Boolean)
+        .sort();
+      if (metadataMismatchChains.length > 0) {
+        reasons.push(reason("apply_worker_chain_active_invalid", `task ${taskId} closed alternative apply_worker_chain active no-TDD metadata must match task metadata: ${renderList(metadataMismatchChains)}`, metadataMismatchChains));
+      }
+      validAlternativeEvidenceIds = new Set(
+        matchingClosedAlternativeChains.flatMap((ev) => apply_worker_chain_ref_ids(ev, "alternative_verification_evidence_ref", "alternative_verification_evidence_refs")),
+      );
+    }
+    const verifications = directAlternativeAllowed
+      ? allVerifications
+      : allVerifications.filter((ev) => validAlternativeEvidenceIds.has(String(ev.evidence_id ?? "")));
+    if (implementationAlternativeRequired && verifications.length === 0) {
+      reasons.push(reason("missing_alternative_verification", `task ${taskId} apply_execution_surface=${executionSurface} requires closed apply_worker_chain alternative_verification proof before completion`));
+    } else if (!implementationAlternativeRequired && verifications.length === 0) {
+      reasons.push(reason("missing_alternative_verification", `task ${taskId} has tdd_required:false and needs alternative verification evidence`));
+    }
     if (reopenMode.mode === "reopened") {
       const reopen = reopenMode.reopen;
       const reopenId = String(reopen.reopen_id ?? "");

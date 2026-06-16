@@ -11,7 +11,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import type { JsonMap, Reason } from "./util.ts";
 import { isObject, reason, renderList, repr, runtime, safe_within, toPosix, walkFiles } from "./util.ts";
-import { normalize_gate } from "./openspec.ts";
+import { effective_superseded_ids, normalize_gate } from "./openspec.ts";
 
 // Explicit target map (design §7); later phases extend this table gate by gate.
 // Entries containing "*" are globs enumerated at check time; set equality (P1-6) means a spec
@@ -430,7 +430,7 @@ export function review_disclosure_reasons(gate: string, changeRoot: string, evid
     return [reason("missing_review_digest", `${gate}: the disclosure loop is mandatory on this gate; need round-tagged role review evidence (review_round_id ${gate}-r1, findings[]) plus a main_review_digest`)];
   }
   const out: Reason[] = [];
-  const dead = new Set(valid.filter((ev) => ev.status === "superseded" && ev.supersedes).map((ev) => String(ev.supersedes)));
+  const dead = effective_superseded_ids(valid);
   const byId = new Map<string, JsonMap>();
   for (const ev of valid) {
     if (typeof ev.evidence_id === "string" && ev.evidence_id) byId.set(ev.evidence_id, ev);

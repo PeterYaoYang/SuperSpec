@@ -14,7 +14,6 @@ import {
   materializeEvidenceRecord,
   prepareProposeComplete,
   roleEvidence,
-  redEvidence,
   status,
   withFixture,
   withRuntime,
@@ -290,7 +289,7 @@ withFixture("active audit-only hook session denies write_scope parent directory 
 });
 
 withFixture("active audit-only hook session guards Edit and Write scoped paths", (fx) => {
-  const tasksText = "- [ ] TASK-001 Implement\n  - test_refs: TEST-001\n  - invariant_refs: INV-001\n  - write_scope: src/feature.ts\n";
+  const tasksText = "- [ ] TASK-001 Implement\n  - test_refs: TEST-001\n  - invariant_refs: INV-001\n  - write_scope: src/feature.ts\n  - tdd_required: false\n  - no_tdd_reason: mechanical-rename\n";
   writeText(join(fx.change, "tasks.md"), tasksText);
   beginAuditSession(fx);
   const refs = [
@@ -320,7 +319,7 @@ withFixture("active audit-only hook session guards Edit and Write scoped paths",
       assert.ok(codes(decision.block_reasons).includes("task_edit_missing"), JSON.stringify(decision.block_reasons));
     }
   });
-  const evidences = [...prepareProposeComplete(fx, { tasksText }), redEvidence()];
+  const evidences = prepareProposeComplete(fx, { tasksText });
   withRuntime({ load_context: () => [status(fx), fx.repo, fx.change, evidences] }, () => {
     for (const ref of refs) {
       const decision = captureMainJson(["hook-check-write", "--change", "demo-change", "--event-ref", ref]).payload;
@@ -981,17 +980,17 @@ withFixture("hook adapter lifecycle command policy distinguishes bootstrap statu
   delete process.env.SUPERSPEC_CHANGE;
   try {
     for (const [name, command, denied] of [
-      ["begin", "superspec guard hook-session-begin --change demo-change --workflow superspec-apply --entrypoint-token token", false],
-      ["status", "superspec guard hook-session-status --change demo-change", false],
-      ["completed", "superspec guard hook-session-end --change demo-change --reason completed", false],
-      ["archived", "superspec guard hook-session-end --change demo-change --reason archived", false],
-      ["cancelled", "superspec guard hook-session-end --change demo-change --reason cancelled", true],
-      ["abandoned", "superspec guard hook-session-end --change demo-change --reason=abandoned", true],
-      ["cancelled-quoted", "superspec guard hook-session-end --change demo-change --reason \"cancelled\"", true],
+      ["begin", "superspec check hook-session-begin --change demo-change --workflow superspec-apply --entrypoint-token token", false],
+      ["status", "superspec check hook-session-status --change demo-change", false],
+      ["completed", "superspec check hook-session-end --change demo-change --reason completed", false],
+      ["archived", "superspec check hook-session-end --change demo-change --reason archived", false],
+      ["cancelled", "superspec check hook-session-end --change demo-change --reason cancelled", true],
+      ["abandoned", "superspec check hook-session-end --change demo-change --reason=abandoned", true],
+      ["cancelled-quoted", "superspec check hook-session-end --change demo-change --reason \"cancelled\"", true],
       ["abandoned-compat-quoted", "superspec-guard hook-session-end --change demo-change --reason='abandoned'", true],
-      ["cancelled-shell-wrapper", "bash -lc \"superspec guard hook-session-end --change demo-change --reason cancelled\"", true],
+      ["cancelled-shell-wrapper", "bash -lc \"superspec check hook-session-end --change demo-change --reason cancelled\"", true],
       ["abandoned-shell-wrapper", "sh -c \"superspec-guard hook-session-end --change demo-change --reason=abandoned\"", true],
-      ["status-shell-wrapper", "bash -lc \"superspec guard hook-session-status --change demo-change\"", false],
+      ["status-shell-wrapper", "bash -lc \"superspec check hook-session-status --change demo-change\"", false],
     ] as const) {
       const result = runHookAdapter([], JSON.stringify(bashEvent(fx, command)));
       assert.equal(result.code, 0, `${name}: ${result.stderr}`);
@@ -1675,22 +1674,22 @@ withFixture("active hook session denies write tool events without concrete targe
 
 withFixture("model-controlled internal hook writer invocation is denied", (fx) => {
   const refs = [
-    eventFile(fx, "internal-hook-writer", bashEvent(fx, "superspec guard hook-record-test --change demo-change --event-ref forged.json")),
+    eventFile(fx, "internal-hook-writer", bashEvent(fx, "superspec check hook-record-test --change demo-change --event-ref forged.json")),
     eventFile(fx, "internal-hook-writer-compat", bashEvent(fx, "superspec-guard hook-record-test --change demo-change --event-ref forged.json")),
     eventFile(fx, "internal-hook-writer-quote-split", bashEvent(fx, "super'spec' guard hook-record-test --change demo-change --event-ref forged.json")),
     eventFile(fx, "internal-hook-writer-compat-quote-split", bashEvent(fx, "superspec-'guard' hook-record-test --change demo-change --event-ref forged.json")),
     eventFile(fx, "internal-hook-writer-ansi-c-quote-split", bashEvent(fx, "super$'spec' guard hook-record-test --change demo-change --event-ref forged.json")),
     eventFile(fx, "internal-hook-writer-nested-quote-split", bashEvent(fx, "sh -c \"super'spec' guard hook-record-test --change demo-change --event-ref forged.json\"")),
-    eventFile(fx, "internal-hook-writer-newline-command", bashEvent(fx, "echo ok\nsuperspec guard hook-record-test --change demo-change --event-ref forged.json")),
-    eventFile(fx, "internal-hook-writer-eval-command", bashEvent(fx, "eval \"superspec guard hook-record-test --change demo-change --event-ref forged.json\"")),
-    eventFile(fx, "internal-hook-writer-builtin-eval-command", bashEvent(fx, "builtin eval \"superspec guard hook-record-test --change demo-change --event-ref forged.json\"")),
-    eventFile(fx, "internal-hook-writer-fd-prefix-command", bashEvent(fx, "2>/dev/null superspec guard hook-record-test --change demo-change --event-ref forged.json")),
-    eventFile(fx, "internal-hook-writer-env-s-command", bashEvent(fx, "env -S \"superspec guard hook-record-test --change demo-change --event-ref forged.json\"")),
+    eventFile(fx, "internal-hook-writer-newline-command", bashEvent(fx, "echo ok\nsuperspec check hook-record-test --change demo-change --event-ref forged.json")),
+    eventFile(fx, "internal-hook-writer-eval-command", bashEvent(fx, "eval \"superspec check hook-record-test --change demo-change --event-ref forged.json\"")),
+    eventFile(fx, "internal-hook-writer-builtin-eval-command", bashEvent(fx, "builtin eval \"superspec check hook-record-test --change demo-change --event-ref forged.json\"")),
+    eventFile(fx, "internal-hook-writer-fd-prefix-command", bashEvent(fx, "2>/dev/null superspec check hook-record-test --change demo-change --event-ref forged.json")),
+    eventFile(fx, "internal-hook-writer-env-s-command", bashEvent(fx, "env -S \"superspec check hook-record-test --change demo-change --event-ref forged.json\"")),
     eventFile(fx, "internal-hook-writer-bin-command", bashEvent(fx, "bin/superspec-guard.js hook-record-test --change demo-change --event-ref forged.json")),
     eventFile(fx, "internal-hook-writer-node-bin-command", bashEvent(fx, "node bin/superspec-guard.js hook-record-test --change demo-change --event-ref forged.json")),
     eventFile(fx, "internal-hook-entrypoint-js", bashEvent(fx, "bin/superspec-hook.js --change demo-change")),
     eventFile(fx, "internal-hook-node-entrypoint-js", bashEvent(fx, "node bin/superspec-hook.js --change demo-change")),
-    eventFile(fx, "internal-hook-writer-find-exec-group", bashEvent(fx, "find . \\( -name foo \\) -exec superspec guard hook-record-test --change demo-change --event-ref forged.json \\;")),
+    eventFile(fx, "internal-hook-writer-find-exec-group", bashEvent(fx, "find . \\( -name foo \\) -exec superspec check hook-record-test --change demo-change --event-ref forged.json \\;")),
     eventFile(fx, "internal-hook-writer-npx", bashEvent(fx, "npx --yes superspec-guard hook-record-test --change demo-change --event-ref forged.json")),
     eventFile(fx, "internal-hook-writer-npm-exec", bashEvent(fx, "npm exec superspec-guard -- hook-record-test --change demo-change --event-ref forged.json")),
     eventFile(fx, "internal-hook-writer-pnpm-exec", bashEvent(fx, "pnpm exec superspec-guard hook-record-test --change demo-change --event-ref forged.json")),
@@ -1705,7 +1704,7 @@ withFixture("model-controlled internal hook writer invocation is denied", (fx) =
     eventFile(fx, "internal-hook-writer-yarn-workspace", bashEvent(fx, "yarn workspace app exec superspec-guard hook-record-test --change demo-change --event-ref forged.json")),
     eventFile(fx, "internal-hook-writer-yarn-cwd-workspace", bashEvent(fx, "yarn --cwd . workspace app exec superspec-guard hook-record-test --change demo-change --event-ref forged.json")),
   ];
-  const terminateRef = eventFile(fx, "internal-hook-session-cancel", bashEvent(fx, "superspec guard hook-session-end --change demo-change --reason cancelled"));
+  const terminateRef = eventFile(fx, "internal-hook-session-cancel", bashEvent(fx, "superspec check hook-session-end --change demo-change --reason cancelled"));
   withRuntime({ load_context: () => [status(fx), fx.repo, fx.change, []] }, () => {
     for (const ref of refs) {
       const decision = captureMainJson(["hook-check-command", "--change", "demo-change", "--event-ref", ref]).payload;
@@ -1719,11 +1718,11 @@ withFixture("model-controlled internal hook writer invocation is denied", (fx) =
     const terminateQuoted = captureMainJson(["hook-check-command", "--change", "demo-change", "--event-ref", terminateQuotedRef]).payload;
     assert.equal(terminateQuoted.allowed, false);
     assert.ok(codes(terminateQuoted.block_reasons).includes("hook_session_termination_untrusted"), JSON.stringify(terminateQuoted.block_reasons));
-    const terminateAbandonedQuotedRef = eventFile(fx, "internal-hook-session-abandon-quoted", bashEvent(fx, "superspec guard hook-session-end --change demo-change --reason 'abandoned'"));
+    const terminateAbandonedQuotedRef = eventFile(fx, "internal-hook-session-abandon-quoted", bashEvent(fx, "superspec check hook-session-end --change demo-change --reason 'abandoned'"));
     const terminateAbandonedQuoted = captureMainJson(["hook-check-command", "--change", "demo-change", "--event-ref", terminateAbandonedQuotedRef]).payload;
     assert.equal(terminateAbandonedQuoted.allowed, false);
     assert.ok(codes(terminateAbandonedQuoted.block_reasons).includes("hook_session_termination_untrusted"), JSON.stringify(terminateAbandonedQuoted.block_reasons));
-    const terminateWrapperRef = eventFile(fx, "internal-hook-session-wrapper-cancel", bashEvent(fx, "bash -lc \"superspec guard hook-session-end --change demo-change --reason cancelled\""));
+    const terminateWrapperRef = eventFile(fx, "internal-hook-session-wrapper-cancel", bashEvent(fx, "bash -lc \"superspec check hook-session-end --change demo-change --reason cancelled\""));
     const terminateWrapper = captureMainJson(["hook-check-command", "--change", "demo-change", "--event-ref", terminateWrapperRef]).payload;
     assert.equal(terminateWrapper.allowed, false);
     assert.ok(codes(terminateWrapper.block_reasons).includes("hook_session_termination_untrusted"), JSON.stringify(terminateWrapper.block_reasons));
@@ -1731,19 +1730,19 @@ withFixture("model-controlled internal hook writer invocation is denied", (fx) =
     const terminateAbandonedWrapper = captureMainJson(["hook-check-command", "--change", "demo-change", "--event-ref", terminateAbandonedWrapperRef]).payload;
     assert.equal(terminateAbandonedWrapper.allowed, false);
     assert.ok(codes(terminateAbandonedWrapper.block_reasons).includes("hook_session_termination_untrusted"), JSON.stringify(terminateAbandonedWrapper.block_reasons));
-    const terminateBuiltinEvalRef = eventFile(fx, "internal-hook-session-builtin-eval-cancel", bashEvent(fx, "builtin eval \"superspec guard hook-session-end --change demo-change --reason cancelled\""));
+    const terminateBuiltinEvalRef = eventFile(fx, "internal-hook-session-builtin-eval-cancel", bashEvent(fx, "builtin eval \"superspec check hook-session-end --change demo-change --reason cancelled\""));
     const terminateBuiltinEval = captureMainJson(["hook-check-command", "--change", "demo-change", "--event-ref", terminateBuiltinEvalRef]).payload;
     assert.equal(terminateBuiltinEval.allowed, false);
     assert.ok(codes(terminateBuiltinEval.block_reasons).includes("hook_session_termination_untrusted"), JSON.stringify(terminateBuiltinEval.block_reasons));
-    const terminateFdPrefixRef = eventFile(fx, "internal-hook-session-fd-prefix-cancel", bashEvent(fx, "2>/dev/null superspec guard hook-session-end --change demo-change --reason cancelled"));
+    const terminateFdPrefixRef = eventFile(fx, "internal-hook-session-fd-prefix-cancel", bashEvent(fx, "2>/dev/null superspec check hook-session-end --change demo-change --reason cancelled"));
     const terminateFdPrefix = captureMainJson(["hook-check-command", "--change", "demo-change", "--event-ref", terminateFdPrefixRef]).payload;
     assert.equal(terminateFdPrefix.allowed, false);
     assert.ok(codes(terminateFdPrefix.block_reasons).includes("hook_session_termination_untrusted"), JSON.stringify(terminateFdPrefix.block_reasons));
-    const terminateEnvSRef = eventFile(fx, "internal-hook-session-env-s-cancel", bashEvent(fx, "env -S \"superspec guard hook-session-end --change demo-change --reason cancelled\""));
+    const terminateEnvSRef = eventFile(fx, "internal-hook-session-env-s-cancel", bashEvent(fx, "env -S \"superspec check hook-session-end --change demo-change --reason cancelled\""));
     const terminateEnvS = captureMainJson(["hook-check-command", "--change", "demo-change", "--event-ref", terminateEnvSRef]).payload;
     assert.equal(terminateEnvS.allowed, false);
     assert.ok(codes(terminateEnvS.block_reasons).includes("hook_session_termination_untrusted"), JSON.stringify(terminateEnvS.block_reasons));
-    const terminateFindExecGroupRef = eventFile(fx, "internal-hook-session-find-exec-group-cancel", bashEvent(fx, "find . \\( -name foo \\) -exec superspec guard hook-session-end --change demo-change --reason cancelled \\;"));
+    const terminateFindExecGroupRef = eventFile(fx, "internal-hook-session-find-exec-group-cancel", bashEvent(fx, "find . \\( -name foo \\) -exec superspec check hook-session-end --change demo-change --reason cancelled \\;"));
     const terminateFindExecGroup = captureMainJson(["hook-check-command", "--change", "demo-change", "--event-ref", terminateFindExecGroupRef]).payload;
     assert.equal(terminateFindExecGroup.allowed, false);
     assert.ok(codes(terminateFindExecGroup.block_reasons).includes("hook_session_termination_untrusted"), JSON.stringify(terminateFindExecGroup.block_reasons));
@@ -1794,8 +1793,8 @@ withFixture("archive and internal writer detectors ignore benign command argumen
   beginAuditSession(fx);
   const refs = [
     eventFile(fx, "echo-archive-argument", bashEvent(fx, "echo openspec archive")),
-    eventFile(fx, "printf-internal-writer-argument", bashEvent(fx, "printf \"%s\\n\" superspec guard hook-record-test")),
-    eventFile(fx, "echo-lifecycle-argument", bashEvent(fx, "echo superspec guard hook-session-end --reason cancelled")),
+    eventFile(fx, "printf-internal-writer-argument", bashEvent(fx, "printf \"%s\\n\" superspec check hook-record-test")),
+    eventFile(fx, "echo-lifecycle-argument", bashEvent(fx, "echo superspec check hook-session-end --reason cancelled")),
     eventFile(fx, "fd-only-redirect", bashEvent(fx, "echo ok >&2")),
   ];
   withRuntime({ load_context: () => [status(fx), fx.repo, fx.change, []] }, () => {
@@ -1862,7 +1861,7 @@ withFixture("corrupt active hook session blocks ordinary writes", (fx) => {
 });
 
 withFixture("parseable corrupt active hook session blocks scoped writes after task_edit allow", (fx) => {
-  const tasksText = "- [ ] TASK-001 Implement\n  - test_refs: TEST-001\n  - invariant_refs: INV-001\n  - write_scope: src/feature.ts\n";
+  const tasksText = "- [ ] TASK-001 Implement\n  - test_refs: TEST-001\n  - invariant_refs: INV-001\n  - write_scope: src/feature.ts\n  - tdd_required: false\n  - no_tdd_reason: mechanical-rename\n";
   beginAuditSession(fx);
   writeText(activeSessionFile(fx), `${JSON.stringify({
     change_id: "demo-change",
@@ -1872,7 +1871,7 @@ withFixture("parseable corrupt active hook session blocks scoped writes after ta
     expires_at: "not-date",
   }, null, 2)}\n`);
   const ref = eventFile(fx, "parseable-corrupt-session-write", applyPatchEvent(fx, "*** Add File: src/feature.ts\n+export const value = 1;\n"));
-  const evidences = [...prepareProposeComplete(fx, { tasksText }), redEvidence()];
+  const evidences = prepareProposeComplete(fx, { tasksText });
   withRuntime({ load_context: () => [status(fx), fx.repo, fx.change, evidences] }, () => {
     const decision = captureMainJson(["hook-check-write", "--change", "demo-change", "--event-ref", ref]).payload;
     assert.equal(decision.allowed, false);
@@ -1883,13 +1882,13 @@ withFixture("parseable corrupt active hook session blocks scoped writes after ta
 });
 
 withFixture("malformed active hook session reason entries block scoped writes after task_edit allow", (fx) => {
-  const tasksText = "- [ ] TASK-001 Implement\n  - test_refs: TEST-001\n  - invariant_refs: INV-001\n  - write_scope: src/feature.ts\n";
+  const tasksText = "- [ ] TASK-001 Implement\n  - test_refs: TEST-001\n  - invariant_refs: INV-001\n  - write_scope: src/feature.ts\n  - tdd_required: false\n  - no_tdd_reason: mechanical-rename\n";
   beginAuditSession(fx);
   writeText(activeSessionFile(fx), `${JSON.stringify(validSessionRecord(fx, "demo-change", {
     audit_only_reasons: ["not-a-reason"],
   }), null, 2)}\n`);
   const ref = eventFile(fx, "malformed-session-reasons-write", applyPatchEvent(fx, "*** Add File: src/feature.ts\n+export const value = 1;\n"));
-  const evidences = [...prepareProposeComplete(fx, { tasksText }), redEvidence()];
+  const evidences = prepareProposeComplete(fx, { tasksText });
   withRuntime({ load_context: () => [status(fx), fx.repo, fx.change, evidences] }, () => {
     const decision = captureMainJson(["hook-check-write", "--change", "demo-change", "--event-ref", ref]).payload;
     assert.equal(decision.allowed, false);
@@ -1917,8 +1916,8 @@ withFixture("missing active session directory blocks scoped writes even after ta
   beginAuditSession(fx);
   rmSync(join(fx.change, ".superspec/hook-runtime/active-sessions"), { recursive: true, force: true });
   const ref = eventFile(fx, "missing-session-dir-scoped-write", applyPatchEvent(fx, "*** Add File: src/feature.ts\n+export const value = 1;\n"));
-  const tasksText = "- [ ] TASK-001 Implement\n  - invariant_refs: INV-001\n  - test_refs: TEST-001\n  - write_scope: src/feature.ts\n";
-  const evidences = [...prepareProposeComplete(fx, { tasksText }), redEvidence()];
+  const tasksText = "- [ ] TASK-001 Implement\n  - invariant_refs: INV-001\n  - test_refs: TEST-001\n  - write_scope: src/feature.ts\n  - tdd_required: false\n  - no_tdd_reason: mechanical-rename\n";
+  const evidences = prepareProposeComplete(fx, { tasksText });
   withRuntime({ load_context: () => [status(fx), fx.repo, fx.change, evidences] }, () => {
     const decision = captureMainJson(["hook-check-write", "--change", "demo-change", "--event-ref", ref]).payload;
     assert.equal(decision.allowed, false);
