@@ -51,12 +51,6 @@ import {
   withRuntime,
   waitForChild,
   waitForCondition,
-  LEGACY_MACHINE_STRING_FIELDS,
-  LEGACY_MACHINE_STRING_LIST_FIELDS,
-  LEGACY_MACHINE_PATH_OBJECT_LIST_FIELDS,
-  rewriteLegacySidecarString,
-  rewriteLegacyJson,
-  importLegacyIrsflowFixture,
   status,
   passEvidence,
   roleEvidence,
@@ -943,18 +937,6 @@ withFixture("dispatch persists confirmed preset upgrade requirement", (fx) => {
     assert.equal(state.superspec.preset, "hotfix");
     assert.equal(state.superspec.preset_upgrade_required, true);
   });
-});
-
-withFixture("legacy irsflow fixture is normalized as superspec test input only", (fx) => {
-  const sourceChange = join(GUARD_ROOT, "tests", "fixtures", "legacy-irsflow-change");
-  importLegacyIrsflowFixture(sourceChange, fx.change);
-  const state = readJson(join(fx.change, ".superspec", "superspec-state.json"));
-  const review = readJson(join(fx.change, ".superspec", "evidence", "reviews", "EV-review-code-reviewer-20260608.json"));
-  assert.ok("superspec" in state);
-  assert.equal("irsflow" in state, false);
-  assert.equal(review.output_ref.startsWith(".superspec/"), true);
-  assert.equal(review.target_refs.some((item: JsonMap) => String(item.path).includes(".superspec/")), true);
-  assert.equal(review.source_anchors.some((item: string) => item.includes(".irsflow/")), true);
 });
 
 test("no v1 hook or custom schema artifacts exist", () => {

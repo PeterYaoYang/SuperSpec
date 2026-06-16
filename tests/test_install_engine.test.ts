@@ -10,7 +10,7 @@ import { delimiter, dirname, join } from "node:path";
 
 import * as guard from "../superspec_guard.ts";
 import { main_init, maybe_install_missing_openspec } from "../src/init_cli.ts";
-import { missing_openspec_cli_message, OPENSPEC_INSTALL_DOC_URL, recommended_openspec_install_plan } from "../src/project_init.ts";
+import { ensure_openspec_chinese_context, missing_openspec_cli_message, OPENSPEC_INSTALL_DOC_URL, recommended_openspec_install_plan } from "../src/project_init.ts";
 
 function writeText(path: string, text: string): void {
   mkdirSync(dirname(path), { recursive: true });
@@ -1040,6 +1040,21 @@ test("interactive init surfaces install failures in Chinese without leaking raw 
   assert.equal(writes.some((item) => item.includes("exit status")), false);
 });
 
+test("ensure_openspec_chinese_context creates config when missing", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "sc-"));
+  try { const a = ensure_openspec_chinese_context(tmp); assert.equal(a.status, "created"); assert.ok(existsSync(join(tmp, "openspec", "config.yaml"))); assert.ok(readFileSync(join(tmp, "openspec", "config.yaml"), "utf8").includes("所有文档必须使用中文编写")); }
+  finally { rmSync(tmp, { recursive: true, force: true }); }
+});
+test("ensure_openspec_chinese_context is idempotent", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "sc-"));
+  try { assert.equal(ensure_openspec_chinese_context(tmp).status, "created"); assert.equal(ensure_openspec_chinese_context(tmp).status, "ok"); }
+  finally { rmSync(tmp, { recursive: true, force: true }); }
+});
+test("ensure_openspec_chinese_context replaces English context", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "sc-"));
+  try { const d = join(tmp, "openspec"); mkdirSync(d, { recursive: true }); writeFileSync(join(d, "config.yaml"), "context: |\n  English.\n", "utf8"); assert.equal(ensure_openspec_chinese_context(tmp).status, "updated"); assert.ok(readFileSync(join(d, "config.yaml"), "utf8").includes("所有文档必须使用中文编写")); }
+  finally { rmSync(tmp, { recursive: true, force: true }); }
+});
 test("templates and guard constants stay consistent (install map covers all workflow skills and roles)", () => {
   // DISTRIBUTION §9: if guard constants change, the install map must follow.
   const { mappings } = guard.load_install_map();

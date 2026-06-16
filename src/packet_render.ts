@@ -67,6 +67,7 @@ import {
   splitList,
   task_apply_execution_surface,
   task_apply_execution_surface_reasons,
+  tasks_structure_hash,
   test_contract_invariant_refs_by_test,
 } from "./tasks.ts";
 import {
@@ -461,6 +462,13 @@ function workflow_packet(ctx: PacketContext, gateRaw: string, taskId?: string): 
     diagnostic_command: gate_recheck_command(ctx.change, gate, taskId, true),
     must_read_refs: workflow_gate_refs(ctx, gate),
   };
+  // Surface tasks_structure_hash directly in the agent-facing packet so apply_isolation and
+  // scope_expansion human confirmations can be constructed without a second status/json detour
+  // or source-code inspection to find the current tasks.md structural fingerprint.
+  if (gate === "apply_ready" || gate === "task_edit" || gate === "task_complete" || gate === "task_reopen") {
+    const currentTasksStructureHash = tasks_structure_hash(ctx.changeRoot);
+    if (currentTasksStructureHash) packet.tasks_structure_hash = currentTasksStructureHash;
+  }
   const cliSurfaces = openspec_cli_surfaces_for_gate(ctx.change, gate);
   if (cliSurfaces.length > 0) packet.openspec_cli_surfaces = cliSurfaces;
   if (taskId) packet.task_id = taskId;

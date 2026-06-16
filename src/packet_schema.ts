@@ -1,7 +1,7 @@
 export type PacketOutputFormat = "agent" | "prompt";
 
 export type PinnedRef = {
-  root: "repo" | "change";
+  root: "repo" | "change" | "superspec";
   path: string;
   blob_sha: string;
 };
@@ -23,6 +23,7 @@ export type WorkflowPacket = {
   current_gate: string;
   task_id?: string;
   status: "allowed" | "blocked";
+  tasks_structure_hash?: string;
   top_blockers?: string[];
   blocker_count?: number;
   has_more_blockers?: boolean;

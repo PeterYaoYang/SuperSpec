@@ -51,12 +51,6 @@ import {
   withFixture,
   withRuntime,
   waitForChild,
-  LEGACY_MACHINE_STRING_FIELDS,
-  LEGACY_MACHINE_STRING_LIST_FIELDS,
-  LEGACY_MACHINE_PATH_OBJECT_LIST_FIELDS,
-  rewriteLegacySidecarString,
-  rewriteLegacyJson,
-  importLegacyIrsflowFixture,
   status,
   passEvidence,
   roleEvidence,
@@ -693,6 +687,7 @@ withFixture("workflow-packet matches representative gate reality without widenin
     "diagnostic_command",
     "discovery_template",
     "discovery_rules",
+    "tasks_structure_hash",
   ]);
   const proposeReady = prepareProposeComplete(fx);
   const reviewReady = archiveReadyEvidences(fx);

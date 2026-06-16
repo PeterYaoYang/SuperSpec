@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import {
   REQUIRED_SUPERSPEC_AGENT_ROLES,
   type JsonMap,
@@ -11,7 +11,7 @@ import {
   reason,
   read_agent_toml_name,
 } from "./core.ts";
-import { install_workflow } from "./install_engine.ts";
+import { install_workflow, type EngineAction } from "./install_engine.ts";
 
 export const OPENSPEC_NPM_PACKAGE = "@fission-ai/openspec";
 export const OPENSPEC_INSTALL_DOC_URL = "https://github.com/Fission-AI/OpenSpec#readme";
@@ -195,9 +195,30 @@ function ensureSuperSpecWorkflow(repoRoot: string, actions: Action[], force: boo
   return result.problems;
 }
 
+const OPENSPEC_CONFIG_REL = "openspec/config.yaml";
+const ZH_CTX = '所有文档必须使用中文编写。需求描述应使用"应当"或"必须"等词汇。';
+export function ensure_openspec_chinese_context(repoRoot: string): EngineAction {
+  const p = join(repoRoot, OPENSPEC_CONFIG_REL);
+  if (existsSync(p) && statSync(p).isFile()) {
+    const t = readFileSync(p, "utf8");
+    if (/context:[\s\S]*?所有文档必须使用中文/u.test(t)) return { action: `configure ${OPENSPEC_CONFIG_REL}`, status: "ok", detail: "OpenSpec 中文语境已存在" };
+    if (/^context:/mu.test(t)) {
+      const u = t.replace(/^context:\s*[|>]?\s*\n(?:[ \t].*\n)*/mu, `context: |\n  ${ZH_CTX}\n`);
+      mkdirSync(dirname(p), { recursive: true }); writeFileSync(p, u, "utf8");
+      return { action: `configure ${OPENSPEC_CONFIG_REL}`, status: "updated", detail: "OpenSpec context 已替换为简体中文语境" };
+    }
+    const s = t.endsWith("\n") ? "\ncontext: |\n" : "\n\ncontext: |\n";
+    mkdirSync(dirname(p), { recursive: true }); writeFileSync(p, `${t}${s}  ${ZH_CTX}\n`, "utf8");
+    return { action: `configure ${OPENSPEC_CONFIG_REL}`, status: "updated", detail: "OpenSpec context 已追加简体中文语境" };
+  }
+  mkdirSync(dirname(p), { recursive: true }); writeFileSync(p, `context: |\n  ${ZH_CTX}\n`, "utf8");
+  return { action: `configure ${OPENSPEC_CONFIG_REL}`, status: "created", detail: "OpenSpec 输出语言已设为简体中文" };
+}
+
 export function project_init(repoRootRaw = process.cwd(), opts: { force?: boolean } = {}): JsonMap {
   const repoRoot = resolve(repoRootRaw);
   const actions: Action[] = [];
+  actions.push(ensure_openspec_chinese_context(repoRoot) as Action);
   const problems = [
     ...ensureOpenSpecCliSurface(repoRoot, actions),
     ...ensureSuperSpecWorkflow(repoRoot, actions, opts.force === true),

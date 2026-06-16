@@ -872,7 +872,7 @@ openspec/changes/<change>/         # 运行时（OpenSpec 正本，spec-driven�
 > **强制力天花板（见 §6.6）：v1 所有 SuperSpec 证据可被伪造闭环，真实净强制 = OpenSpec 原生硬约束 + 合作型 agent 纪律 + 事后审计。v1 不满足"防抄近路"诉求——那是 v2 的事。**
 
 1. 本规范源（SPEC.md）评审定稿。
-2. 确认 change 走默认 `spec-driven`；落地 sidecar 模板（`docs/templates/`）+ 示例 change 验证 `openspec status` 与 SuperSpec guard gate（**不 fork schema**）。
+2. 确认 change 走默认 `spec-driven`；落地 sidecar 模板（`templates/sidecar/`）+ 示例 change 验证 `openspec status` 与 SuperSpec guard gate（**不 fork schema**）。
 3. 实现 Sync Guard（guard-owned state + 指纹对账 + fail-closed + **hook-compatible 命令输出接口**）：默认 `json` 保留完整诊断字段，`--format agent` 提供 workflow/model 消费的白名单安全视图，`--format user` 提供人读中文文本；仅复用 workflow guard 的 rollback/semantic_status 等**状态机无关** schema；**gate/transition 测试按本规范重写，不复用旧 `(stage,substage)` 状态机测试**。
 4. 编写 5 个用户可见 `superspec-*` skill：`superspec-explore`、`superspec-propose`、`superspec-apply`、`superspec-review`、`superspec-archive`（三段式 + subagent 矩阵 + 红绿灯纪律 + 规模分级 + 人审阻塞点 + references）；project init 由 `superspec-init`（仓内开发入口 `superspec_init.ts`）完成，final verification 并入 `superspec-review`，旧 `check-verify-ready` 仅作为兼容入口；`design`、`test-contract`、`tasks` 只作为 `superspec-propose` 内部步骤；**所有 OpenSpec artifact 的产出/实现必须委托 `openspec instructions`（见 §11.4），SuperSpec 仅加 gate/红绿灯/审查外层**；推进处 instruction 要求"先调 guard 且 PASS"。
 5. 清理/隔离旧测试期流程（无需迁移，见 §15）。

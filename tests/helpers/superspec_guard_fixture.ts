@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import test from "node:test";
 import {
-  copyFileSync,
   existsSync,
   linkSync,
   lstatSync,
@@ -270,68 +269,6 @@ export async function waitForCondition(check: () => boolean, timeoutMs: number, 
     await new Promise((resolve) => setTimeout(resolve, stepMs));
   }
   throw new Error(`condition not met within ${timeoutMs}ms`);
-}
-
-export const LEGACY_MACHINE_STRING_FIELDS = new Set([
-  "prompt_ref",
-  "output_ref",
-  "openspec_validate_ref",
-  "task_matrix_ref",
-  "invariant_matrix_ref",
-  "scope_drift_ref",
-]);
-export const LEGACY_MACHINE_STRING_LIST_FIELDS = new Set([
-  "refs",
-  "raw_artifact_refs",
-  "raw_log_refs",
-  "reviewed_files",
-  "rollback_targets",
-]);
-export const LEGACY_MACHINE_PATH_OBJECT_LIST_FIELDS = new Set(["target_refs", "loaded_refs", "source_refs", "required_load_refs"]);
-
-export function rewriteLegacySidecarString(value: string): string {
-  return value.replaceAll(".irsflow/", ".superspec/");
-}
-
-export function rewriteLegacyJson(value: any, field: string | null = null): any {
-  if (Array.isArray(value)) {
-    if (field && LEGACY_MACHINE_STRING_LIST_FIELDS.has(field)) return value.map((item) => rewriteLegacySidecarString(String(item)));
-    if (field && LEGACY_MACHINE_PATH_OBJECT_LIST_FIELDS.has(field)) {
-      return value.map((item) => (
-        typeof item === "object" && item !== null && !Array.isArray(item) && typeof item.path === "string"
-          ? { ...item, path: rewriteLegacySidecarString(item.path) }
-          : item
-      ));
-    }
-    return value.map((item) => rewriteLegacyJson(item, field));
-  }
-  if (value && typeof value === "object") {
-    const out: JsonMap = {};
-    for (const [key, nested] of Object.entries(value)) out[key] = rewriteLegacyJson(nested, key);
-    if ("irsflow" in out) {
-      out.superspec = out.irsflow;
-      delete out.irsflow;
-    }
-    return out;
-  }
-  if (typeof value === "string" && field && LEGACY_MACHINE_STRING_FIELDS.has(field)) return rewriteLegacySidecarString(value);
-  return value;
-}
-
-export function importLegacyIrsflowFixture(sourceChange: string, destChange: string): void {
-  for (const sourcePath of walkFiles(sourceChange)) {
-    const rel = relative(sourceChange, sourcePath);
-    let destRel = rel.replace(".irsflow/", ".superspec/");
-    if (destRel === ".irsflow/irsflow-state.json" || destRel === ".superspec/irsflow-state.json") destRel = ".superspec/superspec-state.json";
-    const destPath = join(destChange, destRel);
-    mkdirp(dirname(destPath));
-    if (sourcePath.endsWith(".json")) {
-      const data = rewriteLegacyJson(readJson(sourcePath));
-      writeText(destPath, `${JSON.stringify(data, null, 2)}\n`);
-    } else {
-      copyFileSync(sourcePath, destPath);
-    }
-  }
 }
 
 export function status(fx: Fixture, statuses: Record<string, string> = {}): JsonMap {

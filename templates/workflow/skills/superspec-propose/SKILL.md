@@ -22,7 +22,7 @@ metadata:
 
 ## 阶段职责
 
-Propose 把 discovery 转成 OpenSpec proposal package，并补 SuperSpec 业务约束和测试契约。负责的文件是 `proposal.md`、`specs/**/*.md`、`design.md`、`tasks.md`、`.superspec/artifacts/business-invariants.md`、`.superspec/artifacts/test-contract.md`。本阶段不改实现代码。
+Propose 把 discovery 转成 OpenSpec proposal package，并按阶段生成 SuperSpec 业务约束和测试契约辅助文档。负责产出 `proposal.md`、`specs/**/*.md`、`design.md`、`tasks.md`，以及在需要时新建或更新 `.superspec/artifacts/business-invariants.md`、`.superspec/artifacts/test-contract.md`。本阶段不改实现代码。
 
 ## 第一条必跑命令
 
@@ -49,7 +49,10 @@ openspec instructions <artifact-id> --change "<change>" --json
 1. 运行 `openspec status --change "<change>" --json`，取 artifact 顺序、状态和 `resolvedOutputPath`。
 2. 每个 artifact（proposal/specs/design/tasks）运行 `openspec instructions <artifact-id> --change "<change>" --json`，取回 template/rules/context/instruction/dependencies。
 3. 先读 dependencies 列出的已完成 artifact，再按 template 写到 `resolvedOutputPath`；context/rules 是对作者的约束，不写进产出文件。
-4. sidecar（`.superspec/artifacts/business-invariants.md`、`.superspec/artifacts/test-contract.md`）用 SuperSpec 内置模板，写到 change 内 `.superspec/artifacts/`。
+4. 辅助文档（`.superspec/artifacts/business-invariants.md`、`.superspec/artifacts/test-contract.md`）如果尚不存在，就按 SuperSpec 内置模板在 change 内 `.superspec/artifacts/` 新建；已存在则基于当前阶段要求更新。
+5. `invariants_reviewed` 的 `workflow-packet` 会下发 `business_invariants_template` 与 `business_invariants_rules`；必须按该骨架直接填写，不得改成段落/列表。
+6. `test_contract_drafted` 的 `workflow-packet` 会下发 `test_contract_template` 与 `test_contract_rules`；必须按该骨架直接填写，不得改成段落/列表。
+7. `business-invariants.md` 的 `## Invariants` / `## Mapping` 和 `test-contract.md` 的 `## 测试覆盖矩阵` 必须保持 Markdown 表格，列名原样保留。
 
 ## Packet 驱动的阶段门
 

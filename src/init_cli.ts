@@ -12,7 +12,7 @@ import {
   type JsonMap,
   type OpenspecCliProbe,
 } from "./core.ts";
-import { forced_openspec_install_plan, project_init, recommended_openspec_install_plan } from "./project_init.ts";
+import { ensure_openspec_chinese_context, forced_openspec_install_plan, project_init, recommended_openspec_install_plan } from "./project_init.ts";
 import { install_workflow, uninstall_workflow, update_workflow, type EngineAction, type EngineResult, type InstallScope } from "./install_engine.ts";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
@@ -345,6 +345,10 @@ function run_init(args: InitArgs, scope: InstallScope): number {
     summary = engineDecision(`${gatePrefix}_update`, targetRoot, update_workflow(targetRoot, { scope }), [
       scope === "project" ? "review *.new files for user-modified surfaces, then rerun superspec check check-init" : "review *.new files for user-modified user-level surfaces",
     ]);
+    if (scope === "project" && summary.allowed) {
+      const act = ensure_openspec_chinese_context(targetRoot);
+      if (Array.isArray(summary.actions)) summary.actions.push(act);
+    }
   } else if (scope === "user") {
     summary = engineDecision("user_install", targetRoot, install_workflow(targetRoot, { force: args.force, scope: "user" }), [
       "user-level SuperSpec Codex surfaces installed; use superspec init --scope project inside a repo when project-local surfaces are needed",
