@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { writeSnapshot } from "./store.ts";
 import { rebuildSnapshot } from "./sync.ts";
 import { next as nextCmd } from "./next.ts";
-import { proposeReady, commitTransition, transitionInit, transitionExplore, startApply, taskStart, taskComplete } from "./transition.ts";
+import { proposeReady, commitTransition, transitionInit, transitionExplore, startApply, taskStart, taskComplete, reviewReady, accept, archive } from "./transition.ts";
 import { recordJobSubmit, recordUserDecision, jobsList, jobsPacket } from "./record.ts";
 import { recordTestRun } from "./task.ts";
 import { probeOpenSpec, openspecStatus, changeRoot } from "./openspec.ts";
@@ -140,6 +140,24 @@ function main(argv: string[]): number {
             const taskId = opts.task;
             if (!taskId) { console.error("task-complete 需要 --task"); return 1; }
             const result = taskComplete(projectRoot, change, cr, taskId);
+            console.log(JSON.stringify(result, null, 2));
+            return result.events_written === 0 ? 1 : 0;
+          }
+
+          case "review-ready": {
+            const result = reviewReady(projectRoot, change, cr);
+            console.log(JSON.stringify(result, null, 2));
+            return result.events_written === 0 ? 1 : 0;
+          }
+
+          case "accept": {
+            const result = accept(projectRoot, change, cr);
+            console.log(JSON.stringify(result, null, 2));
+            return result.events_written === 0 ? 1 : 0;
+          }
+
+          case "archive": {
+            const result = archive(projectRoot, change, cr);
             console.log(JSON.stringify(result, null, 2));
             return result.events_written === 0 ? 1 : 0;
           }

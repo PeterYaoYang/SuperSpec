@@ -1,7 +1,7 @@
 // SuperSpec 流程引擎 — transition：提交协议 + 所有 transition 处理器
 
 import { join } from "node:path";
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync } from "node:fs";
 import {
   ensureChangeLayout, readEvents, appendEvent, makeEvent,
   writeSnapshot, snapshotDigest, withLock, idempotencyKey, stagingDir,
@@ -245,6 +245,89 @@ export function taskStart(projectRoot: string, change: string, changeRoot: strin
         fromState: "apply", toState: "apply", outcome: "advanced" as const,
         reason: `创建任务 ${taskId} 执行尝试`,
         extraEvents: [{ type: "task_started", payload: attempt as unknown as Record<string, unknown> }],
+      };
+    },
+  });
+}
+
+// ===== review-ready =====
+
+export function reviewReady(projectRoot: string, change: string, changeRoot: string): TransitionResult {
+  return commitTransition(projectRoot, change, changeRoot, {
+    name: "review-ready", idempotencyInputs: { phase: "review-ready" },
+    decide: (snapshot) => {
+      // 检查是否所有任务已完成
+      const tasksContent = readFileSync(join(changeRoot, "tasks.md"), "utf8");
+      const allDone = !tasksContent.split("\n").some(l => l.includes("- [ ]"));
+      if (!allDone) return { skip: true, message: "尚有未完成任务" };
+
+      // 如果当前是 apply，先推进到 apply_done
+      if (snapshot.state === "apply") {
+        return { fromState: "apply", toState: "apply_done", outcome: "advanced" as const, reason: "所有任务完成" };
+      }
+      if (snapshot.state === "apply_done") {
+        // 检查是否有 final-audit job 需求
+        const finalAuditOpen = snapshot.open_jobs.find(j => j.role === "final-audit");
+        if (finalAuditOpen) return { skip: true, message: `有待完成的最终审查工作项 ${finalAuditOpen.job_id}` };
+
+        const finalAuditAccepted = snapshot.accepted_jobs.find(j => j.role === "final-audit");
+        if (!finalAuditAccepted) {
+          // 创建 final-audit job
+          const docPaths = ["proposal.md", "tasks.md", "design.md", ".superspec/artifacts/discovery.md", ".superspec/artifacts/business-invariants.md", ".superspec/artifacts/test-contract.md"];
+          const boundFiles: Ref[] = docPaths.filter(p => existsSync(join(changeRoot, p))).map(p => ({ path: p, sha: sha256File(join(changeRoot, p)) ?? "sha256:missing" }));
+          const job: Job = {
+            job_id: newJobId(change, "final-audit"), role: "final-audit", state: "requested" as const,
+            boundFiles, packet_digest: sha256Text(JSON.stringify({ role: "final-audit", boundFiles })),
+            created_from_transition: "review-ready", created_at: new Date().toISOString(),
+          };
+          return {
+            fromState: "apply_done", toState: "apply_done", outcome: "job_created" as const,
+            newJobs: [job], reason: "创建最终审查工作项",
+          };
+        }
+        return { fromState: "apply_done", toState: "review", outcome: "advanced" as const, reason: "最终审查已接受，进入审查阶段" };
+      }
+      return { skip: true, message: `当前状态 ${snapshot.state}，review-ready 不适用` };
+    },
+  });
+}
+
+// ===== accept =====
+
+export function accept(projectRoot: string, change: string, changeRoot: string): TransitionResult {
+  return commitTransition(projectRoot, change, changeRoot, {
+    name: "accept", idempotencyInputs: { phase: "accept" },
+    decide: (snapshot) => {
+      if (snapshot.state !== "review") return { skip: true, message: `当前状态 ${snapshot.state}，需要 review` };
+      return { fromState: "review", toState: "accepted", outcome: "advanced" as const, reason: "审查通过" };
+    },
+  });
+}
+
+// ===== archive =====
+
+export function archive(projectRoot: string, change: string, changeRoot: string): TransitionResult {
+  return commitTransition(projectRoot, change, changeRoot, {
+    name: "archive", idempotencyInputs: { phase: "archive" },
+    decide: (snapshot) => {
+      if (snapshot.state !== "accepted") return { skip: true, message: `当前状态 ${snapshot.state}，需要 accepted` };
+      // 构建保全清单（Phase 4 简化版：记录文档指纹 + specs/）
+      const manifest: Record<string, string> = {};
+      const docPaths = ["proposal.md", "tasks.md", "design.md", ".superspec/artifacts/discovery.md", ".superspec/artifacts/business-invariants.md", ".superspec/artifacts/test-contract.md"];
+      for (const p of docPaths) {
+        manifest[p] = sha256File(join(changeRoot, p)) ?? "sha256:missing";
+      }
+      // specs/ 目录
+      const specsDir = join(changeRoot, "specs");
+      if (existsSync(specsDir)) {
+        for (const f of readdirSync(specsDir)) {
+          if (f.endsWith(".md")) manifest[`specs/${f}`] = sha256File(join(specsDir, f)) ?? "sha256:missing";
+        }
+      }
+      return {
+        fromState: "accepted", toState: "archive", outcome: "advanced" as const,
+        reason: "归档完成",
+        extraEvents: [{ type: "artifact_recorded", payload: { kind: "archive_preservation_manifest", manifest } }],
       };
     },
   });

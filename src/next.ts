@@ -99,8 +99,72 @@ export function next(
     case "propose_ready":
       return {
         state: "propose_ready",
+        path: "next_command",
+        next_command: transitionCommand(change, "start-apply"),
+        reason: "计划就绪，开始执行",
+        missing_inputs: [],
+      };
+
+    case "apply": {
+      // 有 open job → 做
+      if (snapshot.open_jobs.length > 0) {
+        return {
+          state: "apply",
+          path: "required_job",
+          required_jobs: snapshot.open_jobs.map(j => ({ job_id: j.job_id, role: j.role, packet_command: packetCommand(change, j.job_id) })),
+          reason: `有 ${snapshot.open_jobs.length} 个待完成工作项`,
+        };
+      }
+      return {
+        state: "apply",
+        path: "next_command",
+        next_command: `${transitionCommand(change, "review-ready")} 或 ${transitionCommand(change, "task-start", "--task TASK-XXX")}`,
+        reason: "执行中：继续 task-start 或全部完成后 review-ready",
+        missing_inputs: [],
+      };
+    }
+
+    case "apply_done": {
+      if (snapshot.open_jobs.length > 0) {
+        return {
+          state: "apply_done",
+          path: "required_job",
+          required_jobs: snapshot.open_jobs.map(j => ({ job_id: j.job_id, role: j.role, packet_command: packetCommand(change, j.job_id) })),
+          reason: `有 ${snapshot.open_jobs.length} 个待完成工作项`,
+        };
+      }
+      return {
+        state: "apply_done",
+        path: "next_command",
+        next_command: transitionCommand(change, "review-ready"),
+        reason: "所有任务完成，进入审查",
+        missing_inputs: [],
+      };
+    }
+
+    case "review":
+      return {
+        state: "review",
+        path: "next_command",
+        next_command: transitionCommand(change, "accept"),
+        reason: "审查完成，提交接受",
+        missing_inputs: [],
+      };
+
+    case "accepted":
+      return {
+        state: "accepted",
+        path: "next_command",
+        next_command: transitionCommand(change, "archive"),
+        reason: "审查通过，提交归档",
+        missing_inputs: [],
+      };
+
+    case "archive":
+      return {
+        state: "archive",
         path: "done",
-        reason: "Phase 1 终态：propose_ready 已达成。后续阶段（apply/review/archive）待实现。",
+        reason: "已归档，流程完成。",
       };
 
     default:

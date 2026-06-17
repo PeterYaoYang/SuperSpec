@@ -229,9 +229,10 @@ test("完整 e2e：propose → job → accept → propose_ready", () => {
     assert.equal(step5.outcome, "advanced");
     assert.equal(step5.to_state, "propose_ready");
 
-    // 6. next → done
+    // 6. next → next_command（propose_ready 不再是终态，指向 start-apply）
     const step6 = next(fx.projectRoot, fx.change, fx.changeRoot, "normal");
-    assert.equal(step6.path, "done");
+    assert.equal(step6.path, "next_command");
+    assert.ok(step6.next_command.includes("start-apply"));
   } finally { fx.cleanup(); }
 });
 
