@@ -148,6 +148,50 @@ export function recordJobSubmit(
   });
 }
 
+/** record user-decision：登记用户决策 */
+export function recordUserDecision(
+  projectRoot: string,
+  change: string,
+  inputFile: string,
+): RecordResult {
+  return withLock(projectRoot, change, () => {
+    ensureChangeLayout(projectRoot, change);
+
+    if (!existsSync(inputFile)) {
+      appendEvent(projectRoot, change, makeEvent(change, "user_decision_recorded", { accepted: false, reason: "file_not_found", path: inputFile }));
+      return { event_type: "user_decision_recorded" as const, accepted: false, message: `决策文件不存在：${inputFile}` };
+    }
+
+    const content = readFileSync(inputFile, "utf8");
+    let decision: { scope?: string; question?: string; answer?: string };
+    try {
+      decision = JSON.parse(content);
+    } catch {
+      appendEvent(projectRoot, change, makeEvent(change, "user_decision_recorded", { accepted: false, reason: "invalid_json" }));
+      return { event_type: "user_decision_recorded" as const, accepted: false, message: "决策文件不是有效 JSON" };
+    }
+
+    if (!decision.scope || !decision.answer) {
+      appendEvent(projectRoot, change, makeEvent(change, "user_decision_recorded", { accepted: false, reason: "missing_scope_or_answer" }));
+      return { event_type: "user_decision_recorded" as const, accepted: false, message: "决策文件缺少 scope 或 answer" };
+    }
+
+    const event = makeEvent(change, "user_decision_recorded", {
+      scope: decision.scope,
+      question: decision.question ?? "",
+      answer: decision.answer,
+      input_digest: sha256File(inputFile) ?? "sha256:unknown",
+    });
+    appendEvent(projectRoot, change, event);
+
+    return {
+      event_type: "user_decision_recorded" as const,
+      accepted: true,
+      message: `用户决策已登记：scope=${decision.scope}`,
+    };
+  });
+}
+
 /** jobs list：列出工作项 */
 export function jobsList(
   projectRoot: string,

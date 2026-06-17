@@ -7,7 +7,7 @@ import { writeSnapshot } from "./store.ts";
 import { rebuildSnapshot } from "./sync.ts";
 import { next as nextCmd } from "./next.ts";
 import { proposeReady, commitTransition, transitionInit, transitionExplore } from "./transition.ts";
-import { recordJobSubmit, jobsList, jobsPacket } from "./record.ts";
+import { recordJobSubmit, recordUserDecision, jobsList, jobsPacket } from "./record.ts";
 import { probeOpenSpec, openspecStatus, changeRoot } from "./openspec.ts";
 
 // ===== 参数解析 =====
@@ -140,6 +140,17 @@ function main(argv: string[]): number {
               return 1;
             }
             const result = recordJobSubmit(projectRoot, change, cr, jobId, report);
+            console.log(JSON.stringify(result, null, 2));
+            return result.accepted ? 0 : 1;
+          }
+
+          case "user-decision": {
+            const inputFile = opts.input;
+            if (!inputFile) {
+              console.error("record user-decision 需要 --input");
+              return 1;
+            }
+            const result = recordUserDecision(projectRoot, change, inputFile);
             console.log(JSON.stringify(result, null, 2));
             return result.accepted ? 0 : 1;
           }

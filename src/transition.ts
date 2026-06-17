@@ -158,6 +158,16 @@ export function proposeReady(
         return { skip: true, message: "tasks.md 内容不像任务计划文档" };
       }
 
+      // Phase 2：基础职责（normal+ 需要 discovery/bi/test-contract）
+      if (risk !== "minimal") {
+        const artifactsDir = join(changeRoot, ".superspec", "artifacts");
+        for (const doc of ["discovery.md", "business-invariants.md", "test-contract.md"]) {
+          if (!existsSync(join(artifactsDir, doc))) {
+            return { skip: true, message: `基础职责缺失：${doc} 不存在（risk=${risk} 需要）` };
+          }
+        }
+      }
+
       // BLOCKER 2 修复：检查 open_jobs（已有 requested 的不重复创建）
       const requiredRoles = TRANSITION_REQUIREMENTS["propose-ready"]?.[risk] ?? [];
 
@@ -186,13 +196,16 @@ export function proposeReady(
 
       if (staleRoles.length > 0) {
         const newJobs: Job[] = staleRoles.map(({ role }) => {
-          const boundFiles: Ref[] = [
-            { path: "proposal.md", sha: sha256File(join(changeRoot, "proposal.md")) ?? "sha256:missing" },
-            { path: "tasks.md", sha: sha256File(join(changeRoot, "tasks.md")) ?? "sha256:missing" },
+          // BLOCKER 修复：所有基础职责文档都进 boundFiles，改任何一个都会让 accepted job 失效
+          const docPaths = [
+            "proposal.md", "tasks.md", "design.md",
+            ".superspec/artifacts/discovery.md",
+            ".superspec/artifacts/business-invariants.md",
+            ".superspec/artifacts/test-contract.md",
           ];
-          if (existsSync(join(changeRoot, "design.md"))) {
-            boundFiles.push({ path: "design.md", sha: sha256File(join(changeRoot, "design.md")) ?? "sha256:missing" });
-          }
+          const boundFiles: Ref[] = docPaths
+            .filter(p => existsSync(join(changeRoot, p)))
+            .map(p => ({ path: p, sha: sha256File(join(changeRoot, p)) ?? "sha256:missing" }));
           return {
             job_id: newJobId(change, role), role, state: "requested" as const, boundFiles,
             packet_digest: sha256Text(JSON.stringify({ role, boundFiles })),
@@ -231,17 +244,37 @@ export function transitionInit(projectRoot: string, change: string, changeRoot: 
   });
 }
 
-/** explore transition（init→explore 或 explore→propose） */
-export function transitionExplore(projectRoot: string, change: string, changeRoot: string): TransitionResult {
+/** explore transition——init→explore 或 explore→propose（Phase 2：真实校验） */
+export function transitionExplore(
+  projectRoot: string, change: string, changeRoot: string,
+): TransitionResult {
   return commitTransition(projectRoot, change, changeRoot, {
     name: "explore",
+    idempotencyInputs: { phase: "explore" },
     decide: (snapshot) => {
       if (snapshot.state === "init") {
+        // init → explore：直接进入
         return { fromState: "init", toState: "explore", outcome: "advanced" as const, reason: "进入探索阶段" };
       }
+
       if (snapshot.state === "explore") {
-        return { fromState: "explore", toState: "propose", outcome: "advanced" as const, reason: "进入计划阶段" };
+        // explore → propose：校验 discovery.md
+        const discoveryPath = join(changeRoot, ".superspec", "artifacts", "discovery.md");
+        if (!existsSync(discoveryPath)) {
+          return { skip: true, message: "discovery.md 不存在，需先完成探索" };
+        }
+        const content = readFileSync(discoveryPath, "utf8");
+        if (!content.trim()) {
+          return { skip: true, message: "discovery.md 为空" };
+        }
+        // 检查待确认问题段（spec B1：有阻塞性歧义但无 ask_user → block）
+        const openQuestions = content.match(/- \[ \]/g);
+        if (openQuestions && openQuestions.length > 0) {
+          return { skip: true, message: `discovery.md 有 ${openQuestions.length} 个未解决的待确认问题` };
+        }
+        return { fromState: "explore", toState: "propose", outcome: "advanced" as const, reason: "探索完成，进入计划阶段" };
       }
+
       return { skip: true, message: `当前状态 ${snapshot.state}，explore 不适用` };
     },
   });
