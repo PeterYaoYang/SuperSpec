@@ -1,0 +1,241 @@
+// SuperSpec 流程引擎 — 存储层：路径、指纹、事件日志、快照、锁
+
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, openSync, closeSync, unlinkSync, statSync, renameSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { hostname } from "node:os";
+import type { Event, Snapshot, Ref } from "./types.ts";
+
+// ===== 路径 =====
+
+export function engineRoot(projectRoot: string): string {
+  return join(projectRoot, ".superspec");
+}
+
+export function changeDir(projectRoot: string, change: string): string {
+  return join(engineRoot(projectRoot), "changes", change);
+}
+
+export function eventsFile(projectRoot: string, change: string): string {
+  return join(changeDir(projectRoot, change), "events.jsonl");
+}
+
+export function snapshotFile(projectRoot: string, change: string): string {
+  return join(changeDir(projectRoot, change), "snapshot.json");
+}
+
+export function lockFile(projectRoot: string, change: string): string {
+  return join(changeDir(projectRoot, change), "lock");
+}
+
+export function stagingDir(projectRoot: string, change: string, transitionId: string): string {
+  return join(changeDir(projectRoot, change), "staging", transitionId);
+}
+
+export function jobsDir(projectRoot: string, change: string): string {
+  return join(changeDir(projectRoot, change), "jobs");
+}
+
+export function ensureChangeLayout(projectRoot: string, change: string): void {
+  const dir = changeDir(projectRoot, change);
+  mkdirSync(dir, { recursive: true });
+  mkdirSync(join(dir, "jobs"), { recursive: true });
+  mkdirSync(join(dir, "staging"), { recursive: true });
+  mkdirSync(join(dir, "raw"), { recursive: true });
+  const ef = eventsFile(projectRoot, change);
+  if (!existsSync(ef)) writeFileSync(ef, "", "utf8");
+}
+
+// ===== 指纹 =====
+
+export function sha256Text(text: string): string {
+  return "sha256:" + createHash("sha256").update(text, "utf8").digest("hex");
+}
+
+export function sha256File(filePath: string): string | null {
+  if (!existsSync(filePath) || !statSync(filePath).isFile()) return null;
+  return "sha256:" + createHash("sha256").update(readFileSync(filePath)).digest("hex");
+}
+
+export function computeDocumentDigests(
+  changeRoot: string,
+  docPaths: string[]
+): Record<string, string> {
+  const digests: Record<string, string> = {};
+  for (const p of docPaths) {
+    const full = join(changeRoot, p);
+    digests[p] = sha256File(full) ?? "sha256:missing";
+  }
+  return digests;
+}
+
+export function digestOf(obj: unknown): string {
+  const keys = Object.keys(obj as object).sort();
+  return sha256Text(JSON.stringify(obj, keys));
+}
+
+// ===== 事件日志 =====
+
+let eventSeq = 0;
+
+export function appendEvent(projectRoot: string, change: string, event: Event): void {
+  const line = JSON.stringify(event) + "\n";
+  const ef = eventsFile(projectRoot, change);
+  // append
+  const fd = openSync(ef, "a");
+  try {
+    writeFileSync(fd, line, "utf8");
+  } finally {
+    closeSync(fd);
+  }
+}
+
+export function readEvents(projectRoot: string, change: string): Event[] {
+  const ef = eventsFile(projectRoot, change);
+  if (!existsSync(ef)) return [];
+  const content = readFileSync(ef, "utf8");
+  return content.split("\n").filter(l => l.trim()).map(l => JSON.parse(l) as Event);
+}
+
+export function makeEvent(
+  change: string,
+  eventType: Event["event_type"],
+  payload: Record<string, unknown>,
+  opts: {
+    transitionId?: string | null;
+    idempotencyKey?: string | null;
+    prevSnapshotDigest?: string | null;
+    inputRefs?: Ref[];
+    outputRefs?: Ref[];
+  } = {}
+): Event {
+  const base = {
+    change_id: change,
+    event_type: eventType,
+    transition_id: opts.transitionId ?? null,
+    idempotency_key: opts.idempotencyKey ?? null,
+    created_at: new Date().toISOString(),
+    actor: process.env.SUPERSPEC_ACTOR ?? "cli",
+    prev_snapshot_digest: opts.prevSnapshotDigest ?? null,
+    input_refs: opts.inputRefs ?? [],
+    output_refs: opts.outputRefs ?? [],
+    payload,
+  };
+  const event_digest = digestOf(base);
+  const event_id = `EVT-${Date.now()}-${++eventSeq}`;
+  return { event_id, ...base, event_digest } as Event;
+}
+
+export function eventsDigest(events: Event[]): string {
+  return sha256Text(events.map(e => e.event_digest).join("\n"));
+}
+
+// ===== 快照 =====
+
+export function writeSnapshot(projectRoot: string, change: string, snapshot: Snapshot): void {
+  writeFileSync(snapshotFile(projectRoot, change), JSON.stringify(snapshot, null, 2) + "\n", "utf8");
+}
+
+export function readSnapshot(projectRoot: string, change: string): Snapshot | null {
+  const sf = snapshotFile(projectRoot, change);
+  if (!existsSync(sf)) return null;
+  return JSON.parse(readFileSync(sf, "utf8")) as Snapshot;
+}
+
+export function snapshotDigest(snapshot: Snapshot): string {
+  return sha256Text(JSON.stringify({
+    state: snapshot.state,
+    events_digest: snapshot.events_digest,
+    document_digests: snapshot.document_digests,
+    tasks_structure_digest: snapshot.tasks_structure_digest,
+    open_jobs: snapshot.open_jobs.map(j => j.job_id),
+    accepted_jobs: snapshot.accepted_jobs.map(j => j.job_id),
+  }));
+}
+
+// ===== 锁（per-change 文件锁，PID + staleness 回收）=====
+
+const LOCK_STALE_MS = 5 * 60 * 1000;
+
+interface LockInfo {
+  pid: number;
+  hostname: string;
+  created_at: string;
+}
+
+export function acquireLock(projectRoot: string, change: string): void {
+  const lf = lockFile(projectRoot, change);
+  const info: LockInfo = {
+    pid: process.pid,
+    hostname: hostname(),
+    created_at: new Date().toISOString(),
+  };
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const fd = openSync(lf, "wx");
+      try {
+        writeFileSync(fd, JSON.stringify(info) + "\n", "utf8");
+      } finally {
+        closeSync(fd);
+      }
+      return;
+    } catch (err: any) {
+      if (err.code !== "EEXIST") throw err;
+      // 尝试回收 stale lock
+      const existing = readLockInfo(lf);
+      if (existing && isLockStale(existing)) {
+        unlinkSync(lf);
+        continue; // retry
+      }
+      throw new Error(
+        `Lock contention: ${lf} held by pid=${existing?.pid} on ${existing?.hostname}. ` +
+        `If no engine process is active, remove the lock file manually.`
+      );
+    }
+  }
+  throw new Error(`Failed to acquire lock after stale recovery: ${lf}`);
+}
+
+export function releaseLock(projectRoot: string, change: string): void {
+  try { unlinkSync(lockFile(projectRoot, change)); } catch { /* best effort */ }
+}
+
+function readLockInfo(lf: string): LockInfo | null {
+  try {
+    return JSON.parse(readFileSync(lf, "utf8")) as LockInfo;
+  } catch {
+    return null;
+  }
+}
+
+function isLockStale(info: LockInfo): boolean {
+  const age = Date.now() - new Date(info.created_at).getTime();
+  return age > LOCK_STALE_MS;
+}
+
+export function withLock<T>(projectRoot: string, change: string, fn: () => T): T {
+  acquireLock(projectRoot, change);
+  try {
+    return fn();
+  } finally {
+    releaseLock(projectRoot, change);
+  }
+}
+
+// ===== 幂等键 =====
+
+export function idempotencyKey(
+  transitionName: string,
+  inputs: Record<string, unknown>,
+  prevSnapshotDigest: string | null
+): string {
+  // strip 时间戳/审计字段；保留安全前提 digest
+  const stripped = { transition: transitionName, ...inputs, _world: prevSnapshotDigest };
+  return sha256Text(JSON.stringify(stripped, Object.keys(stripped).sort()));
+}
+
+// ===== 工具 =====
+
+export function ref(path: string, projectRoot: string): Ref {
+  return { path, sha: sha256File(join(projectRoot, path)) ?? "sha256:missing" };
+}
