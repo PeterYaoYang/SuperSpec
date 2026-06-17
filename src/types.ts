@@ -44,6 +44,8 @@ export type EventType =
   | "transition_prepare" | "transition_commit"
   | "job_requested" | "job_invalidated"
   | "reopen" | "abandon"
+  // task events
+  | "task_started" | "task_completed" | "task_abandoned"
   // record events (don't advance state)
   | "job_accepted" | "job_rejected"
   | "user_decision_recorded" | "test_run_recorded"
@@ -85,9 +87,40 @@ export interface Snapshot {
   task_statuses: Record<string, "todo" | "doing" | "done">;
   open_jobs: Job[];
   accepted_jobs: Job[];
+  active_task_attempts: TaskAttempt[];
   pending_user_decisions: AskUser[];
   last_transition: string | null;
   computed_at: string;
+}
+
+// ===== Task Attempt =====
+export type AttemptState = "active" | "closed" | "abandoned";
+
+export interface TaskAttempt {
+  attempt_id: string;
+  task_id: string;
+  state: AttemptState;
+  task_structure_digest: string;
+  declared_write_scope: string[];
+  pre_edit_source_fingerprint: string | null;
+  pre_edit_red_ref: string | null;
+  executor_packet_digest: string | null;
+  executor_result_ref: string | null;
+  post_edit_green_ref: string | null;
+  created_at: string;
+}
+
+// ===== Test Run =====
+export interface TestRun {
+  test_id: string;
+  task_structure_digest: string;
+  command: string;
+  cwd: string;
+  exit_code: number;
+  semantic_status: "expected_failure" | "expected_success" | "characterization_pass" | "unknown";
+  target_fingerprint: string | null;
+  raw_log_ref: string | null;
+  created_at: string;
 }
 
 // ===== NextOutput =====

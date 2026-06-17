@@ -5,7 +5,7 @@ import { join } from "node:path";
 import {
   readEvents, eventsDigest, computeDocumentDigests, sha256File, sha256Text, ensureChangeLayout,
 } from "./store.ts";
-import type { Event, Snapshot, Job, State } from "./types.ts";
+import type { Event, Snapshot, Job, State, TaskAttempt } from "./types.ts";
 
 const TRACKED_DOCS = [
   "proposal.md", "design.md", "tasks.md",
@@ -14,16 +14,20 @@ const TRACKED_DOCS = [
   ".superspec/artifacts/test-contract.md",
 ];
 
-/** 从 events.jsonl 推导：当前状态、jobs、pending decisions */
+/** 从 events.jsonl 推导：当前状态、jobs、attempts、pending decisions */
 function replayEvents(events: Event[]): {
   state: State;
   openJobs: Job[];
   acceptedJobs: Job[];
+  activeAttempts: TaskAttempt[];
+  taskStatuses: Record<string, "todo" | "doing" | "done">;
   lastTransition: string | null;
 } {
   let state: State = "init";
   const openJobs: Job[] = [];
   const acceptedJobs: Job[] = [];
+  const activeAttempts: TaskAttempt[] = [];
+  const taskStatuses: Record<string, "todo" | "doing" | "done"> = {};
   let lastTransition: string | null = null;
 
   for (const ev of events) {
@@ -70,9 +74,28 @@ function replayEvents(events: Event[]): {
         if (idx >= 0) acceptedJobs.splice(idx, 1)[0]; // remove from accepted
         break;
       }
+      case "task_started": {
+        const attempt = ev.payload as unknown as TaskAttempt;
+        activeAttempts.push(attempt);
+        taskStatuses[attempt.task_id] = "doing";
+        break;
+      }
+      case "task_completed": {
+        const { task_id, attempt_id } = ev.payload as { task_id: string; attempt_id: string };
+        const idx = activeAttempts.findIndex(a => a.attempt_id === attempt_id);
+        if (idx >= 0) activeAttempts[idx].state = "closed";
+        taskStatuses[task_id] = "done";
+        break;
+      }
+      case "task_abandoned": {
+        const { attempt_id } = ev.payload as { attempt_id: string };
+        const idx = activeAttempts.findIndex(a => a.attempt_id === attempt_id);
+        if (idx >= 0) activeAttempts.splice(idx, 1);
+        break;
+      }
     }
   }
-  return { state, openJobs, acceptedJobs, lastTransition };
+  return { state, openJobs, acceptedJobs, activeAttempts, taskStatuses, lastTransition };
 }
 
 /** 粗粒度失效：检查 accepted job 的 boundFiles 是否仍匹配当前文档 */
@@ -120,7 +143,7 @@ export function rebuildSnapshot(
   const documentDigests = computeDocumentDigests(changeRoot, TRACKED_DOCS);
   const tsDigest = tasksStructureDigest(changeRoot);
 
-  const { state, openJobs, acceptedJobs, lastTransition } = replayEvents(events);
+  const { state, openJobs, acceptedJobs, activeAttempts, taskStatuses, lastTransition } = replayEvents(events);
 
   // 粗粒度失效检查（只读，不写事件）
   const staleInfo = checkStaleJobs(acceptedJobs, documentDigests);
@@ -134,9 +157,10 @@ export function rebuildSnapshot(
     events_digest: evDigest,
     document_digests: documentDigests,
     tasks_structure_digest: tsDigest,
-    task_statuses: {}, // Phase 1 不实现
+    task_statuses: taskStatuses,
     open_jobs: openJobs,
     accepted_jobs: freshAccepted,
+    active_task_attempts: activeAttempts,
     pending_user_decisions: [],
     last_transition: lastTransition,
     computed_at: new Date().toISOString(),

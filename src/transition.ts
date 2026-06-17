@@ -1,5 +1,4 @@
-// SuperSpec 流程引擎 — transition：提交协议 + propose-ready 处理器
-// 所有状态校验在锁内完成（BLOCKER 1 修复）
+// SuperSpec 流程引擎 — transition：提交协议 + 所有 transition 处理器
 
 import { join } from "node:path";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
@@ -9,9 +8,7 @@ import {
   sha256File, sha256Text,
 } from "./store.ts";
 import { rebuildSnapshot } from "./sync.ts";
-import type {
-  Event, Snapshot, State, Job, JobRole, TransitionResult, Ref,
-} from "./types.ts";
+import type { Event, Snapshot, State, Job, JobRole, TransitionResult, Ref, TaskAttempt } from "./types.ts";
 
 let transitionSeq = 0;
 function newTransitionId(): string { return `T-${Date.now()}-${++transitionSeq}`; }
@@ -26,23 +23,21 @@ const TRANSITION_REQUIREMENTS: Record<string, Record<string, JobRole[]>> = {
   },
 };
 
-/** 决策结果（由 decide 回调在锁内返回） */
 interface Decision {
   fromState: State;
   toState: State;
   outcome: "advanced" | "job_created";
   newJobs?: Job[];
   reason: string;
+  extraEvents?: { type: string; payload: Record<string, unknown> }[];
+  postCommit?: (projectRoot: string, change: string, changeRoot: string) => void;
 }
 
 /**
- * 统一 transition 提交协议——所有校验在锁内（BLOCKER 1 修复）。
- * decide 回调在锁内运行，看到的是最新 snapshot。
+ * 统一 transition 提交协议——所有校验在锁内。
  */
 export function commitTransition(
-  projectRoot: string,
-  change: string,
-  changeRoot: string,
+  projectRoot: string, change: string, changeRoot: string,
   opts: {
     name: string;
     decide: (snapshot: Snapshot) => Decision | { skip: true; message: string };
@@ -52,30 +47,22 @@ export function commitTransition(
   const { name } = opts;
 
   return withLock(projectRoot, change, () => {
-    // step 1-3: 锁内读 + 重建
     ensureChangeLayout(projectRoot, change);
     const snapshot = rebuildSnapshot(projectRoot, change, changeRoot);
-    // HIGH 4 修复：用 snapshotDigest（世界状态）而非 eventsDigest
     const worldDigest = snapshotDigest(snapshot);
 
-    // step 4: 幂等校验（锁内）
     const idemKey = idempotencyKey(name, opts.idempotencyInputs ?? {}, worldDigest);
     const events = readEvents(projectRoot, change);
-    const existing = events.find(
-      e => e.idempotency_key === idemKey && e.event_type === "transition_commit"
-    );
+    const existing = events.find(e => e.idempotency_key === idemKey && e.event_type === "transition_commit");
     if (existing) {
       const p = existing.payload as { outcome: string; from_state: State; to_state: State; created_job_ids?: string[] };
       return {
-        transition: name,
-        outcome: p.outcome as "advanced" | "job_created",
+        transition: name, outcome: p.outcome as "advanced" | "job_created",
         from_state: p.from_state, to_state: p.to_state,
-        created_jobs: p.created_job_ids ?? [],
-        message: "幂等返回", events_written: 0,
+        created_jobs: p.created_job_ids ?? [], message: "幂等返回", events_written: 0,
       };
     }
 
-    // step 4b: 锁内决策（BLOCKER 1 修复：校验在锁内）
     const decision = opts.decide(snapshot);
     if ("skip" in decision) {
       return {
@@ -85,9 +72,8 @@ export function commitTransition(
       };
     }
 
-    const { fromState, toState, outcome, newJobs = [], reason } = decision;
+    const { fromState, toState, outcome, newJobs = [], reason, extraEvents = [] } = decision;
 
-    // 锁内校验 from_state（BLOCKER 1 修复）
     if (fromState !== snapshot.state) {
       return {
         transition: name, outcome: "advanced",
@@ -98,184 +84,234 @@ export function commitTransition(
     }
 
     const transitionId = newTransitionId();
-
-    // step 5: staging
     mkdirSync(stagingDir(projectRoot, change, transitionId), { recursive: true });
-    writeFileSync(
-      join(stagingDir(projectRoot, change, transitionId), "intent.json"),
-      JSON.stringify({ name, fromState, toState, outcome, reason }, null, 2),
-    );
 
-    // step 7: transition_prepare
+    // prepare
     appendEvent(projectRoot, change, makeEvent(change, "transition_prepare", {
       transition: name, transition_id: transitionId, from_state: fromState, to_state: toState, reason,
     }, { transitionId, idempotencyKey: idemKey, prevSnapshotDigest: worldDigest }));
 
-    // step 9: transition_commit（HIGH 6 修复：job 数据放 commit payload 内，可 replay）
-    const commitPayload = {
+    // commit
+    appendEvent(projectRoot, change, makeEvent(change, "transition_commit", {
       transition: name, from_state: fromState, to_state: toState,
       outcome, created_job_ids: newJobs.map(j => j.job_id), new_jobs: newJobs, reason,
-    };
-    appendEvent(projectRoot, change, makeEvent(change, "transition_commit", commitPayload, {
-      transitionId, idempotencyKey: idemKey, prevSnapshotDigest: worldDigest,
-    }));
+    }, { transitionId, idempotencyKey: idemKey, prevSnapshotDigest: worldDigest }));
 
-    // step 10: 重建 snapshot
+    // extra events (task_started, task_completed, etc.)
+    for (const ex of extraEvents) {
+      appendEvent(projectRoot, change, makeEvent(change, ex.type as Event["event_type"], ex.payload, { transitionId }));
+    }
+
+    // B1 修复：postCommit 在 commit 事件写入后、snapshot 重建前执行
+    if (decision.postCommit) {
+      decision.postCommit(projectRoot, change, changeRoot);
+    }
+
     writeSnapshot(projectRoot, change, rebuildSnapshot(projectRoot, change, changeRoot));
 
     return {
       transition: name, outcome, from_state: fromState, to_state: toState,
       created_jobs: newJobs.map(j => j.job_id),
-      message: outcome === "advanced"
-        ? `状态推进：${fromState} → ${toState}`
-        : `状态不变（${fromState}），创建了 ${newJobs.length} 个工作项`,
-      events_written: 1,
+      message: outcome === "advanced" ? `状态推进：${fromState} → ${toState}` : `状态不变（${fromState}），创建了 ${newJobs.length} 个工作项`,
+      events_written: 1 + extraEvents.length,
     };
   });
 }
 
-/** propose-ready 处理器——所有逻辑通过 decide 回调在锁内执行 */
-export function proposeReady(
-  projectRoot: string, change: string, changeRoot: string,
-  risk: "minimal" | "normal" | "strict" = "normal",
-): TransitionResult {
+// ===== propose-ready =====
+
+export function proposeReady(projectRoot: string, change: string, changeRoot: string, risk: "minimal" | "normal" | "strict" = "normal"): TransitionResult {
   return commitTransition(projectRoot, change, changeRoot, {
-    name: "propose-ready",
-    idempotencyInputs: { risk },
+    name: "propose-ready", idempotencyInputs: { risk },
     decide: (snapshot) => {
-      // 校验 from_state（锁内）
-      if (snapshot.state !== "propose") {
-        return { skip: true, message: `当前状态 ${snapshot.state}，不能 propose-ready` };
-      }
+      if (snapshot.state !== "propose") return { skip: true, message: `当前状态 ${snapshot.state}，不能 propose-ready` };
 
-      // D1：tasks.md 存在且可解析
       const tasksPath = join(changeRoot, "tasks.md");
-      if (!existsSync(tasksPath)) {
-        return { skip: true, message: "tasks.md 不存在" };
-      }
+      if (!existsSync(tasksPath)) return { skip: true, message: "tasks.md 不存在" };
       const tasksContent = readFileSync(tasksPath, "utf8");
-      if (!tasksContent.includes("# Tasks") && !tasksContent.includes("- [ ]")) {
-        return { skip: true, message: "tasks.md 内容不像任务计划文档" };
-      }
+      if (!tasksContent.includes("# Tasks") && !tasksContent.includes("- [ ]")) return { skip: true, message: "tasks.md 内容不像任务计划文档" };
 
-      // Phase 2：基础职责（normal+ 需要 discovery/bi/test-contract）
       if (risk !== "minimal") {
         const artifactsDir = join(changeRoot, ".superspec", "artifacts");
         for (const doc of ["discovery.md", "business-invariants.md", "test-contract.md"]) {
-          if (!existsSync(join(artifactsDir, doc))) {
-            return { skip: true, message: `基础职责缺失：${doc} 不存在（risk=${risk} 需要）` };
-          }
+          if (!existsSync(join(artifactsDir, doc))) return { skip: true, message: `基础职责缺失：${doc} 不存在（risk=${risk} 需要）` };
         }
       }
 
-      // BLOCKER 2 修复：检查 open_jobs（已有 requested 的不重复创建）
       const requiredRoles = TRANSITION_REQUIREMENTS["propose-ready"]?.[risk] ?? [];
-
-      // 先看是否所有需求都有 fresh accepted job
       const staleRoles: { role: JobRole; reason: string }[] = [];
       for (const role of requiredRoles) {
-        // BLOCKER 2 修复：如果有 open job（requested），不创建新的——直接 skip
         const openForRole = snapshot.open_jobs.find(j => j.role === role);
-        if (openForRole) {
-          return { skip: true, message: `工作项 ${role} 已存在（${openForRole.job_id}），请先完成它` };
-        }
-
+        if (openForRole) return { skip: true, message: `工作项 ${role} 已存在（${openForRole.job_id}），请先完成它` };
         const fresh = snapshot.accepted_jobs.find(j => j.role === role);
         if (!fresh) {
           staleRoles.push({ role, reason: `需求 ${role} 无已接受的工作项` });
         } else {
           for (const bf of fresh.boundFiles) {
-            const currentSha = sha256File(join(changeRoot, bf.path));
-            if (currentSha && currentSha !== bf.sha) {
-              staleRoles.push({ role, reason: `${role} 绑定文件 ${bf.path} 已变化` });
-              break;
-            }
+            const currentSha = sha256File(join(changeRoot, bf.path)) ?? "sha256:missing";
+            if (currentSha !== bf.sha) { staleRoles.push({ role, reason: `${role} 绑定文件 ${bf.path} 已变化` }); break; }
           }
         }
       }
 
       if (staleRoles.length > 0) {
+        const docPaths = ["proposal.md", "tasks.md", "design.md", ".superspec/artifacts/discovery.md", ".superspec/artifacts/business-invariants.md", ".superspec/artifacts/test-contract.md"];
         const newJobs: Job[] = staleRoles.map(({ role }) => {
-          // BLOCKER 修复：所有基础职责文档都进 boundFiles，改任何一个都会让 accepted job 失效
-          const docPaths = [
-            "proposal.md", "tasks.md", "design.md",
-            ".superspec/artifacts/discovery.md",
-            ".superspec/artifacts/business-invariants.md",
-            ".superspec/artifacts/test-contract.md",
-          ];
-          const boundFiles: Ref[] = docPaths
-            .filter(p => existsSync(join(changeRoot, p)))
-            .map(p => ({ path: p, sha: sha256File(join(changeRoot, p)) ?? "sha256:missing" }));
-          return {
-            job_id: newJobId(change, role), role, state: "requested" as const, boundFiles,
-            packet_digest: sha256Text(JSON.stringify({ role, boundFiles })),
-            created_from_transition: "propose-ready", created_at: new Date().toISOString(),
-          };
+          const boundFiles: Ref[] = docPaths.filter(p => existsSync(join(changeRoot, p))).map(p => ({ path: p, sha: sha256File(join(changeRoot, p)) ?? "sha256:missing" }));
+          return { job_id: newJobId(change, role), role, state: "requested" as const, boundFiles, packet_digest: sha256Text(JSON.stringify({ role, boundFiles })), created_from_transition: "propose-ready", created_at: new Date().toISOString() };
         });
-        return {
-          fromState: "propose", toState: "propose", outcome: "job_created" as const, newJobs,
-          reason: staleRoles.map(s => s.reason).join("; "),
-        };
+        return { fromState: "propose", toState: "propose", outcome: "job_created" as const, newJobs, reason: staleRoles.map(s => s.reason).join("; ") };
       }
 
-      return {
-        fromState: "propose", toState: "propose_ready", outcome: "advanced" as const,
-        reason: `risk=${risk}，所有需求已满足`,
-      };
+      return { fromState: "propose", toState: "propose_ready", outcome: "advanced" as const, reason: `risk=${risk}，所有需求已满足` };
     },
   });
 }
 
-/** init transition——走同一条锁内路径（BLOCKER 1 修复） */
+// ===== init =====
+
 export function transitionInit(projectRoot: string, change: string, changeRoot: string): TransitionResult {
   return commitTransition(projectRoot, change, changeRoot, {
-    name: "init",
-    idempotencyInputs: { phase: "init" },
-    decide: (snapshot) => {
+    name: "init", idempotencyInputs: { phase: "init" },
+    decide: () => {
       const events = readEvents(projectRoot, change);
-      if (events.length > 0) {
-        return { skip: true, message: "change 已初始化" };
+      if (events.length > 0) return { skip: true, message: "change 已初始化" };
+      return { fromState: "init", toState: "init", outcome: "advanced" as const, reason: "引擎初始化" };
+    },
+  });
+}
+
+// ===== explore =====
+
+export function transitionExplore(projectRoot: string, change: string, changeRoot: string): TransitionResult {
+  return commitTransition(projectRoot, change, changeRoot, {
+    name: "explore", idempotencyInputs: { phase: "explore" },
+    decide: (snapshot) => {
+      if (snapshot.state === "init") return { fromState: "init", toState: "explore", outcome: "advanced" as const, reason: "进入探索阶段" };
+      if (snapshot.state === "explore") {
+        const discoveryPath = join(changeRoot, ".superspec", "artifacts", "discovery.md");
+        if (!existsSync(discoveryPath)) return { skip: true, message: "discovery.md 不存在" };
+        const content = readFileSync(discoveryPath, "utf8");
+        if (!content.trim()) return { skip: true, message: "discovery.md 为空" };
+        const openQs = content.match(/- \[ \]/g);
+        if (openQs && openQs.length > 0) return { skip: true, message: `discovery.md 有 ${openQs.length} 个未确认问题` };
+        return { fromState: "explore", toState: "propose", outcome: "advanced" as const, reason: "探索完成" };
       }
+      return { skip: true, message: `当前状态 ${snapshot.state}，explore 不适用` };
+    },
+  });
+}
+
+// ===== start-apply =====
+
+export function startApply(projectRoot: string, change: string, changeRoot: string): TransitionResult {
+  return commitTransition(projectRoot, change, changeRoot, {
+    name: "start-apply", idempotencyInputs: { phase: "start-apply" },
+    decide: (snapshot) => {
+      if (snapshot.state !== "propose_ready") return { skip: true, message: `当前状态 ${snapshot.state}，需要 propose_ready` };
+      return { fromState: "propose_ready", toState: "apply", outcome: "advanced" as const, reason: "进入执行阶段" };
+    },
+  });
+}
+
+// ===== task-start =====
+
+let attemptSeq = 0;
+
+export function taskStart(projectRoot: string, change: string, changeRoot: string, taskId: string): TransitionResult {
+  return commitTransition(projectRoot, change, changeRoot, {
+    name: "task-start", idempotencyInputs: { task: taskId },
+    decide: (snapshot) => {
+      if (snapshot.state !== "apply") return { skip: true, message: `当前状态 ${snapshot.state}，需要 apply` };
+      const tasksContent = readFileSync(join(changeRoot, "tasks.md"), "utf8");
+      if (!tasksContent.includes(taskId)) return { skip: true, message: `任务 ${taskId} 不存在` };
+      if (tasksContent.match(new RegExp(`- \\[x\\].*${taskId}`))) return { skip: true, message: `任务 ${taskId} 已完成` };
+
+      const existing = snapshot.active_task_attempts?.find(a => a.task_id === taskId && a.state === "active");
+      if (existing) return { skip: true, message: `任务 ${taskId} 已有活跃尝试` };
+
+      const structureDigest = sha256Text(tasksContent.replace(/- \[[xX]\]/g, "- [ ]"));
+      const attempt: TaskAttempt = {
+        attempt_id: `ATT-${taskId}-${Date.now()}-${++attemptSeq}`,
+        task_id: taskId, state: "active",
+        task_structure_digest: structureDigest,
+        declared_write_scope: [], pre_edit_source_fingerprint: null,
+        pre_edit_red_ref: null, executor_packet_digest: null,
+        executor_result_ref: null, post_edit_green_ref: null,
+        created_at: new Date().toISOString(),
+      };
+
       return {
-        fromState: "init", toState: "init", outcome: "advanced" as const,
-        reason: "引擎初始化",
+        fromState: "apply", toState: "apply", outcome: "advanced" as const,
+        reason: `创建任务 ${taskId} 执行尝试`,
+        extraEvents: [{ type: "task_started", payload: attempt as unknown as Record<string, unknown> }],
       };
     },
   });
 }
 
-/** explore transition——init→explore 或 explore→propose（Phase 2：真实校验） */
-export function transitionExplore(
-  projectRoot: string, change: string, changeRoot: string,
-): TransitionResult {
+// ===== task-complete =====
+
+export function taskComplete(projectRoot: string, change: string, changeRoot: string, taskId: string): TransitionResult {
   return commitTransition(projectRoot, change, changeRoot, {
-    name: "explore",
-    idempotencyInputs: { phase: "explore" },
+    name: "task-complete", idempotencyInputs: { task: taskId, phase: "complete" },
     decide: (snapshot) => {
-      if (snapshot.state === "init") {
-        // init → explore：直接进入
-        return { fromState: "init", toState: "explore", outcome: "advanced" as const, reason: "进入探索阶段" };
+      if (snapshot.state !== "apply") return { skip: true, message: `当前状态 ${snapshot.state}，需要 apply` };
+      const attempt = snapshot.active_task_attempts?.find(a => a.task_id === taskId && a.state === "active");
+      if (!attempt) return { skip: true, message: `任务 ${taskId} 无活跃执行尝试` };
+
+      const tasksContent = readFileSync(join(changeRoot, "tasks.md"), "utf8");
+      const currentDigest = sha256Text(tasksContent.replace(/- \[[xX]\]/g, "- [ ]"));
+      if (currentDigest !== attempt.task_structure_digest) return { skip: true, message: "任务结构指纹不匹配" };
+
+      // 解析任务属性（H1 修复：支持 tdd_required/no_tdd_reason）
+      const taskLine = tasksContent.split("\n").find(l => l.includes(taskId) && l.match(/^(- \[.\])/));
+      const isTdd = !taskLine?.includes("tdd_required:false");
+      const hasNoTddReason = taskLine?.includes("no_tdd_reason:");
+
+      // RED/GREEN 检查（仅 TDD 任务需要）
+      const events = readEvents(projectRoot, change);
+      let hasRed = false, hasGreen = false;
+      for (const ev of events) {
+        if (ev.event_type === "test_run_recorded") {
+          const tr = ev.payload as { task_structure_digest?: string; semantic_status?: string };
+          if (tr.task_structure_digest === attempt.task_structure_digest) {
+            if (tr.semantic_status === "expected_failure" || tr.semantic_status === "characterization_pass") hasRed = true;
+            if (tr.semantic_status === "expected_success") hasGreen = true;
+          }
+        }
       }
 
-      if (snapshot.state === "explore") {
-        // explore → propose：校验 discovery.md
-        const discoveryPath = join(changeRoot, ".superspec", "artifacts", "discovery.md");
-        if (!existsSync(discoveryPath)) {
-          return { skip: true, message: "discovery.md 不存在，需先完成探索" };
-        }
-        const content = readFileSync(discoveryPath, "utf8");
-        if (!content.trim()) {
-          return { skip: true, message: "discovery.md 为空" };
-        }
-        // 检查待确认问题段（spec B1：有阻塞性歧义但无 ask_user → block）
-        const openQuestions = content.match(/- \[ \]/g);
-        if (openQuestions && openQuestions.length > 0) {
-          return { skip: true, message: `discovery.md 有 ${openQuestions.length} 个未解决的待确认问题` };
-        }
-        return { fromState: "explore", toState: "propose", outcome: "advanced" as const, reason: "探索完成，进入计划阶段" };
+      if (isTdd) {
+        if (!hasRed) return { skip: true, message: `TDD 任务 ${taskId} 缺少 RED 证据` };
+        if (!hasGreen) return { skip: true, message: `TDD 任务 ${taskId} 缺少 GREEN 证据` };
+      } else {
+        if (!hasNoTddReason) return { skip: true, message: `非 TDD 任务 ${taskId} 缺少 no_tdd_reason` };
       }
 
-      return { skip: true, message: `当前状态 ${snapshot.state}，explore 不适用` };
+      // B1 修复：checkbox 写入移到 postCommit（commit 事件写入后执行）
+      return {
+        fromState: "apply", toState: "apply", outcome: "advanced" as const,
+        reason: `任务 ${taskId} 完成`,
+        extraEvents: [{ type: "task_completed", payload: { task_id: taskId, attempt_id: attempt.attempt_id } }],
+        postCommit: (_pr: string, _ch: string, cr: string) => {
+          const lines = readFileSync(join(cr, "tasks.md"), "utf8").split("\n");
+          const idx = lines.findIndex(l => l.includes(taskId) && l.match(/- \[ \]/));
+          if (idx < 0) throw new Error(`找不到 ${taskId} 的未完成复选框`);
+          // H2 修复：应用前验证结构指纹
+          const beforeDigest = sha256Text(lines.join("\n").replace(/- \[[xX]\]/g, "- [ ]"));
+          lines[idx] = lines[idx].replace(/- \[ \]/, "- [x]");
+          writeFileSync(join(cr, "tasks.md"), lines.join("\n"));
+          // H2 修复：应用后验证只有目标变了
+          const afterLines = readFileSync(join(cr, "tasks.md"), "utf8").split("\n");
+          const afterDigest = sha256Text(afterLines.join("\n").replace(/- \[[xX]\]/g, "- [ ]"));
+          if (afterDigest !== beforeDigest) {
+            afterLines[idx] = afterLines[idx].replace(/- \[x\]/, "- [ ]");
+            writeFileSync(join(cr, "tasks.md"), afterLines.join("\n"));
+            throw new Error(`复选框补丁导致结构变化：${taskId}`);
+          }
+        },
+      };
     },
   });
 }

@@ -6,8 +6,9 @@ import { join } from "node:path";
 import { writeSnapshot } from "./store.ts";
 import { rebuildSnapshot } from "./sync.ts";
 import { next as nextCmd } from "./next.ts";
-import { proposeReady, commitTransition, transitionInit, transitionExplore } from "./transition.ts";
+import { proposeReady, commitTransition, transitionInit, transitionExplore, startApply, taskStart, taskComplete } from "./transition.ts";
 import { recordJobSubmit, recordUserDecision, jobsList, jobsPacket } from "./record.ts";
+import { recordTestRun } from "./task.ts";
 import { probeOpenSpec, openspecStatus, changeRoot } from "./openspec.ts";
 
 // ===== 参数解析 =====
@@ -118,8 +119,29 @@ function main(argv: string[]): number {
             const risk = (opts.risk as "minimal" | "normal" | "strict") ?? "normal";
             const result = proposeReady(projectRoot, change, cr, risk);
             console.log(JSON.stringify(result, null, 2));
-            // skip（状态不变 + 无事件写入）不是失败，退出码 0
             return result.events_written === 0 && result.message.includes("不能") ? 1 : 0;
+          }
+
+          case "start-apply": {
+            const result = startApply(projectRoot, change, cr);
+            console.log(JSON.stringify(result, null, 2));
+            return result.events_written === 0 ? 1 : 0;
+          }
+
+          case "task-start": {
+            const taskId = opts.task;
+            if (!taskId) { console.error("task-start 需要 --task"); return 1; }
+            const result = taskStart(projectRoot, change, cr, taskId);
+            console.log(JSON.stringify(result, null, 2));
+            return result.events_written === 0 ? 1 : 0;
+          }
+
+          case "task-complete": {
+            const taskId = opts.task;
+            if (!taskId) { console.error("task-complete 需要 --task"); return 1; }
+            const result = taskComplete(projectRoot, change, cr, taskId);
+            console.log(JSON.stringify(result, null, 2));
+            return result.events_written === 0 ? 1 : 0;
           }
 
           default:
@@ -151,6 +173,14 @@ function main(argv: string[]): number {
               return 1;
             }
             const result = recordUserDecision(projectRoot, change, inputFile);
+            console.log(JSON.stringify(result, null, 2));
+            return result.accepted ? 0 : 1;
+          }
+
+          case "test-run": {
+            const inputFile = opts.input;
+            if (!inputFile) { console.error("record test-run 需要 --input"); return 1; }
+            const result = recordTestRun(projectRoot, change, inputFile);
             console.log(JSON.stringify(result, null, 2));
             return result.accepted ? 0 : 1;
           }

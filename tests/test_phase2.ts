@@ -64,7 +64,7 @@ test("explore→propose：discovery.md 有未确认问题时不推进", () => {
     writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "discovery.md"),
       "# Discovery\n\n- [ ] 待确认问题1\n");
     const result = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot);
-    assert.ok(result.message.includes("未解决"), result.message);
+    assert.ok(result.message.includes("未确认"), result.message);
     assert.equal(result.events_written, 0);
   } finally { fx.cleanup(); }
 });
