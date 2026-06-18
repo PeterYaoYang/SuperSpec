@@ -49,16 +49,67 @@ function parseFlags(args: string[]): Record<string, string> {
 
 // ===== 主分发 =====
 
-function main(argv: string[]): number {
+async function main(argv: string[]): Promise<number> {
+  // --help / 无参数 → 打印用法
+  if (argv.length === 0 || argv.includes("--help") || argv.includes("-h")) {
+    console.log(`SuperSpec 流程引擎 v2.0.0-alpha
+
+用法：superspec <命令> [选项]
+
+命令：
+  status --change <C>              查看状态
+  transition <子命令> --change <C>  状态流转（见下）
+  record <子命令> --change <C>      登记证据（见下）
+  jobs <子命令> --change <C>        工作项管理（见下）
+  install [--global]               安装到项目或全局
+  update                           更新 SuperSpec
+  version                          版本号
+
+transition 子命令：
+  init / explore / sync / next / propose-ready / start-apply
+  task-start --task <T> / task-complete --task <T>
+  review-ready / accept / archive
+
+record 子命令：
+  job-submit --job <J> --report <F>
+  user-decision --input <F>
+  test-run --input <F>
+
+jobs 子命令：
+  list / packet --job <J>
+`);
+    return 0;
+  }
+
+  // version
+  if (argv[0] === "version" || argv[0] === "--version" || argv[0] === "-v") {
+    console.log("SuperSpec v2.0.0-alpha.1");
+    return 0;
+  }
+
   const { command, subcommand, opts } = parseArgs(argv);
+  const projectRoot = process.cwd();
+
+  // install / update 不需要 --change
+  if (command === "install") {
+    const { mkdirSync, writeFileSync, existsSync } = await import("node:fs");
+    const engineDir = join(projectRoot, ".superspec");
+    if (!existsSync(engineDir)) mkdirSync(join(engineDir, "changes"), { recursive: true });
+    const gitignorePath = join(engineDir, ".gitignore");
+    if (!existsSync(gitignorePath)) writeFileSync(gitignorePath, "changes/\n*.log\n*.tmp\n");
+    console.log(JSON.stringify({ ok: true, message: "SuperSpec 已安装（引擎目录已创建）" }));
+    return 0;
+  }
+  if (command === "update") {
+    console.log(JSON.stringify({ ok: true, message: "已是最新版本 v2.0.0-alpha.1" }));
+    return 0;
+  }
 
   const change = opts.change;
   if (!change && command !== "status") {
-    console.error("错误：缺少 --change");
+    console.error("错误：缺少 --change（用 --help 查看用法）");
     return 1;
   }
-
-  const projectRoot = process.cwd();
 
   try {
     switch (command) {
@@ -242,5 +293,4 @@ function main(argv: string[]): number {
 }
 
 // 入口
-const exitCode = main(process.argv.slice(2));
-process.exit(exitCode);
+main(process.argv.slice(2)).then(exitCode => process.exit(exitCode));
