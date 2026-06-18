@@ -99,7 +99,7 @@ test("task-start：已完成任务拒绝", () => {
     writeFileSync(join(fx.changeRoot, "tasks.md"), tasks.replace("TASK-001", "- [x] TASK-001").replace("- [ ] - [x]", "- [x]"));
     startApply(fx.projectRoot, fx.change, fx.changeRoot);
     const result = taskStart(fx.projectRoot, fx.change, fx.changeRoot, "TASK-001");
-    assert.ok(result.message.includes("已完成") || result.message.includes("找不到"));
+    assert.ok(result.message.includes("已完成"), `应报"已完成"，实际：${result.message}`);
   } finally { fx.cleanup(); }
 });
 

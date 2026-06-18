@@ -45,11 +45,7 @@ function replayEvents(events: Event[]): {
         }
         break;
       }
-      case "job_requested": {
-        const job = ev.payload as unknown as Job;
-        if (!openJobs.some(j => j.job_id === job.job_id)) openJobs.push(job);
-        break;
-      }
+      // H4 修复：删除 job_requested / job_invalidated 死分支——job 只通过 transition_commit 的 new_jobs payload 创建，staleness 只在 sync 内存计算（不写事件）
       case "job_accepted": {
         const { job_id } = ev.payload as { job_id: string };
         const idx = openJobs.findIndex(j => j.job_id === job_id);
@@ -68,12 +64,7 @@ function replayEvents(events: Event[]): {
         }
         break;
       }
-      case "job_invalidated": {
-        const { job_id } = ev.payload as { job_id: string };
-        const idx = acceptedJobs.findIndex(j => j.job_id === job_id);
-        if (idx >= 0) acceptedJobs.splice(idx, 1)[0]; // remove from accepted
-        break;
-      }
+      // H4：job_invalidated 事件从不发射（删除死分支）
       case "task_started": {
         const attempt = ev.payload as unknown as TaskAttempt;
         activeAttempts.push(attempt);

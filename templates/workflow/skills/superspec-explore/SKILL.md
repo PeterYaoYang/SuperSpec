@@ -24,7 +24,8 @@ metadata:
 
 Explore 只做需求澄清、代码事实调查、范围边界和风险记录。产物是 `openspec/changes/<change>/.superspec/artifacts/discovery.md`；不写 `proposal.md`、`specs/**`、`design.md`、`tasks.md`，也不改实现代码。
 
-## 产物格式
+## 产物格式123456
+
 
 - discovery.md 必须按 SuperSpec discovery 模板的结构填写，保留全部段落：`调查范围` / `现有实现事实` / `隐性合约` / `风险与歧义` / `待确认问题` / `Subagent Evidence`；不得自创或删减段落骨架。
 - 第一条必跑命令 `superspec check workflow-packet --change "<change>" --gate explore_complete --format agent` 的返回里带 `discovery_template` 与 `discovery_rules`：按其中的模板骨架和填写规则产出，而不是自由发挥，这样无论哪个模型产物结构都一致。

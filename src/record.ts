@@ -8,16 +8,8 @@ import {
 } from "./store.ts";
 import type { Event, RecordResult, Job, JobState } from "./types.ts";
 
-/** 从 events 中查找 job（同时查 commit payload 和 job_requested） */
+/** 从 events 中查找 job（H4 修复：job 只在 transition_commit 的 new_jobs payload 里） */
 function findJob(events: Event[], jobId: string): Job | null {
-  // 先查 job_requested 事件
-  for (const ev of events) {
-    if (ev.event_type === "job_requested") {
-      const job = ev.payload as unknown as Job;
-      if (job.job_id === jobId) return job;
-    }
-  }
-  // 再查 transition_commit 的 new_jobs payload（HIGH 6：job 数据在 commit 内）
   for (const ev of events) {
     if (ev.event_type === "transition_commit") {
       const newJobs = (ev.payload as { new_jobs?: Job[] }).new_jobs ?? [];

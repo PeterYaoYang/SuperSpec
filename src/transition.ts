@@ -23,6 +23,18 @@ const TRANSITION_REQUIREMENTS: Record<string, Record<string, JobRole[]>> = {
   },
 };
 
+/**
+ * H1+H2 修复：按 token 边界精确匹配 taskId 行。
+ * 避免正则注入（H1）和子串歧义（H2）。
+ */
+function findTaskLine(lines: string[], taskId: string): number {
+  for (let i = 0; i < lines.length; i++) {
+    const tokens = lines[i].split(/\s+/);
+    if (tokens.includes(taskId)) return i;
+  }
+  return -1;
+}
+
 interface Decision {
   fromState: State;
   toState: State;
@@ -97,14 +109,14 @@ export function commitTransition(
       outcome, created_job_ids: newJobs.map(j => j.job_id), new_jobs: newJobs, reason,
     }, { transitionId, idempotencyKey: idemKey, prevSnapshotDigest: worldDigest }));
 
-    // extra events (task_started, task_completed, etc.)
-    for (const ex of extraEvents) {
-      appendEvent(projectRoot, change, makeEvent(change, ex.type as Event["event_type"], ex.payload, { transitionId }));
-    }
-
-    // B1 修复：postCommit 在 commit 事件写入后、snapshot 重建前执行
+    // B1 修复：postCommit 在 extraEvents 写入前执行（先改文件再写事件，确保 crash 不留"事件说完成但文件没改"）
     if (decision.postCommit) {
       decision.postCommit(projectRoot, change, changeRoot);
+    }
+
+    // extra events (task_started, task_completed, etc.) — 在 postCommit 成功后写
+    for (const ex of extraEvents) {
+      appendEvent(projectRoot, change, makeEvent(change, ex.type as Event["event_type"], ex.payload, { transitionId }));
     }
 
     writeSnapshot(projectRoot, change, rebuildSnapshot(projectRoot, change, changeRoot));
@@ -224,8 +236,10 @@ export function taskStart(projectRoot: string, change: string, changeRoot: strin
     decide: (snapshot) => {
       if (snapshot.state !== "apply") return { skip: true, message: `当前状态 ${snapshot.state}，需要 apply` };
       const tasksContent = readFileSync(join(changeRoot, "tasks.md"), "utf8");
-      if (!tasksContent.includes(taskId)) return { skip: true, message: `任务 ${taskId} 不存在` };
-      if (tasksContent.match(new RegExp(`- \\[x\\].*${taskId}`))) return { skip: true, message: `任务 ${taskId} 已完成` };
+      const lines = tasksContent.split("\n");
+      const taskLineIdx = findTaskLine(lines, taskId);
+      if (taskLineIdx < 0) return { skip: true, message: `任务 ${taskId} 不存在` };
+      if (lines[taskLineIdx].match(/- \[x\]/)) return { skip: true, message: `任务 ${taskId} 已完成` };
 
       const existing = snapshot.active_task_attempts?.find(a => a.task_id === taskId && a.state === "active");
       if (existing) return { skip: true, message: `任务 ${taskId} 已有活跃尝试` };
@@ -348,7 +362,9 @@ export function taskComplete(projectRoot: string, change: string, changeRoot: st
       if (currentDigest !== attempt.task_structure_digest) return { skip: true, message: "任务结构指纹不匹配" };
 
       // 解析任务属性（H1 修复：支持 tdd_required/no_tdd_reason）
-      const taskLine = tasksContent.split("\n").find(l => l.includes(taskId) && l.match(/^(- \[.\])/));
+      const taskLines = tasksContent.split("\n");
+      const taskLineIdx = findTaskLine(taskLines, taskId);
+      const taskLine = taskLineIdx >= 0 ? taskLines[taskLineIdx] : "";
       const isTdd = !taskLine?.includes("tdd_required:false");
       const hasNoTddReason = taskLine?.includes("no_tdd_reason:");
 
@@ -379,8 +395,8 @@ export function taskComplete(projectRoot: string, change: string, changeRoot: st
         extraEvents: [{ type: "task_completed", payload: { task_id: taskId, attempt_id: attempt.attempt_id } }],
         postCommit: (_pr: string, _ch: string, cr: string) => {
           const lines = readFileSync(join(cr, "tasks.md"), "utf8").split("\n");
-          const idx = lines.findIndex(l => l.includes(taskId) && l.match(/- \[ \]/));
-          if (idx < 0) throw new Error(`找不到 ${taskId} 的未完成复选框`);
+          const idx = findTaskLine(lines, taskId);
+          if (idx < 0 || !lines[idx].match(/- \[ \]/)) throw new Error(`找不到 ${taskId} 的未完成复选框`);
           // H2 修复：应用前验证结构指纹
           const beforeDigest = sha256Text(lines.join("\n").replace(/- \[[xX]\]/g, "- [ ]"));
           lines[idx] = lines[idx].replace(/- \[ \]/, "- [x]");

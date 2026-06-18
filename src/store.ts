@@ -94,7 +94,17 @@ export function readEvents(projectRoot: string, change: string): Event[] {
   const ef = eventsFile(projectRoot, change);
   if (!existsSync(ef)) return [];
   const content = readFileSync(ef, "utf8");
-  return content.split("\n").filter(l => l.trim()).map(l => JSON.parse(l) as Event);
+  // H3 修复：逐行解析，跳过损坏行（截断 JSON），不整体崩溃
+  const events: Event[] = [];
+  for (const line of content.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      events.push(JSON.parse(line) as Event);
+    } catch {
+      // 截断/损坏行跳过（崩溃恢复：最后一条可能是半写入的）
+    }
+  }
+  return events;
 }
 
 export function makeEvent(
@@ -139,7 +149,12 @@ export function writeSnapshot(projectRoot: string, change: string, snapshot: Sna
 export function readSnapshot(projectRoot: string, change: string): Snapshot | null {
   const sf = snapshotFile(projectRoot, change);
   if (!existsSync(sf)) return null;
-  return JSON.parse(readFileSync(sf, "utf8")) as Snapshot;
+  try {
+    return JSON.parse(readFileSync(sf, "utf8")) as Snapshot;
+  } catch {
+    // H3 修复：损坏的 snapshot.json 返回 null（让调用方走 sync 重建）
+    return null;
+  }
 }
 
 export function snapshotDigest(snapshot: Snapshot): string {
@@ -150,6 +165,9 @@ export function snapshotDigest(snapshot: Snapshot): string {
     tasks_structure_digest: snapshot.tasks_structure_digest,
     open_jobs: snapshot.open_jobs.map(j => j.job_id),
     accepted_jobs: snapshot.accepted_jobs.map(j => j.job_id),
+    // H5 修复：纳入 task 状态（否则幂等键不反映任务世界状态）
+    active_task_attempts: (snapshot.active_task_attempts ?? []).map(a => a.attempt_id),
+    task_statuses: snapshot.task_statuses,
   }));
 }
 
