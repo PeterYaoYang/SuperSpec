@@ -62,7 +62,7 @@ test("explore→propose：discovery.md 有未确认问题时不推进", () => {
   const fx = setupExplore();
   try {
     writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "discovery.md"),
-      "# Discovery\n\n- [ ] 待确认问题1\n");
+      "# Discovery\n\n## 待确认问题\n\n- [ ] 问题1的描述\n");
     const result = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot);
     assert.ok(result.message.includes("未确认"), result.message);
     assert.equal(result.events_written, 0);
@@ -246,13 +246,13 @@ test("完整 e2e（Phase 2）：init→explore→写 discovery→propose→propo
   }
 });
 
-test("next 在 explore 有空 discovery.md 时返回 ask_user（HIGH 修复）", () => {
+test("next 在 explore 有空 discovery.md 时返回 ask_user", () => {
   const fx = setupExplore();
   try {
     writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "discovery.md"), "");
     const result = next(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(result.path, "ask_user");
-    assert.ok(result.ask_user.scope.includes("empty"));
+    assert.ok(result.reason.includes("为空"), `应报"为空"，实际：${result.reason}`);
   } finally { fx.cleanup(); }
 });
 

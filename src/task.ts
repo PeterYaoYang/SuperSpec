@@ -1,18 +1,17 @@
-// SuperSpec 流程引擎 — task：测试运行记录 + 任务解析工具
+// SuperSpec 流程引擎 — task：测试运行记录 + 任务结构指纹工具
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import {
-  ensureChangeLayout, appendEvent, makeEvent, withLock, sha256Text,
-} from "./store.ts";
+import { sha256Text, ensureChangeLayout, appendEvent, makeEvent, withLock } from "./store.ts";
+import { tasksStructureDigest as formatDigest } from "./format.ts";
 import type { TestRun } from "./types.ts";
 
-/** tasks.md 结构指纹（复选框归一化） */
+/** tasks.md 结构指纹（委托给 format.ts 统一实现） */
 export function tasksStructureDigestOf(changeRoot: string): string | null {
   const p = join(changeRoot, "tasks.md");
   if (!existsSync(p)) return null;
   const content = readFileSync(p, "utf8");
-  return sha256Text(content.replace(/- \[[xX]\]/g, "- [ ]"));
+  return formatDigest(content, sha256Text);
 }
 
 /** record test-run：登记测试运行记录 */

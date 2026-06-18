@@ -8,6 +8,7 @@ import {
   sha256File, sha256Text,
 } from "./store.ts";
 import { rebuildSnapshot } from "./sync.ts";
+import { validateDiscovery, findTaskInLines, parseTasksMd, tasksStructureDigest } from "./format.ts";
 import type { Event, Snapshot, State, Job, JobRole, TransitionResult, Ref, TaskAttempt } from "./types.ts";
 
 let transitionSeq = 0;
@@ -24,16 +25,11 @@ const TRANSITION_REQUIREMENTS: Record<string, Record<string, JobRole[]>> = {
 };
 
 /**
- * H1+H2 修复：按 token 边界精确匹配 taskId 行。
- * 避免正则注入（H1）和子串歧义（H2）。
+ * 已迁移到 format.ts：findTaskInLines / parseTasksMd / tasksStructureDigest
+ * 以下保留 findTaskLine 作为兼容 wrapper（内部调用 format.ts）
  */
 function findTaskLine(lines: string[], taskId: string): number {
-  // H3 修复：用词边界正则，兼容 TASK-001 后跟标点（冒号/句号/括号/markdown链接）
-  const re = new RegExp("(?:^|\\s)" + taskId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "(?:\\s|$|[.,:;!?)\\]])");
-  for (let i = 0; i < lines.length; i++) {
-    if (re.test(lines[i])) return i;
-  }
-  return -1;
+  return findTaskInLines(lines, taskId);
 }
 
 interface Decision {
@@ -205,10 +201,9 @@ export function transitionExplore(projectRoot: string, change: string, changeRoo
       if (snapshot.state === "explore") {
         const discoveryPath = join(changeRoot, ".superspec", "artifacts", "discovery.md");
         if (!existsSync(discoveryPath)) return { skip: true, message: "discovery.md 不存在" };
-        const content = readFileSync(discoveryPath, "utf8");
-        if (!content.trim()) return { skip: true, message: "discovery.md 为空" };
-        const openQs = content.match(/- \[ \]/g);
-        if (openQs && openQs.length > 0) return { skip: true, message: `discovery.md 有 ${openQs.length} 个未确认问题` };
+        // discovery 校验委托给 format.ts（统一格式源）
+        const discoveryCheck = validateDiscovery(changeRoot);
+        if (!discoveryCheck.ok) return { skip: true, message: discoveryCheck.message };
         return { fromState: "explore", toState: "propose", outcome: "advanced" as const, reason: "探索完成" };
       }
       return { skip: true, message: `当前状态 ${snapshot.state}，explore 不适用` };
@@ -363,12 +358,11 @@ export function taskComplete(projectRoot: string, change: string, changeRoot: st
       const currentDigest = sha256Text(tasksContent.replace(/- \[[xX]\]/g, "- [ ]"));
       if (currentDigest !== attempt.task_structure_digest) return { skip: true, message: "任务结构指纹不匹配" };
 
-      // 解析任务属性（H1 修复：支持 tdd_required/no_tdd_reason）
-      const taskLines = tasksContent.split("\n");
-      const taskLineIdx = findTaskLine(taskLines, taskId);
-      const taskLine = taskLineIdx >= 0 ? taskLines[taskLineIdx] : "";
-      const isTdd = !taskLine?.includes("tdd_required:false");
-      const hasNoTddReason = taskLine?.includes("no_tdd_reason:");
+      // 解析任务属性（委托给 format.ts 的 parseTasksMd）
+      const tasks = parseTasksMd(tasksContent);
+      const taskInfo = tasks.find(t => t.taskId === taskId);
+      const isTdd = taskInfo?.tddRequired ?? true;
+      const hasNoTddReason = taskInfo?.noTddReason != null;
 
       // RED/GREEN 检查（HIGH-2 修复：按 attempt_id 匹配，避免多任务 digest 碰撞）
       const events = readEvents(projectRoot, change);
