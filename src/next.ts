@@ -108,11 +108,23 @@ export function next(
           reason: `有 ${snapshot.open_jobs.length} 个待完成工作项`,
         };
       }
+      // 检查是否所有任务已完成
+      const tasksContent = readFileSync(join(changeRoot, "tasks.md"), "utf8");
+      const allDone = !tasksContent.split("\n").some(l => l.includes("- [ ]"));
+      if (allDone) {
+        return {
+          state: "apply",
+          path: "next_command",
+          next_command: transitionCommand(change, "review-ready"),
+          reason: "所有任务完成，进入审查",
+          missing_inputs: [],
+        };
+      }
       return {
         state: "apply",
         path: "next_command",
         next_command: transitionCommand(change, "task-start", "--task TASK-XXX"),
-        reason: "执行中：继续 task-start（全部完成后 next 会自动指向 review-ready）",
+        reason: "执行中：查看 tasks.md 找下一个未完成任务",
         missing_inputs: [],
       };
     }

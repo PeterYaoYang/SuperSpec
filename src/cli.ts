@@ -196,7 +196,8 @@ jobs 子命令：
           }
 
           case "review-ready": {
-            const result = reviewReady(projectRoot, change, cr);
+            const risk = (opts.risk as "minimal" | "normal" | "strict") ?? "normal";
+            const result = reviewReady(projectRoot, change, cr, risk);
             console.log(JSON.stringify(result, null, 2));
             return result.events_written === 0 ? 1 : 0;
           }

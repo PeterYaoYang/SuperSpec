@@ -263,9 +263,9 @@ export function taskStart(projectRoot: string, change: string, changeRoot: strin
 
 // ===== review-ready =====
 
-export function reviewReady(projectRoot: string, change: string, changeRoot: string): TransitionResult {
+export function reviewReady(projectRoot: string, change: string, changeRoot: string, risk: "minimal" | "normal" | "strict" = "normal"): TransitionResult {
   return commitTransition(projectRoot, change, changeRoot, {
-    name: "review-ready", idempotencyInputs: { phase: "review-ready" },
+    name: "review-ready", idempotencyInputs: { phase: "review-ready", risk },
     decide: (snapshot) => {
       // 检查是否所有任务已完成
       const tasksContent = readFileSync(join(changeRoot, "tasks.md"), "utf8");
@@ -282,7 +282,8 @@ export function reviewReady(projectRoot: string, change: string, changeRoot: str
         if (finalAuditOpen) return { skip: true, message: `有待完成的最终审查工作项 ${finalAuditOpen.job_id}` };
 
         const finalAuditAccepted = snapshot.accepted_jobs.find(j => j.role === "final-audit");
-        if (!finalAuditAccepted) {
+        // minimal 直接推进；normal/strict 需要 final-audit
+        if (risk !== "minimal" && !finalAuditAccepted) {
           // 创建 final-audit job
           const docPaths = ["proposal.md", "tasks.md", "design.md", ".superspec/artifacts/discovery.md", ".superspec/artifacts/business-invariants.md", ".superspec/artifacts/test-contract.md"];
           const boundFiles: Ref[] = docPaths.filter(p => existsSync(join(changeRoot, p))).map(p => ({ path: p, sha: sha256File(join(changeRoot, p)) ?? "sha256:missing" }));

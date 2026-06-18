@@ -59,7 +59,7 @@ export interface ParsedTask {
   noTddReason: string | null;
 }
 
-const TASK_LINE_RE = /^(- \[([ xX])\])\s+(TASK-\S+)/;
+const TASK_LINE_RE = /^(- \[([ xX])\])\s+(\S+)/;
 
 /** 解析 tasks.md 的全部任务行 */
 export function parseTasksMd(content: string): ParsedTask[] {

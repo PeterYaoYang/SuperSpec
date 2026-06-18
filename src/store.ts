@@ -182,6 +182,7 @@ interface LockInfo {
 }
 
 export function acquireLock(projectRoot: string, change: string): void {
+  ensureChangeLayout(projectRoot, change); // 确保 change 目录存在（含 events.jsonl）
   const lf = lockFile(projectRoot, change);
   const info: LockInfo = {
     pid: process.pid,
