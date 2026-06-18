@@ -15,7 +15,7 @@ metadata:
 所有状态由 transition engine 管理。循环：
 
 1. `superspec transition next --change "<change>"` 获取下一步
-2. 执行返回的命令（next_command / required_job / ask_user）
+2. 执行返回的命令
 3. 登记结果
 4. 回到 1
 
@@ -24,8 +24,31 @@ next 返回 `ask_user` 说明 discovery 不完整或有未确认问题——向�
 ## 本阶段做什么
 
 1. **建立事实基线**：读代码、查架构、理解当前系统行为（只读）
-2. **写 discovery.md**：当前系统怎么工作 + 需要改什么 + 风险边界 + 开放问题（用 `- [ ]` 标记未确认项）
-3. **澄清歧义**：有阻塞歧义时向用户提问，收到回答后 record user-decision
+2. **写 discovery.md**：
+3. **澄清歧义**：有阻塞歧义时向用户提问
+
+## discovery.md 格式
+
+写入 `openspec/changes/<change>/.superspec/artifacts/discovery.md`：
+
+```markdown
+# Discovery
+
+## 现状
+（当前系统怎么工作）
+
+## 需要改什么
+（要实现的需求）
+
+## 风险和边界
+（技术风险、依赖、兼容性）
+
+## 待确认问题
+- [ ] 问题1的描述
+- [ ] 问题2的描述
+```
+
+**重要**：`- [ ]` 标记的待确认问题必须全部解决（用户确认后改为 `- [x]` 或删除），否则 transition engine 会阻止推进到 propose。
 
 ## Guardrails
 

@@ -24,18 +24,20 @@ metadata:
 每个任务的循环：
 
 1. **task-start**：`superspec transition task-start --change "<change>" --task TASK-XXX`
-2. **RED**：写测试，跑测试确认失败（`semantic_status: expected_failure`），`superspec record test-run --change "<change>" --input <FILE>`
-3. **实现**：写代码让测试通过
-4. **GREEN**：跑测试确认通过（`semantic_status: expected_success`），`superspec record test-run --change "<change>" --input <FILE>`
-5. **task-complete**：`superspec transition task-complete --change "<change>" --task TASK-XXX`（引擎验证 RED→GREEN + 结构指纹 + 勾选复选框）
+2. **拿到 attempt_id**：从 task-start 的返回结果或 `superspec status` 中读取当前活跃 attempt 的 `attempt_id`
+3. **RED**：写测试，跑测试确认失败，`superspec record test-run --change "<change>" --input <FILE>`
+4. **实现**：写代码让测试通过
+5. **GREEN**：跑测试确认通过，`superspec record test-run --change "<change>" --input <FILE>`
+6. **task-complete**：`superspec transition task-complete --change "<change>" --task TASK-XXX`
 
-no-TDD 任务（tdd_required:false + no_tdd_reason）跳过 RED/GREEN，但必须有替代验证。
+no-TDD 任务（tdd_required:false + no_tdd_reason）跳过 RED/GREEN。
 
 ## test-run 输入格式
 
 ```json
 {
   "test_id": "TEST-XXX",
+  "attempt_id": "ATT-TASK-XXX-...",
   "task_structure_digest": "<从 tasks.md 派生的结构指纹>",
   "command": "npm test",
   "cwd": "<工作目录>",
@@ -45,9 +47,13 @@ no-TDD 任务（tdd_required:false + no_tdd_reason）跳过 RED/GREEN，但必�
 }
 ```
 
+- `attempt_id`：从 task-start 结果获取，确保 RED/GREEN 绑定到正确的执行尝试
+- `semantic_status`：`expected_failure`（RED）/ `expected_success`（GREEN）/ `characterization_pass`
+- `task_structure_digest`：tasks.md 复选框归一化后的 sha256（引擎计算，你不需要手动算）
+
 ## Guardrails
 
-- 只改 task-start 声明的写入范围内的文件
+- 只改 tasks.md 里本任务范围相关的文件
 - 不跳过 RED 直接写 GREEN
 - 退出码 0 ≠ 测试通过——semantic_status 才是证据
 - 环境错误 / 构建失败不算 RED 或 GREEN

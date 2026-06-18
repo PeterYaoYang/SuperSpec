@@ -23,12 +23,51 @@ next 返回 `required_job` 说明需要审查工作项——跑 `superspec jobs 
 
 ## 本阶段做什么
 
-1. **写 proposal.md**：需求陈述、方案概述、影响范围
-2. **写 specs/**：能力规范增量（OpenSpec 格式）
-3. **写 design.md**：技术方案、关键决策、替代方案
-4. **写 tasks.md**：任务列表（`- [ ] TASK-XXX 描述`），标注 `tdd_required:true/false`
-5. **写 business-invariants.md**：业务不变量（INV-XXX）
-6. **写 test-contract.md**：测试契约（test_id + INV 映射 + Scenario 覆盖）
+### proposal.md
+需求陈述、方案概述、影响范围。
+
+### specs/
+OpenSpec 能力规范增量（`openspec instructions specs` 格式）。
+
+### design.md
+技术方案、关键决策、替代方案。
+
+### tasks.md
+任务列表，格式：
+
+```markdown
+# Tasks
+
+- [ ] TASK-001 实现登录功能 tdd_required:true
+- [ ] TASK-002 更新文档 tdd_required:false no_tdd_reason:documentation-only
+- [ ] TASK-003 配置变更 tdd_required:false no_tdd_reason:configuration-only
+```
+
+规则：
+- `tdd_required:true`（默认）——改运行时代码/业务逻辑/数据迁移/权限/外部接口
+- `tdd_required:false` + `no_tdd_reason:xxx`——纯文档/配置/机械改名/生成物
+
+### business-invariants.md
+格式：
+
+```markdown
+# Business Invariants
+
+- INV-001 用户密码必须加密存储
+- INV-002 订单金额不能为负数
+```
+
+### test-contract.md
+格式：
+
+```markdown
+# Test Contract
+
+| test_id | invariant | scenario |
+|---|---|---|
+| TEST-001 | INV-001 | 注册时密码被加密 |
+| TEST-002 | INV-002 | 订单金额为负时拒绝 |
+```
 
 ## 完成条件
 
@@ -38,5 +77,5 @@ tasks.md 作为计划文档就绪（不是复选框全完成）+ 基础职责文
 
 - tasks.md 只列任务，不实现
 - 不改业务代码
-- tdd_required 标注真实——改运行时代码 = true，纯文档 = false + no_tdd_reason
+- tdd_required 标注真实
 - 不跳过 transition

@@ -37,6 +37,7 @@ export function recordTestRun(
     const event = makeEvent(change, "test_run_recorded", {
       test_id: tr.test_id,
       task_structure_digest: tr.task_structure_digest,
+      attempt_id: tr.attempt_id ?? null,
       command: tr.command ?? "",
       cwd: tr.cwd ?? "",
       exit_code: tr.exit_code ?? -1,
