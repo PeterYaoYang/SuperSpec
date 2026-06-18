@@ -1,65 +1,33 @@
 ---
 name: superspec-archive
-description: "5.所有审查和验证通过后用：把完成的 change 归档到 specs，并确认关键证据和历史没有丢失；这一步是流程收尾。"
+description: "调用 superspec transition next 获取下一步命令并执行。"
 metadata:
   author: SuperSpec
   source: SuperSpec
 ---
 
-# SuperSpec Archive
+# SuperSpec 归档
 
-## 语言规则 / Language
+## 唯一规则
 
-- 默认使用简体中文写人类可读内容；命令、路径、字段名、阶段门名、task/test id、代码标识符保留原文。
-- 用户可见文案不得使用“裁决”描述用户动作；统一说“确认”“范围取舍”“处理方式选择”或“用户确认记录”。
-- 不把内部证据种类、reason code、JSON 字段大全直接转述给用户；需要诊断时才引用原文。
-- 普通 workflow 命令使用 `--format agent`；`--format json` 只用于诊断，不作为默认上下文。
+你不再携带工作流协议。所有状态由 transition engine 管理。
 
-## 命令执行 / Shell
+循环：
 
-- Windows PowerShell 中使用 `.cmd` shim：`superspec.cmd ...`、`openspec.cmd ...`；不要运行 `superspec.ps1` 或 `openspec.ps1`。
-- 其他 shell 使用文档中的 `superspec ...`、`openspec ...` 命令。
+1. 跑 `superspec transition next --change "<change>"` 获取下一步
+2. 执行返回的命令（next_command / required_job packet / ask_user）
+3. 登记结果（`superspec record ...`）
+4. 回到 1
 
-## 阶段职责
+## 命令参考
 
-Archive 在 `review_complete` allowed 后收尾：确认 archive readiness、保全 `.superspec` 证据快照、运行 OpenSpec archive，并验证归档后的 preservation。
+- **查下一步**：`superspec transition next --change "<change>"`
+- **提交流转**：`superspec transition <命令> --change "<change>"`（如 explore / propose-ready / start-apply / task-start / task-complete / review-ready / accept / archive）
+- **登记结果**：`superspec record job-submit --change "<change>" --job <JOB> --report <FILE>`
+- **登记测试**：`superspec record test-run --change "<change>" --input <FILE>`
+- **登记决策**：`superspec record user-decision --change "<change>" --input <FILE>`
+- **查状态**：`superspec status --change "<change>"`
 
-## 第一条必跑命令
+## 语言
 
-```text
-superspec check workflow-packet --change "<change>" --gate archive_ready --format agent
-```
-
-遇到 `block` 就停止，不归档。
-
-## OpenSpec 边界
-
-- 直接使用 OpenSpec CLI surface，不读取 repo-local `openspec-*` skill 文本。
-- 归档动作使用 native OpenSpec CLI；SuperSpec 不重新实现移动、spec sync 或 validation。
-- 当前 v1 固定使用 `openspec archive -y "<change>"`，不暴露 `--no-validate` 或 skip-specs 分支。
-
-## 用户确认边界
-
-`archive_ready` 最终确认必须等待明确选择。若 change 不应同步 specs，先回 propose/change update 调整方案，不在 archive 阶段跳过。
-
-## 执行步骤
-
-确认后运行会写 preservation manifest 的 readiness check：
-
-```text
-superspec check check-archive-ready --change "<change>" --format agent
-```
-
-然后运行 OpenSpec archive：
-
-```text
-openspec archive -y "<change>"
-```
-
-最后验证 archived sidecar preservation：
-
-```text
-superspec check check-archived --change "<change>" --format agent
-```
-
-`.superspec/artifacts/business-invariants.md`、`.superspec/artifacts/test-contract.md`、review/verification evidence、RED/GREEN evidence 和 archive evidence 必须能从 preservation manifest 追溯。
+默认简体中文写人类可读内容；命令、路径、字段名保留原文。
