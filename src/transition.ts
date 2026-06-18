@@ -96,7 +96,7 @@ export function commitTransition(
     }
 
     const transitionId = newTransitionId();
-    mkdirSync(stagingDir(projectRoot, change, transitionId), { recursive: true });
+    // M8: staging 目录在 Phase 1-5 不写入实际内容，跳过创建
 
     // prepare
     appendEvent(projectRoot, change, makeEvent(change, "transition_prepare", {

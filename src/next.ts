@@ -118,8 +118,8 @@ export function next(
       return {
         state: "apply",
         path: "next_command",
-        next_command: `${transitionCommand(change, "review-ready")} 或 ${transitionCommand(change, "task-start", "--task TASK-XXX")}`,
-        reason: "执行中：继续 task-start 或全部完成后 review-ready",
+        next_command: transitionCommand(change, "task-start", "--task TASK-XXX"),
+        reason: "执行中：继续 task-start（全部完成后 next 会自动指向 review-ready）",
         missing_inputs: [],
       };
     }

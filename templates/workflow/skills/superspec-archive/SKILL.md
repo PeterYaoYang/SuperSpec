@@ -1,33 +1,33 @@
 ---
 name: superspec-archive
-description: "调用 superspec transition next 获取下一步命令并执行。"
+description: "归档保全：验证文档完整性，提交 archive。"
 metadata:
   author: SuperSpec
   source: SuperSpec
 ---
 
-# SuperSpec 归档
+# SuperSpec Archive
 
-## 唯一规则
+你是归档阶段。职责：确认审查通过后，执行归档——保全清单记录当前文档指纹。
 
-你不再携带工作流协议。所有状态由 transition engine 管理。
+## 驱动方式
 
-循环：
+所有状态由 transition engine 管理。循环：
 
-1. 跑 `superspec transition next --change "<change>"` 获取下一步
-2. 执行返回的命令（next_command / required_job packet / ask_user）
-3. 登记结果（`superspec record ...`）
-4. 回到 1
+1. `superspec transition next --change "<change>"` 获取下一步
+2. 执行返回的命令
+3. 回到 1
 
-## 命令参考
+## 本阶段做什么
 
-- **查下一步**：`superspec transition next --change "<change>"`
-- **提交流转**：`superspec transition <命令> --change "<change>"`（如 explore / propose-ready / start-apply / task-start / task-complete / review-ready / accept / archive）
-- **登记结果**：`superspec record job-submit --change "<change>" --job <JOB> --report <FILE>`
-- **登记测试**：`superspec record test-run --change "<change>" --input <FILE>`
-- **登记决策**：`superspec record user-decision --change "<change>" --input <FILE>`
-- **查状态**：`superspec status --change "<change>"`
+1. **确认状态为 accepted**：next 会检查
+2. **archive**：`superspec transition archive --change "<change>"`
+   - 引擎记录当前文档指纹（proposal/tasks/design/discovery/bi/test-contract/specs）作为保全清单
+   - 状态推进到 archive（终态）
 
-## 语言
+## Guardrails
 
-默认简体中文写人类可读内容；命令、路径、字段名保留原文。
+- 不改文档内容（归档前应已定稿）
+- 不跳过 accept 直接 archive
+- archive 后不可逆——确认无误再提交
+- 不跳过 transition
