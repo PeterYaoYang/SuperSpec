@@ -113,6 +113,7 @@ export interface TaskAttempt {
 // ===== Test Run =====
 export interface TestRun {
   test_id: string;
+  attempt_id?: string | null;
   task_structure_digest: string;
   command: string;
   cwd: string;
