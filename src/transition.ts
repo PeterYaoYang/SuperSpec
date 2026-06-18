@@ -22,7 +22,53 @@ const TRANSITION_REQUIREMENTS: Record<string, Record<string, JobRole[]>> = {
     normal:  ["proposal-auditor"],
     strict:  ["critic-review", "architect-review", "test-engineer-review"],
   },
+  "explore": {
+    minimal: [],
+    normal:  [],
+    strict:  ["clarification-review"],
+  },
 };
+
+/**
+ * 通用 job 检查/创建逻辑——任何 transition 都能调用。
+ * 检查 requiredRoles 是否有 fresh accepted job；缺则创建新 job。
+ * 返回 null = 全部满足；返回 Decision = 需要创建 job（状态不变）。
+ */
+function checkOrCreateReviewJobs(
+  snapshot: Snapshot,
+  requiredRoles: JobRole[],
+  changeRoot: string,
+  change: string,
+  transitionName: string,
+  bindDocPaths: string[],
+): Decision | null {
+  const staleRoles: { role: JobRole; reason: string }[] = [];
+  for (const role of requiredRoles) {
+    const openForRole = snapshot.open_jobs.find(j => j.role === role);
+    if (openForRole) return { fromState: snapshot.state, toState: snapshot.state, outcome: "advanced" as const, reason: `工作项 ${role} 已存在（${openForRole.job_id}），请先完成它` };
+    const fresh = snapshot.accepted_jobs.find(j => j.role === role);
+    if (!fresh) {
+      staleRoles.push({ role, reason: `需求 ${role} 无已接受的工作项` });
+    } else {
+      for (const bf of fresh.boundFiles) {
+        const currentSha = sha256File(join(changeRoot, bf.path)) ?? "sha256:missing";
+        if (currentSha !== bf.sha) { staleRoles.push({ role, reason: `${role} 绑定文件 ${bf.path} 已变化` }); break; }
+      }
+    }
+  }
+
+  if (staleRoles.length > 0) {
+    const newJobs: Job[] = staleRoles.map(({ role }) => {
+      const boundFiles: Ref[] = bindDocPaths.filter(p => existsSync(join(changeRoot, p))).map(p => ({ path: p, sha: sha256File(join(changeRoot, p)) ?? "sha256:missing" }));
+      return { job_id: newJobId(change, role), role, state: "requested" as const, boundFiles, packet_digest: sha256Text(JSON.stringify({ role, boundFiles })), created_from_transition: transitionName, created_at: new Date().toISOString() };
+    });
+    return {
+      fromState: snapshot.state, toState: snapshot.state, outcome: "job_created" as const,
+      newJobs, reason: staleRoles.map(s => s.reason).join("; "),
+    };
+  }
+  return null; // 全部满足
+}
 
 /**
  * 已迁移到 format.ts：findTaskInLines / parseTasksMd / tasksStructureDigest
@@ -148,30 +194,13 @@ export function proposeReady(projectRoot: string, change: string, changeRoot: st
         }
       }
 
+      // 通用 job 检查（用提取的 helper）
       const requiredRoles = TRANSITION_REQUIREMENTS["propose-ready"]?.[risk] ?? [];
-      const staleRoles: { role: JobRole; reason: string }[] = [];
-      for (const role of requiredRoles) {
-        const openForRole = snapshot.open_jobs.find(j => j.role === role);
-        if (openForRole) return { skip: true, message: `工作项 ${role} 已存在（${openForRole.job_id}），请先完成它` };
-        const fresh = snapshot.accepted_jobs.find(j => j.role === role);
-        if (!fresh) {
-          staleRoles.push({ role, reason: `需求 ${role} 无已接受的工作项` });
-        } else {
-          for (const bf of fresh.boundFiles) {
-            const currentSha = sha256File(join(changeRoot, bf.path)) ?? "sha256:missing";
-            if (currentSha !== bf.sha) { staleRoles.push({ role, reason: `${role} 绑定文件 ${bf.path} 已变化` }); break; }
-          }
-        }
-      }
-
-      if (staleRoles.length > 0) {
-        const docPaths = ["proposal.md", "tasks.md", "design.md", ".superspec/artifacts/discovery.md", ".superspec/artifacts/business-invariants.md", ".superspec/artifacts/test-contract.md"];
-        const newJobs: Job[] = staleRoles.map(({ role }) => {
-          const boundFiles: Ref[] = docPaths.filter(p => existsSync(join(changeRoot, p))).map(p => ({ path: p, sha: sha256File(join(changeRoot, p)) ?? "sha256:missing" }));
-          return { job_id: newJobId(change, role), role, state: "requested" as const, boundFiles, packet_digest: sha256Text(JSON.stringify({ role, boundFiles })), created_from_transition: "propose-ready", created_at: new Date().toISOString() };
-        });
-        return { fromState: "propose", toState: "propose", outcome: "job_created" as const, newJobs, reason: staleRoles.map(s => s.reason).join("; ") };
-      }
+      const reviewResult = checkOrCreateReviewJobs(
+        snapshot, requiredRoles, changeRoot, change, "propose-ready",
+        ["proposal.md", "tasks.md", "design.md", ".superspec/artifacts/discovery.md", ".superspec/artifacts/business-invariants.md", ".superspec/artifacts/test-contract.md"],
+      );
+      if (reviewResult) return reviewResult;
 
       return { fromState: "propose", toState: "propose_ready", outcome: "advanced" as const, reason: `risk=${risk}，所有需求已满足` };
     },
@@ -201,9 +230,18 @@ export function transitionExplore(projectRoot: string, change: string, changeRoo
       if (snapshot.state === "explore") {
         const discoveryPath = join(changeRoot, ".superspec", "artifacts", "discovery.md");
         if (!existsSync(discoveryPath)) return { skip: true, message: "discovery.md 不存在" };
-        // discovery 校验委托给 format.ts（统一格式源）
+        // explore→propose：校验 discovery + 通用 job 审查（normal+ 需 clarification-review）
         const discoveryCheck = validateDiscovery(changeRoot);
         if (!discoveryCheck.ok) return { skip: true, message: discoveryCheck.message };
+
+        // 通用 job 审查（和 propose-ready 同一个 helper）
+        const requiredRoles = TRANSITION_REQUIREMENTS["explore"]?.["normal"] ?? [];
+        const reviewResult = checkOrCreateReviewJobs(
+          snapshot, requiredRoles, changeRoot, change, "explore",
+          [".superspec/artifacts/discovery.md"],
+        );
+        if (reviewResult) return reviewResult;
+
         return { fromState: "explore", toState: "propose", outcome: "advanced" as const, reason: "探索完成" };
       }
       return { skip: true, message: `当前状态 ${snapshot.state}，explore 不适用` };
