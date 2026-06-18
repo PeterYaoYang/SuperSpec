@@ -28,9 +28,10 @@ const TRANSITION_REQUIREMENTS: Record<string, Record<string, JobRole[]>> = {
  * 避免正则注入（H1）和子串歧义（H2）。
  */
 function findTaskLine(lines: string[], taskId: string): number {
+  // H3 修复：用词边界正则，兼容 TASK-001 后跟标点（冒号/句号/括号/markdown链接）
+  const re = new RegExp("(?:^|\\s)" + taskId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "(?:\\s|$|[.,:;!?)\\]])");
   for (let i = 0; i < lines.length; i++) {
-    const tokens = lines[i].split(/\s+/);
-    if (tokens.includes(taskId)) return i;
+    if (re.test(lines[i])) return i;
   }
   return -1;
 }
@@ -96,25 +97,26 @@ export function commitTransition(
     }
 
     const transitionId = newTransitionId();
-    // M8: staging 目录在 Phase 1-5 不写入实际内容，跳过创建
 
     // prepare
     appendEvent(projectRoot, change, makeEvent(change, "transition_prepare", {
       transition: name, transition_id: transitionId, from_state: fromState, to_state: toState, reason,
     }, { transitionId, idempotencyKey: idemKey, prevSnapshotDigest: worldDigest }));
 
-    // commit
+    // BLOCKER-1 修复：postCommit 在 commit 写入前执行。
+    // 如果 postCommit 抛错 → 只有 prepare（无 commit）→ 幂等重试会跳过 prepare 重新执行。
+    // 如果 postCommit 成功 → commit + extraEvents 写入 → 一致。
+    if (decision.postCommit) {
+      decision.postCommit(projectRoot, change, changeRoot);
+    }
+
+    // commit（postCommit 成功后才写）
     appendEvent(projectRoot, change, makeEvent(change, "transition_commit", {
       transition: name, from_state: fromState, to_state: toState,
       outcome, created_job_ids: newJobs.map(j => j.job_id), new_jobs: newJobs, reason,
     }, { transitionId, idempotencyKey: idemKey, prevSnapshotDigest: worldDigest }));
 
-    // B1 修复：postCommit 在 extraEvents 写入前执行（先改文件再写事件，确保 crash 不留"事件说完成但文件没改"）
-    if (decision.postCommit) {
-      decision.postCommit(projectRoot, change, changeRoot);
-    }
-
-    // extra events (task_started, task_completed, etc.) — 在 postCommit 成功后写
+    // extra events (task_started, task_completed, etc.)
     for (const ex of extraEvents) {
       appendEvent(projectRoot, change, makeEvent(change, ex.type as Event["event_type"], ex.payload, { transitionId }));
     }
@@ -368,13 +370,16 @@ export function taskComplete(projectRoot: string, change: string, changeRoot: st
       const isTdd = !taskLine?.includes("tdd_required:false");
       const hasNoTddReason = taskLine?.includes("no_tdd_reason:");
 
-      // RED/GREEN 检查（仅 TDD 任务需要）
+      // RED/GREEN 检查（HIGH-2 修复：按 attempt_id 匹配，避免多任务 digest 碰撞）
       const events = readEvents(projectRoot, change);
       let hasRed = false, hasGreen = false;
       for (const ev of events) {
         if (ev.event_type === "test_run_recorded") {
-          const tr = ev.payload as { task_structure_digest?: string; semantic_status?: string };
-          if (tr.task_structure_digest === attempt.task_structure_digest) {
+          const tr = ev.payload as { task_structure_digest?: string; attempt_id?: string; semantic_status?: string };
+          // 匹配当前 attempt（优先按 attempt_id，回退到 digest）
+          const matches = tr.attempt_id === attempt.attempt_id ||
+            (!tr.attempt_id && tr.task_structure_digest === attempt.task_structure_digest);
+          if (matches) {
             if (tr.semantic_status === "expected_failure" || tr.semantic_status === "characterization_pass") hasRed = true;
             if (tr.semantic_status === "expected_success") hasGreen = true;
           }

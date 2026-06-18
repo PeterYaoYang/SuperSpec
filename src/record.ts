@@ -184,7 +184,7 @@ export function recordUserDecision(
   });
 }
 
-/** jobs list：列出工作项 */
+/** jobs list（HIGH-1 修复：从 transition_commit.new_jobs 提取，不再依赖已删除的 job_requested 事件） */
 export function jobsList(
   projectRoot: string,
   change: string,
@@ -195,8 +195,13 @@ export function jobsList(
   const rejected: { job_id: string; role: string }[] = [];
 
   for (const ev of events) {
-    if (ev.event_type === "job_requested") {
-      open.push(ev.payload as unknown as Job);
+    if (ev.event_type === "transition_commit") {
+      const newJobs = (ev.payload as { new_jobs?: Job[] }).new_jobs ?? [];
+      for (const job of newJobs) {
+        if (!open.some(j => j.job_id === job.job_id) && !accepted.some(j => j.job_id === job.job_id) && !rejected.some(r => r.job_id === job.job_id)) {
+          open.push(job);
+        }
+      }
     } else if (ev.event_type === "job_accepted") {
       const { job_id } = ev.payload as { job_id: string };
       const idx = open.findIndex(j => j.job_id === job_id);
