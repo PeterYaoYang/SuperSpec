@@ -52,7 +52,7 @@ function parseFlags(args: string[]): Record<string, string> {
 async function main(argv: string[]): Promise<number> {
   // --help / 无参数 → 打印用法
   if (argv.length === 0 || argv.includes("--help") || argv.includes("-h")) {
-    console.log(`SuperSpec 流程引擎 v2.0.0-alpha
+    console.log(`SuperSpec 流程引擎 0.1.15-alpha
 
 用法：superspec <命令> [选项]
 
@@ -83,7 +83,7 @@ jobs 子命令：
 
   // version
   if (argv[0] === "version" || argv[0] === "--version" || argv[0] === "-v") {
-    console.log("SuperSpec v2.0.0-alpha.1");
+    console.log("SuperSpec 0.1.15-alpha");
     return 0;
   }
 
@@ -104,8 +104,8 @@ jobs 子命令：
       console.log(JSON.stringify({
         ok: false,
         message: "检测到老版 SuperSpec (0.x) 的状态文件。\n" +
-          "SuperSpec 2.0 是全新引擎，不兼容 0.x 的状态格式。\n" +
-          "请先用老版（0.1.x）完成或归档现有 change，再安装 2.0。\n" +
+          "SuperSpec 0.1.15-alpha 是全新引擎，不兼容 0.x 的状态格式。\n" +
+          "请先用老版（0.1.x）完成或归档现有 change，再安装 0.1.15-alpha。\n" +
           "或在全新项目目录中安装。",
       }));
       return 1;
@@ -114,7 +114,7 @@ jobs 子命令：
     if (!existsSync(engineDir)) mkdirSync(join(engineDir, "changes"), { recursive: true });
     const gitignorePath = join(engineDir, ".gitignore");
     if (!existsSync(gitignorePath)) writeFileSync(gitignorePath, "changes/\n*.log\n*.tmp\n");
-    console.log(JSON.stringify({ ok: true, message: "SuperSpec 2.0 已安装" }));
+    console.log(JSON.stringify({ ok: true, message: "SuperSpec 0.1.15-alpha 已安装" }));
     return 0;
   }
   if (command === "update") {
@@ -124,13 +124,13 @@ jobs 子命令：
     if (isLegacyUpdate) {
       console.log(JSON.stringify({
         ok: false,
-        message: "SuperSpec 2.0 是全新引擎，不能从 0.x 直接 update。\n" +
-          "请用 npm install -g @peterxiaoyang/superspec@2 手动安装。\n" +
+        message: "SuperSpec 0.1.15-alpha 是全新引擎，不能从 0.x 直接 update。\n" +
+          "请用 npm install -g @peterxiaoyang/superspec@0.1.15-alpha 手动安装。\n" +
           "现有 change 请先用 0.1.x 完成归档。",
       }));
       return 1;
     }
-    console.log(JSON.stringify({ ok: true, message: "已是最新版本 2.0.0-alpha.1" }));
+    console.log(JSON.stringify({ ok: true, message: "已是最新版本 0.1.15-alpha" }));
     return 0;
   }
 
