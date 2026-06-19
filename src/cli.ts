@@ -114,7 +114,58 @@ jobs 子命令：
     if (!existsSync(engineDir)) mkdirSync(join(engineDir, "changes"), { recursive: true });
     const gitignorePath = join(engineDir, ".gitignore");
     if (!existsSync(gitignorePath)) writeFileSync(gitignorePath, "changes/\n*.log\n*.tmp\n");
-    console.log(JSON.stringify({ ok: true, message: "SuperSpec 0.1.15-alpha 已安装" }));
+
+    // 复制 skills 到 .codex/skills/
+    const { copyFileSync, cpSync } = await import("node:fs");
+    const skillsSource = join(import.meta.dirname, "..", "templates", "workflow", "skills");
+    const skillsDest = join(projectRoot, ".codex", "skills");
+    const installedSkills: string[] = [];
+    if (existsSync(skillsSource)) {
+      const skillDirs = readdirSync(skillsSource);
+      for (const dir of skillDirs) {
+        const src = join(skillsSource, dir, "SKILL.md");
+        if (existsSync(src)) {
+          mkdirSync(join(skillsDest, dir), { recursive: true });
+          copyFileSync(src, join(skillsDest, dir, "SKILL.md"));
+          installedSkills.push(dir);
+        }
+      }
+    }
+
+    // 复制 release skill
+    const releaseSrc = join(import.meta.dirname, "..", "..", ".codex", "skills", "superspec-release", "SKILL.md");
+    if (existsSync(releaseSrc)) {
+      mkdirSync(join(skillsDest, "superspec-release"), { recursive: true });
+      copyFileSync(releaseSrc, join(skillsDest, "superspec-release", "SKILL.md"));
+      installedSkills.push("superspec-release");
+    }
+
+    // 复制 prompts 到 .codex/prompts/
+    const promptsSource = join(import.meta.dirname, "..", "templates", "workflow", "prompts");
+    const promptsDest = join(projectRoot, ".codex", "prompts");
+    const installedPrompts: string[] = [];
+    if (existsSync(promptsSource)) {
+      const promptFiles = readdirSync(promptsSource);
+      for (const f of promptFiles) {
+        const src = join(promptsSource, f);
+        const stat = await import("node:fs").then(m => m.statSync(src));
+        if (stat.isFile()) {
+          mkdirSync(promptsDest, { recursive: true });
+          copyFileSync(src, join(promptsDest, f));
+          installedPrompts.push(f);
+        }
+      }
+    }
+
+    console.log(JSON.stringify({
+      ok: true,
+      message: "SuperSpec 0.1.15-alpha 已安装",
+      installed: {
+        engine_dir: ".superspec/",
+        skills: installedSkills,
+        prompts: installedPrompts,
+      },
+    }));
     return 0;
   }
   if (command === "update") {
