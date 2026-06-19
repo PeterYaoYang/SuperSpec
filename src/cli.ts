@@ -92,16 +92,45 @@ jobs 子命令：
 
   // install / update 不需要 --change
   if (command === "install") {
-    const { mkdirSync, writeFileSync, existsSync } = await import("node:fs");
+    const { mkdirSync, writeFileSync, existsSync, readdirSync, readFileSync } = await import("node:fs");
     const engineDir = join(projectRoot, ".superspec");
+
+    // 检测老版残留（0.x 的 superspec-state.json / superspec-state.lock）
+    const oldStateFiles = ["superspec-state.json", "superspec-state.lock", "ledger.jsonl"];
+    const foundOld = oldStateFiles.some(f => existsSync(join(projectRoot, "openspec", "changes")) &&
+      readdirSync(join(projectRoot, "openspec", "changes")).some(c =>
+        existsSync(join(projectRoot, "openspec", "changes", c, ".superspec", f))));
+    if (foundOld) {
+      console.log(JSON.stringify({
+        ok: false,
+        message: "检测到老版 SuperSpec (0.x) 的状态文件。\n" +
+          "SuperSpec 2.0 是全新引擎，不兼容 0.x 的状态格式。\n" +
+          "请先用老版（0.1.x）完成或归档现有 change，再安装 2.0。\n" +
+          "或在全新项目目录中安装。",
+      }));
+      return 1;
+    }
+
     if (!existsSync(engineDir)) mkdirSync(join(engineDir, "changes"), { recursive: true });
     const gitignorePath = join(engineDir, ".gitignore");
     if (!existsSync(gitignorePath)) writeFileSync(gitignorePath, "changes/\n*.log\n*.tmp\n");
-    console.log(JSON.stringify({ ok: true, message: "SuperSpec 已安装（引擎目录已创建）" }));
+    console.log(JSON.stringify({ ok: true, message: "SuperSpec 2.0 已安装" }));
     return 0;
   }
   if (command === "update") {
-    console.log(JSON.stringify({ ok: true, message: "已是最新版本 v2.0.0-alpha.1" }));
+    // 检测是否从老版 update 过来
+    const { existsSync } = await import("node:fs");
+    const isLegacyUpdate = !existsSync(join(projectRoot, ".superspec", "changes"));
+    if (isLegacyUpdate) {
+      console.log(JSON.stringify({
+        ok: false,
+        message: "SuperSpec 2.0 是全新引擎，不能从 0.x 直接 update。\n" +
+          "请用 npm install -g @peterxiaoyang/superspec@2 手动安装。\n" +
+          "现有 change 请先用 0.1.x 完成归档。",
+      }));
+      return 1;
+    }
+    console.log(JSON.stringify({ ok: true, message: "已是最新版本 2.0.0-alpha.1" }));
     return 0;
   }
 
