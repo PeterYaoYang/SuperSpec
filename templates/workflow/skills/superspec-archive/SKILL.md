@@ -23,7 +23,14 @@ metadata:
 1. **确认状态为 accepted**：next 会检查
 2. **archive**：`superspec transition archive --change "<change>"`
    - 引擎记录当前文档指纹（proposal/tasks/design/discovery/bi/test-contract/specs）作为保全清单
+   - 归档事件写入 `events.jsonl`，并包含 `artifact_recorded`
+   - 缺失 artifact 会以 `sha256:missing` 表达
    - 状态推进到 archive（终态）
+
+当前限制：
+
+- 这一步没有执行物理 OpenSpec archive；只是记录 SuperSpec 保全事件。
+- 当前 CLI 没有 archive rollback / retry surface。
 
 ## Guardrails
 

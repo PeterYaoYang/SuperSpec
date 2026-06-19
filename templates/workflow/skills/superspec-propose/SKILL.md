@@ -21,6 +21,16 @@ metadata:
 
 next 返回 `required_job` 说明需要审查工作项——跑 `superspec jobs packet` 拿到工作说明，执行审查，`superspec record job-submit --change "<change>" --job <JOB> --report <FILE>`。
 
+当前 CLI surface：
+
+- 用 `openspec status --change "<change>" --json` 确认 OpenSpec 当前状态。
+- 通过 `openspec instructions <artifact> --change "<change>" --json` 获取 proposal、spec、design、tasks 等 artifact 的写法约束。
+- 基础计划文档齐全后，执行 `superspec transition propose-ready --change "<change>" --risk strict`；`minimal`、`normal`、`strict` 分别控制需要的审查 job 数量。
+- `normal` 至少可能创建 `proposal-auditor`；`strict` 可能创建 `proposal-auditor`、`critic-review`、`architect-review`、`test-engineer-review`。
+- 有 open job 时，用 `superspec jobs packet --change "<change>" --job "<job-id>"` 取包，再用 `superspec record job-submit --change "<change>" --job "<job-id>" --report <report.json>` 提交报告。
+- 不要把 `superspec status` 的 job 计数当 propose 审查真相；以 transition 返回的 required_job 和 job packet 为准。
+- 不要绕过 `openspec instructions` 徒手另造一套 OpenSpec artifact 写法。
+
 ## 本阶段做什么
 
 ### proposal.md
@@ -45,7 +55,7 @@ OpenSpec 能力规范增量（`openspec instructions specs` 格式）。
 
 规则：
 - `tdd_required:true`（默认）——改运行时代码/业务逻辑/数据迁移/权限/外部接口
-- `tdd_required:false` + `no_tdd_reason:xxx`——纯文档/配置/机械改名/生成物
+- `tdd_required:false` 和 `no_tdd_reason` 必须写在同一条 `TASK-*` 任务行里——纯文档/配置/机械改名/生成物，例如 `no_tdd_reason:documentation-only`
 
 ### business-invariants.md
 格式：
@@ -79,3 +89,4 @@ tasks.md 作为计划文档就绪（不是复选框全完成）+ 基础职责文
 - 不改业务代码
 - tdd_required 标注真实
 - 不跳过 transition
+- `boundFiles` 不包含 `specs/**/*.md` 时，不要把该 job 当成 specs 变更的新鲜审查证据

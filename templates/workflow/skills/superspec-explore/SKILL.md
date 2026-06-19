@@ -21,6 +21,13 @@ metadata:
 
 next 返回 `ask_user` 说明 discovery 不完整或有未确认问题——向用户提问，收到回答后 `superspec record user-decision --change "<change>" --input <FILE>`。
 
+当前 CLI surface：
+
+- 用 `openspec list --json` 和 `openspec status --change "<change>" --json` 建立 OpenSpec 事实基线。
+- 用 `superspec transition explore --change "<change>"` 从 init 进入探索阶段。
+- 用户回答阻塞问题后，写入决策文件并执行 `superspec record user-decision --change "<change>" --input <decision.json>`。
+- 不要把 `superspec status` 的 job 计数当成权威事实；阶段推进以 transition / record 返回值和 OpenSpec 文档为准。
+
 ## 本阶段做什么
 
 1. **建立事实基线**：读代码、查架构、理解当前系统行为（只读）
@@ -48,7 +55,7 @@ next 返回 `ask_user` 说明 discovery 不完整或有未确认问题——向�
 - [ ] 问题2的描述
 ```
 
-**重要**：`- [ ]` 标记的待确认问题必须全部解决（用户确认后改为 `- [x]` 或删除），否则 transition engine 会阻止推进到 propose。
+**重要**：`- [ ]` 标记的待确认问题必须全部解决。收到用户确认后，把对应未决项从 `- [ ]` 改成 `- [x]` 或删除；只留档、不回写 `discovery.md`，阶段还是过不去。
 
 ## Guardrails
 
@@ -56,3 +63,4 @@ next 返回 `ask_user` 说明 discovery 不完整或有未确认问题——向�
 - 不写 proposal/specs/design/tasks
 - 不跳过 transition 直接编辑状态文件
 - 用户未确认的决策不自行推断
+- 不要伪造当前分支没有的 `superspec check`
