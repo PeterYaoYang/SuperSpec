@@ -77,17 +77,16 @@ npm install -g @peterxiaoyang/superspec@latest
 进入你的项目根目录，然后运行：
 
 ```bash
-superspec init --scope project
+superspec install
 ```
 
 这条命令的意思是：把 SuperSpec 当前可用的工作流入口安装到项目里。
-
-初始化还会安装托管的 `.codex/hooks.json`。默认 manifest 只在子智能体启动和停止时调用 SuperSpec，记录 best-effort 审计信息；它不会拦截普通文件写入，也不会在测试命令后自动记录结果。
+当前 beta 会安装 `.superspec/` 引擎目录、`.codex/skills/superspec-*` 阶段入口、`.codex/prompts/*.md` 角色 prompt、`.codex/agents/*.toml` 子智能体配置，并补齐 `.codex/config.toml` 的多 agent 开关。`superspec init --scope project` 仍作为兼容别名可用。
 
 Windows PowerShell 如果拦截 npm 的 `.ps1` 脚本，请改用：
 
 ```powershell
-superspec.cmd init --scope project
+superspec.cmd install
 ```
 
 ### 3. 按步骤使用
@@ -135,6 +134,8 @@ superspec.cmd init --scope project
 | `superspec-archive` | 审查通过后 | 用 OpenSpec 完成归档，并检查关键记录是否保留 |
 
 你日常主要记住这五个入口就够了。
+
+CLI 不带 `--risk` 时默认是 `normal`；但内置的 `superspec-explore` 和 `superspec-propose` 技能默认用 `--risk strict` 驱动。探索阶段会创建 `critic` 工作项审查需求澄清记录；计划阶段会创建 `proposal-auditor`、`critic`、`architect` 和 `test-engineer` 工作项后再进入实现准备。
 
 ## 它会多保存哪些记录
 
@@ -200,34 +201,24 @@ superspec --version
 安装到当前项目：
 
 ```bash
-superspec init --scope project
+superspec install
 ```
 
-更新当前项目里的 SuperSpec 入口：
+`superspec init --scope project` 是兼容别名，也会执行同一套安装逻辑。
+
+检查当前项目的 OpenSpec 探测结果：
 
 ```bash
-superspec update --scope project
+superspec status
 ```
 
-这条命令会先通过 npm 更新全局 `@peterxiaoyang/superspec`，再用新版本更新当前项目里的入口文件。只想使用当前已安装包更新项目文件时，可以运行：
+更新当前 beta CLI：
 
 ```bash
-superspec update --scope project --local-only
+superspec update
 ```
 
-卸载当前项目里的 SuperSpec 入口：
-
-```bash
-superspec uninstall --scope project
-```
-
-这些命令默认不会删除已经生成的 `.superspec/` 过程记录。
-
-诊断全局安装、PATH、OpenSpec 依赖和 npm bin 指向问题：
-
-```bash
-superspec doctor
-```
+这条命令只检查当前 `.superspec/changes` 运行时是否已经是新引擎布局；真正升级全局 npm 包仍需使用 `npm install -g @peterxiaoyang/superspec@<version>`。
 
 ## 进阶信息
 
@@ -235,24 +226,35 @@ superspec doctor
 
 ```text
 .codex/
-  hooks.json
   skills/superspec-explore/
   skills/superspec-propose/
   skills/superspec-apply/
   skills/superspec-review/
   skills/superspec-archive/
+  prompts/architect.md
+  prompts/code-reviewer.md
+  prompts/critic.md
+  prompts/executor.md
+  prompts/explore.md
+  prompts/final-audit.md
+  prompts/proposal-auditor.md
+  prompts/test-engineer.md
+  prompts/test-runner.md
+  prompts/verifier.md
+  agents/architect.toml
+  agents/code-reviewer.toml
+  agents/critic.toml
+  agents/executor.toml
+  agents/explore.toml
+  agents/final-audit.toml
+  agents/proposal-auditor.toml
+  agents/test-engineer.toml
+  agents/test-runner.toml
+  agents/verifier.toml
+  config.toml
 ```
 
-SuperSpec 内部还有一些检查命令，例如：
-
-```bash
-superspec check check-init --change <变更ID>
-superspec check check-apply-ready --change <变更ID>
-superspec check check-review-ready --change <变更ID>
-superspec check check-archive-ready --change <变更ID>
-```
-
-普通使用者通常不需要手动运行这些命令；对应的阶段入口会在需要时使用它们。
+当前 beta 的阶段入口由 `superspec transition next --change <变更ID>` 驱动，不再提供旧版 `superspec check ...` surface。
 
 如果你要开发 SuperSpec 本身：
 
@@ -260,14 +262,13 @@ superspec check check-archive-ready --change <变更ID>
 npm run build
 npm run typecheck
 npm test
-npm run pack:dry-run
+npm pack --dry-run
 ```
 
 更多细节见：
 
-- `docs/SPEC.md`：完整设计和规则
-- `docs/DISTRIBUTION.md`：安装、升级、卸载和分发说明
-- `.codex/skills/superspec-*/SKILL.md`：当前 Codex 适配器使用的阶段入口说明
+- `docs/plans/SUPERSPEC_TRANSITION_ENGINE_SPEC_LITE.md`：transition engine 设计
+- `templates/workflow/skills/superspec-*/SKILL.md`：当前 Codex 适配器使用的阶段入口说明
 
 ## 致谢与灵感来源
 

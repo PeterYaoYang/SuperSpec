@@ -14,12 +14,21 @@ metadata:
 
 所有状态由 transition engine 管理。循环：
 
-1. `superspec transition next --change "<change>"` 获取下一步
+1. `superspec transition next --change "<change>" --risk strict` 获取下一步
 2. 执行返回的命令
 3. 登记结果
 4. 回到 1
 
 next 返回 `required_job` 说明需要审查工作项——跑 `superspec jobs packet` 拿到工作说明，执行审查，`superspec record job-submit --change "<change>" --job <JOB> --report <FILE>`。
+
+本技能默认以 `risk=strict` 驱动。计划阶段进入 `propose-ready` 前必须完成这些审核工作项：
+
+- `proposal-auditor`
+- `critic`
+- `architect`
+- `test-engineer`
+
+所有工作项报告都必须按 packet 的 `job_report_json` 契约提交。
 
 ## 本阶段做什么
 
@@ -79,3 +88,4 @@ tasks.md 作为计划文档就绪（不是复选框全完成）+ 基础职责文
 - 不改业务代码
 - tdd_required 标注真实
 - 不跳过 transition
+- 不跳过 strict 模式下的审核工作项

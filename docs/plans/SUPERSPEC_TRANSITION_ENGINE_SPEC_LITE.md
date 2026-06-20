@@ -136,7 +136,7 @@ requested → accepted | rejected
 
 > **补丁 F2-lite（Phase 2）**：next 检测**同一需求**（如 proposal-auditor）跨不同 job_id 被 rejected ≥3 次 → 返回 `ask_user` path。Phase 1 不实现。
 
-工作项类型：`clarification-review` / `proposal-auditor` / `critic-review` / `architect-review` / `test-engineer-review` / `executor` / `test-run` / `final-audit`。
+工作项类型：`proposal-auditor` / `critic` / `architect` / `test-engineer` / `executor` / `test-run` / `final-audit`。需求澄清阶段的 strict 审核也使用 `critic`。
 
 ---
 

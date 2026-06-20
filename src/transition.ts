@@ -20,12 +20,12 @@ const TRANSITION_REQUIREMENTS: Record<string, Record<string, JobRole[]>> = {
   "propose-ready": {
     minimal: [],
     normal:  ["proposal-auditor"],
-    strict:  ["critic-review", "architect-review", "test-engineer-review"],
+    strict:  ["proposal-auditor", "critic", "architect", "test-engineer"],
   },
   "explore": {
     minimal: [],
     normal:  [],
-    strict:  ["clarification-review"],
+    strict:  ["critic"],
   },
 };
 
@@ -222,20 +222,20 @@ export function transitionInit(projectRoot: string, change: string, changeRoot: 
 
 // ===== explore =====
 
-export function transitionExplore(projectRoot: string, change: string, changeRoot: string): TransitionResult {
+export function transitionExplore(projectRoot: string, change: string, changeRoot: string, risk: "minimal" | "normal" | "strict" = "normal"): TransitionResult {
   return commitTransition(projectRoot, change, changeRoot, {
-    name: "explore", idempotencyInputs: { phase: "explore" },
+    name: "explore", idempotencyInputs: { phase: "explore", risk },
     decide: (snapshot) => {
       if (snapshot.state === "init") return { fromState: "init", toState: "explore", outcome: "advanced" as const, reason: "进入探索阶段" };
       if (snapshot.state === "explore") {
         const discoveryPath = join(changeRoot, ".superspec", "artifacts", "discovery.md");
         if (!existsSync(discoveryPath)) return { skip: true, message: "discovery.md 不存在" };
-        // explore→propose：校验 discovery + 通用 job 审查（normal+ 需 clarification-review）
+        // explore→propose：校验 discovery + strict 模式下的 critic 审查
         const discoveryCheck = validateDiscovery(changeRoot);
         if (!discoveryCheck.ok) return { skip: true, message: discoveryCheck.message };
 
         // 通用 job 审查（和 propose-ready 同一个 helper）
-        const requiredRoles = TRANSITION_REQUIREMENTS["explore"]?.["normal"] ?? [];
+        const requiredRoles = TRANSITION_REQUIREMENTS["explore"]?.[risk] ?? [];
         const reviewResult = checkOrCreateReviewJobs(
           snapshot, requiredRoles, changeRoot, change, "explore",
           [".superspec/artifacts/discovery.md"],

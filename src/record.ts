@@ -6,7 +6,41 @@ import {
   ensureChangeLayout, readEvents, appendEvent, makeEvent,
   sha256File, withLock,
 } from "./store.ts";
-import type { Event, RecordResult, Job, JobState } from "./types.ts";
+import type { Event, RecordResult, Job, JobRole, JobState } from "./types.ts";
+
+const REVIEW_REPORT_REQUIRED_FIELDS = ["role", "verdict", "findings"] as const;
+const REVIEW_REPORT_OPTIONAL_FIELDS = ["summary", "evidence_refs", "risks", "open_questions"] as const;
+
+function recommendedAgentForRole(role: JobRole): string {
+  switch (role) {
+    case "proposal-auditor": return "proposal-auditor";
+    case "critic": return "critic";
+    case "architect": return "architect";
+    case "test-engineer": return "test-engineer";
+    case "final-audit": return "final-audit";
+    case "executor": return "executor";
+    case "test-run": return "test-runner";
+  }
+}
+
+function roleDescription(role: JobRole): string {
+  switch (role) {
+    case "proposal-auditor":
+      return "审查 proposal/tasks/design/discovery/business-invariants/test-contract 是否足够进入实现计划门";
+    case "critic":
+      return "从反方角度审查需求澄清或计划材料中的隐藏假设、范围漂移、验收漏洞和证据缺口";
+    case "architect":
+      return "审查架构边界、接口契约、长期维护风险和设计取舍";
+    case "test-engineer":
+      return "审查测试契约、覆盖策略、RED/GREEN 可信度和验收场景映射";
+    case "final-audit":
+      return "最终审查 proposal、实现状态、任务完成、测试契约和 SuperSpec 证据一致性";
+    case "executor":
+      return "执行受限实现工作项";
+    case "test-run":
+      return "执行受限测试工作项";
+  }
+}
 
 /** 从 events 中查找 job（H4 修复：job 只在 transition_commit 的 new_jobs payload 里） */
 function findJob(events: Event[], jobId: string): Job | null {
@@ -83,14 +117,31 @@ export function recordJobSubmit(
     // acceptance checks
     const checks: string[] = [];
 
-    // 0. 报告角色匹配（HIGH 5 修复）
+    // 0. 报告格式和角色匹配（最小 JSON contract）
     try {
       const report = JSON.parse(reportContent);
-      if (report.role && report.role !== job.role) {
-        checks.push(`报告角色 ${report.role} 与工作项角色 ${job.role} 不匹配`);
+      if (!report || typeof report !== "object" || Array.isArray(report)) {
+        checks.push("报告必须是 JSON object");
+      } else {
+        const obj = report as { role?: unknown; verdict?: unknown; findings?: unknown };
+        for (const field of REVIEW_REPORT_REQUIRED_FIELDS) {
+          if (!(field in obj)) checks.push(`报告缺少必填字段 ${field}`);
+        }
+        if (obj.role !== job.role) {
+          checks.push(`报告角色 ${String(obj.role)} 与工作项角色 ${job.role} 不匹配`);
+        }
+        if (obj.verdict !== "pass" && obj.verdict !== "fail") {
+          checks.push("报告 verdict 必须是 pass 或 fail");
+        }
+        if (!Array.isArray(obj.findings)) {
+          checks.push("报告 findings 必须是数组");
+        }
+        if (obj.verdict === "fail") {
+          checks.push("报告 verdict=fail，工作项未通过");
+        }
       }
     } catch {
-      // 非 JSON 报告，Phase 1 允许（Phase 2 加正式 schema）
+      checks.push("报告必须是有效 JSON");
     }
 
     // 1. boundFiles 仍匹配当前文档（missing 也算不匹配）
@@ -234,16 +285,22 @@ export function jobsPacket(
   }
   return {
     found: true,
-    packet: {
-      job_id: job.job_id,
-      role: job.role,
-      boundFiles: job.boundFiles,
-      packet_digest: job.packet_digest,
-      required_output_kind: "report",
-      output_instructions: `请审查 ${job.boundFiles.map(f => f.path).join(", ")}，产出审查报告`,
-      stop_conditions: ["审查完成后提交报告，不要修改文档"],
-      created_from_transition: job.created_from_transition,
-    },
+      packet: {
+        job_id: job.job_id,
+        role: job.role,
+        recommended_agent: recommendedAgentForRole(job.role),
+        boundFiles: job.boundFiles,
+        packet_digest: job.packet_digest,
+        required_output_kind: "job_report_json",
+        output_contract_fields: [...REVIEW_REPORT_REQUIRED_FIELDS],
+        output_contract_optional_fields: [...REVIEW_REPORT_OPTIONAL_FIELDS],
+        output_instructions:
+          `${roleDescription(job.role)}。请审查 ${job.boundFiles.map(f => f.path).join(", ")}，` +
+          `产出 JSON 报告文件并通过 superspec record job-submit 登记。` +
+          `最小格式：{"role":"${job.role}","verdict":"pass|fail","findings":[]}`,
+        stop_conditions: ["审查完成后提交报告，不要修改文档"],
+        created_from_transition: job.created_from_transition,
+      },
     message: `工作项 ${jobId} 的执行说明`,
   };
 }

@@ -14,12 +14,14 @@ metadata:
 
 所有状态由 transition engine 管理。循环：
 
-1. `superspec transition next --change "<change>"` 获取下一步
+1. `superspec transition next --change "<change>" --risk strict` 获取下一步
 2. 执行返回的命令
 3. 登记结果
 4. 回到 1
 
 next 返回 `ask_user` 说明 discovery 不完整或有未确认问题——向用户提问，收到回答后 `superspec record user-decision --change "<change>" --input <FILE>`。
+
+本技能默认以 `risk=strict` 驱动。探索完成后，`explore→propose` 会先创建 `critic` 工作项，由 Critic 审查需求澄清记录。该工作项必须产出 `job_report_json`，并通过 `superspec record job-submit --change "<change>" --job <JOB> --report <FILE>` 登记。
 
 ## 本阶段做什么
 
@@ -56,3 +58,4 @@ next 返回 `ask_user` 说明 discovery 不完整或有未确认问题——向�
 - 不写 proposal/specs/design/tasks
 - 不跳过 transition 直接编辑状态文件
 - 用户未确认的决策不自行推断
+- strict 模式下不跳过 `critic`

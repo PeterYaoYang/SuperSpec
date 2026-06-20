@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // SuperSpec 流程引擎 — CLI 入口
 
-import { writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import { installProject } from "./install.ts";
 import { writeSnapshot } from "./store.ts";
 import { rebuildSnapshot } from "./sync.ts";
 import { next as nextCmd } from "./next.ts";
@@ -52,7 +52,7 @@ function parseFlags(args: string[]): Record<string, string> {
 async function main(argv: string[]): Promise<number> {
   // --help / 无参数 → 打印用法
   if (argv.length === 0 || argv.includes("--help") || argv.includes("-h")) {
-    console.log(`SuperSpec 流程引擎 0.1.15-alpha
+    console.log(`SuperSpec 流程引擎 0.1.16-alpha
 
 用法：superspec <命令> [选项]
 
@@ -61,7 +61,8 @@ async function main(argv: string[]): Promise<number> {
   transition <子命令> --change <C>  状态流转（见下）
   record <子命令> --change <C>      登记证据（见下）
   jobs <子命令> --change <C>        工作项管理（见下）
-  install [--global]               安装到项目或全局
+  install                           安装项目工作流入口
+  init --scope project              install 的兼容别名
   update                           更新 SuperSpec
   version                          版本号
 
@@ -83,90 +84,33 @@ jobs 子命令：
 
   // version
   if (argv[0] === "version" || argv[0] === "--version" || argv[0] === "-v") {
-    console.log("SuperSpec 0.1.15-alpha");
+    console.log("SuperSpec 0.1.16-alpha");
     return 0;
   }
 
   const { command, subcommand, opts } = parseArgs(argv);
   const projectRoot = process.cwd();
 
-  // install / update 不需要 --change
-  if (command === "install") {
-    const { mkdirSync, writeFileSync, existsSync, readdirSync, readFileSync } = await import("node:fs");
-    const engineDir = join(projectRoot, ".superspec");
-
-    // 检测老版残留（0.x 的 superspec-state.json / superspec-state.lock）
-    const oldStateFiles = ["superspec-state.json", "superspec-state.lock", "ledger.jsonl"];
-    const foundOld = oldStateFiles.some(f => existsSync(join(projectRoot, "openspec", "changes")) &&
-      readdirSync(join(projectRoot, "openspec", "changes")).some(c =>
-        existsSync(join(projectRoot, "openspec", "changes", c, ".superspec", f))));
-    if (foundOld) {
+  // install / init / update 不需要 --change
+  if (command === "install" || command === "init") {
+    if (command === "init" && opts.scope && opts.scope !== "project") {
       console.log(JSON.stringify({
         ok: false,
-        message: "检测到老版 SuperSpec (0.x) 的状态文件。\n" +
-          "SuperSpec 0.1.15-alpha 是全新引擎，不兼容 0.x 的状态格式。\n" +
-          "请先用老版（0.1.x）完成或归档现有 change，再安装 0.1.15-alpha。\n" +
-          "或在全新项目目录中安装。",
+        message: "当前 beta 只支持 init --scope project",
       }));
       return 1;
     }
 
-    if (!existsSync(engineDir)) mkdirSync(join(engineDir, "changes"), { recursive: true });
-    const gitignorePath = join(engineDir, ".gitignore");
-    if (!existsSync(gitignorePath)) writeFileSync(gitignorePath, "changes/\n*.log\n*.tmp\n");
-
-    // 复制 skills 到 .codex/skills/
-    const { copyFileSync, cpSync } = await import("node:fs");
-    const skillsSource = join(import.meta.dirname, "..", "templates", "workflow", "skills");
-    const skillsDest = join(projectRoot, ".codex", "skills");
-    const installedSkills: string[] = [];
-    if (existsSync(skillsSource)) {
-      const skillDirs = readdirSync(skillsSource);
-      for (const dir of skillDirs) {
-        const src = join(skillsSource, dir, "SKILL.md");
-        if (existsSync(src)) {
-          mkdirSync(join(skillsDest, dir), { recursive: true });
-          copyFileSync(src, join(skillsDest, dir, "SKILL.md"));
-          installedSkills.push(dir);
-        }
-      }
+    try {
+      console.log(JSON.stringify(installProject(projectRoot)));
+      return 0;
+    } catch (err) {
+      console.log(JSON.stringify({
+        ok: false,
+        message: (err as Error).message,
+      }));
+      return 1;
     }
-
-    // 复制 release skill
-    const releaseSrc = join(import.meta.dirname, "..", "..", ".codex", "skills", "superspec-release", "SKILL.md");
-    if (existsSync(releaseSrc)) {
-      mkdirSync(join(skillsDest, "superspec-release"), { recursive: true });
-      copyFileSync(releaseSrc, join(skillsDest, "superspec-release", "SKILL.md"));
-      installedSkills.push("superspec-release");
-    }
-
-    // 复制 prompts 到 .codex/prompts/
-    const promptsSource = join(import.meta.dirname, "..", "templates", "workflow", "prompts");
-    const promptsDest = join(projectRoot, ".codex", "prompts");
-    const installedPrompts: string[] = [];
-    if (existsSync(promptsSource)) {
-      const promptFiles = readdirSync(promptsSource);
-      for (const f of promptFiles) {
-        const src = join(promptsSource, f);
-        const stat = await import("node:fs").then(m => m.statSync(src));
-        if (stat.isFile()) {
-          mkdirSync(promptsDest, { recursive: true });
-          copyFileSync(src, join(promptsDest, f));
-          installedPrompts.push(f);
-        }
-      }
-    }
-
-    console.log(JSON.stringify({
-      ok: true,
-      message: "SuperSpec 0.1.15-alpha 已安装",
-      installed: {
-        engine_dir: ".superspec/",
-        skills: installedSkills,
-        prompts: installedPrompts,
-      },
-    }));
-    return 0;
   }
   if (command === "update") {
     // 检测是否从老版 update 过来
@@ -175,13 +119,13 @@ jobs 子命令：
     if (isLegacyUpdate) {
       console.log(JSON.stringify({
         ok: false,
-        message: "SuperSpec 0.1.15-alpha 是全新引擎，不能从 0.x 直接 update。\n" +
-          "请用 npm install -g @peterxiaoyang/superspec@0.1.15-alpha 手动安装。\n" +
+        message: "SuperSpec 0.1.16-alpha 是全新引擎，不能从 0.x 直接 update。\n" +
+          "请用 npm install -g @peterxiaoyang/superspec@0.1.16-alpha 手动安装。\n" +
           "现有 change 请先用 0.1.x 完成归档。",
       }));
       return 1;
     }
-    console.log(JSON.stringify({ ok: true, message: "已是最新版本 0.1.15-alpha" }));
+    console.log(JSON.stringify({ ok: true, message: "已是最新版本 0.1.16-alpha" }));
     return 0;
   }
 
@@ -224,7 +168,10 @@ jobs 子命令：
             return 0;
 
           case "explore":
-            console.log(JSON.stringify(transitionExplore(projectRoot, change, cr), null, 2));
+            {
+              const risk = (opts.risk as "minimal" | "normal" | "strict") ?? "normal";
+              console.log(JSON.stringify(transitionExplore(projectRoot, change, cr, risk), null, 2));
+            }
             return 0;
 
           case "sync": {
@@ -364,7 +311,7 @@ jobs 子命令：
       }
 
       default:
-        console.error(`未知命令：${command}。可用：status, transition, record, jobs`);
+        console.error(`未知命令：${command}。可用：status, transition, record, jobs, install, init, update, version`);
         return 1;
     }
   } catch (err) {

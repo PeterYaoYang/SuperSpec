@@ -10,7 +10,7 @@ import { ensureChangeLayout, readEvents, appendEvent, makeEvent } from "../src/s
 import { rebuildSnapshot } from "../src/sync.ts";
 import { next } from "../src/next.ts";
 import { proposeReady, transitionExplore } from "../src/transition.ts";
-import { recordUserDecision, recordJobSubmit } from "../src/record.ts";
+import { recordUserDecision, recordJobSubmit, jobsPacket } from "../src/record.ts";
 
 // ===== 夹具 =====
 
@@ -96,6 +96,53 @@ test("next 在 explore 有 discovery 无问题时返回 transition 命令", () =
     const result = next(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(result.path, "next_command");
     assert.ok(result.next_command.includes("explore"));
+  } finally { fx.cleanup(); }
+});
+
+test("next 在 explore strict 风险时返回带 risk 的 transition 命令", () => {
+  const fx = setupPropose();
+  try {
+    const result = next(fx.projectRoot, fx.change, fx.changeRoot, "strict");
+    assert.equal(result.path, "next_command");
+    assert.ok(result.next_command.includes('transition explore --change "test-change" --risk strict'));
+  } finally { fx.cleanup(); }
+});
+
+test("explore→propose strict：创建 critic，接受 JSON 报告后推进", () => {
+  const fx = setupPropose();
+  try {
+    const first = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "strict");
+    assert.equal(first.outcome, "job_created");
+    assert.equal(first.to_state, "explore");
+    assert.equal(first.created_jobs.length, 1);
+
+    let snapshot = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(snapshot.state, "explore");
+    assert.equal(snapshot.open_jobs[0].role, "critic");
+
+    const packet = jobsPacket(fx.projectRoot, fx.change, first.created_jobs[0]);
+    assert.equal(packet.found, true);
+    assert.equal(packet.packet?.role, "critic");
+    assert.equal(packet.packet?.recommended_agent, "critic");
+    assert.equal(packet.packet?.required_output_kind, "job_report_json");
+    assert.deepEqual(packet.packet?.output_contract_fields, ["role", "verdict", "findings"]);
+
+    const reportPath = join(fx.projectRoot, "critic.json");
+    writeFileSync(reportPath, JSON.stringify({
+      role: "critic",
+      verdict: "pass",
+      findings: [],
+      summary: "discovery 可进入 propose",
+    }));
+    const record = recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, first.created_jobs[0], reportPath);
+    assert.equal(record.accepted, true);
+
+    const second = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "strict");
+    assert.equal(second.outcome, "advanced");
+    assert.equal(second.to_state, "propose");
+
+    snapshot = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(snapshot.state, "propose");
   } finally { fx.cleanup(); }
 });
 
@@ -189,6 +236,42 @@ test("propose-ready --risk normal：基础职责全满足 + proposal-auditor acc
     const t2 = proposeReady(projectRoot, change, changeRoot, "normal");
     assert.equal(t2.outcome, "advanced");
     assert.equal(t2.to_state, "propose_ready");
+  } finally {
+    rmSync(projectRoot, { recursive: true, force: true });
+  }
+});
+
+test("propose-ready --risk strict：创建 proposal-auditor + critic + architect + test 审核工作项", () => {
+  const projectRoot = mkdtempSync(join(tmpdir(), "superspec-p2strict-"));
+  const change = "test-change";
+  const changeRoot = join(projectRoot, "openspec", "changes", change);
+  mkdirSync(join(changeRoot, ".superspec", "artifacts"), { recursive: true });
+  writeFileSync(join(changeRoot, "proposal.md"), "# Proposal\n");
+  writeFileSync(join(changeRoot, "tasks.md"), "# Tasks\n\n- [ ] TASK-001\n");
+  writeFileSync(join(changeRoot, "design.md"), "# Design\n");
+  writeFileSync(join(changeRoot, ".superspec", "artifacts", "discovery.md"), "# Discovery\n");
+  writeFileSync(join(changeRoot, ".superspec", "artifacts", "business-invariants.md"), "# BI\n");
+  writeFileSync(join(changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");
+  ensureChangeLayout(projectRoot, change);
+  for (const [t, f, to] of [["init","init","init"],["explore","init","explore"],["propose","explore","propose"]] as const) {
+    appendEvent(projectRoot, change, makeEvent(change, "transition_commit", {
+      transition: t, from_state: f, to_state: to,
+      outcome: "advanced", created_job_ids: [], reason: t,
+    }, { transitionId: `T-${t}`, idempotencyKey: `${t}-key` }));
+  }
+
+  try {
+    const result = proposeReady(projectRoot, change, changeRoot, "strict");
+    assert.equal(result.outcome, "job_created");
+    assert.equal(result.created_jobs.length, 4);
+
+    const snapshot = rebuildSnapshot(projectRoot, change, changeRoot);
+    assert.deepEqual(snapshot.open_jobs.map(j => j.role).sort(), [
+      "architect",
+      "critic",
+      "proposal-auditor",
+      "test-engineer",
+    ]);
   } finally {
     rmSync(projectRoot, { recursive: true, force: true });
   }

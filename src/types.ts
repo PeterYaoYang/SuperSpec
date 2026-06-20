@@ -15,8 +15,8 @@ export type Ref = { path: string; sha: string };
 export type JobState = "requested" | "accepted" | "rejected";
 
 export type JobRole =
-  | "proposal-auditor" | "clarification-review" | "critic-review"
-  | "architect-review" | "test-engineer-review" | "executor" | "test-run" | "final-audit";
+  | "proposal-auditor" | "critic"
+  | "architect" | "test-engineer" | "executor" | "test-run" | "final-audit";
 
 export interface Job {
   job_id: string;
@@ -31,9 +31,12 @@ export interface Job {
 export interface JobPacket {
   job_id: string;
   role: JobRole;
+  recommended_agent?: string;
   boundFiles: Ref[];
   packet_digest: string;
   required_output_kind: string;
+  output_contract_fields?: string[];
+  output_contract_optional_fields?: string[];
   stop_conditions: string[];
   created_from_transition: string;
 }

@@ -58,7 +58,7 @@ export function next(
       return {
         state: "explore",
         path: "next_command",
-        next_command: transitionCommand(change, "explore"),
+        next_command: transitionCommand(change, "explore", `--risk ${defaultRisk}`),
         reason: "探索完成，推进到计划阶段",
         missing_inputs: [],
       };
