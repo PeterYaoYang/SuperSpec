@@ -89,16 +89,16 @@ function replayEvents(events: Event[]): {
   return { state, openJobs, acceptedJobs, activeAttempts, taskStatuses, lastTransition };
 }
 
-/** 粗粒度失效：检查 accepted job 的 boundFiles 是否仍匹配当前文档 */
+/** 粗粒度失效：检查 job 的 boundFiles 是否仍匹配当前文档 */
 function checkStaleJobs(
-  acceptedJobs: Job[],
-  documentDigests: Record<string, string>
+  jobs: Job[],
+  changeRoot: string,
 ): { job_id: string; reason: string }[] {
   const stale: { job_id: string; reason: string }[] = [];
-  for (const job of acceptedJobs) {
+  for (const job of jobs) {
     for (const bf of job.boundFiles) {
-      const current = documentDigests[bf.path];
-      if (current && current !== bf.sha) {
+      const current = sha256File(join(changeRoot, bf.path)) ?? "sha256:missing";
+      if (current !== bf.sha) {
         stale.push({
           job_id: job.job_id,
           reason: `绑定文件 ${bf.path} 已变化（${bf.sha} → ${current}）`,
@@ -136,10 +136,11 @@ export function rebuildSnapshot(
 
   const { state, openJobs, acceptedJobs, activeAttempts, taskStatuses, lastTransition } = replayEvents(events);
 
-  // 粗粒度失效检查（只读，不写事件）
-  const staleInfo = checkStaleJobs(acceptedJobs, documentDigests);
-  // stale 的 job 从 accepted 移除（sync 只反映当前事实）
-  const freshAccepted = acceptedJobs.filter(j => !staleInfo.some(s => s.job_id === j.job_id));
+  // 粗粒度失效检查（只读，不写事件）：snapshot 只暴露当前可执行/可复用 job。
+  const staleOpenInfo = checkStaleJobs(openJobs, changeRoot);
+  const staleAcceptedInfo = checkStaleJobs(acceptedJobs, changeRoot);
+  const freshOpen = openJobs.filter(j => !staleOpenInfo.some(s => s.job_id === j.job_id));
+  const freshAccepted = acceptedJobs.filter(j => !staleAcceptedInfo.some(s => s.job_id === j.job_id));
 
   return {
     change_id: change,
@@ -149,7 +150,7 @@ export function rebuildSnapshot(
     document_digests: documentDigests,
     tasks_structure_digest: tsDigest,
     task_statuses: taskStatuses,
-    open_jobs: openJobs,
+    open_jobs: freshOpen,
     accepted_jobs: freshAccepted,
     active_task_attempts: activeAttempts,
     pending_user_decisions: [],

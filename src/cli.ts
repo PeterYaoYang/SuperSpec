@@ -6,7 +6,8 @@ import { installProject } from "./install.ts";
 import { writeSnapshot } from "./store.ts";
 import { rebuildSnapshot } from "./sync.ts";
 import { next as nextCmd } from "./next.ts";
-import { proposeReady, commitTransition, transitionInit, transitionExplore, startApply, taskStart, taskComplete, reviewReady, accept, archive } from "./transition.ts";
+import { proposeReady, commitTransition, transitionInit, transitionExplore, startApply, taskStart, taskComplete, reopen, reviewReady, accept, archive } from "./transition.ts";
+import type { State } from "./types.ts";
 import { recordJobSubmit, recordUserDecision, jobsList, jobsPacket } from "./record.ts";
 import { recordTestRun } from "./task.ts";
 import { probeOpenSpec, openspecStatus, changeRoot } from "./openspec.ts";
@@ -70,6 +71,7 @@ async function main(argv: string[]): Promise<number> {
 transition 子命令：
   init / explore / sync / next / propose-ready / start-apply
   task-start --task <T> / task-complete --task <T>
+  reopen --to apply --reason <TEXT>
   review-ready / accept / archive
 
 record 子命令：
@@ -227,6 +229,16 @@ jobs 子命令：
             const taskId = opts.task;
             if (!taskId) { console.error("task-complete 需要 --task"); return 1; }
             const result = taskComplete(projectRoot, change, cr, taskId);
+            console.log(JSON.stringify(result, null, 2));
+            return result.events_written === 0 ? 1 : 0;
+          }
+
+          case "reopen": {
+            const to = opts.to as State | undefined;
+            const reason = opts.reason;
+            if (!to) { console.error("reopen 需要 --to"); return 1; }
+            if (!reason) { console.error("reopen 需要 --reason"); return 1; }
+            const result = reopen(projectRoot, change, cr, to, reason);
             console.log(JSON.stringify(result, null, 2));
             return result.events_written === 0 ? 1 : 0;
           }

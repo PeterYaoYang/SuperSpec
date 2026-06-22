@@ -3,8 +3,9 @@
 import { rebuildSnapshot } from "./sync.ts";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Job, NextOutput, AskUser } from "./types.ts";
-import { validateDiscovery, countDiscoveryOpenQuestions, collectProposeOpenQuestions } from "./format.ts";
+import { readEvents, sha256Text } from "./store.ts";
+import type { Job, NextOutput, AskUser, TaskAttempt } from "./types.ts";
+import { validateDiscovery, countDiscoveryOpenQuestions, collectProposeOpenQuestions, parseTasksMd, pendingTasksInContent } from "./format.ts";
 
 const ACTIVE_PROPOSAL_REVIEW_ROLES = new Set(["critic", "architect", "test-engineer"]);
 
@@ -22,6 +23,54 @@ function transitionCommand(change: string, name: string, extra = ""): string {
 
 function riskFlag(risk: "minimal" | "normal" | "strict"): string {
   return risk === "strict" ? "" : `--risk ${risk}`;
+}
+
+function pendingTaskIds(changeRoot: string): string[] {
+  const tasksContent = readFileSync(join(changeRoot, "tasks.md"), "utf8");
+  return pendingTasksInContent(tasksContent).map(task => task.taskId);
+}
+
+function reopenCommand(change: string, pending: string[]): string {
+  return transitionCommand(change, "reopen", `--to apply --reason "pending tasks: ${pending.join(", ")}"`);
+}
+
+function taskCompletionReadiness(
+  projectRoot: string,
+  change: string,
+  changeRoot: string,
+  attempt: TaskAttempt,
+): { ready: boolean; missing: string[] } {
+  const tasksContent = readFileSync(join(changeRoot, "tasks.md"), "utf8");
+  const tasks = parseTasksMd(tasksContent);
+  const taskInfo = tasks.find(task => task.taskId === attempt.task_id);
+  const missing: string[] = [];
+
+  if (!taskInfo) return { ready: false, missing: [`任务 ${attempt.task_id} 不存在`] };
+
+  const currentDigest = sha256Text(tasksContent.replace(/- \[[xX]\]/g, "- [ ]"));
+  // Keep the wording aligned with task-complete; no command should be suggested if it would fail this guard.
+  if (currentDigest !== attempt.task_structure_digest) missing.push("任务结构指纹");
+
+  if (!taskInfo.tddRequired) {
+    if (!taskInfo.noTddReason) missing.push("no_tdd_reason");
+    return { ready: missing.length === 0, missing };
+  }
+
+  let hasRed = false;
+  let hasGreen = false;
+  for (const ev of readEvents(projectRoot, change)) {
+    if (ev.event_type !== "test_run_recorded") continue;
+    const tr = ev.payload as { task_structure_digest?: string; attempt_id?: string | null; semantic_status?: string };
+    const matches = tr.attempt_id === attempt.attempt_id ||
+      (!tr.attempt_id && tr.task_structure_digest === attempt.task_structure_digest);
+    if (!matches) continue;
+    if (tr.semantic_status === "expected_failure" || tr.semantic_status === "characterization_pass") hasRed = true;
+    if (tr.semantic_status === "expected_success") hasGreen = true;
+  }
+  if (!hasRed) missing.push("RED 证据");
+  if (!hasGreen) missing.push("GREEN 证据");
+
+  return { ready: missing.length === 0, missing };
 }
 
 /** next 命令：读 snapshot，返回唯一可执行路径 */
@@ -134,6 +183,38 @@ export function next(
     }
 
     case "apply": {
+      // 检查是否所有任务已完成
+      const pending = pendingTaskIds(changeRoot);
+      if (pending.length > 0) {
+        const activePending = snapshot.active_task_attempts.find(attempt =>
+          attempt.state === "active" && pending.includes(attempt.task_id)
+        );
+        if (activePending) {
+          const readiness = taskCompletionReadiness(projectRoot, change, changeRoot, activePending);
+          if (readiness.ready) {
+            return {
+              state: "apply",
+              path: "next_command",
+              next_command: transitionCommand(change, "task-complete", `--task ${activePending.task_id}`),
+              reason: `任务 ${activePending.task_id} 证据已登记，可以完成`,
+              missing_inputs: [],
+            };
+          }
+          const ask: AskUser = {
+            question: `任务 ${activePending.task_id} 已开始，请先登记 ${readiness.missing.join("、")} 后继续`,
+            allowed_answers: ["证据已登记"],
+            scope: `apply_active_task_${activePending.task_id}`,
+          };
+          return { state: "apply", path: "ask_user", ask_user: ask, reason: `任务 ${activePending.task_id} 缺少完成证据` };
+        }
+        return {
+          state: "apply",
+          path: "next_command",
+          next_command: transitionCommand(change, "task-start", `--task ${pending[0]}`),
+          reason: `执行中：下一个未完成任务 ${pending[0]}`,
+          missing_inputs: [],
+        };
+      }
       // 有 open job → 做
       if (snapshot.open_jobs.length > 0) {
         return {
@@ -143,28 +224,26 @@ export function next(
           reason: `有 ${snapshot.open_jobs.length} 个待完成工作项`,
         };
       }
-      // 检查是否所有任务已完成
-      const tasksContent = readFileSync(join(changeRoot, "tasks.md"), "utf8");
-      const allDone = !tasksContent.split("\n").some(l => l.includes("- [ ]"));
-      if (allDone) {
-        return {
-          state: "apply",
-          path: "next_command",
-          next_command: transitionCommand(change, "review-ready", riskFlag(defaultRisk)),
-          reason: "所有任务完成，进入审查",
-          missing_inputs: [],
-        };
-      }
       return {
         state: "apply",
         path: "next_command",
-        next_command: transitionCommand(change, "task-start", "--task TASK-XXX"),
-        reason: "执行中：查看 tasks.md 找下一个未完成任务",
+        next_command: transitionCommand(change, "review-ready", riskFlag(defaultRisk)),
+        reason: "所有任务完成，进入审查",
         missing_inputs: [],
       };
     }
 
     case "apply_done": {
+      const pending = pendingTaskIds(changeRoot);
+      if (pending.length > 0) {
+        return {
+          state: "apply_done",
+          path: "next_command",
+          next_command: reopenCommand(change, pending),
+          reason: `发现未完成任务 ${pending[0]}，回到执行阶段`,
+          missing_inputs: [],
+        };
+      }
       if (snapshot.open_jobs.length > 0) {
         return {
           state: "apply_done",
@@ -182,7 +261,17 @@ export function next(
       };
     }
 
-    case "review":
+    case "review": {
+      const pending = pendingTaskIds(changeRoot);
+      if (pending.length > 0) {
+        return {
+          state: "review",
+          path: "next_command",
+          next_command: reopenCommand(change, pending),
+          reason: `发现未完成任务 ${pending[0]}，回到执行阶段`,
+          missing_inputs: [],
+        };
+      }
       return {
         state: "review",
         path: "next_command",
@@ -190,6 +279,7 @@ export function next(
         reason: "审查完成，提交接受",
         missing_inputs: [],
       };
+    }
 
     case "accepted":
       return {

@@ -2,6 +2,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -9,9 +10,8 @@ import { tmpdir } from "node:os";
 import { ensureChangeLayout, appendEvent, makeEvent, readEvents } from "../src/store.ts";
 import { rebuildSnapshot } from "../src/sync.ts";
 import { next } from "../src/next.ts";
-import { reviewReady, accept, archive } from "../src/transition.ts";
+import { reviewReady, taskStart, taskComplete, reopen, accept, archive } from "../src/transition.ts";
 import { jobsPacket, recordJobSubmit } from "../src/record.ts";
-import { tasksStructureDigestOf } from "../src/task.ts";
 
 function setupApplyWithDoneTask(): { projectRoot: string; change: string; changeRoot: string; cleanup: () => void } {
   const projectRoot = mkdtempSync(join(tmpdir(), "superspec-p4-"));
@@ -58,6 +58,181 @@ test("review-ready：有未完成任务拒绝", () => {
     const result = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
     assert.ok(result.message.includes("未完成"));
     assert.equal(result.events_written, 0);
+  } finally { fx.cleanup(); }
+});
+
+test("apply_done 后补任务：reopen 复开执行并创建 fresh verifier", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    const toApplyDone = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(toApplyDone.to_state, "apply_done");
+
+    const verifierGate = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(verifierGate.outcome, "job_created");
+    const staleVerifierJobId = verifierGate.created_jobs[0];
+
+    writeFileSync(join(fx.changeRoot, "tasks.md"), "# Tasks\n\n- [x] TASK-001 Done\n- [ ] TASK-025 Fix review issue tdd_required:false no_tdd_reason:review-followup\n");
+
+    const blocked = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(blocked.events_written, 0);
+    assert.match(blocked.message, /TASK-025/);
+
+    const reopenNext = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(reopenNext.path, "next_command");
+    assert.equal(reopenNext.next_command, 'superspec transition reopen --change "test-change" --to apply --reason "pending tasks: TASK-025"');
+
+    const reopened = reopen(fx.projectRoot, fx.change, fx.changeRoot, "apply", "pending tasks: TASK-025");
+    assert.equal(reopened.from_state, "apply_done");
+    assert.equal(reopened.to_state, "apply");
+
+    const reopenedSnap = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(reopenedSnap.state, "apply");
+    assert.equal(reopenedSnap.open_jobs.some(job => job.job_id === staleVerifierJobId), false);
+
+    const startNext = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(startNext.path, "next_command");
+    assert.equal(startNext.next_command, 'superspec transition task-start --change "test-change" --task TASK-025');
+
+    const started = taskStart(fx.projectRoot, fx.change, fx.changeRoot, "TASK-025");
+    assert.equal(started.to_state, "apply");
+
+    const activeNext = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(activeNext.path, "next_command");
+    assert.equal(activeNext.next_command, 'superspec transition task-complete --change "test-change" --task TASK-025');
+
+    const completed = taskComplete(fx.projectRoot, fx.change, fx.changeRoot, "TASK-025");
+    assert.equal(completed.events_written, 2);
+
+    const afterCompleteNext = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(afterCompleteNext.path, "next_command");
+    assert.match(afterCompleteNext.next_command, /review-ready/);
+
+    const backToApplyDone = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(backToApplyDone.to_state, "apply_done");
+
+    const freshVerifier = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(freshVerifier.outcome, "job_created");
+    assert.notEqual(freshVerifier.created_jobs[0], staleVerifierJobId);
+
+    const oldReportPath = join(fx.projectRoot, "old-verifier.json");
+    writeFileSync(oldReportPath, JSON.stringify({ role: "verifier", findings: [], verdict: "pass" }));
+    const oldSubmit = recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, staleVerifierJobId, oldReportPath);
+    assert.equal(oldSubmit.accepted, false);
+    assert.match(oldSubmit.message, /绑定文件 tasks\.md 已变化/);
+
+    const freshReportPath = join(fx.projectRoot, "fresh-verifier.json");
+    writeFileSync(freshReportPath, JSON.stringify({ role: "verifier", findings: [], verdict: "pass" }));
+    const freshSubmit = recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, freshVerifier.created_jobs[0], freshReportPath);
+    assert.equal(freshSubmit.accepted, true);
+
+    const advanced = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(advanced.to_state, "review");
+  } finally { fx.cleanup(); }
+});
+
+test("task-start：apply_done 状态拒绝，必须显式 reopen", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    writeFileSync(join(fx.changeRoot, "tasks.md"), "# Tasks\n\n- [x] TASK-001 Done\n- [ ] TASK-025 Fix review issue\n");
+
+    const result = taskStart(fx.projectRoot, fx.change, fx.changeRoot, "TASK-025");
+    assert.equal(result.events_written, 0);
+    assert.match(result.message, /需要 apply/);
+  } finally { fx.cleanup(); }
+});
+
+test("next：active attempt 证据不足时不重复 task-start", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    writeFileSync(join(fx.changeRoot, "tasks.md"), "# Tasks\n\n- [ ] TASK-025 Needs TDD\n");
+    taskStart(fx.projectRoot, fx.change, fx.changeRoot, "TASK-025");
+
+    const result = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(result.path, "ask_user");
+    assert.match(result.ask_user.question, /RED 证据/);
+    assert.match(result.ask_user.question, /GREEN 证据/);
+  } finally { fx.cleanup(); }
+});
+
+test("reopen：无 pending task 或终态来源时拒绝", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    const noPending = reopen(fx.projectRoot, fx.change, fx.changeRoot, "apply", "no pending");
+    assert.equal(noPending.events_written, 0);
+    assert.match(noPending.message, /没有未完成任务/);
+  } finally { fx.cleanup(); }
+
+  const acceptedFx = setupApplyWithDoneTask();
+  try {
+    reviewReady(acceptedFx.projectRoot, acceptedFx.change, acceptedFx.changeRoot, "minimal");
+    reviewReady(acceptedFx.projectRoot, acceptedFx.change, acceptedFx.changeRoot, "minimal");
+    accept(acceptedFx.projectRoot, acceptedFx.change, acceptedFx.changeRoot);
+    writeFileSync(join(acceptedFx.changeRoot, "tasks.md"), "# Tasks\n\n- [ ] TASK-025 Too late\n");
+
+    const fromAccepted = reopen(acceptedFx.projectRoot, acceptedFx.change, acceptedFx.changeRoot, "apply", "pending tasks: TASK-025");
+    assert.equal(fromAccepted.events_written, 0);
+    assert.match(fromAccepted.message, /不能 reopen/);
+  } finally { acceptedFx.cleanup(); }
+
+  const archiveFx = setupApplyWithDoneTask();
+  try {
+    reviewReady(archiveFx.projectRoot, archiveFx.change, archiveFx.changeRoot, "minimal");
+    reviewReady(archiveFx.projectRoot, archiveFx.change, archiveFx.changeRoot, "minimal");
+    accept(archiveFx.projectRoot, archiveFx.change, archiveFx.changeRoot);
+    archive(archiveFx.projectRoot, archiveFx.change, archiveFx.changeRoot);
+    writeFileSync(join(archiveFx.changeRoot, "tasks.md"), "# Tasks\n\n- [ ] TASK-025 Too late\n");
+
+    const fromArchive = reopen(archiveFx.projectRoot, archiveFx.change, archiveFx.changeRoot, "apply", "pending tasks: TASK-025");
+    assert.equal(fromArchive.events_written, 0);
+    assert.match(fromArchive.message, /不能 reopen/);
+  } finally { archiveFx.cleanup(); }
+});
+
+test("CLI transition reopen：apply_done + pending → apply", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    writeFileSync(join(fx.changeRoot, "tasks.md"), "# Tasks\n\n- [x] TASK-001 Done\n- [ ] TASK-025 CLI followup\n");
+
+    const cli = new URL("../src/cli.ts", import.meta.url).pathname;
+    const output = execFileSync(process.execPath, [
+      cli,
+      "transition",
+      "reopen",
+      "--change",
+      fx.change,
+      "--to",
+      "apply",
+      "--reason",
+      "pending tasks: TASK-025",
+    ], {
+      cwd: fx.projectRoot,
+      encoding: "utf8",
+    });
+    const result = JSON.parse(output);
+    assert.equal(result.to_state, "apply");
+
+    const snap = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(snap.state, "apply");
+  } finally { fx.cleanup(); }
+});
+
+test("review 状态后补任务：next 返回 reopen 且 accept 拒绝", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    writeFileSync(join(fx.changeRoot, "tasks.md"), "# Tasks\n\n- [x] TASK-001 Done\n- [ ] TASK-025 Review followup\n");
+
+    const nextResult = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(nextResult.path, "next_command");
+    assert.equal(nextResult.next_command, 'superspec transition reopen --change "test-change" --to apply --reason "pending tasks: TASK-025"');
+
+    const accepted = accept(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(accepted.events_written, 0);
+    assert.match(accepted.message, /TASK-025/);
   } finally { fx.cleanup(); }
 });
 
@@ -171,6 +346,40 @@ test("review-ready：忽略非 review-ready 来源的 verifier job", () => {
     assert.equal(created?.role, "verifier");
     assert.equal(created?.created_from_transition, "review-ready");
   } finally { fx.cleanup(); }
+});
+
+test("sync：绑定文件删除会让 open 和 accepted job stale", () => {
+  const openFx = setupApplyWithDoneTask();
+  try {
+    reviewReady(openFx.projectRoot, openFx.change, openFx.changeRoot);
+    const created = reviewReady(openFx.projectRoot, openFx.change, openFx.changeRoot);
+    const jobId = created.created_jobs[0];
+
+    rmSync(join(openFx.changeRoot, "proposal.md"), { force: true });
+    const snap = rebuildSnapshot(openFx.projectRoot, openFx.change, openFx.changeRoot);
+    assert.equal(snap.open_jobs.some(job => job.job_id === jobId), false);
+
+    const reportPath = join(openFx.projectRoot, "stale-open.json");
+    writeFileSync(reportPath, JSON.stringify({ role: "verifier", findings: [], verdict: "pass" }));
+    const staleSubmit = recordJobSubmit(openFx.projectRoot, openFx.change, openFx.changeRoot, jobId, reportPath);
+    assert.equal(staleSubmit.accepted, false);
+    assert.match(staleSubmit.message, /sha256:missing/);
+  } finally { openFx.cleanup(); }
+
+  const acceptedFx = setupApplyWithDoneTask();
+  try {
+    reviewReady(acceptedFx.projectRoot, acceptedFx.change, acceptedFx.changeRoot);
+    const created = reviewReady(acceptedFx.projectRoot, acceptedFx.change, acceptedFx.changeRoot);
+    const jobId = created.created_jobs[0];
+    const reportPath = join(acceptedFx.projectRoot, "fresh.json");
+    writeFileSync(reportPath, JSON.stringify({ role: "verifier", findings: [], verdict: "pass" }));
+    const accepted = recordJobSubmit(acceptedFx.projectRoot, acceptedFx.change, acceptedFx.changeRoot, jobId, reportPath);
+    assert.equal(accepted.accepted, true);
+
+    rmSync(join(acceptedFx.changeRoot, "proposal.md"), { force: true });
+    const snap = rebuildSnapshot(acceptedFx.projectRoot, acceptedFx.change, acceptedFx.changeRoot);
+    assert.equal(snap.accepted_jobs.some(job => job.job_id === jobId), false);
+  } finally { acceptedFx.cleanup(); }
 });
 
 test("accept：review → accepted", () => {

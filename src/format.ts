@@ -132,6 +132,11 @@ export function parseTasksMd(content: string): ParsedTask[] {
   return tasks;
 }
 
+/** 返回未完成任务 */
+export function pendingTasksInContent(content: string): ParsedTask[] {
+  return parseTasksMd(content).filter(task => !task.done);
+}
+
 /** 在 tasks.md 中按 taskId 精确查找任务（词边界，不误判子串） */
 export function findTaskInLines(lines: string[], taskId: string): number {
   for (let i = 0; i < lines.length; i++) {

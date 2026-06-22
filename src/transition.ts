@@ -8,7 +8,7 @@ import {
   sha256File, sha256Text,
 } from "./store.ts";
 import { rebuildSnapshot } from "./sync.ts";
-import { validateDiscovery, collectProposeOpenQuestions, findTaskInLines, parseTasksMd, tasksStructureDigest } from "./format.ts";
+import { validateDiscovery, collectProposeOpenQuestions, findTaskInLines, parseTasksMd, pendingTasksInContent, tasksStructureDigest } from "./format.ts";
 import type { Event, Snapshot, State, Job, JobRole, TransitionResult, Ref, TaskAttempt } from "./types.ts";
 
 let transitionSeq = 0;
@@ -91,6 +91,15 @@ function historicalProposeReadyRoles(projectRoot: string, change: string): JobRo
  */
 function findTaskLine(lines: string[], taskId: string): number {
   return findTaskInLines(lines, taskId);
+}
+
+function pendingTaskIds(changeRoot: string): string[] {
+  const tasksContent = readFileSync(join(changeRoot, "tasks.md"), "utf8");
+  return pendingTasksInContent(tasksContent).map(task => task.taskId);
+}
+
+function formatPendingTaskMessage(ids: string[], action: string): string {
+  return `尚有未完成任务：${ids.join(", ")}；${action}`;
 }
 
 interface Decision {
@@ -336,6 +345,31 @@ export function taskStart(projectRoot: string, change: string, changeRoot: strin
   });
 }
 
+// ===== reopen =====
+
+export function reopen(projectRoot: string, change: string, changeRoot: string, to: State, reason: string): TransitionResult {
+  return commitTransition(projectRoot, change, changeRoot, {
+    name: "reopen", idempotencyInputs: { to, reason },
+    decide: (snapshot) => {
+      if (to !== "apply") return { skip: true, message: `reopen 当前只支持 --to apply，不支持 ${to}` };
+      if (!reason || reason.trim() === "") return { skip: true, message: "reopen 需要非空 --reason" };
+      if (snapshot.state !== "apply_done" && snapshot.state !== "review") {
+        return { skip: true, message: `当前状态 ${snapshot.state}，不能 reopen 到 apply` };
+      }
+
+      const pending = pendingTaskIds(changeRoot);
+      if (pending.length === 0) return { skip: true, message: "没有未完成任务，不能 reopen 到 apply" };
+
+      return {
+        fromState: snapshot.state,
+        toState: "apply",
+        outcome: "advanced" as const,
+        reason: `${reason.trim()}（pending tasks: ${pending.join(", ")}）`,
+      };
+    },
+  });
+}
+
 // ===== review-ready =====
 
 export function reviewReady(projectRoot: string, change: string, changeRoot: string, risk: "minimal" | "normal" | "strict" = "strict"): TransitionResult {
@@ -343,9 +377,8 @@ export function reviewReady(projectRoot: string, change: string, changeRoot: str
     name: "review-ready", idempotencyInputs: { phase: "review-ready", risk },
     decide: (snapshot) => {
       // 检查是否所有任务已完成
-      const tasksContent = readFileSync(join(changeRoot, "tasks.md"), "utf8");
-      const allDone = !tasksContent.split("\n").some(l => l.includes("- [ ]"));
-      if (!allDone) return { skip: true, message: "尚有未完成任务" };
+      const pending = pendingTaskIds(changeRoot);
+      if (pending.length > 0) return { skip: true, message: formatPendingTaskMessage(pending, "请先通过 next/reopen 继续执行") };
 
       // 如果当前是 apply，先推进到 apply_done
       if (snapshot.state === "apply") {
@@ -385,6 +418,8 @@ export function accept(projectRoot: string, change: string, changeRoot: string):
     name: "accept", idempotencyInputs: { phase: "accept" },
     decide: (snapshot) => {
       if (snapshot.state !== "review") return { skip: true, message: `当前状态 ${snapshot.state}，需要 review` };
+      const pending = pendingTaskIds(changeRoot);
+      if (pending.length > 0) return { skip: true, message: formatPendingTaskMessage(pending, "请先 reopen --to apply 继续执行") };
       return { fromState: "review", toState: "accepted", outcome: "advanced" as const, reason: "审查通过" };
     },
   });
