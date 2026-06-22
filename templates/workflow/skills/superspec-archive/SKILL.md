@@ -1,6 +1,6 @@
 ---
 name: superspec-archive
-description: "归档保全：验证文档完整性，提交 archive。"
+description: "五.验证文档完整性，归档"
 metadata:
   author: SuperSpec
   source: SuperSpec
@@ -12,7 +12,7 @@ metadata:
 
 ## 驱动方式
 
-所有状态由 transition engine 管理。循环：
+所有状态由工作流引擎管理。循环：
 
 1. `superspec transition next --change "<change>"` 获取下一步
 2. 执行返回的命令

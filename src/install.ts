@@ -15,8 +15,6 @@ export const WORKFLOW_PROMPTS = [
   "critic.md",
   "executor.md",
   "explore.md",
-  "final-audit.md",
-  "proposal-auditor.md",
   "test-engineer.md",
   "test-runner.md",
   "verifier.md",
@@ -28,8 +26,6 @@ export const WORKFLOW_AGENTS = [
   "critic.toml",
   "executor.toml",
   "explore.toml",
-  "final-audit.toml",
-  "proposal-auditor.toml",
   "test-engineer.toml",
   "test-runner.toml",
   "verifier.toml",
@@ -44,6 +40,7 @@ export interface InstallResult {
     prompts: string[];
     agents: string[];
     config: string;
+    openspec_config: string;
   };
 }
 
@@ -165,6 +162,40 @@ function ensureCodexConfig(projectRoot: string): string {
   return ".codex/config.toml";
 }
 
+const OPENSPEC_CONFIG_PATH = "openspec/config.yaml";
+const OPENSPEC_CHINESE_CONTEXT_BLOCK =
+  "context: |\n" +
+  "  语言：中文（简体）\n" +
+  "  所有产出物必须用简体中文撰写。\n";
+const OPENSPEC_DEFAULT_CONFIG =
+  "schema: spec-driven\n\n" +
+  OPENSPEC_CHINESE_CONTEXT_BLOCK;
+
+function hasTopLevelContext(content: string): boolean {
+  return /^context\s*:/m.test(content);
+}
+
+function ensureOpenSpecChineseContext(projectRoot: string): string {
+  const openspecDir = join(projectRoot, "openspec");
+  const configPath = join(projectRoot, OPENSPEC_CONFIG_PATH);
+  mkdirSync(openspecDir, { recursive: true });
+
+  if (!existsSync(configPath)) {
+    writeFileSync(configPath, OPENSPEC_DEFAULT_CONFIG);
+    return OPENSPEC_CONFIG_PATH;
+  }
+
+  const current = readFileSync(configPath, "utf8");
+  if (hasTopLevelContext(current)) return OPENSPEC_CONFIG_PATH;
+
+  const trimmed = current.trimEnd();
+  const next = trimmed.length > 0
+    ? `${trimmed}\n\n${OPENSPEC_CHINESE_CONTEXT_BLOCK}`
+    : OPENSPEC_DEFAULT_CONFIG;
+  writeFileSync(configPath, next);
+  return OPENSPEC_CONFIG_PATH;
+}
+
 export function installProject(projectRoot: string, options: InstallOptions = {}): InstallResult {
   if (legacyStateFound(projectRoot)) {
     throw new Error(
@@ -192,6 +223,7 @@ export function installProject(projectRoot: string, options: InstallOptions = {}
       prompts: copyPrompts(templateRoot, projectRoot),
       agents: copyAgents(templateRoot, projectRoot),
       config: ensureCodexConfig(projectRoot),
+      openspec_config: ensureOpenSpecChineseContext(projectRoot),
     },
   };
 }

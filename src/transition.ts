@@ -8,7 +8,7 @@ import {
   sha256File, sha256Text,
 } from "./store.ts";
 import { rebuildSnapshot } from "./sync.ts";
-import { validateDiscovery, findTaskInLines, parseTasksMd, tasksStructureDigest } from "./format.ts";
+import { validateDiscovery, collectProposeOpenQuestions, findTaskInLines, parseTasksMd, tasksStructureDigest } from "./format.ts";
 import type { Event, Snapshot, State, Job, JobRole, TransitionResult, Ref, TaskAttempt } from "./types.ts";
 
 let transitionSeq = 0;
@@ -19,8 +19,8 @@ function newJobId(change: string, role: string): string { return `JOB-${change.s
 const TRANSITION_REQUIREMENTS: Record<string, Record<string, JobRole[]>> = {
   "propose-ready": {
     minimal: [],
-    normal:  ["proposal-auditor"],
-    strict:  ["proposal-auditor", "critic", "architect", "test-engineer"],
+    normal:  ["critic"],
+    strict:  ["critic", "architect", "test-engineer"],
   },
   "explore": {
     minimal: [],
@@ -44,9 +44,9 @@ function checkOrCreateReviewJobs(
 ): Decision | null {
   const staleRoles: { role: JobRole; reason: string }[] = [];
   for (const role of requiredRoles) {
-    const openForRole = snapshot.open_jobs.find(j => j.role === role);
+    const openForRole = snapshot.open_jobs.find(j => j.role === role && j.created_from_transition === transitionName);
     if (openForRole) return { fromState: snapshot.state, toState: snapshot.state, outcome: "advanced" as const, reason: `工作项 ${role} 已存在（${openForRole.job_id}），请先完成它` };
-    const fresh = snapshot.accepted_jobs.find(j => j.role === role);
+    const fresh = snapshot.accepted_jobs.find(j => j.role === role && j.created_from_transition === transitionName);
     if (!fresh) {
       staleRoles.push({ role, reason: `需求 ${role} 无已接受的工作项` });
     } else {
@@ -70,6 +70,21 @@ function checkOrCreateReviewJobs(
   return null; // 全部满足
 }
 
+function historicalProposeReadyRoles(projectRoot: string, change: string): JobRole[] {
+  const roles = new Set<JobRole>();
+  for (const ev of readEvents(projectRoot, change)) {
+    if (ev.event_type !== "transition_commit") continue;
+    const newJobs = (ev.payload as { new_jobs?: Job[] }).new_jobs ?? [];
+    for (const job of newJobs) {
+      if (
+        job.created_from_transition === "propose-ready" &&
+        (job.role === "critic" || job.role === "architect" || job.role === "test-engineer")
+      ) roles.add(job.role);
+    }
+  }
+  return [...roles];
+}
+
 /**
  * 已迁移到 format.ts：findTaskInLines / parseTasksMd / tasksStructureDigest
  * 以下保留 findTaskLine 作为兼容 wrapper（内部调用 format.ts）
@@ -85,6 +100,7 @@ interface Decision {
   newJobs?: Job[];
   reason: string;
   extraEvents?: { type: string; payload: Record<string, unknown> }[];
+  details?: Record<string, unknown>;
   postCommit?: (projectRoot: string, change: string, changeRoot: string) => void;
 }
 
@@ -127,7 +143,7 @@ export function commitTransition(
       };
     }
 
-    const { fromState, toState, outcome, newJobs = [], reason, extraEvents = [] } = decision;
+    const { fromState, toState, outcome, newJobs = [], reason, extraEvents = [], details } = decision;
 
     if (fromState !== snapshot.state) {
       return {
@@ -170,13 +186,14 @@ export function commitTransition(
       created_jobs: newJobs.map(j => j.job_id),
       message: outcome === "advanced" ? `状态推进：${fromState} → ${toState}` : `状态不变（${fromState}），创建了 ${newJobs.length} 个工作项`,
       events_written: 1 + extraEvents.length,
+      ...(details ? { details } : {}),
     };
   });
 }
 
 // ===== propose-ready =====
 
-export function proposeReady(projectRoot: string, change: string, changeRoot: string, risk: "minimal" | "normal" | "strict" = "normal"): TransitionResult {
+export function proposeReady(projectRoot: string, change: string, changeRoot: string, risk: "minimal" | "normal" | "strict" = "strict"): TransitionResult {
   return commitTransition(projectRoot, change, changeRoot, {
     name: "propose-ready", idempotencyInputs: { risk },
     decide: (snapshot) => {
@@ -186,6 +203,12 @@ export function proposeReady(projectRoot: string, change: string, changeRoot: st
       if (!existsSync(tasksPath)) return { skip: true, message: "tasks.md 不存在" };
       const tasksContent = readFileSync(tasksPath, "utf8");
       if (!tasksContent.includes("# Tasks") && !tasksContent.includes("- [ ]")) return { skip: true, message: "tasks.md 内容不像任务计划文档" };
+
+      const openQuestions = collectProposeOpenQuestions(changeRoot);
+      if (openQuestions.openCount > 0) {
+        const files = openQuestions.files.map(f => `${f.path}(${f.openCount})`).join(", ");
+        return { skip: true, message: `计划文档有 ${openQuestions.openCount} 个待用户确认问题：${files}` };
+      }
 
       if (risk !== "minimal") {
         const artifactsDir = join(changeRoot, ".superspec", "artifacts");
@@ -222,7 +245,7 @@ export function transitionInit(projectRoot: string, change: string, changeRoot: 
 
 // ===== explore =====
 
-export function transitionExplore(projectRoot: string, change: string, changeRoot: string, risk: "minimal" | "normal" | "strict" = "normal"): TransitionResult {
+export function transitionExplore(projectRoot: string, change: string, changeRoot: string, risk: "minimal" | "normal" | "strict" = "strict"): TransitionResult {
   return commitTransition(projectRoot, change, changeRoot, {
     name: "explore", idempotencyInputs: { phase: "explore", risk },
     decide: (snapshot) => {
@@ -256,6 +279,19 @@ export function startApply(projectRoot: string, change: string, changeRoot: stri
     name: "start-apply", idempotencyInputs: { phase: "start-apply" },
     decide: (snapshot) => {
       if (snapshot.state !== "propose_ready") return { skip: true, message: `当前状态 ${snapshot.state}，需要 propose_ready` };
+      const reviewedRoles = historicalProposeReadyRoles(projectRoot, change);
+      if (reviewedRoles.length > 0) {
+        const reviewResult = checkOrCreateReviewJobs(
+          snapshot, reviewedRoles, changeRoot, change, "propose-ready",
+          ["proposal.md", "tasks.md", "design.md", ".superspec/artifacts/discovery.md", ".superspec/artifacts/business-invariants.md", ".superspec/artifacts/test-contract.md"],
+        );
+        if (reviewResult) {
+          return {
+            ...reviewResult,
+            reason: `进入 apply 前需要 fresh proposal 审查：${reviewResult.reason}`,
+          };
+        }
+      }
       return { fromState: "propose_ready", toState: "apply", outcome: "advanced" as const, reason: "进入执行阶段" };
     },
   });
@@ -294,6 +330,7 @@ export function taskStart(projectRoot: string, change: string, changeRoot: strin
         fromState: "apply", toState: "apply", outcome: "advanced" as const,
         reason: `创建任务 ${taskId} 执行尝试`,
         extraEvents: [{ type: "task_started", payload: attempt as unknown as Record<string, unknown> }],
+        details: { attempt_id: attempt.attempt_id },
       };
     },
   });
@@ -301,7 +338,7 @@ export function taskStart(projectRoot: string, change: string, changeRoot: strin
 
 // ===== review-ready =====
 
-export function reviewReady(projectRoot: string, change: string, changeRoot: string, risk: "minimal" | "normal" | "strict" = "normal"): TransitionResult {
+export function reviewReady(projectRoot: string, change: string, changeRoot: string, risk: "minimal" | "normal" | "strict" = "strict"): TransitionResult {
   return commitTransition(projectRoot, change, changeRoot, {
     name: "review-ready", idempotencyInputs: { phase: "review-ready", risk },
     decide: (snapshot) => {
@@ -315,27 +352,26 @@ export function reviewReady(projectRoot: string, change: string, changeRoot: str
         return { fromState: "apply", toState: "apply_done", outcome: "advanced" as const, reason: "所有任务完成" };
       }
       if (snapshot.state === "apply_done") {
-        // 检查是否有 final-audit job 需求
-        const finalAuditOpen = snapshot.open_jobs.find(j => j.role === "final-audit");
-        if (finalAuditOpen) return { skip: true, message: `有待完成的最终审查工作项 ${finalAuditOpen.job_id}` };
+        const isReviewReadyVerifier = (job: Job) => job.role === "verifier" && job.created_from_transition === "review-ready";
+        const verifierOpen = snapshot.open_jobs.find(isReviewReadyVerifier);
+        if (verifierOpen) return { skip: true, message: `有待完成的最终验证工作项 ${verifierOpen.job_id}` };
 
-        const finalAuditAccepted = snapshot.accepted_jobs.find(j => j.role === "final-audit");
-        // minimal 直接推进；normal/strict 需要 final-audit
-        if (risk !== "minimal" && !finalAuditAccepted) {
-          // 创建 final-audit job
+        const verifierAccepted = snapshot.accepted_jobs.find(isReviewReadyVerifier);
+        // minimal 直接推进；normal/strict 需要 review-ready verifier
+        if (risk !== "minimal" && !verifierAccepted) {
           const docPaths = ["proposal.md", "tasks.md", "design.md", ".superspec/artifacts/discovery.md", ".superspec/artifacts/business-invariants.md", ".superspec/artifacts/test-contract.md"];
           const boundFiles: Ref[] = docPaths.filter(p => existsSync(join(changeRoot, p))).map(p => ({ path: p, sha: sha256File(join(changeRoot, p)) ?? "sha256:missing" }));
           const job: Job = {
-            job_id: newJobId(change, "final-audit"), role: "final-audit", state: "requested" as const,
-            boundFiles, packet_digest: sha256Text(JSON.stringify({ role: "final-audit", boundFiles })),
+            job_id: newJobId(change, "verifier"), role: "verifier", state: "requested" as const,
+            boundFiles, packet_digest: sha256Text(JSON.stringify({ role: "verifier", boundFiles, created_from_transition: "review-ready" })),
             created_from_transition: "review-ready", created_at: new Date().toISOString(),
           };
           return {
             fromState: "apply_done", toState: "apply_done", outcome: "job_created" as const,
-            newJobs: [job], reason: "创建最终审查工作项",
+            newJobs: [job], reason: "创建最终验证工作项",
           };
         }
-        return { fromState: "apply_done", toState: "review", outcome: "advanced" as const, reason: "最终审查已接受，进入审查阶段" };
+        return { fromState: "apply_done", toState: "review", outcome: "advanced" as const, reason: "最终验证已接受，进入审查阶段" };
       }
       return { skip: true, message: `当前状态 ${snapshot.state}，review-ready 不适用` };
     },

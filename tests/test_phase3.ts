@@ -8,7 +8,9 @@ import { tmpdir } from "node:os";
 
 import { ensureChangeLayout, appendEvent, makeEvent } from "../src/store.ts";
 import { rebuildSnapshot } from "../src/sync.ts";
-import { startApply, taskStart, taskComplete } from "../src/transition.ts";
+import { next } from "../src/next.ts";
+import { proposeReady, startApply, taskStart, taskComplete } from "../src/transition.ts";
+import { recordJobSubmit } from "../src/record.ts";
 import { recordTestRun, tasksStructureDigestOf } from "../src/task.ts";
 import { sha256Text } from "../src/store.ts";
 
@@ -50,6 +52,39 @@ function setupTaskInProgress(): ReturnType<typeof setupApply> & { taskId: string
   return { ...fx, taskId: "TASK-001" };
 }
 
+function setupPropose(): ReturnType<typeof setupApply> {
+  const projectRoot = mkdtempSync(join(tmpdir(), "superspec-p3-propose-"));
+  const change = "test-change";
+  const changeRoot = join(projectRoot, "openspec", "changes", change);
+  mkdirSync(join(changeRoot, ".superspec", "artifacts"), { recursive: true });
+  writeFileSync(join(changeRoot, "proposal.md"), "# Proposal\n");
+  writeFileSync(join(changeRoot, "tasks.md"), "# Tasks\n\n- [ ] TASK-001 Do something\n");
+  writeFileSync(join(changeRoot, "design.md"), "# Design\n");
+  writeFileSync(join(changeRoot, ".superspec", "artifacts", "discovery.md"), "# Discovery\n");
+  writeFileSync(join(changeRoot, ".superspec", "artifacts", "business-invariants.md"), "# BI\n");
+  writeFileSync(join(changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");
+  ensureChangeLayout(projectRoot, change);
+  for (const [t, f, to] of [["init","init","init"],["explore","init","explore"],["propose","explore","propose"]] as const) {
+    appendEvent(projectRoot, change, makeEvent(change, "transition_commit", {
+      transition: t, from_state: f, to_state: to,
+      outcome: "advanced", created_job_ids: [], reason: t,
+    }, { transitionId: `T-${t}`, idempotencyKey: `${t}-key` }));
+  }
+  return {
+    projectRoot, change, changeRoot,
+    cleanup: () => rmSync(projectRoot, { recursive: true, force: true }),
+  };
+}
+
+function reviewerReport(role: "critic" | "architect" | "test-engineer" = "critic"): string {
+  return JSON.stringify({
+    role,
+    verdict: "pass",
+    findings: [],
+    reviewer: { kind: "codex-subagent", id: "test-reviewer" },
+  });
+}
+
 // ===== 测试 =====
 
 test("start-apply：propose_ready → apply", () => {
@@ -61,6 +96,62 @@ test("start-apply：propose_ready → apply", () => {
 
     const snap = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(snap.state, "apply");
+  } finally { fx.cleanup(); }
+});
+
+test("start-apply：minimal 无历史 proposal 审查时可进入 apply", () => {
+  const fx = setupApply();
+  try {
+    const result = startApply(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(result.outcome, "advanced");
+    assert.equal(result.to_state, "apply");
+  } finally { fx.cleanup(); }
+});
+
+test("start-apply：fresh proposal review accepted 后可进入 apply", () => {
+  const fx = setupPropose();
+  try {
+    const t1 = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.equal(t1.outcome, "job_created");
+    const reportPath = join(fx.projectRoot, "critic.json");
+    writeFileSync(reportPath, reviewerReport("critic"));
+    const accepted = recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, t1.created_jobs[0], reportPath);
+    assert.equal(accepted.accepted, true);
+    const t2 = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.equal(t2.to_state, "propose_ready");
+
+    const result = startApply(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(result.outcome, "advanced");
+    assert.equal(result.to_state, "apply");
+  } finally { fx.cleanup(); }
+});
+
+test("start-apply：proposal review stale 时创建 fresh job，next 返回 required_job", () => {
+  const fx = setupPropose();
+  try {
+    const t1 = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    const reportPath = join(fx.projectRoot, "critic.json");
+    writeFileSync(reportPath, reviewerReport("critic"));
+    const accepted = recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, t1.created_jobs[0], reportPath);
+    assert.equal(accepted.accepted, true);
+    const t2 = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.equal(t2.to_state, "propose_ready");
+
+    writeFileSync(join(fx.changeRoot, "proposal.md"), "# Proposal\n\nchanged\n");
+
+    const result = startApply(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(result.outcome, "job_created");
+    assert.equal(result.to_state, "propose_ready");
+    assert.equal(result.created_jobs.length, 1);
+
+    const snap = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(snap.state, "propose_ready");
+    assert.equal(snap.open_jobs.length, 1);
+    assert.equal(snap.open_jobs[0].role, "critic");
+
+    const nextResult = next(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.equal(nextResult.path, "required_job");
+    assert.equal(nextResult.required_jobs[0].role, "critic");
   } finally { fx.cleanup(); }
 });
 
@@ -82,6 +173,7 @@ test("task-start：创建 task_attempt", () => {
     startApply(fx.projectRoot, fx.change, fx.changeRoot);
     const result = taskStart(fx.projectRoot, fx.change, fx.changeRoot, "TASK-001");
     assert.equal(result.events_written, 2); // commit + task_started
+    assert.equal(typeof result.details?.attempt_id, "string");
 
     const snap = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot);
     assert.ok(snap.active_task_attempts);

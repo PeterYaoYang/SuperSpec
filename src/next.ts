@@ -1,10 +1,16 @@
 // SuperSpec 流程引擎 — next：返回可执行路径
 
 import { rebuildSnapshot } from "./sync.ts";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { NextOutput, AskUser } from "./types.ts";
-import { validateDiscovery, countDiscoveryOpenQuestions } from "./format.ts";
+import type { Job, NextOutput, AskUser } from "./types.ts";
+import { validateDiscovery, countDiscoveryOpenQuestions, collectProposeOpenQuestions } from "./format.ts";
+
+const ACTIVE_PROPOSAL_REVIEW_ROLES = new Set(["critic", "architect", "test-engineer"]);
+
+function isActiveProposalReviewJob(job: Job): boolean {
+  return job.created_from_transition === "propose-ready" && ACTIVE_PROPOSAL_REVIEW_ROLES.has(job.role);
+}
 
 function packetCommand(change: string, jobId: string): string {
   return `superspec jobs packet --change "${change}" --job "${jobId}"`;
@@ -14,12 +20,16 @@ function transitionCommand(change: string, name: string, extra = ""): string {
   return `superspec transition ${name} --change "${change}"${extra ? " " + extra : ""}`;
 }
 
+function riskFlag(risk: "minimal" | "normal" | "strict"): string {
+  return risk === "strict" ? "" : `--risk ${risk}`;
+}
+
 /** next 命令：读 snapshot，返回唯一可执行路径 */
 export function next(
   projectRoot: string,
   change: string,
   changeRoot: string,
-  defaultRisk: "minimal" | "normal" | "strict" = "normal",
+  defaultRisk: "minimal" | "normal" | "strict" = "strict",
 ): NextOutput {
   const snapshot = rebuildSnapshot(projectRoot, change, changeRoot);
 
@@ -58,15 +68,27 @@ export function next(
       return {
         state: "explore",
         path: "next_command",
-        next_command: transitionCommand(change, "explore", `--risk ${defaultRisk}`),
+        next_command: transitionCommand(change, "explore", riskFlag(defaultRisk)),
         reason: "探索完成，推进到计划阶段",
         missing_inputs: [],
       };
     }
 
     case "propose": {
-      if (snapshot.open_jobs.length > 0) {
-        const jobs = snapshot.open_jobs.map(j => ({
+      const openQuestions = collectProposeOpenQuestions(changeRoot);
+      if (openQuestions.openCount > 0) {
+        const files = openQuestions.files.map(f => `${f.path}(${f.openCount})`).join(", ");
+        const ask: AskUser = {
+          question: `计划文档有 ${openQuestions.openCount} 个待用户确认问题：${files}。请确认并更新计划文档后继续`,
+          allowed_answers: ["所有问题已确认"],
+          scope: "propose_open_questions",
+        };
+        return { state: "propose", path: "ask_user", ask_user: ask, reason: `有 ${openQuestions.openCount} 个 propose 未确认问题` };
+      }
+
+      const proposalReviewJobs = snapshot.open_jobs.filter(isActiveProposalReviewJob);
+      if (proposalReviewJobs.length > 0) {
+        const jobs = proposalReviewJobs.map(j => ({
           job_id: j.job_id,
           role: j.role,
           packet_command: packetCommand(change, j.job_id),
@@ -79,17 +101,29 @@ export function next(
         };
       }
 
-      const riskFlag = `--risk ${defaultRisk}`;
       return {
         state: "propose",
         path: "next_command",
-        next_command: transitionCommand(change, "propose-ready", riskFlag),
+        next_command: transitionCommand(change, "propose-ready", riskFlag(defaultRisk)),
         reason: "计划文档就绪，提交 propose-ready",
         missing_inputs: [],
       };
     }
 
-    case "propose_ready":
+    case "propose_ready": {
+      const proposalReviewJobs = snapshot.open_jobs.filter(isActiveProposalReviewJob);
+      if (proposalReviewJobs.length > 0) {
+        return {
+          state: "propose_ready",
+          path: "required_job",
+          required_jobs: proposalReviewJobs.map(j => ({
+            job_id: j.job_id,
+            role: j.role,
+            packet_command: packetCommand(change, j.job_id),
+          })),
+          reason: `有 ${proposalReviewJobs.length} 个待完成 proposal 审查工作项`,
+        };
+      }
       return {
         state: "propose_ready",
         path: "next_command",
@@ -97,6 +131,7 @@ export function next(
         reason: "计划就绪，开始执行",
         missing_inputs: [],
       };
+    }
 
     case "apply": {
       // 有 open job → 做
@@ -115,7 +150,7 @@ export function next(
         return {
           state: "apply",
           path: "next_command",
-          next_command: transitionCommand(change, "review-ready"),
+          next_command: transitionCommand(change, "review-ready", riskFlag(defaultRisk)),
           reason: "所有任务完成，进入审查",
           missing_inputs: [],
         };
@@ -141,7 +176,7 @@ export function next(
       return {
         state: "apply_done",
         path: "next_command",
-        next_command: transitionCommand(change, "review-ready"),
+        next_command: transitionCommand(change, "review-ready", riskFlag(defaultRisk)),
         reason: "所有任务完成，进入审查",
         missing_inputs: [],
       };

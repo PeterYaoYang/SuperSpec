@@ -15,10 +15,13 @@ import { join } from "node:path";
 //
 // 引擎只解析"待确认问题"段内的 `- [ ]`，不误判正常 checklist。
 
-/** 从 discovery.md 提取"待确认问题"段内的未确认项数量 */
-export function countDiscoveryOpenQuestions(content: string): number {
-  // 找"待确认问题"标题（中英文兼容）
-  const sectionMatch = content.match(/^#{1,6}\s*(待确认问题|Open Questions|Pending Questions)\s*$/im);
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function countOpenChecklistItemsInSection(content: string, headings: readonly string[]): number {
+  const headingPattern = headings.map(escapeRegex).join("|");
+  const sectionMatch = new RegExp(`^#{1,6}\\s*(?:${headingPattern})\\s*$`, "im").exec(content);
   if (!sectionMatch) return 0;
   const sectionStart = sectionMatch.index! + sectionMatch[0].length;
   // 截取到下一个标题或文件末尾
@@ -26,8 +29,13 @@ export function countDiscoveryOpenQuestions(content: string): number {
   const nextHeadingMatch = restContent.match(/^#{1,6}\s+/m);
   const sectionBody = nextHeadingMatch ? restContent.slice(0, nextHeadingMatch.index) : restContent;
   // 数未确认项
-  const matches = sectionBody.match(/- \[ \]/g);
+  const matches = sectionBody.match(/^\s*-\s+\[ \]/gm);
   return matches ? matches.length : 0;
+}
+
+/** 从 discovery.md 提取"待确认问题"段内的未确认项数量 */
+export function countDiscoveryOpenQuestions(content: string): number {
+  return countOpenChecklistItemsInSection(content, ["待确认问题", "Open Questions", "Pending Questions"]);
 }
 
 /** 完整校验 discovery.md：存在 + 非空 + 无未确认问题 */
@@ -39,6 +47,46 @@ export function validateDiscovery(changeRoot: string): { ok: boolean; message: s
   const openCount = countDiscoveryOpenQuestions(content);
   if (openCount > 0) return { ok: false, message: `discovery.md 有 ${openCount} 个未确认问题`, openCount };
   return { ok: true, message: "discovery.md 就绪", openCount: 0 };
+}
+
+// ===== propose 待用户确认 =====
+//
+// 格式（propose skill 定义）：
+//   ## 待用户确认
+//   - [ ] DEC-001 是否兼容旧行为？
+//   - [x] DEC-002 已确认的问题
+//
+// 引擎只解析指定计划文档中该段落内的 `- [ ]`，不误判其它 checklist。
+
+export interface ProposeOpenQuestionFile {
+  path: string;
+  openCount: number;
+}
+
+const PROPOSE_CONFIRMATION_DOCS = [
+  "proposal.md",
+  "design.md",
+  ".superspec/artifacts/test-contract.md",
+] as const;
+
+const PROPOSE_CONFIRMATION_HEADINGS = ["待用户确认", "待确认问题", "Open Questions", "Pending Questions"] as const;
+
+export function countProposeOpenQuestionsInContent(content: string): number {
+  return countOpenChecklistItemsInSection(content, PROPOSE_CONFIRMATION_HEADINGS);
+}
+
+export function collectProposeOpenQuestions(changeRoot: string): { openCount: number; files: ProposeOpenQuestionFile[] } {
+  const files: ProposeOpenQuestionFile[] = [];
+  for (const path of PROPOSE_CONFIRMATION_DOCS) {
+    const fullPath = join(changeRoot, path);
+    if (!existsSync(fullPath)) continue;
+    const openCount = countProposeOpenQuestionsInContent(readFileSync(fullPath, "utf8"));
+    if (openCount > 0) files.push({ path, openCount });
+  }
+  return {
+    openCount: files.reduce((sum, file) => sum + file.openCount, 0),
+    files,
+  };
 }
 
 // ===== tasks.md =====

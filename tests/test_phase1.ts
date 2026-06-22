@@ -83,6 +83,15 @@ function setupFixture(state: "init" | "explore" | "propose" = "propose"): Fixtur
   };
 }
 
+function reviewerReport(role: "critic" | "architect" | "test-engineer" = "critic"): string {
+  return JSON.stringify({
+    role,
+    findings: [],
+    verdict: "pass",
+    reviewer: { kind: "codex-subagent", id: "test-reviewer" },
+  });
+}
+
 // ===== 测试 =====
 
 test("snapshot 可从 events + 文档重建", () => {
@@ -155,7 +164,7 @@ test("propose-ready --risk minimal：无 job 需求，直接推进", () => {
   } finally { fx.cleanup(); }
 });
 
-test("propose-ready --risk normal：创建 proposal-auditor job，状态不变", () => {
+test("propose-ready --risk normal：创建 critic job，状态不变", () => {
   const fx = setupFixture("propose");
   try {
     const result = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
@@ -166,7 +175,7 @@ test("propose-ready --risk normal：创建 proposal-auditor job，状态不变",
     const snapshot = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(snapshot.state, "propose"); // 仍 propose
     assert.equal(snapshot.open_jobs.length, 1);
-    assert.equal(snapshot.open_jobs[0].role, "proposal-auditor");
+    assert.equal(snapshot.open_jobs[0].role, "critic");
   } finally { fx.cleanup(); }
 });
 
@@ -179,7 +188,7 @@ test("next 返回 required_job 当有 open job", () => {
     const result = next(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     assert.equal(result.path, "required_job");
     assert.ok(result.required_jobs.length > 0);
-    assert.equal(result.required_jobs[0].role, "proposal-auditor");
+    assert.equal(result.required_jobs[0].role, "critic");
     assert.ok(result.required_jobs[0].packet_command.includes("jobs packet"));
   } finally { fx.cleanup(); }
 });
@@ -193,12 +202,46 @@ test("record job-submit：接受合格报告", () => {
 
     // 写报告
     const reportPath = join(fx.projectRoot, "report.json");
-    writeFileSync(reportPath, JSON.stringify({ role: "proposal-auditor", findings: [], verdict: "pass" }));
+    writeFileSync(reportPath, reviewerReport("critic"));
 
     // 提交
     const rResult = recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, jobId, reportPath);
     assert.equal(rResult.accepted, true);
     assert.equal(rResult.job_state, "accepted");
+  } finally { fx.cleanup(); }
+});
+
+test("record job-submit：critic 缺 reviewer 会拒绝", () => {
+  const fx = setupFixture("propose");
+  try {
+    const tResult = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    const jobId = tResult.created_jobs[0];
+    const reportPath = join(fx.projectRoot, "report.json");
+    writeFileSync(reportPath, JSON.stringify({ role: "critic", findings: [], verdict: "pass" }));
+
+    const rResult = recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, jobId, reportPath);
+    assert.equal(rResult.accepted, false);
+    assert.ok(rResult.message.includes("reviewer"));
+  } finally { fx.cleanup(); }
+});
+
+test("record job-submit：critic reviewer kind/id 非法会拒绝", () => {
+  const fx = setupFixture("propose");
+  try {
+    const tResult = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    const jobId = tResult.created_jobs[0];
+    const reportPath = join(fx.projectRoot, "report.json");
+    writeFileSync(reportPath, JSON.stringify({
+      role: "critic",
+      findings: [],
+      verdict: "pass",
+      reviewer: { kind: "self", id: "" },
+    }));
+
+    const rResult = recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, jobId, reportPath);
+    assert.equal(rResult.accepted, false);
+    assert.ok(rResult.message.includes("reviewer.kind"));
+    assert.ok(rResult.message.includes("reviewer.id"));
   } finally { fx.cleanup(); }
 });
 
@@ -220,7 +263,7 @@ test("完整 e2e：propose → job → accept → propose_ready", () => {
 
     // 4. record job-submit → accepted
     const reportPath = join(fx.projectRoot, "report.json");
-    writeFileSync(reportPath, JSON.stringify({ role: "proposal-auditor", findings: [], verdict: "pass" }));
+    writeFileSync(reportPath, reviewerReport("critic"));
     const step4 = recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, jobId, reportPath);
     assert.equal(step4.accepted, true);
 
@@ -243,7 +286,7 @@ test("文档变化后 accepted job 失效 → transition 创建新 job", () => {
     const t1 = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     const jobId1 = t1.created_jobs[0];
     const reportPath = join(fx.projectRoot, "report.json");
-    writeFileSync(reportPath, JSON.stringify({ role: "proposal-auditor", findings: [], verdict: "pass" }));
+    writeFileSync(reportPath, reviewerReport("critic"));
     recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, jobId1, reportPath);
 
     // 2. 修改 proposal.md（绑定文件变了）
@@ -284,7 +327,7 @@ test("record job-submit 幂等：同 report 返回旧结果", () => {
     const t = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     const jobId = t.created_jobs[0];
     const reportPath = join(fx.projectRoot, "report.json");
-    writeFileSync(reportPath, JSON.stringify({ role: "proposal-auditor", findings: [], verdict: "pass" }));
+    writeFileSync(reportPath, reviewerReport("critic"));
 
     const r1 = recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, jobId, reportPath);
     assert.equal(r1.accepted, true);

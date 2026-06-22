@@ -15,8 +15,8 @@ export type Ref = { path: string; sha: string };
 export type JobState = "requested" | "accepted" | "rejected";
 
 export type JobRole =
-  | "proposal-auditor" | "critic"
-  | "architect" | "test-engineer" | "executor" | "test-run" | "final-audit";
+  | "critic" | "architect" | "test-engineer"
+  | "executor" | "test-run" | "verifier";
 
 export interface Job {
   job_id: string;
@@ -158,6 +158,7 @@ export interface TransitionResult {
   created_jobs: string[];
   message: string;
   events_written: number;
+  details?: Record<string, unknown>;
 }
 
 // ===== Record 结果 =====

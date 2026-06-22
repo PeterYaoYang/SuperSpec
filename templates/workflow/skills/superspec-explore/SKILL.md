@@ -1,6 +1,6 @@
 ---
 name: superspec-explore
-description: "探索现状、澄清范围、维护 discovery.md；通过 transition/record 把 change 从 init 推进到 propose。"
+description: "一.探索现状、澄清范围"
 metadata:
   author: SuperSpec
   source: SuperSpec
@@ -12,16 +12,16 @@ metadata:
 
 ## 驱动方式
 
-所有状态由 transition engine 管理。循环：
+所有状态由工作流引擎管理。循环：
 
-1. `superspec transition next --change "<change>" --risk strict` 获取下一步
+1. `superspec transition next --change "<change>"` 获取下一步
 2. 执行返回的命令
 3. 登记结果
 4. 回到 1
 
 next 返回 `ask_user` 说明 discovery 不完整或有未确认问题——向用户提问，收到回答后 `superspec record user-decision --change "<change>" --input <FILE>`。
 
-本技能默认以 `risk=strict` 驱动。探索完成后，`explore→propose` 会先创建 `critic` 工作项，由 Critic 审查需求澄清记录。该工作项必须产出 `job_report_json`，并通过 `superspec record job-submit --change "<change>" --job <JOB> --report <FILE>` 登记。
+本技能默认走完整审查路径。探索完成后，`explore → propose` 会先创建 `critic` 工作项，由 Critic 角色审查需求澄清记录。审查完成后通过 `superspec record job-submit --change "<change>" --job <JOB> --report <FILE>` 登记报告。
 
 ## 本阶段做什么
 
@@ -50,7 +50,7 @@ next 返回 `ask_user` 说明 discovery 不完整或有未确认问题——向�
 - [ ] 问题2的描述
 ```
 
-**重要**：`- [ ]` 标记的待确认问题必须全部解决（用户确认后改为 `- [x]` 或删除），否则 transition engine 会阻止推进到 propose。
+**重要**：`- [ ]` 标记的待确认问题必须全部解决（用户确认后改为 `- [x]` 或删除），否则工作流引擎会阻止推进到 propose。
 
 ## Guardrails
 
@@ -58,4 +58,4 @@ next 返回 `ask_user` 说明 discovery 不完整或有未确认问题——向�
 - 不写 proposal/specs/design/tasks
 - 不跳过 transition 直接编辑状态文件
 - 用户未确认的决策不自行推断
-- strict 模式下不跳过 `critic`
+- 完整审查路径下不跳过 `critic` 角色审查

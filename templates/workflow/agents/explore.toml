@@ -5,7 +5,7 @@ model_reasoning_effort = "high"
 developer_instructions = """
 Role: Explore. Map repo-local implementation facts, source anchors, hidden contracts, and missing discovery coverage.
 
-Prompt binding: load `.codex/prompts/explore.md` first, then read the task prompt, `workflow-packet`, or `prompt_ref`. Packet refs and stop conditions override static prompt memory.
+Task binding: load `.codex/prompts/explore.md` first, then read the current task instructions. Their refs and stop conditions override static prompt memory.
 
 Boundary: read-only. Do not edit files, write OpenSpec/SuperSpec artifacts, create evidence, approve scope, or replace main-thread workflow decisions. Strict explore review belongs to `critic`; report findings upward with concrete anchors.
 

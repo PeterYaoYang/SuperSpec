@@ -10,14 +10,18 @@ import type { Event, RecordResult, Job, JobRole, JobState } from "./types.ts";
 
 const REVIEW_REPORT_REQUIRED_FIELDS = ["role", "verdict", "findings"] as const;
 const REVIEW_REPORT_OPTIONAL_FIELDS = ["summary", "evidence_refs", "risks", "open_questions"] as const;
+const REVIEWER_KINDS = new Set(["codex-subagent", "human", "external-agent"]);
+
+function requiresReviewer(role: JobRole): boolean {
+  return role === "critic" || role === "architect" || role === "test-engineer";
+}
 
 function recommendedAgentForRole(role: JobRole): string {
   switch (role) {
-    case "proposal-auditor": return "proposal-auditor";
     case "critic": return "critic";
     case "architect": return "architect";
     case "test-engineer": return "test-engineer";
-    case "final-audit": return "final-audit";
+    case "verifier": return "verifier";
     case "executor": return "executor";
     case "test-run": return "test-runner";
   }
@@ -25,16 +29,14 @@ function recommendedAgentForRole(role: JobRole): string {
 
 function roleDescription(role: JobRole): string {
   switch (role) {
-    case "proposal-auditor":
-      return "审查 proposal/tasks/design/discovery/business-invariants/test-contract 是否足够进入实现计划门";
     case "critic":
       return "从反方角度审查需求澄清或计划材料中的隐藏假设、范围漂移、验收漏洞和证据缺口";
     case "architect":
       return "审查架构边界、接口契约、长期维护风险和设计取舍";
     case "test-engineer":
       return "审查测试契约、覆盖策略、RED/GREEN 可信度和验收场景映射";
-    case "final-audit":
-      return "最终审查 proposal、实现状态、任务完成、测试契约和 SuperSpec 证据一致性";
+    case "verifier":
+      return "验证 proposal、实现状态、任务完成、测试契约和 SuperSpec 证据是否足以支撑完成结论";
     case "executor":
       return "执行受限实现工作项";
     case "test-run":
@@ -123,7 +125,7 @@ export function recordJobSubmit(
       if (!report || typeof report !== "object" || Array.isArray(report)) {
         checks.push("报告必须是 JSON object");
       } else {
-        const obj = report as { role?: unknown; verdict?: unknown; findings?: unknown };
+        const obj = report as { role?: unknown; verdict?: unknown; findings?: unknown; reviewer?: unknown };
         for (const field of REVIEW_REPORT_REQUIRED_FIELDS) {
           if (!(field in obj)) checks.push(`报告缺少必填字段 ${field}`);
         }
@@ -138,6 +140,20 @@ export function recordJobSubmit(
         }
         if (obj.verdict === "fail") {
           checks.push("报告 verdict=fail，工作项未通过");
+        }
+        if (requiresReviewer(job.role)) {
+          if (!("reviewer" in obj)) checks.push("报告缺少必填字段 reviewer");
+          const reviewer = obj.reviewer as { kind?: unknown; id?: unknown } | undefined;
+          if (!reviewer || typeof reviewer !== "object" || Array.isArray(reviewer)) {
+            checks.push("报告 reviewer 必须是包含 kind/id 的对象");
+          } else {
+            if (typeof reviewer.kind !== "string" || !REVIEWER_KINDS.has(reviewer.kind)) {
+              checks.push(`报告 reviewer.kind 必须是 ${[...REVIEWER_KINDS].join("|")} 之一`);
+            }
+            if (typeof reviewer.id !== "string" || reviewer.id.trim() === "") {
+              checks.push("报告 reviewer.id 必须是非空字符串");
+            }
+          }
         }
       }
     } catch {
@@ -292,12 +308,15 @@ export function jobsPacket(
         boundFiles: job.boundFiles,
         packet_digest: job.packet_digest,
         required_output_kind: "job_report_json",
-        output_contract_fields: [...REVIEW_REPORT_REQUIRED_FIELDS],
+        output_contract_fields: requiresReviewer(job.role) ? [...REVIEW_REPORT_REQUIRED_FIELDS, "reviewer"] : [...REVIEW_REPORT_REQUIRED_FIELDS],
         output_contract_optional_fields: [...REVIEW_REPORT_OPTIONAL_FIELDS],
         output_instructions:
           `${roleDescription(job.role)}。请审查 ${job.boundFiles.map(f => f.path).join(", ")}，` +
+          (requiresReviewer(job.role) ? `必须由独立 ${recommendedAgentForRole(job.role)} reviewer 执行并在 reviewer.kind/id 中记录来源，` : "") +
           `产出 JSON 报告文件并通过 superspec record job-submit 登记。` +
-          `最小格式：{"role":"${job.role}","verdict":"pass|fail","findings":[]}`,
+          (requiresReviewer(job.role)
+            ? `最小格式：{"role":"${job.role}","verdict":"pass|fail","findings":[],"reviewer":{"kind":"codex-subagent","id":"<thread-or-agent-id>"}}`
+            : `最小格式：{"role":"${job.role}","verdict":"pass|fail","findings":[]}`),
         stop_conditions: ["审查完成后提交报告，不要修改文档"],
         created_from_transition: job.created_from_transition,
       },

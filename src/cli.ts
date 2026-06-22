@@ -147,12 +147,20 @@ jobs 子命令：
         const cr = changeRoot(projectRoot, change);
         const snapshot = rebuildSnapshot(projectRoot, change, cr);
         const jobs = jobsList(projectRoot, change);
+        const staleAcceptedJobs = Math.max(0, jobs.accepted.length - snapshot.accepted_jobs.length);
         console.log(JSON.stringify({
           change,
           state: snapshot.state,
-          open_jobs: jobs.open.length,
-          accepted_jobs: jobs.accepted.length,
+          open_jobs: snapshot.open_jobs.length,
+          accepted_jobs: snapshot.accepted_jobs.length,
+          historical_accepted_jobs: jobs.accepted.length,
+          stale_accepted_jobs: staleAcceptedJobs,
           rejected_jobs: jobs.rejected.length,
+          active_task_attempts: snapshot.active_task_attempts.map(a => ({
+            attempt_id: a.attempt_id,
+            task_id: a.task_id,
+            state: a.state,
+          })),
           document_digests: snapshot.document_digests,
           last_transition: snapshot.last_transition,
         }, null, 2));
@@ -169,7 +177,7 @@ jobs 子命令：
 
           case "explore":
             {
-              const risk = (opts.risk as "minimal" | "normal" | "strict") ?? "normal";
+              const risk = (opts.risk as "minimal" | "normal" | "strict") ?? "strict";
               console.log(JSON.stringify(transitionExplore(projectRoot, change, cr, risk), null, 2));
             }
             return 0;
@@ -187,14 +195,14 @@ jobs 子命令：
           }
 
           case "next": {
-            const risk = (opts.risk as "minimal" | "normal" | "strict") ?? "normal";
+            const risk = (opts.risk as "minimal" | "normal" | "strict") ?? "strict";
             const result = nextCmd(projectRoot, change, cr, risk);
             console.log(JSON.stringify(result, null, 2));
             return 0;
           }
 
           case "propose-ready": {
-            const risk = (opts.risk as "minimal" | "normal" | "strict") ?? "normal";
+            const risk = (opts.risk as "minimal" | "normal" | "strict") ?? "strict";
             const result = proposeReady(projectRoot, change, cr, risk);
             console.log(JSON.stringify(result, null, 2));
             return result.events_written === 0 && result.message.includes("不能") ? 1 : 0;
@@ -223,7 +231,7 @@ jobs 子命令：
           }
 
           case "review-ready": {
-            const risk = (opts.risk as "minimal" | "normal" | "strict") ?? "normal";
+            const risk = (opts.risk as "minimal" | "normal" | "strict") ?? "strict";
             const result = reviewReady(projectRoot, change, cr, risk);
             console.log(JSON.stringify(result, null, 2));
             return result.events_written === 0 ? 1 : 0;

@@ -135,7 +135,7 @@ superspec.cmd install
 
 你日常主要记住这五个入口就够了。
 
-CLI 不带 `--risk` 时默认是 `normal`；但内置的 `superspec-explore` 和 `superspec-propose` 技能默认用 `--risk strict` 驱动。探索阶段会创建 `critic` 工作项审查需求澄清记录；计划阶段会创建 `proposal-auditor`、`critic`、`architect` 和 `test-engineer` 工作项后再进入实现准备。
+CLI 不带 `--risk` 时默认走完整审查路径；需要轻量路径时显式传 `--risk normal` 或 `--risk minimal`。探索阶段会创建 `critic` 工作项审查需求澄清记录；计划阶段会创建 `critic`、`architect` 和 `test-engineer` 工作项后再进入实现准备。
 
 ## 它会多保存哪些记录
 
@@ -206,6 +206,26 @@ superspec install
 
 `superspec init --scope project` 是兼容别名，也会执行同一套安装逻辑。
 
+### OpenSpec 中文输出
+
+OpenSpec 生成文档的语言应通过官方项目配置控制。在 `openspec/config.yaml` 中使用 `context`：
+
+```yaml
+schema: spec-driven
+
+context: |
+  语言：中文（简体）
+  所有产出物必须用简体中文撰写。
+```
+
+`superspec install` 会创建缺失的 `openspec/config.yaml`，或在没有顶层 `context` 时追加这段官方中文 context。如果文件已经有顶层 `context`，SuperSpec 不会覆盖它。
+
+可以用下面的命令检查生成的 instructions 是否包含语言上下文：
+
+```bash
+openspec instructions proposal --change <change>
+```
+
 检查当前项目的 OpenSpec 探测结果：
 
 ```bash
@@ -236,8 +256,6 @@ superspec update
   prompts/critic.md
   prompts/executor.md
   prompts/explore.md
-  prompts/final-audit.md
-  prompts/proposal-auditor.md
   prompts/test-engineer.md
   prompts/test-runner.md
   prompts/verifier.md
@@ -246,8 +264,6 @@ superspec update
   agents/critic.toml
   agents/executor.toml
   agents/explore.toml
-  agents/final-audit.toml
-  agents/proposal-auditor.toml
   agents/test-engineer.toml
   agents/test-runner.toml
   agents/verifier.toml

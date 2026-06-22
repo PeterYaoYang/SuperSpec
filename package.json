@@ -1,6 +1,6 @@
 {
   "name": "@peterxiaoyang/superspec",
-  "version": "0.1.16-alpha",
+  "version": "0.1.17-alpha",
   "description": "SuperSpec 流程引擎 — transition engine with lightweight fact-sync",
   "type": "module",
   "engines": { "node": ">=20.19.0" },

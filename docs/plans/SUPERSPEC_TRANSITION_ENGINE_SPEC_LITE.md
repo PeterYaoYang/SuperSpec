@@ -62,6 +62,8 @@ superspec transition reopen        --change X --to STATE --reason TEXT
 superspec transition abandon       --change X --reason TEXT
 ```
 
+`--risk` 不传时默认走完整审查路径；需要轻量路径时显式传 `normal` 或 `minimal`。
+
 **登记**（写 evidence/记录，不推进状态）：
 ```
 superspec record user-decision  --change X --input FILE
@@ -134,9 +136,9 @@ requested → accepted | rejected
 - **next 不建 job**：发现需求缺 fresh job 时，next 只返回**原 transition 命令**（如 `superspec transition propose-ready --change X`）。由 transition 创建 job。
 - **record job-submit 幂等**：同 `(job_id, report_digest)` 重复提交 → 返回旧结果。job 已终态（accepted/rejected）后提交不同 report → 拒绝，要求新 job。
 
-> **补丁 F2-lite（Phase 2）**：next 检测**同一需求**（如 proposal-auditor）跨不同 job_id 被 rejected ≥3 次 → 返回 `ask_user` path。Phase 1 不实现。
+> **补丁 F2-lite（Phase 2）**：next 检测**同一审查需求**跨不同 job_id 被 rejected ≥3 次 → 返回 `ask_user` path。Phase 1 不实现。
 
-工作项类型：`proposal-auditor` / `critic` / `architect` / `test-engineer` / `executor` / `test-run` / `final-audit`。需求澄清阶段的 strict 审核也使用 `critic`。
+工作项类型：`critic` / `architect` / `test-engineer` / `executor` / `test-run` / `verifier`。需求澄清阶段的 strict 审核也使用 `critic`。
 
 ---
 

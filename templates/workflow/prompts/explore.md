@@ -1,6 +1,6 @@
 ---
 description: "仓库代码事实扫描与 discovery 覆盖辅助角色"
-argument-hint: "任务说明、workflow-packet 或 prompt_ref"
+argument-hint: "本次探索说明"
 ---
 
 # Explore
@@ -16,9 +16,9 @@ argument-hint: "任务说明、workflow-packet 或 prompt_ref"
 - 不要写 `proposal.md`/`design.md`/`tasks.md`/`specs/**`/`.superspec/**`。
 - 不能作为 `explore_complete` 的 role evidence；strict 风险模式需要门禁审查时交给 `critic`。
 
-## SuperSpec Packet 规则
+## 本次任务说明
 
-如果主流程提供 `workflow-packet` 或 `prompt_ref`，先读取 packet 指向的 refs。以 packet 中的 `target_refs`、`source_refs`、`required_load_refs`、`artifact_refs` 和 `stop_conditions` 为准；不要依赖本 prompt 记忆输出 schema。
+如果主流程提供本次任务说明，先读取其中指向的 refs。以本次任务说明中的目标范围、来源 refs、必读 refs、artifact refs 和停止条件为准；不要依赖本 prompt 记忆输出 schema。
 
 ## 输出风格
 

@@ -1,6 +1,6 @@
 ---
 name: superspec-apply
-description: "按 tasks.md 逐任务实现代码，记录 RED/GREEN 证据，推进 task-complete。"
+description: "三.按 tasks.md 逐任务实现代码，并按要求完成红/绿 验证"
 metadata:
   author: SuperSpec
   source: SuperSpec
@@ -12,7 +12,7 @@ metadata:
 
 ## 驱动方式
 
-所有状态由 transition engine 管理。循环：
+所有状态由工作流引擎管理。循环：
 
 1. `superspec transition next --change "<change>"` 获取下一步
 2. 执行返回的命令
@@ -23,12 +23,12 @@ metadata:
 
 每个任务的循环：
 
-1. **task-start**：`superspec transition task-start --change "<change>" --task TASK-XXX`
-2. **拿到 attempt_id**：从 task-start 的返回结果或 `superspec status` 中读取当前活跃 attempt 的 `attempt_id`
-3. **RED**：写测试，跑测试确认失败，`superspec record test-run --change "<change>" --input <FILE>`
-4. **实现**：写代码让测试通过
-5. **GREEN**：跑测试确认通过，`superspec record test-run --change "<change>" --input <FILE>`
-6. **task-complete**：`superspec transition task-complete --change "<change>" --task TASK-XXX`
+1. **任务开始**：`superspec transition task-start --change "<change>" --task TASK-XXX`
+2. **拿到执行尝试 ID**：从 task-start 的返回结果或 `superspec status` 中读取当前活跃 attempt 的 `attempt_id`
+3. **红灯验证**：写测试，跑测试确认失败，`superspec record test-run --change "<change>" --input <FILE>`
+4. **代码实现**：根据任务写代码实现,保证代码不出现过渡设计以及代码质量
+5. **绿灯验证**：跑测试确认通过，`superspec record test-run --change "<change>" --input <FILE>`
+6. **任务结束标记完成**：`superspec transition task-complete --change "<change>" --task TASK-XXX`
 
 no-TDD 任务（tdd_required:false + no_tdd_reason）跳过 RED/GREEN。
 

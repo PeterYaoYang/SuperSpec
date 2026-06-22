@@ -1,6 +1,6 @@
 ---
 name: superspec-propose
-description: "编写计划文档（proposal/specs/design/tasks + 不变量 + 测试契约）；通过 transition 推进到 propose_ready。"
+description: "二.编写计划文档（proposal/specs/design/tasks）"
 metadata:
   author: SuperSpec
   source: SuperSpec
@@ -12,23 +12,21 @@ metadata:
 
 ## 驱动方式
 
-所有状态由 transition engine 管理。循环：
+所有状态由工作流引擎管理。循环：
 
-1. `superspec transition next --change "<change>" --risk strict` 获取下一步
+1. `superspec transition next --change "<change>"` 获取下一步
 2. 执行返回的命令
 3. 登记结果
 4. 回到 1
 
-next 返回 `required_job` 说明需要审查工作项——跑 `superspec jobs packet` 拿到工作说明，执行审查，`superspec record job-submit --change "<change>" --job <JOB> --report <FILE>`。
+next 返回需要审查时，先按返回的审查说明完成对应审查，再用 `superspec record job-submit --change "<change>" --job <JOB> --report <FILE>` 提交审查报告。
 
-本技能默认以 `risk=strict` 驱动。计划阶段进入 `propose-ready` 前必须完成这些审核工作项：
+人类可读正文默认使用简体中文；OpenSpec 结构标题、规范关键字、命令、路径、JSON 字段、代码标识符保留原文。
+如果 OpenSpec 生成文档语言不符合预期，先检查 `openspec/config.yaml` 的官方 `context` 设置；不要在变更文档里添加自定义 `language` 字段。
 
-- `proposal-auditor`
-- `critic`
-- `architect`
-- `test-engineer`
+本技能默认走完整审查路径。计划阶段进入实现前，工作流会要求 `critic`、`architect`、`test-engineer` 三个独立审查完成。
 
-所有工作项报告都必须按 packet 的 `job_report_json` 契约提交。
+所有审查工作项必须由独立角色 reviewer 执行，不能由主流程自审代替；报告必须按工作流返回的格式提交，并记录实际审查来源。
 
 ## 本阶段做什么
 
@@ -78,6 +76,23 @@ OpenSpec 能力规范增量（`openspec instructions specs` 格式）。
 | TEST-002 | INV-002 | 订单金额为负时拒绝 |
 ```
 
+### 待用户确认
+如果计划阶段遇到会影响需求范围、验收标准、用户可见行为、方案取舍、测试策略、安全、权限、数据或迁移判断的关键不确定问题，先写入相关计划文档的 `## 待用户确认` 段落：
+
+```markdown
+## 待用户确认
+
+- [ ] DEC-001 是否需要兼容历史行为？
+```
+
+`next` 会在 propose 阶段检查 `proposal.md`、`design.md` 和 `test-contract.md` 的该段落。存在未确认项时，先向用户提问；收到回答后写入 JSON 文件并执行：
+
+```bash
+superspec record user-decision --change "<change>" --input <FILE>
+```
+
+然后把用户决定反映到 proposal/design/test-contract，并将对应确认项改为 `[x]` 或移出未确认列表。局部实现细节、命名、普通文件组织和不影响需求/验收/风险的技术微调不要升级为用户确认。
+
 ## 完成条件
 
 tasks.md 作为计划文档就绪（不是复选框全完成）+ 基础职责文档齐全 → next 返回 propose-ready 命令。
@@ -85,7 +100,8 @@ tasks.md 作为计划文档就绪（不是复选框全完成）+ 基础职责文
 ## Guardrails
 
 - tasks.md 只列任务，不实现
+- 不绕过 `## 待用户确认` 中的未确认项
 - 不改业务代码
 - tdd_required 标注真实
 - 不跳过 transition
-- 不跳过 strict 模式下的审核工作项
+- 不跳过完整审查路径下的审核工作项
