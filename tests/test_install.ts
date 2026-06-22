@@ -100,6 +100,220 @@ test("CLI init --scope project is a compatibility alias for install", () => {
   });
 });
 
+test("CLI update refreshes installed workflow skills from bundled templates", () => {
+  withTempProject(projectRoot => {
+    installProject(projectRoot);
+    const cli = new URL("../src/cli.ts", import.meta.url).pathname;
+    const skillPath = join(projectRoot, ".codex", "skills", "superspec-explore", "SKILL.md");
+    writeFileSync(skillPath, "stale skill template\n");
+    writeFileSync(`${skillPath}.bak`, "older backup\n");
+
+    const output = execFileSync(process.execPath, [cli, "update"], {
+      cwd: projectRoot,
+      encoding: "utf8",
+    });
+    const result = JSON.parse(output);
+
+    assert.equal(result.ok, true);
+    assert.equal(result.message, `SuperSpec ${PACKAGE_VERSION} 已更新项目工作流`);
+    assert.deepEqual(result.installed.skills, [...WORKFLOW_SKILLS]);
+    assert.equal(
+      readFileSync(skillPath, "utf8"),
+      readFileSync(new URL("../templates/workflow/skills/superspec-explore/SKILL.md", import.meta.url), "utf8"),
+    );
+    assert.equal(readFileSync(`${skillPath}.bak`, "utf8"), "stale skill template\n");
+  });
+});
+
+test("CLI update bootstraps old projects and ignores legacy self-update flags", () => {
+  withTempProject(projectRoot => {
+    const cli = new URL("../src/cli.ts", import.meta.url).pathname;
+    const output = execFileSync(process.execPath, [cli, "update", "--scope", "project", "--skip-self-update"], {
+      cwd: projectRoot,
+      encoding: "utf8",
+    });
+    const result = JSON.parse(output);
+
+    assert.equal(result.ok, true);
+    assert.equal(result.message, `SuperSpec ${PACKAGE_VERSION} 已更新项目工作流`);
+    assert.deepEqual(result.installed.skills, [...WORKFLOW_SKILLS]);
+    assert.equal(existsSync(join(projectRoot, ".superspec", "changes")), true);
+    assert.equal(existsSync(join(projectRoot, ".codex", "skills", "superspec-explore", "SKILL.md")), true);
+    assert.equal(existsSync(join(projectRoot, ".codex", "prompts", "executor.md")), true);
+    assert.equal(existsSync(join(projectRoot, ".codex", "agents", "executor.toml")), true);
+  });
+});
+
+test("CLI update allows legacy state while install still blocks it", () => {
+  withTempProject(projectRoot => {
+    mkdirSync(join(projectRoot, "openspec", "changes", "old-change", ".superspec"), { recursive: true });
+    writeFileSync(join(projectRoot, "openspec", "changes", "old-change", ".superspec", "ledger.jsonl"), "{}\n");
+
+    assert.throws(
+      () => installProject(projectRoot),
+      /检测到老版 SuperSpec/,
+    );
+
+    const cli = new URL("../src/cli.ts", import.meta.url).pathname;
+    const output = execFileSync(process.execPath, [cli, "update", "--skip-self-update"], {
+      cwd: projectRoot,
+      encoding: "utf8",
+    });
+    const result = JSON.parse(output);
+
+    assert.equal(result.ok, true);
+    assert.equal(existsSync(join(projectRoot, ".superspec", "changes")), true);
+    assert.equal(existsSync(join(projectRoot, ".codex", "skills", "superspec-propose", "SKILL.md")), true);
+  });
+});
+
+test("installProject removes old managed superspec hook and keeps a backup", () => {
+  withTempProject(projectRoot => {
+    mkdirSync(join(projectRoot, ".codex"), { recursive: true });
+    const hooksPath = join(projectRoot, ".codex", "hooks.json");
+    const legacyHooks = {
+      superspec: {
+        managed: true,
+        adapter_version: "superspec-hook@2",
+      },
+      hooks: {
+        SubagentStart: [
+          {
+            matcher: ".*",
+            hooks: [
+              {
+                type: "command",
+                command: "superspec-hook --change \"$SUPERSPEC_CHANGE\"",
+              },
+            ],
+          },
+        ],
+      },
+    };
+    writeFileSync(hooksPath, `${JSON.stringify(legacyHooks, null, 2)}\n`);
+
+    installProject(projectRoot, { allowLegacyState: true });
+
+    assert.equal(existsSync(hooksPath), false);
+    assert.equal(readFileSync(`${hooksPath}.bak`, "utf8"), `${JSON.stringify(legacyHooks, null, 2)}\n`);
+  });
+});
+
+test("installProject removes only old superspec hook commands from mixed hooks", () => {
+  withTempProject(projectRoot => {
+    mkdirSync(join(projectRoot, ".codex"), { recursive: true });
+    const hooksPath = join(projectRoot, ".codex", "hooks.json");
+    const mixedHooks = {
+      superspec: {
+        managed: true,
+        adapter_version: "superspec-hook@2",
+      },
+      custom: {
+        keep: true,
+      },
+      hooks: {
+        SubagentStart: [
+          {
+            matcher: ".*",
+            hooks: [
+              {
+                type: "command",
+                command: "superspec-hook --change \"$SUPERSPEC_CHANGE\"",
+              },
+              {
+                type: "command",
+                command: "echo keep",
+              },
+            ],
+          },
+        ],
+      },
+    };
+    writeFileSync(hooksPath, `${JSON.stringify(mixedHooks, null, 2)}\n`);
+
+    installProject(projectRoot, { allowLegacyState: true });
+
+    const migrated = readFileSync(hooksPath, "utf8");
+    assert.equal(readFileSync(`${hooksPath}.bak`, "utf8"), `${JSON.stringify(mixedHooks, null, 2)}\n`);
+    assert.doesNotMatch(migrated, /superspec-hook/);
+    assert.match(migrated, /echo keep/);
+    assert.match(migrated, /"custom"/);
+  });
+});
+
+test("installProject leaves unmanaged hooks untouched", () => {
+  withTempProject(projectRoot => {
+    mkdirSync(join(projectRoot, ".codex"), { recursive: true });
+    const hooksPath = join(projectRoot, ".codex", "hooks.json");
+    const userHooks = {
+      hooks: {
+        Stop: [
+          {
+            matcher: ".*",
+            hooks: [
+              {
+                type: "command",
+                command: "echo user",
+              },
+            ],
+          },
+        ],
+      },
+    };
+    writeFileSync(hooksPath, `${JSON.stringify(userHooks, null, 2)}\n`);
+
+    installProject(projectRoot, { allowLegacyState: true });
+
+    assert.equal(readFileSync(hooksPath, "utf8"), `${JSON.stringify(userHooks, null, 2)}\n`);
+    assert.equal(existsSync(`${hooksPath}.bak`), false);
+  });
+});
+
+test("installProject leaves malformed hooks untouched", () => {
+  withTempProject(projectRoot => {
+    mkdirSync(join(projectRoot, ".codex"), { recursive: true });
+    const hooksPath = join(projectRoot, ".codex", "hooks.json");
+    writeFileSync(hooksPath, "{ not json\n");
+
+    installProject(projectRoot, { allowLegacyState: true });
+
+    assert.equal(readFileSync(hooksPath, "utf8"), "{ not json\n");
+    assert.equal(existsSync(`${hooksPath}.bak`), false);
+  });
+});
+
+test("installProject leaves managed hooks without old superspec-hook commands untouched", () => {
+  withTempProject(projectRoot => {
+    mkdirSync(join(projectRoot, ".codex"), { recursive: true });
+    const hooksPath = join(projectRoot, ".codex", "hooks.json");
+    const managedWithoutLegacyCommand = {
+      superspec: {
+        managed: true,
+        adapter_version: "superspec-hook@2",
+      },
+      hooks: {
+        Stop: [
+          {
+            matcher: ".*",
+            hooks: [
+              {
+                type: "command",
+                command: "echo managed",
+              },
+            ],
+          },
+        ],
+      },
+    };
+    writeFileSync(hooksPath, `${JSON.stringify(managedWithoutLegacyCommand, null, 2)}\n`);
+
+    installProject(projectRoot, { allowLegacyState: true });
+
+    assert.equal(readFileSync(hooksPath, "utf8"), `${JSON.stringify(managedWithoutLegacyCommand, null, 2)}\n`);
+    assert.equal(existsSync(`${hooksPath}.bak`), false);
+  });
+});
+
 test("installProject appends OpenSpec Chinese context when top-level context is missing", () => {
   withTempProject(projectRoot => {
     mkdirSync(join(projectRoot, "openspec"), { recursive: true });

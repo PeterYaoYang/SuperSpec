@@ -1,5 +1,5 @@
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { SUPERSPEC_VERSION } from "./version.ts";
 
 export const WORKFLOW_SKILLS = [
@@ -47,6 +47,7 @@ export interface InstallResult {
 
 export interface InstallOptions {
   templateRoot?: string;
+  allowLegacyState?: boolean;
 }
 
 function defaultTemplateRoot(): string {
@@ -85,13 +86,23 @@ function assertWorkflowTemplates(templateRoot: string): void {
   }
 }
 
+function writeBundledFile(src: string, dest: string): void {
+  mkdirSync(dirname(dest), { recursive: true });
+  const next = readFileSync(src, "utf8");
+  if (existsSync(dest)) {
+    const current = readFileSync(dest, "utf8");
+    if (current === next) return;
+    writeFileSync(`${dest}.bak`, current);
+  }
+  writeFileSync(dest, next);
+}
+
 function copySkills(templateRoot: string, projectRoot: string): string[] {
   const skillsDest = join(projectRoot, ".codex", "skills");
   const installedSkills: string[] = [];
   for (const skill of WORKFLOW_SKILLS) {
     const src = join(templateRoot, "skills", skill, "SKILL.md");
-    mkdirSync(join(skillsDest, skill), { recursive: true });
-    copyFileSync(src, join(skillsDest, skill, "SKILL.md"));
+    writeBundledFile(src, join(skillsDest, skill, "SKILL.md"));
     installedSkills.push(skill);
   }
   return installedSkills;
@@ -102,8 +113,7 @@ function copyPrompts(templateRoot: string, projectRoot: string): string[] {
   const installedPrompts: string[] = [];
   for (const prompt of WORKFLOW_PROMPTS) {
     const src = join(templateRoot, "prompts", prompt);
-    mkdirSync(promptsDest, { recursive: true });
-    copyFileSync(src, join(promptsDest, prompt));
+    writeBundledFile(src, join(promptsDest, prompt));
     installedPrompts.push(prompt);
   }
   return installedPrompts;
@@ -114,11 +124,93 @@ function copyAgents(templateRoot: string, projectRoot: string): string[] {
   const installedAgents: string[] = [];
   for (const agent of WORKFLOW_AGENTS) {
     const src = join(templateRoot, "agents", agent);
-    mkdirSync(agentsDest, { recursive: true });
-    copyFileSync(src, join(agentsDest, agent));
+    writeBundledFile(src, join(agentsDest, agent));
     installedAgents.push(agent);
   }
   return installedAgents;
+}
+
+type JsonRecord = Record<string, unknown>;
+
+function isRecord(value: unknown): value is JsonRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isLegacySuperspecHook(value: unknown): boolean {
+  return isRecord(value)
+    && typeof value.command === "string"
+    && /\bsuperspec-hook\b/.test(value.command);
+}
+
+function removeLegacySuperspecHookCommands(hooks: unknown): { hooks: unknown; removed: number } {
+  if (!isRecord(hooks)) return { hooks, removed: 0 };
+
+  let removed = 0;
+  const nextHooks: JsonRecord = { ...hooks };
+  for (const [eventName, eventValue] of Object.entries(hooks)) {
+    if (!Array.isArray(eventValue)) continue;
+
+    const nextEvent: unknown[] = [];
+    for (const entry of eventValue) {
+      if (!isRecord(entry) || !Array.isArray(entry.hooks)) {
+        nextEvent.push(entry);
+        continue;
+      }
+
+      const keptCommands = entry.hooks.filter(command => {
+        if (!isLegacySuperspecHook(command)) return true;
+        removed += 1;
+        return false;
+      });
+      if (keptCommands.length > 0) {
+        nextEvent.push({ ...entry, hooks: keptCommands });
+      }
+    }
+
+    if (nextEvent.length > 0) nextHooks[eventName] = nextEvent;
+    else delete nextHooks[eventName];
+  }
+
+  return { hooks: nextHooks, removed };
+}
+
+function hasUserHookContent(config: JsonRecord): boolean {
+  return Object.entries(config).some(([key, value]) => {
+    if (key === "superspec") return false;
+    if (key === "hooks" && isRecord(value) && Object.keys(value).length === 0) return false;
+    return true;
+  });
+}
+
+function migrateLegacyManagedHooks(projectRoot: string): void {
+  const hooksPath = join(projectRoot, ".codex", "hooks.json");
+  if (!existsSync(hooksPath)) return;
+
+  const current = readFileSync(hooksPath, "utf8");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(current);
+  } catch {
+    return;
+  }
+  if (!isRecord(parsed) || !isRecord(parsed.superspec) || parsed.superspec.managed !== true) return;
+
+  const migrated = removeLegacySuperspecHookCommands(parsed.hooks);
+  if (migrated.removed === 0) return;
+
+  writeFileSync(`${hooksPath}.bak`, current);
+  const nextConfig: JsonRecord = { ...parsed, hooks: migrated.hooks };
+  delete nextConfig.superspec;
+  if (isRecord(nextConfig.hooks) && Object.keys(nextConfig.hooks).length === 0) {
+    delete nextConfig.hooks;
+  }
+
+  if (!hasUserHookContent(nextConfig)) {
+    rmSync(hooksPath);
+    return;
+  }
+
+  writeFileSync(hooksPath, `${JSON.stringify(nextConfig, null, 2)}\n`);
 }
 
 function insertMissingTableEntries(content: string, table: string, entries: Record<string, string>): string {
@@ -198,7 +290,7 @@ function ensureOpenSpecChineseContext(projectRoot: string): string {
 }
 
 export function installProject(projectRoot: string, options: InstallOptions = {}): InstallResult {
-  if (legacyStateFound(projectRoot)) {
+  if (!options.allowLegacyState && legacyStateFound(projectRoot)) {
     throw new Error(
       "检测到老版 SuperSpec (0.x) 的状态文件。\n" +
       `SuperSpec ${SUPERSPEC_VERSION} 是全新引擎，不兼容 0.x 的状态格式。\n` +
@@ -214,6 +306,7 @@ export function installProject(projectRoot: string, options: InstallOptions = {}
   mkdirSync(join(engineDir, "changes"), { recursive: true });
   const gitignorePath = join(engineDir, ".gitignore");
   if (!existsSync(gitignorePath)) writeFileSync(gitignorePath, "changes/\n*.log\n*.tmp\n");
+  migrateLegacyManagedHooks(projectRoot);
 
   return {
     ok: true,

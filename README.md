@@ -232,13 +232,13 @@ openspec instructions proposal --change <change>
 superspec status
 ```
 
-更新当前 beta CLI：
+同步当前项目的 SuperSpec 工作流入口：
 
 ```bash
 superspec update
 ```
 
-这条命令只检查当前 `.superspec/changes` 运行时是否已经是新引擎布局；真正升级全局 npm 包仍需使用 `npm install -g @peterxiaoyang/superspec@<version>`。
+这条命令会补齐 `.superspec/changes` 运行时目录，并把当前 CLI 内置的 `.codex/skills/superspec-*`、`.codex/prompts/*.md`、`.codex/agents/*.toml` 同步到项目里。真正升级全局 npm 包仍需使用 `npm install -g @peterxiaoyang/superspec@<version>`。
 
 ## 进阶信息
 

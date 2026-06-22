@@ -64,7 +64,7 @@ async function main(argv: string[]): Promise<number> {
   jobs <子命令> --change <C>        工作项管理（见下）
   install                           安装项目工作流入口
   init --scope project              install 的兼容别名
-  update                           更新 SuperSpec
+  update                           同步项目工作流模板
   version                          版本号
 
 transition 子命令：
@@ -114,20 +114,20 @@ jobs 子命令：
     }
   }
   if (command === "update") {
-    // 检测是否从老版 update 过来
-    const { existsSync } = await import("node:fs");
-    const isLegacyUpdate = !existsSync(join(projectRoot, ".superspec", "changes"));
-    if (isLegacyUpdate) {
+    try {
+      const result = installProject(projectRoot, { allowLegacyState: true });
+      console.log(JSON.stringify({
+        ...result,
+        message: `SuperSpec ${SUPERSPEC_VERSION} 已更新项目工作流`,
+      }));
+      return 0;
+    } catch (err) {
       console.log(JSON.stringify({
         ok: false,
-        message: `SuperSpec ${SUPERSPEC_VERSION} 是全新引擎，不能从 0.x 直接 update。\n` +
-          `请用 npm install -g @peterxiaoyang/superspec@${SUPERSPEC_VERSION} 手动安装。\n` +
-          "现有 change 请先用 0.1.x 完成归档。",
+        message: (err as Error).message,
       }));
       return 1;
     }
-    console.log(JSON.stringify({ ok: true, message: `已是最新版本 ${SUPERSPEC_VERSION}` }));
-    return 0;
   }
 
   const change = opts.change;
