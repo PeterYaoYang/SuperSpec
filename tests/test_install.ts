@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -20,6 +20,33 @@ function withTempProject(fn: (projectRoot: string) => void): void {
 
 function countTopLevelContext(content: string): number {
   return content.match(/^context\s*:/gm)?.length ?? 0;
+}
+
+function cliPath(): string {
+  return new URL("../src/cli.ts", import.meta.url).pathname;
+}
+
+function runCli(args: string[], projectRoot: string, env: Record<string, string> = {}) {
+  return spawnSync(process.execPath, [cliPath(), ...args], {
+    cwd: projectRoot,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      ...env,
+    },
+  });
+}
+
+function testEnv(env: Record<string, string> = {}): Record<string, string> {
+  return {
+    SUPERSPEC_TEST_MODE: "1",
+    ...env,
+  };
+}
+
+function writeExecutable(filePath: string, content: string): void {
+  writeFileSync(filePath, content);
+  chmodSync(filePath, 0o755);
 }
 
 test("installProject installs engine, workflow skills, role prompts, and agents", () => {
@@ -70,8 +97,7 @@ test("installProject installs engine, workflow skills, role prompts, and agents"
 });
 
 test("CLI version reads package.json version", () => {
-  const cli = new URL("../src/cli.ts", import.meta.url).pathname;
-  const output = execFileSync(process.execPath, [cli, "--version"], {
+  const output = execFileSync(process.execPath, [cliPath(), "--version"], {
     encoding: "utf8",
   });
 
@@ -80,8 +106,7 @@ test("CLI version reads package.json version", () => {
 
 test("CLI init --scope project is a compatibility alias for install", () => {
   withTempProject(projectRoot => {
-    const cli = new URL("../src/cli.ts", import.meta.url).pathname;
-    const output = execFileSync(process.execPath, [cli, "init", "--scope", "project"], {
+    const output = execFileSync(process.execPath, [cliPath(), "init", "--scope", "project"], {
       cwd: projectRoot,
       encoding: "utf8",
     });
@@ -100,15 +125,105 @@ test("CLI init --scope project is a compatibility alias for install", () => {
   });
 });
 
+test("CLI init 非交互模式不触发自升级提示", () => {
+  withTempProject(projectRoot => {
+    const output = execFileSync(process.execPath, [cliPath(), "init", "--scope", "project"], {
+      cwd: projectRoot,
+      encoding: "utf8",
+      env: testEnv({
+        SUPERSPEC_TEST_LATEST_VERSION: "99.0.0",
+        SUPERSPEC_TEST_SKIP_GLOBAL_INSTALL: "1",
+      }),
+    });
+    const result = JSON.parse(output);
+
+    assert.equal(result.ok, true);
+    assert.equal(result.self_update, undefined);
+    assert.equal(result.message, `SuperSpec ${PACKAGE_VERSION} 已安装`);
+    assert.equal(existsSync(join(projectRoot, ".codex", "skills", "superspec-explore", "SKILL.md")), true);
+  });
+});
+
+test("CLI init 交互选择 no 时继续当前版本安装", () => {
+  withTempProject(projectRoot => {
+    const output = execFileSync(process.execPath, [cliPath(), "init", "--scope", "project"], {
+      cwd: projectRoot,
+      encoding: "utf8",
+      env: testEnv({
+        SUPERSPEC_TEST_ASSUME_TTY: "1",
+        SUPERSPEC_TEST_PROMPT_ANSWER: "no",
+        SUPERSPEC_TEST_LATEST_VERSION: "99.0.0",
+      }),
+    });
+    const result = JSON.parse(output);
+
+    assert.equal(result.ok, true);
+    assert.equal(result.self_update, undefined);
+    assert.equal(result.message, `SuperSpec ${PACKAGE_VERSION} 已安装`);
+  });
+});
+
+test("CLI init 交互默认 yes 时升级并递归运行新版 CLI", () => {
+  withTempProject(projectRoot => {
+    const rerunPayload = {
+      ok: true,
+      message: "SuperSpec 99.0.0 已安装",
+      installed: {
+        engine_dir: ".superspec/",
+        skills: [...WORKFLOW_SKILLS],
+        prompts: [...WORKFLOW_PROMPTS],
+        agents: [...WORKFLOW_AGENTS],
+        config: ".codex/config.toml",
+        openspec_config: "openspec/config.yaml",
+      },
+    };
+    const output = execFileSync(process.execPath, [cliPath(), "init", "--scope", "project"], {
+      cwd: projectRoot,
+      encoding: "utf8",
+      env: testEnv({
+        SUPERSPEC_TEST_ASSUME_TTY: "1",
+        SUPERSPEC_TEST_PROMPT_ANSWER: "",
+        SUPERSPEC_TEST_LATEST_VERSION: "99.0.0",
+        SUPERSPEC_TEST_SKIP_GLOBAL_INSTALL: "1",
+        SUPERSPEC_TEST_CLI_VERSION: "99.0.0",
+        SUPERSPEC_TEST_RERUN_OUTPUT: JSON.stringify(rerunPayload),
+      }),
+    });
+    const result = JSON.parse(output);
+
+    assert.equal(result.ok, true);
+    assert.equal(result.message, "SuperSpec 99.0.0 已安装");
+    assert.deepEqual(result.self_update, {
+      updated: true,
+      from: PACKAGE_VERSION,
+      to: "99.0.0",
+    });
+  });
+});
+
+test("CLI init latest 查询失败时提示 stderr 并继续安装", () => {
+  withTempProject(projectRoot => {
+    const run = runCli(["init", "--scope", "project"], projectRoot, testEnv({
+      SUPERSPEC_TEST_ASSUME_TTY: "1",
+      SUPERSPEC_TEST_NPM_VIEW_ERROR: "registry offline",
+    }));
+    const result = JSON.parse(run.stdout);
+
+    assert.equal(run.status, 0);
+    assert.match(run.stderr, /registry offline/);
+    assert.equal(result.ok, true);
+    assert.equal(result.message, `SuperSpec ${PACKAGE_VERSION} 已安装`);
+  });
+});
+
 test("CLI update refreshes installed workflow skills from bundled templates", () => {
   withTempProject(projectRoot => {
     installProject(projectRoot);
-    const cli = new URL("../src/cli.ts", import.meta.url).pathname;
     const skillPath = join(projectRoot, ".codex", "skills", "superspec-explore", "SKILL.md");
     writeFileSync(skillPath, "stale skill template\n");
     writeFileSync(`${skillPath}.bak`, "older backup\n");
 
-    const output = execFileSync(process.execPath, [cli, "update"], {
+    const output = execFileSync(process.execPath, [cliPath(), "update", "--skip-self-update"], {
       cwd: projectRoot,
       encoding: "utf8",
     });
@@ -125,10 +240,221 @@ test("CLI update refreshes installed workflow skills from bundled templates", ()
   });
 });
 
+test("CLI update 默认先安装 npm latest 并递归运行新 CLI", () => {
+  withTempProject(projectRoot => {
+    const rerunPayload = {
+      ok: true,
+      message: "SuperSpec 99.0.0 已更新项目工作流",
+      installed: {
+        engine_dir: ".superspec/",
+        skills: [...WORKFLOW_SKILLS],
+        prompts: [...WORKFLOW_PROMPTS],
+        agents: [...WORKFLOW_AGENTS],
+        config: ".codex/config.toml",
+        openspec_config: "openspec/config.yaml",
+      },
+    };
+
+    const output = execFileSync(process.execPath, [cliPath(), "update"], {
+      cwd: projectRoot,
+      encoding: "utf8",
+      env: testEnv({
+        SUPERSPEC_TEST_LATEST_VERSION: "99.0.0",
+        SUPERSPEC_TEST_SKIP_GLOBAL_INSTALL: "1",
+        SUPERSPEC_TEST_CLI_VERSION: "99.0.0",
+        SUPERSPEC_TEST_RERUN_OUTPUT: JSON.stringify(rerunPayload),
+      }),
+    });
+    const result = JSON.parse(output);
+
+    assert.equal(result.ok, true);
+    assert.equal(result.message, "SuperSpec 99.0.0 已更新项目工作流");
+    assert.deepEqual(result.self_update, {
+      updated: true,
+      from: PACKAGE_VERSION,
+      to: "99.0.0",
+    });
+  });
+});
+
+test("CLI update latest 不高于当前版本时只同步项目模板", () => {
+  withTempProject(projectRoot => {
+    const output = execFileSync(process.execPath, [cliPath(), "update"], {
+      cwd: projectRoot,
+      encoding: "utf8",
+      env: testEnv({
+        SUPERSPEC_TEST_LATEST_VERSION: PACKAGE_VERSION,
+      }),
+    });
+    const result = JSON.parse(output);
+
+    assert.equal(result.ok, true);
+    assert.equal(result.self_update, undefined);
+    assert.equal(result.message, `SuperSpec ${PACKAGE_VERSION} 已更新项目工作流`);
+  });
+});
+
+test("CLI update npm latest 查询失败时返回结构化错误", () => {
+  withTempProject(projectRoot => {
+    const run = runCli(["update"], projectRoot, testEnv({
+      SUPERSPEC_TEST_NPM_VIEW_ERROR: "registry unavailable",
+    }));
+    const result = JSON.parse(run.stdout);
+
+    assert.equal(run.status, 1);
+    assert.equal(result.ok, false);
+    assert.match(result.message, /registry unavailable/);
+    assert.deepEqual(result.self_update, {
+      updated: false,
+      from: PACKAGE_VERSION,
+      to: null,
+      phase: "npm_view",
+    });
+  });
+});
+
+test("CLI update 全局安装失败时返回目标版本和 phase", () => {
+  withTempProject(projectRoot => {
+    const run = runCli(["update"], projectRoot, testEnv({
+      SUPERSPEC_TEST_LATEST_VERSION: "99.0.0",
+      SUPERSPEC_TEST_GLOBAL_INSTALL_ERROR: "permission denied",
+    }));
+    const result = JSON.parse(run.stdout);
+
+    assert.equal(run.status, 1);
+    assert.equal(result.ok, false);
+    assert.match(result.message, /permission denied/);
+    assert.deepEqual(result.self_update, {
+      updated: false,
+      from: PACKAGE_VERSION,
+      to: "99.0.0",
+      phase: "global_install",
+    });
+  });
+});
+
+test("CLI update 安装后 PATH 仍指向旧版本时失败", () => {
+  withTempProject(projectRoot => {
+    const run = runCli(["update"], projectRoot, testEnv({
+      SUPERSPEC_TEST_LATEST_VERSION: "99.0.0",
+      SUPERSPEC_TEST_SKIP_GLOBAL_INSTALL: "1",
+      SUPERSPEC_TEST_CLI_VERSION: PACKAGE_VERSION,
+    }));
+    const result = JSON.parse(run.stdout);
+
+    assert.equal(run.status, 1);
+    assert.equal(result.ok, false);
+    assert.match(result.message, /期望 99\.0\.0/);
+    assert.equal(result.self_update.phase, "version_mismatch");
+    assert.equal(result.self_update.to, "99.0.0");
+  });
+});
+
+test("CLI update 新版 CLI rerun 失败时返回 rerun phase", () => {
+  withTempProject(projectRoot => {
+    const run = runCli(["update"], projectRoot, testEnv({
+      SUPERSPEC_TEST_LATEST_VERSION: "99.0.0",
+      SUPERSPEC_TEST_SKIP_GLOBAL_INSTALL: "1",
+      SUPERSPEC_TEST_CLI_VERSION: "99.0.0",
+      SUPERSPEC_TEST_RERUN_ERROR: "rerun failed",
+    }));
+    const result = JSON.parse(run.stdout);
+
+    assert.equal(run.status, 1);
+    assert.equal(result.ok, false);
+    assert.match(result.message, /rerun failed/);
+    assert.deepEqual(result.self_update, {
+      updated: false,
+      from: PACKAGE_VERSION,
+      to: "99.0.0",
+      phase: "rerun",
+    });
+  });
+});
+
+test("CLI update 新版 CLI 返回 ok false 时父进程也失败", () => {
+  withTempProject(projectRoot => {
+    const run = runCli(["update"], projectRoot, testEnv({
+      SUPERSPEC_TEST_LATEST_VERSION: "99.0.0",
+      SUPERSPEC_TEST_SKIP_GLOBAL_INSTALL: "1",
+      SUPERSPEC_TEST_CLI_VERSION: "99.0.0",
+      SUPERSPEC_TEST_RERUN_OUTPUT: JSON.stringify({ ok: false, message: "template sync failed" }),
+    }));
+    const result = JSON.parse(run.stdout);
+
+    assert.equal(run.status, 1);
+    assert.equal(result.ok, false);
+    assert.equal(result.message, "template sync failed");
+    assert.deepEqual(result.self_update, {
+      updated: true,
+      from: PACKAGE_VERSION,
+      to: "99.0.0",
+    });
+  });
+});
+
+test("CLI update 新版 CLI 输出非 JSON 时失败", () => {
+  withTempProject(projectRoot => {
+    const run = runCli(["update"], projectRoot, testEnv({
+      SUPERSPEC_TEST_LATEST_VERSION: "99.0.0",
+      SUPERSPEC_TEST_SKIP_GLOBAL_INSTALL: "1",
+      SUPERSPEC_TEST_CLI_VERSION: "99.0.0",
+      SUPERSPEC_TEST_RERUN_OUTPUT: "not json\n",
+    }));
+    const result = JSON.parse(run.stdout);
+
+    assert.equal(run.status, 1);
+    assert.equal(result.ok, false);
+    assert.equal(result.message, "新版 CLI 输出不是 JSON object");
+    assert.deepEqual(result.self_update, {
+      updated: false,
+      from: PACKAGE_VERSION,
+      to: "99.0.0",
+      phase: "rerun_output",
+    });
+  });
+});
+
+test("CLI update 生产模式忽略 SUPERSPEC_TEST mock 变量", () => {
+  withTempProject(projectRoot => {
+    const binDir = join(projectRoot, "bin");
+    mkdirSync(binDir, { recursive: true });
+    const npmLog = join(projectRoot, "npm.log");
+    const escapedLog = npmLog.replace(/'/g, "'\\''");
+    writeExecutable(join(binDir, "npm"), `#!/bin/sh
+echo "$@" >> '${escapedLog}'
+if [ "$1" = "view" ]; then
+  echo "${PACKAGE_VERSION}"
+  exit 0
+fi
+echo "unexpected npm $@" >&2
+exit 1
+`);
+
+    const output = execFileSync(process.execPath, [cliPath(), "update"], {
+      cwd: projectRoot,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        NODE_ENV: "production",
+        SUPERSPEC_TEST_MODE: "0",
+        SUPERSPEC_TEST_LATEST_VERSION: "99.0.0",
+        SUPERSPEC_TEST_SKIP_GLOBAL_INSTALL: "1",
+        SUPERSPEC_TEST_RERUN_OUTPUT: JSON.stringify({ ok: true, message: "mocked" }),
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+      },
+    });
+    const result = JSON.parse(output);
+
+    assert.equal(result.ok, true);
+    assert.equal(result.self_update, undefined);
+    assert.match(readFileSync(npmLog, "utf8"), /^view @peterxiaoyang\/superspec version$/m);
+  });
+});
+
 test("CLI update bootstraps old projects and ignores legacy self-update flags", () => {
   withTempProject(projectRoot => {
-    const cli = new URL("../src/cli.ts", import.meta.url).pathname;
-    const output = execFileSync(process.execPath, [cli, "update", "--scope", "project", "--skip-self-update"], {
+    const output = execFileSync(process.execPath, [cliPath(), "update", "--scope", "project", "--skip-self-update"], {
       cwd: projectRoot,
       encoding: "utf8",
     });
@@ -154,8 +480,7 @@ test("CLI update allows legacy state while install still blocks it", () => {
       /检测到老版 SuperSpec/,
     );
 
-    const cli = new URL("../src/cli.ts", import.meta.url).pathname;
-    const output = execFileSync(process.execPath, [cli, "update", "--skip-self-update"], {
+    const output = execFileSync(process.execPath, [cliPath(), "update", "--skip-self-update"], {
       cwd: projectRoot,
       encoding: "utf8",
     });

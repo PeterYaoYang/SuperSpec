@@ -238,7 +238,7 @@ superspec status
 superspec update
 ```
 
-这条命令会补齐 `.superspec/changes` 运行时目录，并把当前 CLI 内置的 `.codex/skills/superspec-*`、`.codex/prompts/*.md`、`.codex/agents/*.toml` 同步到项目里。真正升级全局 npm 包仍需使用 `npm install -g @peterxiaoyang/superspec@<version>`。
+这条命令会先检查 npm 上的 latest 版本；如果有新版，会自动执行全局升级并用新版 CLI 重新同步项目入口。同步内容包括补齐 `.superspec/changes` 运行时目录，并把当前 CLI 内置的 `.codex/skills/superspec-*`、`.codex/prompts/*.md`、`.codex/agents/*.toml` 同步到项目里。
 
 ## 进阶信息
 

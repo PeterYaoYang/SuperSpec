@@ -2,6 +2,8 @@
 // SuperSpec 流程引擎 — CLI 入口
 
 import { join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { createInterface } from "node:readline/promises";
 import { installProject } from "./install.ts";
 import { writeSnapshot } from "./store.ts";
 import { rebuildSnapshot } from "./sync.ts";
@@ -12,6 +14,8 @@ import { recordJobSubmit, recordUserDecision, jobsList, jobsPacket } from "./rec
 import { recordTestRun } from "./task.ts";
 import { probeOpenSpec, openspecStatus, changeRoot } from "./openspec.ts";
 import { SUPERSPEC_VERSION } from "./version.ts";
+
+const PACKAGE_NAME = "@peterxiaoyang/superspec";
 
 // ===== 参数解析 =====
 
@@ -45,6 +49,279 @@ function parseFlags(args: string[]): Record<string, string> {
   return opts;
 }
 
+function parseVersion(version: string): { major: number; minor: number; patch: number; prerelease: string | null } | null {
+  const match = version.trim().match(/^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/);
+  if (!match) return null;
+  return {
+    major: Number(match[1]),
+    minor: Number(match[2]),
+    patch: Number(match[3]),
+    prerelease: match[4] ?? null,
+  };
+}
+
+function compareVersions(a: string, b: string): number {
+  const left = parseVersion(a);
+  const right = parseVersion(b);
+  if (!left || !right) return a.localeCompare(b);
+  for (const key of ["major", "minor", "patch"] as const) {
+    if (left[key] !== right[key]) return left[key] - right[key];
+  }
+  if (left.prerelease === right.prerelease) return 0;
+  if (left.prerelease == null) return 1;
+  if (right.prerelease == null) return -1;
+  return left.prerelease.localeCompare(right.prerelease);
+}
+
+function commandErrorMessage(err: unknown): string {
+  if (!err || typeof err !== "object") return String(err);
+  const maybe = err as { message?: string; stderr?: Buffer | string; stdout?: Buffer | string };
+  const stderr = maybe.stderr ? Buffer.from(maybe.stderr).toString("utf8").trim() : "";
+  const stdout = maybe.stdout ? Buffer.from(maybe.stdout).toString("utf8").trim() : "";
+  return stderr || stdout || maybe.message || String(err);
+}
+
+type SelfUpdatePhase = "npm_view" | "global_install" | "version_check" | "version_mismatch" | "rerun" | "rerun_output";
+
+class SelfUpdateError extends Error {
+  readonly phase: SelfUpdatePhase;
+  readonly latest: string | null;
+
+  constructor(phase: SelfUpdatePhase, message: string, latest: string | null = null) {
+    super(message);
+    this.name = "SelfUpdateError";
+    this.phase = phase;
+    this.latest = latest;
+  }
+}
+
+function isTestMode(): boolean {
+  return process.env.SUPERSPEC_TEST_MODE === "1" || process.env.NODE_ENV === "test";
+}
+
+function testEnv(name: string): string | undefined {
+  return isTestMode() ? process.env[name] : undefined;
+}
+
+function selfUpdateError(phase: SelfUpdatePhase, err: unknown, latest: string | null = null): SelfUpdateError {
+  return new SelfUpdateError(phase, commandErrorMessage(err), latest);
+}
+
+function attachSelfUpdateLatest(err: unknown, phase: SelfUpdatePhase, latest: string): SelfUpdateError {
+  if (err instanceof SelfUpdateError) {
+    return new SelfUpdateError(err.phase, err.message, err.latest ?? latest);
+  }
+  return selfUpdateError(phase, err, latest);
+}
+
+function selfUpdateFailurePayload(err: unknown): { ok: false; message: string; self_update: { updated: false; from: string; to: string | null; phase: SelfUpdatePhase | "unknown" } } {
+  if (err instanceof SelfUpdateError) {
+    return {
+      ok: false,
+      message: err.message,
+      self_update: {
+        updated: false,
+        from: SUPERSPEC_VERSION,
+        to: err.latest,
+        phase: err.phase,
+      },
+    };
+  }
+
+  return {
+    ok: false,
+    message: commandErrorMessage(err),
+    self_update: {
+      updated: false,
+      from: SUPERSPEC_VERSION,
+      to: null,
+      phase: "unknown",
+    },
+  };
+}
+
+function npmLatestVersion(): string {
+  const testError = testEnv("SUPERSPEC_TEST_NPM_VIEW_ERROR");
+  if (testError) throw new SelfUpdateError("npm_view", testError);
+  const testLatest = testEnv("SUPERSPEC_TEST_LATEST_VERSION");
+  if (testLatest) return testLatest;
+
+  try {
+    const output = execFileSync("npm", ["view", PACKAGE_NAME, "version"], { encoding: "utf8" });
+    return output.trim().replace(/^"|"$/g, "");
+  } catch (err) {
+    throw selfUpdateError("npm_view", err);
+  }
+}
+
+function installLatestGlobal(): void {
+  const testError = testEnv("SUPERSPEC_TEST_GLOBAL_INSTALL_ERROR");
+  if (testError) throw new SelfUpdateError("global_install", testError);
+  if (testEnv("SUPERSPEC_TEST_SKIP_GLOBAL_INSTALL") === "1") return;
+
+  try {
+    execFileSync("npm", ["install", "-g", `${PACKAGE_NAME}@latest`], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch (err) {
+    throw selfUpdateError("global_install", err);
+  }
+}
+
+function parseSuperSpecVersion(output: string): string | null {
+  const match = output.trim().match(/^SuperSpec\s+(.+)$/);
+  return match?.[1]?.trim() ?? null;
+}
+
+function pathCliVersion(): string {
+  const testError = testEnv("SUPERSPEC_TEST_CLI_VERSION_ERROR");
+  if (testError) throw new Error(testError);
+  const testVersion = testEnv("SUPERSPEC_TEST_CLI_VERSION");
+  if (testVersion) return testVersion;
+  const testOutput = testEnv("SUPERSPEC_TEST_CLI_VERSION_OUTPUT");
+  if (testOutput) {
+    const parsed = parseSuperSpecVersion(testOutput);
+    if (!parsed) throw new Error(`无法解析 superspec --version 输出：${testOutput}`);
+    return parsed;
+  }
+
+  const output = execFileSync("superspec", ["--version"], {
+    encoding: "utf8",
+    env: process.env,
+  });
+  const parsed = parseSuperSpecVersion(output);
+  if (!parsed) throw new Error(`无法解析 superspec --version 输出：${output.trim()}`);
+  return parsed;
+}
+
+function assertUpdatedCliVersion(latest: string): void {
+  let actual: string;
+  try {
+    actual = pathCliVersion();
+  } catch (err) {
+    throw selfUpdateError("version_check", err, latest);
+  }
+  if (actual !== latest) {
+    throw new SelfUpdateError(
+      "version_mismatch",
+      `全局 superspec 版本仍为 ${actual}，期望 ${latest}。请检查 npm 全局 bin 是否在 PATH 前置。`,
+      latest,
+    );
+  }
+}
+
+function rerunUpdatedCli(projectRoot: string, args: string[]): string {
+  const testError = testEnv("SUPERSPEC_TEST_RERUN_ERROR");
+  if (testError) throw new SelfUpdateError("rerun", testError);
+  const testOutput = testEnv("SUPERSPEC_TEST_RERUN_OUTPUT");
+  if (testOutput) return testOutput;
+
+  try {
+    return execFileSync("superspec", args, {
+      cwd: projectRoot,
+      encoding: "utf8",
+      env: process.env,
+    });
+  } catch (err) {
+    throw selfUpdateError("rerun", err);
+  }
+}
+
+function updateSelfIfNeeded(projectRoot: string, rerunArgs: string[]): { updated: false; latest: string } | { updated: true; latest: string; output: string } {
+  const latest = npmLatestVersion();
+  if (compareVersions(latest, SUPERSPEC_VERSION) <= 0) return { updated: false, latest };
+
+  try {
+    installLatestGlobal();
+  } catch (err) {
+    throw attachSelfUpdateLatest(err, "global_install", latest);
+  }
+  assertUpdatedCliVersion(latest);
+  let output: string;
+  try {
+    output = rerunUpdatedCli(projectRoot, rerunArgs);
+  } catch (err) {
+    throw attachSelfUpdateLatest(err, "rerun", latest);
+  }
+  return {
+    updated: true,
+    latest,
+    output,
+  };
+}
+
+function updatedCliOutput(output: string, latest: string): { exitCode: number; text: string } {
+  const trimmed = output.trim();
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("新版 CLI 输出不是 JSON object");
+    }
+    const payload = {
+      ...parsed,
+      self_update: {
+        updated: true,
+        from: SUPERSPEC_VERSION,
+        to: latest,
+      },
+    };
+    return {
+      exitCode: (payload as { ok?: unknown }).ok === false ? 1 : 0,
+      text: JSON.stringify(payload, null, 2),
+    };
+  } catch {
+    const failure = new SelfUpdateError("rerun_output", "新版 CLI 输出不是 JSON object", latest);
+    return {
+      exitCode: 1,
+      text: JSON.stringify(selfUpdateFailurePayload(failure), null, 2),
+    };
+  }
+}
+
+async function askToUpdateSelfIfNeeded(projectRoot: string, rerunArgs: string[]): Promise<{ updated: false; latest: string | null } | { updated: true; latest: string; output: string }> {
+  const assumeTty = testEnv("SUPERSPEC_TEST_ASSUME_TTY") === "1";
+  if (!assumeTty && (!process.stdin.isTTY || !process.stdout.isTTY)) return { updated: false, latest: null };
+
+  let latest: string;
+  try {
+    latest = npmLatestVersion();
+  } catch (err) {
+    console.error(`SuperSpec 检查最新版本失败：${commandErrorMessage(err)}。继续使用当前版本。`);
+    return { updated: false, latest: null };
+  }
+  if (compareVersions(latest, SUPERSPEC_VERSION) <= 0) return { updated: false, latest };
+
+  const testAnswer = testEnv("SUPERSPEC_TEST_PROMPT_ANSWER");
+  if (testAnswer !== undefined) {
+    if (/^n(o)?$/i.test(testAnswer.trim())) return { updated: false, latest };
+  } else {
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    try {
+      const answer = await rl.question(`发现 SuperSpec ${latest} 可用，当前为 ${SUPERSPEC_VERSION}。是否先升级再继续？ [Y/n] `);
+      if (/^n(o)?$/i.test(answer.trim())) return { updated: false, latest };
+    } finally {
+      rl.close();
+    }
+  }
+
+  try {
+    installLatestGlobal();
+  } catch (err) {
+    throw attachSelfUpdateLatest(err, "global_install", latest);
+  }
+  assertUpdatedCliVersion(latest);
+  try {
+    return {
+      updated: true,
+      latest,
+      output: rerunUpdatedCli(projectRoot, rerunArgs),
+    };
+  } catch (err) {
+    throw attachSelfUpdateLatest(err, "rerun", latest);
+  }
+}
+
 // ===== 初始化 transition init =====
 
 // ===== init/explore 现在在 transition.ts 中（走统一锁内路径）=====
@@ -65,7 +342,7 @@ async function main(argv: string[]): Promise<number> {
   jobs <子命令> --change <C>        工作项管理（见下）
   install                           安装项目工作流入口
   init --scope project              install 的兼容别名
-  update                           同步项目工作流模板
+  update                           升级 CLI 到 npm latest 并同步项目工作流模板
   version                          版本号
 
 transition 子命令：
@@ -105,18 +382,36 @@ jobs 子命令：
     }
 
     try {
+      if (opts["skip-self-update"] !== "true") {
+        const rerunArgs = command === "init"
+          ? ["init", "--scope", "project", "--skip-self-update"]
+          : ["install", "--skip-self-update"];
+        const selfUpdate = await askToUpdateSelfIfNeeded(projectRoot, rerunArgs);
+        if (selfUpdate.updated) {
+          const rerun = updatedCliOutput(selfUpdate.output, selfUpdate.latest);
+          console.log(rerun.text);
+          return rerun.exitCode;
+        }
+      }
       console.log(JSON.stringify(installProject(projectRoot)));
       return 0;
     } catch (err) {
-      console.log(JSON.stringify({
-        ok: false,
-        message: (err as Error).message,
-      }));
+      console.log(JSON.stringify(err instanceof SelfUpdateError
+        ? selfUpdateFailurePayload(err)
+        : { ok: false, message: commandErrorMessage(err) }));
       return 1;
     }
   }
   if (command === "update") {
     try {
+      if (opts["skip-self-update"] !== "true") {
+        const selfUpdate = updateSelfIfNeeded(projectRoot, ["update", "--skip-self-update"]);
+        if (selfUpdate.updated) {
+          const rerun = updatedCliOutput(selfUpdate.output, selfUpdate.latest);
+          console.log(rerun.text);
+          return rerun.exitCode;
+        }
+      }
       const result = installProject(projectRoot, { allowLegacyState: true });
       console.log(JSON.stringify({
         ...result,
@@ -124,10 +419,9 @@ jobs 子命令：
       }));
       return 0;
     } catch (err) {
-      console.log(JSON.stringify({
-        ok: false,
-        message: (err as Error).message,
-      }));
+      console.log(JSON.stringify(err instanceof SelfUpdateError
+        ? selfUpdateFailurePayload(err)
+        : { ok: false, message: commandErrorMessage(err) }));
       return 1;
     }
   }
