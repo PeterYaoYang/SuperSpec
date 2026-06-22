@@ -42,12 +42,43 @@ function setupApplyWithDoneTask(): { projectRoot: string; change: string; change
   };
 }
 
+function appendTestRunEvent(
+  projectRoot: string,
+  change: string,
+  payload: {
+    test_id: string;
+    attempt_id?: string | null;
+    task_structure_digest: string;
+    semantic_status: "expected_failure" | "expected_success" | "characterization_pass" | "unknown";
+    command?: string;
+    cwd?: string;
+    exit_code?: number;
+    target_fingerprint?: string | null;
+  },
+): void {
+  appendEvent(projectRoot, change, makeEvent(change, "test_run_recorded", {
+    command: payload.command ?? "npm test",
+    cwd: payload.cwd ?? projectRoot,
+    exit_code: payload.exit_code ?? 0,
+    target_fingerprint: payload.target_fingerprint ?? null,
+    raw_log_ref: null,
+    ...payload,
+  }));
+}
+
 test("review-ready：apply → apply_done（所有任务完成）", () => {
   const fx = setupApplyWithDoneTask();
   try {
     const result = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(result.outcome, "advanced");
     assert.equal(result.to_state, "apply_done");
+    const commit = readEvents(fx.projectRoot, fx.change).findLast(e =>
+      e.event_type === "transition_commit" && (e.payload as { transition?: string }).transition === "review-ready"
+    );
+    assert.deepEqual((commit?.payload as { review_policy?: unknown }).review_policy, {
+      review_risk: "strict",
+      requires_verifier: true,
+    });
   } finally { fx.cleanup(); }
 });
 
@@ -262,6 +293,60 @@ test("next：apply/apply_done 显式 minimal 会传播到 review-ready", () => {
   } finally { fx.cleanup(); }
 });
 
+test("review policy：首次 risk 生效，后续 risk 不覆盖", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    const toApplyDone = reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    assert.equal(toApplyDone.to_state, "apply_done");
+
+    const toReview = reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "strict");
+    assert.equal(toReview.to_state, "review");
+    assert.equal(toReview.created_jobs.length, 0);
+
+    const policies = readEvents(fx.projectRoot, fx.change)
+      .filter(e => e.event_type === "transition_commit")
+      .map(e => (e.payload as { review_policy?: unknown }).review_policy)
+      .filter(Boolean);
+    assert.equal(policies.length, 1);
+    assert.deepEqual(policies[0], {
+      review_risk: "minimal",
+      requires_verifier: false,
+    });
+  } finally { fx.cleanup(); }
+});
+
+test("review 状态无 policy：next 回 review-ready，accept 不直通", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "transition_commit", {
+      transition: "legacy-review",
+      from_state: "apply",
+      to_state: "review",
+      outcome: "advanced",
+      created_job_ids: [],
+      reason: "legacy review without policy",
+    }, { transitionId: "T-legacy-review", idempotencyKey: "legacy-review-key" }));
+
+    const nextResult = next(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    assert.equal(nextResult.path, "next_command");
+    assert.equal(nextResult.next_command, 'superspec transition review-ready --change "test-change" --risk minimal');
+
+    const blocked = accept(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(blocked.events_written, 0);
+    assert.match(blocked.message, /审查策略/);
+
+    const eventCountBefore = readEvents(fx.projectRoot, fx.change).length;
+    const policyWritten = reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    assert.equal(policyWritten.from_state, "review");
+    assert.equal(policyWritten.to_state, "review");
+    assert.equal(policyWritten.events_written, 1);
+    assert.equal(readEvents(fx.projectRoot, fx.change).length, eventCountBefore + 2, "prepare + commit");
+
+    const accepted = accept(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(accepted.to_state, "accepted");
+  } finally { fx.cleanup(); }
+});
+
 test("review-ready：apply_done → 创建 verifier final gate job", () => {
   const projectRoot = mkdtempSync(join(tmpdir(), "superspec-p4fa-"));
   const change = "test-change";
@@ -348,6 +433,136 @@ test("review-ready：忽略非 review-ready 来源的 verifier job", () => {
   } finally { fx.cleanup(); }
 });
 
+test("review-ready：verifier rejected 后创建新 job 带处理提示", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    const created = reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.equal(created.outcome, "job_created");
+
+    const reportPath = join(fx.projectRoot, "verifier-fail.json");
+    writeFileSync(reportPath, JSON.stringify({
+      role: "verifier",
+      findings: [{ severity: "high", message: "missing verification" }],
+      verdict: "fail",
+    }));
+    const rejected = recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, created.created_jobs[0], reportPath);
+    assert.equal(rejected.accepted, false);
+
+    const retry = reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.equal(retry.outcome, "job_created");
+    assert.match(String(retry.details?.advisory), /此前 verifier 未通过/);
+  } finally { fx.cleanup(); }
+});
+
+test("accept：非 review-ready verifier 不能满足最终验证", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+
+    const unrelatedJob = {
+      job_id: "JOB-unrelated-verifier",
+      role: "verifier",
+      state: "requested",
+      boundFiles: [],
+      packet_digest: "sha256:unrelated",
+      created_from_transition: "apply-verify",
+      created_at: new Date().toISOString(),
+    };
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "transition_commit", {
+      transition: "apply-verify",
+      from_state: "apply_done",
+      to_state: "apply_done",
+      outcome: "job_created",
+      created_job_ids: [unrelatedJob.job_id],
+      new_jobs: [unrelatedJob],
+      reason: "unrelated verifier",
+    }, { transitionId: "T-unrelated-verifier", idempotencyKey: "unrelated-verifier-key" }));
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "job_accepted", {
+      job_id: unrelatedJob.job_id,
+      role: "verifier",
+      report_digest: "sha256:unrelated-report",
+      accepted_at: new Date().toISOString(),
+    }));
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "transition_commit", {
+      transition: "manual-review",
+      from_state: "apply_done",
+      to_state: "review",
+      outcome: "advanced",
+      created_job_ids: [],
+      reason: "simulate bad review advance",
+    }, { transitionId: "T-manual-review", idempotencyKey: "manual-review-key" }));
+
+    const blocked = accept(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(blocked.events_written, 0);
+    assert.match(blocked.message, /fresh verifier/);
+  } finally { fx.cleanup(); }
+});
+
+test("accept：verifier accepted 后补登记匹配 digest 的 legacy test-run 会失效", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    writeFileSync(join(fx.changeRoot, "tasks.md"), "# Tasks\n\n- [ ] TASK-001 Implement\n");
+
+    taskStart(fx.projectRoot, fx.change, fx.changeRoot, "TASK-001");
+    const attempt = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot).active_task_attempts[0];
+    assert.ok(attempt);
+
+    appendTestRunEvent(fx.projectRoot, fx.change, {
+      test_id: "TEST-RED",
+      attempt_id: attempt.attempt_id,
+      task_structure_digest: attempt.task_structure_digest,
+      semantic_status: "expected_failure",
+      exit_code: 1,
+    });
+    appendTestRunEvent(fx.projectRoot, fx.change, {
+      test_id: "TEST-GREEN",
+      attempt_id: attempt.attempt_id,
+      task_structure_digest: attempt.task_structure_digest,
+      semantic_status: "expected_success",
+      exit_code: 0,
+    });
+
+    const completed = taskComplete(fx.projectRoot, fx.change, fx.changeRoot, "TASK-001");
+    assert.equal(completed.events_written, 2);
+
+    reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    const verifier = reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.equal(verifier.outcome, "job_created");
+    const jobId = verifier.created_jobs[0];
+
+    const packet = jobsPacket(fx.projectRoot, fx.change, jobId);
+    assert.equal(typeof packet.packet?.review_evidence_digest, "string");
+
+    const reportPath = join(fx.projectRoot, "verifier-evidence.json");
+    writeFileSync(reportPath, JSON.stringify({ role: "verifier", findings: [], verdict: "pass" }));
+    const submit = recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, jobId, reportPath);
+    assert.equal(submit.accepted, true);
+
+    const toReview = reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.equal(toReview.to_state, "review");
+
+    appendTestRunEvent(fx.projectRoot, fx.change, {
+      test_id: "TEST-LATE-LEGACY",
+      attempt_id: null,
+      task_structure_digest: attempt.task_structure_digest,
+      semantic_status: "expected_success",
+      exit_code: 0,
+    });
+
+    const snap = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(snap.accepted_jobs.some(job => job.job_id === jobId), false);
+
+    const nextResult = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(nextResult.path, "next_command");
+    assert.match(nextResult.next_command, /review-ready/);
+
+    const blocked = accept(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(blocked.events_written, 0);
+    assert.match(blocked.message, /fresh verifier/);
+  } finally { fx.cleanup(); }
+});
+
 test("sync：绑定文件删除会让 open 和 accepted job stale", () => {
   const openFx = setupApplyWithDoneTask();
   try {
@@ -383,26 +598,13 @@ test("sync：绑定文件删除会让 open 和 accepted job stale", () => {
 });
 
 test("accept：review → accepted", () => {
-  const projectRoot = mkdtempSync(join(tmpdir(), "superspec-p4ac-"));
-  const change = "test-change";
-  const changeRoot = join(projectRoot, "openspec", "changes", change);
-  mkdirSync(join(changeRoot, ".superspec", "artifacts"), { recursive: true });
-  writeFileSync(join(changeRoot, "tasks.md"), "# Tasks\n");
-  ensureChangeLayout(projectRoot, change);
-  for (const [t, f, to] of [
-    ["init","init","init"],["explore","init","explore"],["propose","explore","propose"],
-    ["propose-ready","propose","propose_ready"],["start-apply","propose_ready","apply"],
-    ["review-ready","apply","apply_done"],["review-ready2","apply_done","review"],
-  ] as const) {
-    appendEvent(projectRoot, change, makeEvent(change, "transition_commit", {
-      transition: t, from_state: f, to_state: to,
-      outcome: "advanced", created_job_ids: [], reason: t,
-    }, { transitionId: `T-${t}`, idempotencyKey: `${t}-key` }));
-  }
+  const fx = setupApplyWithDoneTask();
   try {
-    const result = accept(projectRoot, change, changeRoot);
+    reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    const result = accept(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(result.to_state, "accepted");
-  } finally { rmSync(projectRoot, { recursive: true, force: true }); }
+  } finally { fx.cleanup(); }
 });
 
 test("archive：accepted → archive + 保全清单", () => {

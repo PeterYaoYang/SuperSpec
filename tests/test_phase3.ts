@@ -2,17 +2,16 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { ensureChangeLayout, appendEvent, makeEvent } from "../src/store.ts";
+import { ensureChangeLayout, appendEvent, makeEvent, readEvents, rawFile, sha256Text } from "../src/store.ts";
 import { rebuildSnapshot } from "../src/sync.ts";
 import { next } from "../src/next.ts";
 import { proposeReady, startApply, taskStart, taskComplete } from "../src/transition.ts";
 import { recordJobSubmit } from "../src/record.ts";
 import { recordTestRun, tasksStructureDigestOf } from "../src/task.ts";
-import { sha256Text } from "../src/store.ts";
 
 // ===== 夹具：seed 到 propose_ready =====
 
@@ -83,6 +82,10 @@ function reviewerReport(role: "critic" | "architect" | "test-engineer" = "critic
     findings: [],
     reviewer: { kind: "codex-subagent", id: "test-reviewer" },
   });
+}
+
+function rawDirFiles(projectRoot: string, change: string): string[] {
+  return readdirSync(join(projectRoot, ".superspec", "changes", change, "raw")).sort();
 }
 
 // ===== 测试 =====
@@ -210,6 +213,87 @@ test("record test-run：RED 登记", () => {
     }));
     const result = recordTestRun(fx.projectRoot, fx.change, testFile);
     assert.equal(result.accepted, true);
+
+    const rawPath = rawFile(fx.projectRoot, fx.change, "test-runs");
+    const rawLines = readFileSync(rawPath, "utf8").trim().split("\n");
+    assert.equal(rawLines.length, 1);
+    assert.equal(JSON.parse(rawLines[0]).semantic_status, "expected_failure");
+    assert.deepEqual(rawDirFiles(fx.projectRoot, fx.change), ["test-runs.jsonl"]);
+
+    const event = readEvents(fx.projectRoot, fx.change).findLast(e => e.event_type === "test_run_recorded");
+    assert.ok(event);
+    assert.equal(event.payload.raw_kind, "test-runs");
+    assert.equal(event.payload.raw_index, 0);
+    assert.equal(event.payload.raw_digest, sha256Text(rawLines[0]));
+  } finally { fx.cleanup(); }
+});
+
+test("record test-run：raw_index 跳过损坏 JSONL 行", () => {
+  const fx = setupTaskInProgress();
+  try {
+    const rawPath = rawFile(fx.projectRoot, fx.change, "test-runs");
+    writeFileSync(rawPath, `${JSON.stringify({ seed: true })}\n{ bad json\n`, "utf8");
+    const structDigest = tasksStructureDigestOf(fx.changeRoot);
+    const testFile = join(fx.projectRoot, "red.json");
+    writeFileSync(testFile, JSON.stringify({
+      test_id: "TEST-001",
+      task_structure_digest: structDigest,
+      command: "npm test",
+      cwd: fx.projectRoot,
+      exit_code: 1,
+      semantic_status: "expected_failure",
+    }));
+
+    const result = recordTestRun(fx.projectRoot, fx.change, testFile);
+    assert.equal(result.accepted, true);
+
+    const event = readEvents(fx.projectRoot, fx.change).findLast(e => e.event_type === "test_run_recorded");
+    assert.ok(event);
+    assert.equal(event.payload.raw_index, 1);
+  } finally { fx.cleanup(); }
+});
+
+test("raw JSONL orphan 行不作为任务完成证据", () => {
+  const fx = setupTaskInProgress();
+  try {
+    const rawPath = rawFile(fx.projectRoot, fx.change, "test-runs");
+    writeFileSync(rawPath, [
+      JSON.stringify({ test_id: "TEST-001", semantic_status: "expected_failure" }),
+      JSON.stringify({ test_id: "TEST-001", semantic_status: "expected_success" }),
+      "",
+    ].join("\n"), "utf8");
+
+    const snap = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(snap.active_task_attempts.length, 1);
+
+    const nextResult = next(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.equal(nextResult.path, "ask_user");
+    assert.ok(nextResult.reason.includes("缺少完成证据"));
+
+    const complete = taskComplete(fx.projectRoot, fx.change, fx.changeRoot, "TASK-001");
+    assert.equal(complete.events_written, 0);
+    assert.ok(complete.message.includes("RED"));
+  } finally { fx.cleanup(); }
+});
+
+test("record test-run：raw append 失败时不写 accepted event", () => {
+  const fx = setupTaskInProgress();
+  try {
+    const rawPath = rawFile(fx.projectRoot, fx.change, "test-runs");
+    mkdirSync(rawPath);
+    const structDigest = tasksStructureDigestOf(fx.changeRoot);
+    const testFile = join(fx.projectRoot, "red.json");
+    writeFileSync(testFile, JSON.stringify({
+      test_id: "TEST-001",
+      task_structure_digest: structDigest,
+      command: "npm test",
+      cwd: fx.projectRoot,
+      exit_code: 1,
+      semantic_status: "expected_failure",
+    }));
+
+    assert.throws(() => recordTestRun(fx.projectRoot, fx.change, testFile));
+    assert.equal(readEvents(fx.projectRoot, fx.change).some(e => e.event_type === "test_run_recorded"), false);
   } finally { fx.cleanup(); }
 });
 

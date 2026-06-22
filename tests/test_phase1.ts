@@ -2,11 +2,11 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { ensureChangeLayout, readEvents, appendEvent, makeEvent, writeSnapshot, readSnapshot, acquireLock, releaseLock } from "../src/store.ts";
+import { ensureChangeLayout, readEvents, appendEvent, makeEvent, writeSnapshot, readSnapshot, acquireLock, releaseLock, rawFile, sha256Text } from "../src/store.ts";
 import { rebuildSnapshot } from "../src/sync.ts";
 import { next } from "../src/next.ts";
 import { proposeReady, commitTransition } from "../src/transition.ts";
@@ -90,6 +90,10 @@ function reviewerReport(role: "critic" | "architect" | "test-engineer" = "critic
     verdict: "pass",
     reviewer: { kind: "codex-subagent", id: "test-reviewer" },
   });
+}
+
+function rawDirFiles(projectRoot: string, change: string): string[] {
+  return readdirSync(join(projectRoot, ".superspec", "changes", change, "raw")).sort();
 }
 
 // ===== 测试 =====
@@ -208,6 +212,18 @@ test("record job-submit：接受合格报告", () => {
     const rResult = recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, jobId, reportPath);
     assert.equal(rResult.accepted, true);
     assert.equal(rResult.job_state, "accepted");
+
+    const rawPath = rawFile(fx.projectRoot, fx.change, "review-reports");
+    const rawLines = readFileSync(rawPath, "utf8").trim().split("\n");
+    assert.equal(rawLines.length, 1);
+    assert.equal(JSON.parse(rawLines[0]).role, "critic");
+    assert.deepEqual(rawDirFiles(fx.projectRoot, fx.change), ["review-reports.jsonl"]);
+
+    const accepted = readEvents(fx.projectRoot, fx.change).findLast(e => e.event_type === "job_accepted");
+    assert.ok(accepted);
+    assert.equal(accepted.payload.raw_kind, "review-reports");
+    assert.equal(accepted.payload.raw_index, 0);
+    assert.equal(accepted.payload.raw_digest, sha256Text(rawLines[0]));
   } finally { fx.cleanup(); }
 });
 
@@ -222,6 +238,7 @@ test("record job-submit：critic 缺 reviewer 会拒绝", () => {
     const rResult = recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, jobId, reportPath);
     assert.equal(rResult.accepted, false);
     assert.ok(rResult.message.includes("reviewer"));
+    assert.deepEqual(rawDirFiles(fx.projectRoot, fx.change), []);
   } finally { fx.cleanup(); }
 });
 
@@ -242,6 +259,21 @@ test("record job-submit：critic reviewer kind/id 非法会拒绝", () => {
     assert.equal(rResult.accepted, false);
     assert.ok(rResult.message.includes("reviewer.kind"));
     assert.ok(rResult.message.includes("reviewer.id"));
+    assert.deepEqual(rawDirFiles(fx.projectRoot, fx.change), []);
+  } finally { fx.cleanup(); }
+});
+
+test("record job-submit：raw append 失败时不写 accepted event", () => {
+  const fx = setupFixture("propose");
+  try {
+    const tResult = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    const jobId = tResult.created_jobs[0];
+    const reportPath = join(fx.projectRoot, "report.json");
+    writeFileSync(reportPath, reviewerReport("critic"));
+    mkdirSync(rawFile(fx.projectRoot, fx.change, "review-reports"));
+
+    assert.throws(() => recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, jobId, reportPath));
+    assert.equal(readEvents(fx.projectRoot, fx.change).some(e => e.event_type === "job_accepted"), false);
   } finally { fx.cleanup(); }
 });
 
@@ -331,11 +363,14 @@ test("record job-submit 幂等：同 report 返回旧结果", () => {
 
     const r1 = recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, jobId, reportPath);
     assert.equal(r1.accepted, true);
+    const rawPath = rawFile(fx.projectRoot, fx.change, "review-reports");
+    assert.equal(readFileSync(rawPath, "utf8").trim().split("\n").length, 1);
 
     // 重复提交同报告 → 幂等返回
     const r2 = recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, jobId, reportPath);
     assert.equal(r2.accepted, true);
     assert.ok(r2.message.includes("幂等"));
+    assert.equal(readFileSync(rawPath, "utf8").trim().split("\n").length, 1);
   } finally { fx.cleanup(); }
 });
 

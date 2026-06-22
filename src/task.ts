@@ -2,7 +2,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { sha256Text, ensureChangeLayout, appendEvent, makeEvent, withLock } from "./store.ts";
+import { sha256Text, ensureChangeLayout, appendEvent, makeEvent, withLock, appendRawRecord } from "./store.ts";
 import { tasksStructureDigest as formatDigest } from "./format.ts";
 import type { TestRun } from "./types.ts";
 
@@ -33,7 +33,7 @@ export function recordTestRun(
       return { accepted: false, message: "缺少 test_id 或 task_structure_digest" };
     }
 
-    const event = makeEvent(change, "test_run_recorded", {
+    const normalizedTestRun = {
       test_id: tr.test_id,
       task_structure_digest: tr.task_structure_digest,
       attempt_id: tr.attempt_id ?? null,
@@ -43,6 +43,11 @@ export function recordTestRun(
       semantic_status: tr.semantic_status ?? "unknown",
       target_fingerprint: tr.target_fingerprint ?? null,
       raw_log_ref: tr.raw_log_ref ?? null,
+    };
+    const rawRef = appendRawRecord(projectRoot, change, "test-runs", normalizedTestRun);
+    const event = makeEvent(change, "test_run_recorded", {
+      ...normalizedTestRun,
+      ...rawRef,
     });
     appendEvent(projectRoot, change, event);
     return { accepted: true, message: `测试运行已登记：test_id=${tr.test_id}` };

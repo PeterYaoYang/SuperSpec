@@ -1,14 +1,25 @@
 {
   "name": "@peterxiaoyang/superspec",
-  "version": "0.1.22",
+  "version": "0.1.23",
   "description": "SuperSpec 流程引擎 — transition engine with lightweight fact-sync",
   "type": "module",
-  "engines": { "node": ">=20.19.0" },
-  "bin": { "superspec": "dist/cli.js" },
-  "exports": {
-    ".": { "types": "./dist/types.d.ts", "default": "./dist/cli.js" }
+  "engines": {
+    "node": ">=20.19.0"
   },
-  "files": ["README.md", "dist", "templates"],
+  "bin": {
+    "superspec": "dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/types.d.ts",
+      "default": "./dist/cli.js"
+    }
+  },
+  "files": [
+    "README.md",
+    "dist",
+    "templates"
+  ],
   "scripts": {
     "build": "node build.js",
     "typecheck": "tsc --noEmit",

@@ -23,6 +23,7 @@ export interface Job {
   role: JobRole;
   state: JobState;
   boundFiles: Ref[];
+  review_evidence_digest?: string;
   packet_digest: string;
   created_from_transition: string;
   created_at: string;
@@ -33,6 +34,7 @@ export interface JobPacket {
   role: JobRole;
   recommended_agent?: string;
   boundFiles: Ref[];
+  review_evidence_digest?: string;
   packet_digest: string;
   required_output_kind: string;
   output_contract_fields?: string[];
@@ -76,7 +78,12 @@ export interface TransitionCommitPayload {
   to_state: State;             // 状态不变时 = from_state
   outcome: "advanced" | "job_created";  // advanced=状态推进, job_created=状态不变但创建了 job
   created_job_ids: string[];   // 本次创建的 job
+  new_jobs?: Job[];
   reason: string;
+  review_policy?: {
+    review_risk: "minimal" | "normal" | "strict";
+    requires_verifier: boolean;
+  };
 }
 
 // ===== Snapshot =====

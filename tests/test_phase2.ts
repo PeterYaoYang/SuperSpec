@@ -3,11 +3,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { ensureChangeLayout, readEvents, appendEvent, makeEvent } from "../src/store.ts";
+import { ensureChangeLayout, readEvents, appendEvent, makeEvent, rawFile, sha256Text } from "../src/store.ts";
 import { rebuildSnapshot } from "../src/sync.ts";
 import { next } from "../src/next.ts";
 import { proposeReady, transitionExplore } from "../src/transition.ts";
@@ -54,6 +54,10 @@ function reviewerReport(role: "critic" | "architect" | "test-engineer" = "critic
     reviewer: { kind: "codex-subagent", id: "test-reviewer" },
     summary: "通过",
   });
+}
+
+function rawDirFiles(projectRoot: string, change: string): string[] {
+  return readdirSync(join(projectRoot, ".superspec", "changes", change, "raw")).sort();
 }
 
 // ===== 测试 =====
@@ -266,6 +270,62 @@ test("record user-decision：合法决策登记成功", () => {
     const result = recordUserDecision(fx.projectRoot, fx.change, decisionFile);
     assert.equal(result.accepted, true);
     assert.ok(result.message.includes("enter_propose"));
+
+    const rawPath = rawFile(fx.projectRoot, fx.change, "user-decisions");
+    const rawLines = readFileSync(rawPath, "utf8").trim().split("\n");
+    assert.equal(rawLines.length, 1);
+    assert.deepEqual(JSON.parse(rawLines[0]), {
+      scope: "enter_propose",
+      question: "是否进入计划阶段？",
+      answer: "yes",
+    });
+    assert.deepEqual(rawDirFiles(fx.projectRoot, fx.change), ["user-decisions.jsonl"]);
+
+    const event = readEvents(fx.projectRoot, fx.change).findLast(e => e.event_type === "user_decision_recorded");
+    assert.ok(event);
+    assert.equal(event.payload.raw_kind, "user-decisions");
+    assert.equal(event.payload.raw_index, 0);
+    assert.equal(event.payload.raw_digest, sha256Text(rawLines[0]));
+  } finally { fx.cleanup(); }
+});
+
+test("record user-decision：同输入幂等且不重复写 raw", () => {
+  const fx = setupPropose();
+  try {
+    const decisionFile = join(fx.projectRoot, "decision.json");
+    writeFileSync(decisionFile, JSON.stringify({
+      scope: "enter_propose",
+      question: "是否进入计划阶段？",
+      answer: "yes",
+    }));
+
+    const first = recordUserDecision(fx.projectRoot, fx.change, decisionFile);
+    assert.equal(first.accepted, true);
+    const rawPath = rawFile(fx.projectRoot, fx.change, "user-decisions");
+    assert.equal(readFileSync(rawPath, "utf8").trim().split("\n").length, 1);
+    const eventCount = readEvents(fx.projectRoot, fx.change).filter(e => e.event_type === "user_decision_recorded").length;
+
+    const second = recordUserDecision(fx.projectRoot, fx.change, decisionFile);
+    assert.equal(second.accepted, true);
+    assert.ok(second.message.includes("幂等"));
+    assert.equal(readFileSync(rawPath, "utf8").trim().split("\n").length, 1);
+    assert.equal(readEvents(fx.projectRoot, fx.change).filter(e => e.event_type === "user_decision_recorded").length, eventCount);
+  } finally { fx.cleanup(); }
+});
+
+test("record user-decision：raw append 失败时不写 accepted event", () => {
+  const fx = setupPropose();
+  try {
+    const decisionFile = join(fx.projectRoot, "decision.json");
+    writeFileSync(decisionFile, JSON.stringify({
+      scope: "enter_propose",
+      question: "是否进入计划阶段？",
+      answer: "yes",
+    }));
+    mkdirSync(rawFile(fx.projectRoot, fx.change, "user-decisions"));
+
+    assert.throws(() => recordUserDecision(fx.projectRoot, fx.change, decisionFile));
+    assert.equal(readEvents(fx.projectRoot, fx.change).some(e => e.event_type === "user_decision_recorded"), false);
   } finally { fx.cleanup(); }
 });
 
@@ -277,6 +337,19 @@ test("record user-decision：缺 scope 拒绝", () => {
     const result = recordUserDecision(fx.projectRoot, fx.change, decisionFile);
     assert.equal(result.accepted, false);
     assert.ok(result.message.includes("scope"));
+    assert.deepEqual(rawDirFiles(fx.projectRoot, fx.change), []);
+  } finally { fx.cleanup(); }
+});
+
+test("record user-decision：非法 JSON 不写 raw archive", () => {
+  const fx = setupPropose();
+  try {
+    const decisionFile = join(fx.projectRoot, "decision.json");
+    writeFileSync(decisionFile, "{ not json\n");
+    const result = recordUserDecision(fx.projectRoot, fx.change, decisionFile);
+    assert.equal(result.accepted, false);
+    assert.ok(result.message.includes("有效 JSON"));
+    assert.deepEqual(rawDirFiles(fx.projectRoot, fx.change), []);
   } finally { fx.cleanup(); }
 });
 

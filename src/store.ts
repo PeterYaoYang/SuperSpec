@@ -8,6 +8,15 @@ import type { Event, Snapshot, Ref } from "./types.ts";
 
 // ===== 路径 =====
 
+export const RAW_RECORD_KINDS = ["test-runs", "review-reports", "user-decisions"] as const;
+export type RawRecordKind = typeof RAW_RECORD_KINDS[number];
+
+export interface RawRecordRef {
+  raw_kind: RawRecordKind;
+  raw_index: number;
+  raw_digest: string;
+}
+
 export function engineRoot(projectRoot: string): string {
   return join(projectRoot, ".superspec");
 }
@@ -18,6 +27,10 @@ export function changeDir(projectRoot: string, change: string): string {
 
 export function eventsFile(projectRoot: string, change: string): string {
   return join(changeDir(projectRoot, change), "events.jsonl");
+}
+
+export function rawFile(projectRoot: string, change: string, kind: RawRecordKind): string {
+  return join(changeDir(projectRoot, change), "raw", `${kind}.jsonl`);
 }
 
 export function snapshotFile(projectRoot: string, change: string): string {
@@ -138,6 +151,56 @@ export function makeEvent(
 
 export function eventsDigest(events: Event[]): string {
   return sha256Text(events.map(e => e.event_digest).join("\n"));
+}
+
+// ===== Raw 归档 =====
+
+function countValidJsonlRecords(filePath: string): number {
+  if (!existsSync(filePath)) return 0;
+  let count = 0;
+  for (const line of readFileSync(filePath, "utf8").split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      JSON.parse(line);
+      count++;
+    } catch {
+      // raw JSONL 与 events.jsonl 一样容忍截断/损坏行；raw_index 按有效记录计数。
+    }
+  }
+  return count;
+}
+
+/**
+ * Append an accepted record input to the raw archive.
+ *
+ * Contract: call only while holding the per-change lock. The returned raw_index
+ * is the zero-based valid-record index, not necessarily the physical line.
+ */
+export function appendRawRecord(
+  projectRoot: string,
+  change: string,
+  kind: RawRecordKind,
+  record: unknown,
+): RawRecordRef {
+  if (!(RAW_RECORD_KINDS as readonly string[]).includes(kind)) {
+    throw new Error(`Unsupported raw record kind: ${kind}`);
+  }
+  const rf = rawFile(projectRoot, change, kind);
+  mkdirSync(dirname(rf), { recursive: true });
+  const rawIndex = countValidJsonlRecords(rf);
+  const line = JSON.stringify(record);
+  const rawDigest = sha256Text(line);
+  const fd = openSync(rf, "a");
+  try {
+    writeFileSync(fd, line + "\n", "utf8");
+  } finally {
+    closeSync(fd);
+  }
+  return {
+    raw_kind: kind,
+    raw_index: rawIndex,
+    raw_digest: rawDigest,
+  };
 }
 
 // ===== 快照 =====

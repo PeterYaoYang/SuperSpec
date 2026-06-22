@@ -3,8 +3,9 @@
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import {
-  readEvents, eventsDigest, computeDocumentDigests, sha256File, sha256Text, ensureChangeLayout,
+  readEvents, eventsDigest, computeDocumentDigests, sha256Text, ensureChangeLayout,
 } from "./store.ts";
+import { reviewEvidenceDigest, reviewVerifierStaleReason } from "./review.ts";
 import type { Event, Snapshot, Job, State, TaskAttempt } from "./types.ts";
 
 const TRACKED_DOCS = [
@@ -93,18 +94,13 @@ function replayEvents(events: Event[]): {
 function checkStaleJobs(
   jobs: Job[],
   changeRoot: string,
+  currentReviewEvidenceDigest: string,
 ): { job_id: string; reason: string }[] {
   const stale: { job_id: string; reason: string }[] = [];
   for (const job of jobs) {
-    for (const bf of job.boundFiles) {
-      const current = sha256File(join(changeRoot, bf.path)) ?? "sha256:missing";
-      if (current !== bf.sha) {
-        stale.push({
-          job_id: job.job_id,
-          reason: `绑定文件 ${bf.path} 已变化（${bf.sha} → ${current}）`,
-        });
-        break; // 一个文件变就够了
-      }
+    const reason = reviewVerifierStaleReason(job, changeRoot, currentReviewEvidenceDigest);
+    if (reason) {
+      stale.push({ job_id: job.job_id, reason });
     }
   }
   return stale;
@@ -135,10 +131,11 @@ export function rebuildSnapshot(
   const tsDigest = tasksStructureDigest(changeRoot);
 
   const { state, openJobs, acceptedJobs, activeAttempts, taskStatuses, lastTransition } = replayEvents(events);
+  const currentReviewEvidenceDigest = reviewEvidenceDigest(events);
 
   // 粗粒度失效检查（只读，不写事件）：snapshot 只暴露当前可执行/可复用 job。
-  const staleOpenInfo = checkStaleJobs(openJobs, changeRoot);
-  const staleAcceptedInfo = checkStaleJobs(acceptedJobs, changeRoot);
+  const staleOpenInfo = checkStaleJobs(openJobs, changeRoot, currentReviewEvidenceDigest);
+  const staleAcceptedInfo = checkStaleJobs(acceptedJobs, changeRoot, currentReviewEvidenceDigest);
   const freshOpen = openJobs.filter(j => !staleOpenInfo.some(s => s.job_id === j.job_id));
   const freshAccepted = acceptedJobs.filter(j => !staleAcceptedInfo.some(s => s.job_id === j.job_id));
 

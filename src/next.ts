@@ -4,6 +4,7 @@ import { rebuildSnapshot } from "./sync.ts";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { readEvents, sha256Text } from "./store.ts";
+import { isFreshReviewVerifier, isReviewReadyVerifier, readReviewPolicyFromEvents, reviewEvidenceDigest } from "./review.ts";
 import type { Job, NextOutput, AskUser, TaskAttempt } from "./types.ts";
 import { validateDiscovery, countDiscoveryOpenQuestions, collectProposeOpenQuestions, parseTasksMd, pendingTasksInContent } from "./format.ts";
 
@@ -271,6 +272,43 @@ export function next(
           reason: `发现未完成任务 ${pending[0]}，回到执行阶段`,
           missing_inputs: [],
         };
+      }
+      const reviewVerifierJobs = snapshot.open_jobs.filter(isReviewReadyVerifier);
+      if (reviewVerifierJobs.length > 0) {
+        return {
+          state: "review",
+          path: "required_job",
+          required_jobs: reviewVerifierJobs.map(j => ({
+            job_id: j.job_id,
+            role: j.role,
+            packet_command: packetCommand(change, j.job_id),
+          })),
+          reason: `有 ${reviewVerifierJobs.length} 个待完成最终验证工作项`,
+        };
+      }
+      const events = readEvents(projectRoot, change);
+      const policy = readReviewPolicyFromEvents(events);
+      if (!policy) {
+        return {
+          state: "review",
+          path: "next_command",
+          next_command: transitionCommand(change, "review-ready", riskFlag(defaultRisk)),
+          reason: "缺少审查策略，先补 review-ready",
+          missing_inputs: [],
+        };
+      }
+      if (policy.requires_verifier) {
+        const currentEvidenceDigest = reviewEvidenceDigest(events);
+        const verifierAccepted = snapshot.accepted_jobs.find(job => isFreshReviewVerifier(job, changeRoot, currentEvidenceDigest));
+        if (!verifierAccepted) {
+          return {
+            state: "review",
+            path: "next_command",
+            next_command: transitionCommand(change, "review-ready", riskFlag(defaultRisk)),
+            reason: "缺少 fresh verifier，先补最终验证",
+            missing_inputs: [],
+          };
+        }
       }
       return {
         state: "review",

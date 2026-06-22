@@ -4,8 +4,9 @@ import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import {
   ensureChangeLayout, readEvents, appendEvent, makeEvent,
-  sha256File, withLock,
+  sha256File, withLock, appendRawRecord,
 } from "./store.ts";
+import { reviewEvidenceDigest, reviewVerifierStaleReason } from "./review.ts";
 import type { Event, RecordResult, Job, JobRole, JobState } from "./types.ts";
 
 const REVIEW_REPORT_REQUIRED_FIELDS = ["role", "verdict", "findings"] as const;
@@ -118,6 +119,7 @@ export function recordJobSubmit(
 
     // acceptance checks
     const checks: string[] = [];
+    let parsedReport: Record<string, unknown> | null = null;
 
     // 0. 报告格式和角色匹配（最小 JSON contract）
     try {
@@ -125,7 +127,8 @@ export function recordJobSubmit(
       if (!report || typeof report !== "object" || Array.isArray(report)) {
         checks.push("报告必须是 JSON object");
       } else {
-        const obj = report as { role?: unknown; verdict?: unknown; findings?: unknown; reviewer?: unknown };
+        parsedReport = report as Record<string, unknown>;
+        const obj = parsedReport as { role?: unknown; verdict?: unknown; findings?: unknown; reviewer?: unknown };
         for (const field of REVIEW_REPORT_REQUIRED_FIELDS) {
           if (!(field in obj)) checks.push(`报告缺少必填字段 ${field}`);
         }
@@ -167,6 +170,10 @@ export function recordJobSubmit(
         checks.push(`绑定文件 ${bf.path} 已变化（${bf.sha} → ${currentSha}）`);
       }
     }
+    const reviewStaleReason = reviewVerifierStaleReason(job, changeRoot, reviewEvidenceDigest(events));
+    if (reviewStaleReason && !checks.includes(reviewStaleReason)) {
+      checks.push(reviewStaleReason);
+    }
 
     // 2. 报告格式基本校验（非空 JSON 或文本）
     if (!reportContent.trim()) {
@@ -191,11 +198,13 @@ export function recordJobSubmit(
     }
 
     // 接受
+    const rawRef = appendRawRecord(projectRoot, change, "review-reports", parsedReport);
     const acceptEvent = makeEvent(change, "job_accepted", {
       job_id: jobId,
       role: job.role,
       report_digest: reportDigest,
       accepted_at: new Date().toISOString(),
+      ...rawRef,
     });
     appendEvent(projectRoot, change, acceptEvent);
     return {
@@ -215,6 +224,7 @@ export function recordUserDecision(
 ): RecordResult {
   return withLock(projectRoot, change, () => {
     ensureChangeLayout(projectRoot, change);
+    const events = readEvents(projectRoot, change);
 
     if (!existsSync(inputFile)) {
       appendEvent(projectRoot, change, makeEvent(change, "user_decision_recorded", { accepted: false, reason: "file_not_found", path: inputFile }));
@@ -235,11 +245,29 @@ export function recordUserDecision(
       return { event_type: "user_decision_recorded" as const, accepted: false, message: "决策文件缺少 scope 或 answer" };
     }
 
-    const event = makeEvent(change, "user_decision_recorded", {
+    const inputDigest = sha256File(inputFile) ?? "sha256:unknown";
+    const existing = events.find(
+      e => e.event_type === "user_decision_recorded"
+        && (e.payload as { input_digest?: string }).input_digest === inputDigest
+    );
+    if (existing) {
+      return {
+        event_type: "user_decision_recorded" as const,
+        accepted: true,
+        message: "幂等返回：同 user decision 已登记",
+      };
+    }
+
+    const normalizedDecision = {
       scope: decision.scope,
       question: decision.question ?? "",
       answer: decision.answer,
-      input_digest: sha256File(inputFile) ?? "sha256:unknown",
+    };
+    const rawRef = appendRawRecord(projectRoot, change, "user-decisions", normalizedDecision);
+    const event = makeEvent(change, "user_decision_recorded", {
+      ...normalizedDecision,
+      input_digest: inputDigest,
+      ...rawRef,
     });
     appendEvent(projectRoot, change, event);
 
@@ -306,12 +334,14 @@ export function jobsPacket(
         role: job.role,
         recommended_agent: recommendedAgentForRole(job.role),
         boundFiles: job.boundFiles,
+        ...(job.review_evidence_digest ? { review_evidence_digest: job.review_evidence_digest } : {}),
         packet_digest: job.packet_digest,
         required_output_kind: "job_report_json",
         output_contract_fields: requiresReviewer(job.role) ? [...REVIEW_REPORT_REQUIRED_FIELDS, "reviewer"] : [...REVIEW_REPORT_REQUIRED_FIELDS],
         output_contract_optional_fields: [...REVIEW_REPORT_OPTIONAL_FIELDS],
         output_instructions:
           `${roleDescription(job.role)}。请审查 ${job.boundFiles.map(f => f.path).join(", ")}，` +
+          (job.review_evidence_digest ? `本工作项绑定的执行证据版本为 ${job.review_evidence_digest}，` : "") +
           (requiresReviewer(job.role) ? `必须由独立 ${recommendedAgentForRole(job.role)} reviewer 执行并在 reviewer.kind/id 中记录来源，` : "") +
           `产出 JSON 报告文件并通过 superspec record job-submit 登记。` +
           (requiresReviewer(job.role)
