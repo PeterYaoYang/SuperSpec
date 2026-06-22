@@ -1,5 +1,6 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { SUPERSPEC_VERSION } from "./version.ts";
 
 export const WORKFLOW_SKILLS = [
   "superspec-explore",
@@ -200,8 +201,8 @@ export function installProject(projectRoot: string, options: InstallOptions = {}
   if (legacyStateFound(projectRoot)) {
     throw new Error(
       "检测到老版 SuperSpec (0.x) 的状态文件。\n" +
-      "SuperSpec 0.1.16-alpha 是全新引擎，不兼容 0.x 的状态格式。\n" +
-      "请先用老版（0.1.x）完成或归档现有 change，再安装 0.1.16-alpha。\n" +
+      `SuperSpec ${SUPERSPEC_VERSION} 是全新引擎，不兼容 0.x 的状态格式。\n` +
+      `请先用老版（0.1.x）完成或归档现有 change，再安装 ${SUPERSPEC_VERSION}。\n` +
       "或在全新项目目录中安装。",
     );
   }
@@ -216,7 +217,7 @@ export function installProject(projectRoot: string, options: InstallOptions = {}
 
   return {
     ok: true,
-    message: "SuperSpec 0.1.16-alpha 已安装",
+    message: `SuperSpec ${SUPERSPEC_VERSION} 已安装`,
     installed: {
       engine_dir: ".superspec/",
       skills: copySkills(templateRoot, projectRoot),

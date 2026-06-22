@@ -10,6 +10,7 @@ import { proposeReady, commitTransition, transitionInit, transitionExplore, star
 import { recordJobSubmit, recordUserDecision, jobsList, jobsPacket } from "./record.ts";
 import { recordTestRun } from "./task.ts";
 import { probeOpenSpec, openspecStatus, changeRoot } from "./openspec.ts";
+import { SUPERSPEC_VERSION } from "./version.ts";
 
 // ===== 参数解析 =====
 
@@ -52,7 +53,7 @@ function parseFlags(args: string[]): Record<string, string> {
 async function main(argv: string[]): Promise<number> {
   // --help / 无参数 → 打印用法
   if (argv.length === 0 || argv.includes("--help") || argv.includes("-h")) {
-    console.log(`SuperSpec 流程引擎 0.1.16-alpha
+    console.log(`SuperSpec 流程引擎 ${SUPERSPEC_VERSION}
 
 用法：superspec <命令> [选项]
 
@@ -84,7 +85,7 @@ jobs 子命令：
 
   // version
   if (argv[0] === "version" || argv[0] === "--version" || argv[0] === "-v") {
-    console.log("SuperSpec 0.1.16-alpha");
+    console.log(`SuperSpec ${SUPERSPEC_VERSION}`);
     return 0;
   }
 
@@ -119,13 +120,13 @@ jobs 子命令：
     if (isLegacyUpdate) {
       console.log(JSON.stringify({
         ok: false,
-        message: "SuperSpec 0.1.16-alpha 是全新引擎，不能从 0.x 直接 update。\n" +
-          "请用 npm install -g @peterxiaoyang/superspec@0.1.16-alpha 手动安装。\n" +
+        message: `SuperSpec ${SUPERSPEC_VERSION} 是全新引擎，不能从 0.x 直接 update。\n` +
+          `请用 npm install -g @peterxiaoyang/superspec@${SUPERSPEC_VERSION} 手动安装。\n` +
           "现有 change 请先用 0.1.x 完成归档。",
       }));
       return 1;
     }
-    console.log(JSON.stringify({ ok: true, message: "已是最新版本 0.1.16-alpha" }));
+    console.log(JSON.stringify({ ok: true, message: `已是最新版本 ${SUPERSPEC_VERSION}` }));
     return 0;
   }
 

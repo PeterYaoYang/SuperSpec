@@ -7,6 +7,8 @@ import { join } from "node:path";
 
 import { installProject, WORKFLOW_AGENTS, WORKFLOW_PROMPTS, WORKFLOW_SKILLS } from "../src/install.ts";
 
+const PACKAGE_VERSION = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version as string;
+
 function withTempProject(fn: (projectRoot: string) => void): void {
   const projectRoot = mkdtempSync(join(tmpdir(), "superspec-install-test-"));
   try {
@@ -25,6 +27,7 @@ test("installProject installs engine, workflow skills, role prompts, and agents"
     const result = installProject(projectRoot);
 
     assert.equal(result.ok, true);
+    assert.equal(result.message, `SuperSpec ${PACKAGE_VERSION} 已安装`);
     assert.deepEqual(result.installed.skills, [...WORKFLOW_SKILLS]);
     assert.deepEqual(result.installed.prompts, [...WORKFLOW_PROMPTS]);
     assert.deepEqual(result.installed.agents, [...WORKFLOW_AGENTS]);
@@ -64,6 +67,15 @@ test("installProject installs engine, workflow skills, role prompts, and agents"
     assert.match(openspecConfig, /所有产出物必须用简体中文撰写/);
     assert.doesNotMatch(openspecConfig, /^\s*language\s*:/m);
   });
+});
+
+test("CLI version reads package.json version", () => {
+  const cli = new URL("../src/cli.ts", import.meta.url).pathname;
+  const output = execFileSync(process.execPath, [cli, "--version"], {
+    encoding: "utf8",
+  });
+
+  assert.equal(output.trim(), `SuperSpec ${PACKAGE_VERSION}`);
 });
 
 test("CLI init --scope project is a compatibility alias for install", () => {
