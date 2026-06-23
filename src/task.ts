@@ -14,6 +14,42 @@ export function tasksStructureDigestOf(changeRoot: string): string | null {
   return formatDigest(content, sha256Text);
 }
 
+function recordTestRunLoaded(
+  projectRoot: string,
+  change: string,
+  content: string,
+): { accepted: boolean; message: string } {
+  let tr: Partial<TestRun>;
+  try {
+    tr = JSON.parse(content);
+  } catch {
+    return { accepted: false, message: "无效 JSON" };
+  }
+
+  if (!tr.test_id || !tr.task_structure_digest) {
+    return { accepted: false, message: "缺少 test_id 或 task_structure_digest" };
+  }
+
+  const normalizedTestRun = {
+    test_id: tr.test_id,
+    task_structure_digest: tr.task_structure_digest,
+    attempt_id: tr.attempt_id ?? null,
+    command: tr.command ?? "",
+    cwd: tr.cwd ?? "",
+    exit_code: tr.exit_code ?? -1,
+    semantic_status: tr.semantic_status ?? "unknown",
+    target_fingerprint: tr.target_fingerprint ?? null,
+    raw_log_ref: tr.raw_log_ref ?? null,
+  };
+  const rawRef = appendRawRecord(projectRoot, change, "test-runs", normalizedTestRun);
+  const event = makeEvent(change, "test_run_recorded", {
+    ...normalizedTestRun,
+    ...rawRef,
+  });
+  appendEvent(projectRoot, change, event);
+  return { accepted: true, message: `测试运行已登记：test_id=${tr.test_id}` };
+}
+
 /** record test-run：登记测试运行记录 */
 export function recordTestRun(
   projectRoot: string, change: string, inputFile: string,
@@ -22,34 +58,16 @@ export function recordTestRun(
     ensureChangeLayout(projectRoot, change);
     if (!existsSync(inputFile)) return { accepted: false, message: `文件不存在：${inputFile}` };
 
-    let tr: Partial<TestRun>;
-    try {
-      tr = JSON.parse(readFileSync(inputFile, "utf8"));
-    } catch {
-      return { accepted: false, message: "无效 JSON" };
-    }
+    return recordTestRunLoaded(projectRoot, change, readFileSync(inputFile, "utf8"));
+  });
+}
 
-    if (!tr.test_id || !tr.task_structure_digest) {
-      return { accepted: false, message: "缺少 test_id 或 task_structure_digest" };
-    }
-
-    const normalizedTestRun = {
-      test_id: tr.test_id,
-      task_structure_digest: tr.task_structure_digest,
-      attempt_id: tr.attempt_id ?? null,
-      command: tr.command ?? "",
-      cwd: tr.cwd ?? "",
-      exit_code: tr.exit_code ?? -1,
-      semantic_status: tr.semantic_status ?? "unknown",
-      target_fingerprint: tr.target_fingerprint ?? null,
-      raw_log_ref: tr.raw_log_ref ?? null,
-    };
-    const rawRef = appendRawRecord(projectRoot, change, "test-runs", normalizedTestRun);
-    const event = makeEvent(change, "test_run_recorded", {
-      ...normalizedTestRun,
-      ...rawRef,
-    });
-    appendEvent(projectRoot, change, event);
-    return { accepted: true, message: `测试运行已登记：test_id=${tr.test_id}` };
+/** record test-run：从 JSON 内容登记测试运行记录 */
+export function recordTestRunContent(
+  projectRoot: string, change: string, content: string,
+): { accepted: boolean; message: string } {
+  return withLock(projectRoot, change, () => {
+    ensureChangeLayout(projectRoot, change);
+    return recordTestRunLoaded(projectRoot, change, content);
   });
 }

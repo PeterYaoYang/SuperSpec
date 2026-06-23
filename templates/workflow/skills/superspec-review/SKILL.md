@@ -19,7 +19,7 @@ metadata:
 3. 登记结果
 4. 回到 1
 
-next 返回需要 verifier 工作项时，先按返回的验证说明执行核对，再用 `superspec record job-submit --change "<change>" --job <JOB> --report <FILE>` 提交验证报告。
+next 返回需要 verifier 工作项时，先按返回的验证说明执行核对，再优先用 `superspec record job-submit --change "<change>" --job <JOB> --report -` 从 stdin 提交 JSON 验证报告内容；文件路径模式仍可作为 fallback。
 
 `record job-submit` 沿用现有 raw 归档：报告追加到 `raw/review-reports.jsonl`，不会为 review gate 新增 raw 文件类型。
 

@@ -37,6 +37,9 @@ export interface JobPacket {
   review_evidence_digest?: string;
   packet_digest: string;
   required_output_kind: string;
+  preferred_input_mode?: "stdin" | "file";
+  submission_command?: string;
+  file_fallback?: boolean;
   output_contract_fields?: string[];
   output_contract_optional_fields?: string[];
   stop_conditions: string[];

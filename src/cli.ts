@@ -1,17 +1,17 @@
 #!/usr/bin/env node
 // SuperSpec 流程引擎 — CLI 入口
 
-import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { createInterface } from "node:readline/promises";
+import { readFileSync } from "node:fs";
 import { installProject } from "./install.ts";
 import { writeSnapshot } from "./store.ts";
 import { rebuildSnapshot } from "./sync.ts";
 import { next as nextCmd } from "./next.ts";
 import { proposeReady, commitTransition, transitionInit, transitionExplore, startApply, taskStart, taskComplete, reopen, reviewReady, accept, archive } from "./transition.ts";
 import type { State } from "./types.ts";
-import { recordJobSubmit, recordUserDecision, jobsList, jobsPacket } from "./record.ts";
-import { recordTestRun } from "./task.ts";
+import { recordJobSubmit, recordJobSubmitContent, recordUserDecision, recordUserDecisionContent, jobsList, jobsPacket } from "./record.ts";
+import { recordTestRun, recordTestRunContent } from "./task.ts";
 import { probeOpenSpec, openspecStatus, changeRoot } from "./openspec.ts";
 import { SUPERSPEC_VERSION } from "./version.ts";
 
@@ -47,6 +47,20 @@ function parseFlags(args: string[]): Record<string, string> {
     }
   }
   return opts;
+}
+
+class StdinRecordInputError extends Error {
+  constructor(flag: "--input" | "--report") {
+    super(`${flag} - 需要通过 pipe 或重定向提供 JSON；不方便时请使用文件路径。`);
+    this.name = "StdinRecordInputError";
+  }
+}
+
+function readStdinRecordContent(flag: "--input" | "--report"): string {
+  if (process.stdin.isTTY === true) {
+    throw new StdinRecordInputError(flag);
+  }
+  return readFileSync(0, "utf8");
 }
 
 function parseVersion(version: string): { major: number; minor: number; patch: number; prerelease: string | null } | null {
@@ -352,9 +366,9 @@ transition 子命令：
   review-ready / accept / archive
 
 record 子命令：
-  job-submit --job <J> --report <F>
-  user-decision --input <F>
-  test-run --input <F>
+  job-submit --job <J> --report <F|->
+  user-decision --input <F|->
+  test-run --input <F|->
 
 jobs 子命令：
   list / packet --job <J>
@@ -573,7 +587,18 @@ jobs 子命令：
               console.error("record job-submit 需要 --job 和 --report");
               return 1;
             }
-            const result = recordJobSubmit(projectRoot, change, cr, jobId, report);
+            let result;
+            try {
+              result = report === "-"
+                ? recordJobSubmitContent(projectRoot, change, cr, jobId, readStdinRecordContent("--report"))
+                : recordJobSubmit(projectRoot, change, cr, jobId, report);
+            } catch (err) {
+              if (err instanceof StdinRecordInputError) {
+                console.error(err.message);
+                return 1;
+              }
+              throw err;
+            }
             console.log(JSON.stringify(result, null, 2));
             return result.accepted ? 0 : 1;
           }
@@ -584,7 +609,18 @@ jobs 子命令：
               console.error("record user-decision 需要 --input");
               return 1;
             }
-            const result = recordUserDecision(projectRoot, change, inputFile);
+            let result;
+            try {
+              result = inputFile === "-"
+                ? recordUserDecisionContent(projectRoot, change, readStdinRecordContent("--input"))
+                : recordUserDecision(projectRoot, change, inputFile);
+            } catch (err) {
+              if (err instanceof StdinRecordInputError) {
+                console.error(err.message);
+                return 1;
+              }
+              throw err;
+            }
             console.log(JSON.stringify(result, null, 2));
             return result.accepted ? 0 : 1;
           }
@@ -592,7 +628,18 @@ jobs 子命令：
           case "test-run": {
             const inputFile = opts.input;
             if (!inputFile) { console.error("record test-run 需要 --input"); return 1; }
-            const result = recordTestRun(projectRoot, change, inputFile);
+            let result;
+            try {
+              result = inputFile === "-"
+                ? recordTestRunContent(projectRoot, change, readStdinRecordContent("--input"))
+                : recordTestRun(projectRoot, change, inputFile);
+            } catch (err) {
+              if (err instanceof StdinRecordInputError) {
+                console.error(err.message);
+                return 1;
+              }
+              throw err;
+            }
             console.log(JSON.stringify(result, null, 2));
             return result.accepted ? 0 : 1;
           }

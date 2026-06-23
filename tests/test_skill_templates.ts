@@ -53,6 +53,32 @@ test("workflow skill templates have valid frontmatter fences", () => {
   }
 });
 
+test("workflow record guidance prefers stdin over temporary JSON files", () => {
+  const skillFiles = [
+    "../templates/workflow/skills/superspec-explore/SKILL.md",
+    "../templates/workflow/skills/superspec-propose/SKILL.md",
+    "../templates/workflow/skills/superspec-apply/SKILL.md",
+    "../templates/workflow/skills/superspec-review/SKILL.md",
+  ];
+  const promptFiles = [
+    "../templates/workflow/prompts/critic.md",
+    "../templates/workflow/prompts/architect.md",
+    "../templates/workflow/prompts/test-engineer.md",
+  ];
+
+  for (const file of [...skillFiles, ...promptFiles]) {
+    const content = read(file);
+    assert.doesNotMatch(content, /--input <FILE>|--report <FILE>|报告文件|写入 JSON 文件/, file);
+  }
+
+  assert.match(read("../templates/workflow/skills/superspec-explore/SKILL.md"), /--input -/);
+  assert.match(read("../templates/workflow/skills/superspec-explore/SKILL.md"), /--report -/);
+  assert.match(read("../templates/workflow/skills/superspec-propose/SKILL.md"), /--input -/);
+  assert.match(read("../templates/workflow/skills/superspec-propose/SKILL.md"), /--report -/);
+  assert.match(read("../templates/workflow/skills/superspec-apply/SKILL.md"), /--input -/);
+  assert.match(read("../templates/workflow/skills/superspec-review/SKILL.md"), /--report -/);
+});
+
 test("review agent toml contracts require reviewer only for proposal review roles", () => {
   for (const agent of ["critic", "architect", "test-engineer"]) {
     const content = read(`../templates/workflow/agents/${agent}.toml`);

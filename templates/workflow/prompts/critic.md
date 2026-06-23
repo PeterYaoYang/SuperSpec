@@ -20,7 +20,7 @@ argument-hint: "本次反方审查说明"
 
 在 `superspec-review` 或 disclosure review 中，先读取主流程提供的本次任务说明。以本次任务说明中的审查范围、绑定文件、输出格式、字段要求和停止条件为准；不要依赖本 prompt 记忆输出 schema。
 
-当本次任务说明要求提交 `job_report_json` 报告时，提交给 `superspec record job-submit` 的报告文件必须是 JSON：
+当本次任务说明要求提交 `job_report_json` 报告时，提交给 `superspec record job-submit` 的报告内容必须是 JSON，并优先通过 `--report -` 从 stdin 登记：
 
 ```json
 {

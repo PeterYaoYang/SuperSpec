@@ -19,7 +19,7 @@ metadata:
 3. 登记结果
 4. 回到 1
 
-next 返回需要审查时，先按返回的审查说明完成对应审查，再用 `superspec record job-submit --change "<change>" --job <JOB> --report <FILE>` 提交审查报告。
+next 返回需要审查时，先按返回的审查说明完成对应审查，再优先用 `superspec record job-submit --change "<change>" --job <JOB> --report -` 从 stdin 提交 JSON 审查报告内容；文件路径模式仍可作为 fallback。
 
 人类可读正文默认使用简体中文；OpenSpec 结构标题、规范关键字、命令、路径、JSON 字段、代码标识符保留原文。
 如果 OpenSpec 生成文档语言不符合预期，先检查 `openspec/config.yaml` 的官方 `context` 设置；不要在变更文档里添加自定义 `language` 字段。
@@ -120,11 +120,13 @@ OpenSpec 能力规范增量（`openspec instructions specs` 格式）。
 - [ ] DEC-001 是否需要兼容历史行为？
 ```
 
-`next` 会在 propose 阶段检查 `proposal.md`、`design.md` 和 `test-contract.md` 的该段落。存在未确认项时，先向用户提问；收到回答后写入 JSON 文件并执行：
+`next` 会在 propose 阶段检查 `proposal.md`、`design.md` 和 `test-contract.md` 的该段落。存在未确认项时，先向用户提问；收到回答后将 JSON 内容通过 stdin 登记：
 
 ```bash
-superspec record user-decision --change "<change>" --input <FILE>
+superspec record user-decision --change "<change>" --input -
 ```
+
+文件路径模式仍可作为 fallback。
 
 然后把用户决定反映到 proposal/design/test-contract，并将对应确认项改为 `[x]` 或移出未确认列表。局部实现细节、命名、普通文件组织和不影响需求/验收/风险的技术微调不要升级为用户确认。
 

@@ -19,14 +19,14 @@ metadata:
 3. 登记结果
 4. 回到 1
 
-next 返回 `ask_user` 说明 discovery 不完整或有未确认问题——向用户提问，收到回答后 `superspec record user-decision --change "<change>" --input <FILE>`。
+next 返回 `ask_user` 说明 discovery 不完整或有未确认问题。若 scope 是 `explore_discovery`，先检查并填写 discovery 草稿，不要把草稿占位内容直接转问用户；只有真实阻塞问题才向用户提问，收到回答后优先用 `superspec record user-decision --change "<change>" --input -` 从 stdin 登记 JSON 内容；文件路径模式仍可作为 fallback。
 
-本技能默认走完整审查路径。探索完成后，`explore → propose` 会先创建 `critic` 工作项，由 Critic 角色审查需求澄清记录。审查完成后通过 `superspec record job-submit --change "<change>" --job <JOB> --report <FILE>` 登记报告。
+本技能默认走完整审查路径。探索完成后，`explore → propose` 会先创建 `critic` 工作项，由 Critic 角色审查需求澄清记录。审查完成后优先通过 `superspec record job-submit --change "<change>" --job <JOB> --report -` 从 stdin 登记 JSON 报告内容；文件路径模式仍可作为 fallback。
 
 ## 本阶段做什么
 
 1. **建立事实基线**：读代码、查架构、理解当前系统行为（只读）
-2. **写 discovery.md**：
+2. **写 discovery.md**：首次进入 explore 时引擎可能已创建草稿；必须用真实事实替换草稿标记和占位内容
 3. **澄清歧义**：有阻塞歧义时向用户提问
 
 ## 探索分工
@@ -51,6 +51,8 @@ next 返回 `ask_user` 说明 discovery 不完整或有未确认问题——向�
 ## discovery.md 格式
 
 写入 `openspec/changes/<change>/.superspec/artifacts/discovery.md`：
+
+如果文件已经存在并包含 `<!-- superspec:discovery-draft -->` 或“待探索后...”占位文本，说明它是引擎生成的草稿。完成探索后必须删除草稿标记并替换所有占位内容，否则引擎会继续阻止推进。
 
 ```markdown
 # Discovery

@@ -249,6 +249,9 @@ test("explore→propose 默认完整审查：创建 critic，接受 JSON 报告�
     assert.equal(packet.packet?.role, "critic");
     assert.equal(packet.packet?.recommended_agent, "critic");
     assert.equal(packet.packet?.required_output_kind, "job_report_json");
+    assert.equal(packet.packet?.preferred_input_mode, "stdin");
+    assert.equal(packet.packet?.submission_command, `superspec record job-submit --change "${fx.change}" --job "${first.created_jobs[0]}" --report -`);
+    assert.equal(packet.packet?.file_fallback, true);
     assert.deepEqual(packet.packet?.output_contract_fields, ["role", "verdict", "findings", "reviewer"]);
 
     const reportPath = join(fx.projectRoot, "critic.json");

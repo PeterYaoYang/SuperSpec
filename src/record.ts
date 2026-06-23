@@ -4,7 +4,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import {
   ensureChangeLayout, readEvents, appendEvent, makeEvent,
-  sha256File, withLock, appendRawRecord,
+  sha256File, sha256Text, withLock, appendRawRecord,
 } from "./store.ts";
 import { reviewEvidenceDigest, reviewVerifierStaleReason } from "./review.ts";
 import type { Event, RecordResult, Job, JobRole, JobState } from "./types.ts";
@@ -66,6 +66,134 @@ function jobTerminalState(events: Event[], jobId: string): JobState | null {
   return null;
 }
 
+function terminalJobSubmitResult(
+  events: Event[],
+  jobId: string,
+  terminal: JobState,
+  reportDigest: string,
+): RecordResult {
+  const existing = events.find(
+    e => (e.event_type === "job_accepted" || e.event_type === "job_rejected")
+      && (e.payload as { job_id: string }).job_id === jobId
+      && (e.payload as { report_digest?: string }).report_digest === reportDigest
+  );
+  if (existing) {
+    return {
+      event_type: existing.event_type as "job_accepted" | "job_rejected",
+      accepted: existing.event_type === "job_accepted",
+      message: "幂等返回：同 report 已提交",
+      job_state: existing.event_type === "job_accepted" ? "accepted" : "rejected",
+    };
+  }
+  return {
+    event_type: "job_rejected",
+    accepted: false,
+    message: `工作项 ${jobId} 已终态（${terminal}），不接受新报告。需要新工作项请重跑 transition。`,
+  };
+}
+
+function recordJobSubmitLoaded(
+  projectRoot: string,
+  change: string,
+  changeRoot: string,
+  jobId: string,
+  job: Job,
+  events: Event[],
+  reportContent: string,
+  reportDigest: string,
+): RecordResult {
+  const checks: string[] = [];
+  let parsedReport: Record<string, unknown> | null = null;
+
+  try {
+    const report = JSON.parse(reportContent);
+    if (!report || typeof report !== "object" || Array.isArray(report)) {
+      checks.push("报告必须是 JSON object");
+    } else {
+      parsedReport = report as Record<string, unknown>;
+      const obj = parsedReport as { role?: unknown; verdict?: unknown; findings?: unknown; reviewer?: unknown };
+      for (const field of REVIEW_REPORT_REQUIRED_FIELDS) {
+        if (!(field in obj)) checks.push(`报告缺少必填字段 ${field}`);
+      }
+      if (obj.role !== job.role) {
+        checks.push(`报告角色 ${String(obj.role)} 与工作项角色 ${job.role} 不匹配`);
+      }
+      if (obj.verdict !== "pass" && obj.verdict !== "fail") {
+        checks.push("报告 verdict 必须是 pass 或 fail");
+      }
+      if (!Array.isArray(obj.findings)) {
+        checks.push("报告 findings 必须是数组");
+      }
+      if (obj.verdict === "fail") {
+        checks.push("报告 verdict=fail，工作项未通过");
+      }
+      if (requiresReviewer(job.role)) {
+        if (!("reviewer" in obj)) checks.push("报告缺少必填字段 reviewer");
+        const reviewer = obj.reviewer as { kind?: unknown; id?: unknown } | undefined;
+        if (!reviewer || typeof reviewer !== "object" || Array.isArray(reviewer)) {
+          checks.push("报告 reviewer 必须是包含 kind/id 的对象");
+        } else {
+          if (typeof reviewer.kind !== "string" || !REVIEWER_KINDS.has(reviewer.kind)) {
+            checks.push(`报告 reviewer.kind 必须是 ${[...REVIEWER_KINDS].join("|")} 之一`);
+          }
+          if (typeof reviewer.id !== "string" || reviewer.id.trim() === "") {
+            checks.push("报告 reviewer.id 必须是非空字符串");
+          }
+        }
+      }
+    }
+  } catch {
+    checks.push("报告必须是有效 JSON");
+  }
+
+  for (const bf of job.boundFiles) {
+    const currentSha = sha256File(join(changeRoot, bf.path)) ?? "sha256:missing";
+    if (currentSha !== bf.sha) {
+      checks.push(`绑定文件 ${bf.path} 已变化（${bf.sha} → ${currentSha}）`);
+    }
+  }
+  const reviewStaleReason = reviewVerifierStaleReason(job, changeRoot, reviewEvidenceDigest(events));
+  if (reviewStaleReason && !checks.includes(reviewStaleReason)) {
+    checks.push(reviewStaleReason);
+  }
+
+  if (!reportContent.trim()) {
+    checks.push("报告内容为空");
+  }
+
+  if (checks.length > 0) {
+    const rejectEvent = makeEvent(change, "job_rejected", {
+      job_id: jobId,
+      role: job.role,
+      report_digest: reportDigest,
+      reason: checks.join("; "),
+    });
+    appendEvent(projectRoot, change, rejectEvent);
+    return {
+      event_type: "job_rejected",
+      accepted: false,
+      message: `工作项 ${jobId} 被拒绝：${checks.join("; ")}`,
+      job_state: "rejected",
+    };
+  }
+
+  const rawRef = appendRawRecord(projectRoot, change, "review-reports", parsedReport);
+  const acceptEvent = makeEvent(change, "job_accepted", {
+    job_id: jobId,
+    role: job.role,
+    report_digest: reportDigest,
+    accepted_at: new Date().toISOString(),
+    ...rawRef,
+  });
+  appendEvent(projectRoot, change, acceptEvent);
+  return {
+    event_type: "job_accepted",
+    accepted: true,
+    message: `工作项 ${jobId}（${job.role}）已接受`,
+    job_state: "accepted",
+  };
+}
+
 /** record job-submit：登记工作项结果 */
 export function recordJobSubmit(
   projectRoot: string,
@@ -78,142 +206,103 @@ export function recordJobSubmit(
     ensureChangeLayout(projectRoot, change);
     const events = readEvents(projectRoot, change);
 
-    // 查找 job
     const job = findJob(events, jobId);
     if (!job) {
       return { event_type: "job_rejected", accepted: false, message: `工作项 ${jobId} 不存在` };
     }
 
-    // 检查终态
     const terminal = jobTerminalState(events, jobId);
     if (terminal) {
-      // 幂等检查：同 report_digest → 返回旧结果
       const reportDigest = sha256File(reportFile) ?? "sha256:unknown";
-      const existing = events.find(
-        e => (e.event_type === "job_accepted" || e.event_type === "job_rejected")
-          && (e.payload as { job_id: string }).job_id === jobId
-          && (e.payload as { report_digest?: string }).report_digest === reportDigest
-      );
-      if (existing) {
-        return {
-          event_type: existing.event_type as "job_accepted" | "job_rejected",
-          accepted: existing.event_type === "job_accepted",
-          message: "幂等返回：同 report 已提交",
-          job_state: existing.event_type === "job_accepted" ? "accepted" : "rejected",
-        };
-      }
-      // 终态 job + 不同 report → 拒绝
-      return {
-        event_type: "job_rejected",
-        accepted: false,
-        message: `工作项 ${jobId} 已终态（${terminal}），不接受新报告。需要新工作项请重跑 transition。`,
-      };
+      return terminalJobSubmitResult(events, jobId, terminal, reportDigest);
     }
 
-    // 读报告
     if (!existsSync(reportFile)) {
       return { event_type: "job_rejected", accepted: false, message: `报告文件不存在：${reportFile}` };
     }
     const reportContent = readFileSync(reportFile, "utf8");
     const reportDigest = sha256File(reportFile) ?? "sha256:unknown";
-
-    // acceptance checks
-    const checks: string[] = [];
-    let parsedReport: Record<string, unknown> | null = null;
-
-    // 0. 报告格式和角色匹配（最小 JSON contract）
-    try {
-      const report = JSON.parse(reportContent);
-      if (!report || typeof report !== "object" || Array.isArray(report)) {
-        checks.push("报告必须是 JSON object");
-      } else {
-        parsedReport = report as Record<string, unknown>;
-        const obj = parsedReport as { role?: unknown; verdict?: unknown; findings?: unknown; reviewer?: unknown };
-        for (const field of REVIEW_REPORT_REQUIRED_FIELDS) {
-          if (!(field in obj)) checks.push(`报告缺少必填字段 ${field}`);
-        }
-        if (obj.role !== job.role) {
-          checks.push(`报告角色 ${String(obj.role)} 与工作项角色 ${job.role} 不匹配`);
-        }
-        if (obj.verdict !== "pass" && obj.verdict !== "fail") {
-          checks.push("报告 verdict 必须是 pass 或 fail");
-        }
-        if (!Array.isArray(obj.findings)) {
-          checks.push("报告 findings 必须是数组");
-        }
-        if (obj.verdict === "fail") {
-          checks.push("报告 verdict=fail，工作项未通过");
-        }
-        if (requiresReviewer(job.role)) {
-          if (!("reviewer" in obj)) checks.push("报告缺少必填字段 reviewer");
-          const reviewer = obj.reviewer as { kind?: unknown; id?: unknown } | undefined;
-          if (!reviewer || typeof reviewer !== "object" || Array.isArray(reviewer)) {
-            checks.push("报告 reviewer 必须是包含 kind/id 的对象");
-          } else {
-            if (typeof reviewer.kind !== "string" || !REVIEWER_KINDS.has(reviewer.kind)) {
-              checks.push(`报告 reviewer.kind 必须是 ${[...REVIEWER_KINDS].join("|")} 之一`);
-            }
-            if (typeof reviewer.id !== "string" || reviewer.id.trim() === "") {
-              checks.push("报告 reviewer.id 必须是非空字符串");
-            }
-          }
-        }
-      }
-    } catch {
-      checks.push("报告必须是有效 JSON");
-    }
-
-    // 1. boundFiles 仍匹配当前文档（missing 也算不匹配）
-    for (const bf of job.boundFiles) {
-      const currentSha = sha256File(join(changeRoot, bf.path)) ?? "sha256:missing";
-      if (currentSha !== bf.sha) {
-        checks.push(`绑定文件 ${bf.path} 已变化（${bf.sha} → ${currentSha}）`);
-      }
-    }
-    const reviewStaleReason = reviewVerifierStaleReason(job, changeRoot, reviewEvidenceDigest(events));
-    if (reviewStaleReason && !checks.includes(reviewStaleReason)) {
-      checks.push(reviewStaleReason);
-    }
-
-    // 2. 报告格式基本校验（非空 JSON 或文本）
-    if (!reportContent.trim()) {
-      checks.push("报告内容为空");
-    }
-
-    if (checks.length > 0) {
-      // 拒绝
-      const rejectEvent = makeEvent(change, "job_rejected", {
-        job_id: jobId,
-        role: job.role,
-        report_digest: reportDigest,
-        reason: checks.join("; "),
-      });
-      appendEvent(projectRoot, change, rejectEvent);
-      return {
-        event_type: "job_rejected",
-        accepted: false,
-        message: `工作项 ${jobId} 被拒绝：${checks.join("; ")}`,
-        job_state: "rejected",
-      };
-    }
-
-    // 接受
-    const rawRef = appendRawRecord(projectRoot, change, "review-reports", parsedReport);
-    const acceptEvent = makeEvent(change, "job_accepted", {
-      job_id: jobId,
-      role: job.role,
-      report_digest: reportDigest,
-      accepted_at: new Date().toISOString(),
-      ...rawRef,
-    });
-    appendEvent(projectRoot, change, acceptEvent);
-    return {
-      event_type: "job_accepted",
-      accepted: true,
-      message: `工作项 ${jobId}（${job.role}）已接受`,
-      job_state: "accepted",
-    };
+    return recordJobSubmitLoaded(projectRoot, change, changeRoot, jobId, job, events, reportContent, reportDigest);
   });
+}
+
+/** record job-submit：从 JSON 内容登记工作项结果 */
+export function recordJobSubmitContent(
+  projectRoot: string,
+  change: string,
+  changeRoot: string,
+  jobId: string,
+  reportContent: string,
+): RecordResult {
+  return withLock(projectRoot, change, () => {
+    ensureChangeLayout(projectRoot, change);
+    const events = readEvents(projectRoot, change);
+
+    const job = findJob(events, jobId);
+    if (!job) {
+      return { event_type: "job_rejected", accepted: false, message: `工作项 ${jobId} 不存在` };
+    }
+
+    const reportDigest = sha256Text(reportContent);
+    const terminal = jobTerminalState(events, jobId);
+    if (terminal) {
+      return terminalJobSubmitResult(events, jobId, terminal, reportDigest);
+    }
+
+    return recordJobSubmitLoaded(projectRoot, change, changeRoot, jobId, job, events, reportContent, reportDigest);
+  });
+}
+
+function recordUserDecisionLoaded(
+  projectRoot: string,
+  change: string,
+  events: Event[],
+  content: string,
+  inputDigest: string,
+): RecordResult {
+  let decision: { scope?: string; question?: string; answer?: string };
+  try {
+    decision = JSON.parse(content);
+  } catch {
+    appendEvent(projectRoot, change, makeEvent(change, "user_decision_recorded", { accepted: false, reason: "invalid_json" }));
+    return { event_type: "user_decision_recorded" as const, accepted: false, message: "决策文件不是有效 JSON" };
+  }
+
+  if (!decision.scope || !decision.answer) {
+    appendEvent(projectRoot, change, makeEvent(change, "user_decision_recorded", { accepted: false, reason: "missing_scope_or_answer" }));
+    return { event_type: "user_decision_recorded" as const, accepted: false, message: "决策文件缺少 scope 或 answer" };
+  }
+
+  const existing = events.find(
+    e => e.event_type === "user_decision_recorded"
+      && (e.payload as { input_digest?: string }).input_digest === inputDigest
+  );
+  if (existing) {
+    return {
+      event_type: "user_decision_recorded" as const,
+      accepted: true,
+      message: "幂等返回：同 user decision 已登记",
+    };
+  }
+
+  const normalizedDecision = {
+    scope: decision.scope,
+    question: decision.question ?? "",
+    answer: decision.answer,
+  };
+  const rawRef = appendRawRecord(projectRoot, change, "user-decisions", normalizedDecision);
+  const event = makeEvent(change, "user_decision_recorded", {
+    ...normalizedDecision,
+    input_digest: inputDigest,
+    ...rawRef,
+  });
+  appendEvent(projectRoot, change, event);
+
+  return {
+    event_type: "user_decision_recorded" as const,
+    accepted: true,
+    message: `用户决策已登记：scope=${decision.scope}`,
+  };
 }
 
 /** record user-decision：登记用户决策 */
@@ -232,50 +321,21 @@ export function recordUserDecision(
     }
 
     const content = readFileSync(inputFile, "utf8");
-    let decision: { scope?: string; question?: string; answer?: string };
-    try {
-      decision = JSON.parse(content);
-    } catch {
-      appendEvent(projectRoot, change, makeEvent(change, "user_decision_recorded", { accepted: false, reason: "invalid_json" }));
-      return { event_type: "user_decision_recorded" as const, accepted: false, message: "决策文件不是有效 JSON" };
-    }
-
-    if (!decision.scope || !decision.answer) {
-      appendEvent(projectRoot, change, makeEvent(change, "user_decision_recorded", { accepted: false, reason: "missing_scope_or_answer" }));
-      return { event_type: "user_decision_recorded" as const, accepted: false, message: "决策文件缺少 scope 或 answer" };
-    }
-
     const inputDigest = sha256File(inputFile) ?? "sha256:unknown";
-    const existing = events.find(
-      e => e.event_type === "user_decision_recorded"
-        && (e.payload as { input_digest?: string }).input_digest === inputDigest
-    );
-    if (existing) {
-      return {
-        event_type: "user_decision_recorded" as const,
-        accepted: true,
-        message: "幂等返回：同 user decision 已登记",
-      };
-    }
+    return recordUserDecisionLoaded(projectRoot, change, events, content, inputDigest);
+  });
+}
 
-    const normalizedDecision = {
-      scope: decision.scope,
-      question: decision.question ?? "",
-      answer: decision.answer,
-    };
-    const rawRef = appendRawRecord(projectRoot, change, "user-decisions", normalizedDecision);
-    const event = makeEvent(change, "user_decision_recorded", {
-      ...normalizedDecision,
-      input_digest: inputDigest,
-      ...rawRef,
-    });
-    appendEvent(projectRoot, change, event);
-
-    return {
-      event_type: "user_decision_recorded" as const,
-      accepted: true,
-      message: `用户决策已登记：scope=${decision.scope}`,
-    };
+/** record user-decision：从 JSON 内容登记用户决策 */
+export function recordUserDecisionContent(
+  projectRoot: string,
+  change: string,
+  content: string,
+): RecordResult {
+  return withLock(projectRoot, change, () => {
+    ensureChangeLayout(projectRoot, change);
+    const events = readEvents(projectRoot, change);
+    return recordUserDecisionLoaded(projectRoot, change, events, content, sha256Text(content));
   });
 }
 
@@ -337,13 +397,16 @@ export function jobsPacket(
         ...(job.review_evidence_digest ? { review_evidence_digest: job.review_evidence_digest } : {}),
         packet_digest: job.packet_digest,
         required_output_kind: "job_report_json",
+        preferred_input_mode: "stdin",
+        submission_command: `superspec record job-submit --change "${change}" --job "${job.job_id}" --report -`,
+        file_fallback: true,
         output_contract_fields: requiresReviewer(job.role) ? [...REVIEW_REPORT_REQUIRED_FIELDS, "reviewer"] : [...REVIEW_REPORT_REQUIRED_FIELDS],
         output_contract_optional_fields: [...REVIEW_REPORT_OPTIONAL_FIELDS],
         output_instructions:
           `${roleDescription(job.role)}。请审查 ${job.boundFiles.map(f => f.path).join(", ")}，` +
           (job.review_evidence_digest ? `本工作项绑定的执行证据版本为 ${job.review_evidence_digest}，` : "") +
           (requiresReviewer(job.role) ? `必须由独立 ${recommendedAgentForRole(job.role)} reviewer 执行并在 reviewer.kind/id 中记录来源，` : "") +
-          `产出 JSON 报告文件并通过 superspec record job-submit 登记。` +
+          `产出 JSON 报告内容并优先通过 --report - 从 stdin 登记；文件路径模式仍可作为 fallback。` +
           (requiresReviewer(job.role)
             ? `最小格式：{"role":"${job.role}","verdict":"pass|fail","findings":[],"reviewer":{"kind":"codex-subagent","id":"<thread-or-agent-id>"}}`
             : `最小格式：{"role":"${job.role}","verdict":"pass|fail","findings":[]}`),
