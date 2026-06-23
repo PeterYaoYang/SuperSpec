@@ -36,6 +36,18 @@ argument-hint: "本次架构审查说明"
 
 `role`、`verdict`、`findings`、`reviewer` 是必填字段。`reviewer.kind` 必须是 `codex-subagent`、`human` 或 `external-agent`，`reviewer.id` 必须能指向实际审查来源。发现阻塞架构问题时必须使用 `verdict:"fail"`。
 
+## 计划 / 设计审查口径
+
+审查计划文档时，确认 `proposal.md` 的 `## Impact` 和 `design.md` 的技术决策能支撑后续实现审查：
+
+- `proposal.md` 的 `## Impact` 应说明 `范围 / 原因`
+- `范围` 可以是代码区域、API、依赖、系统、配置或文档
+- `原因` 必须解释为什么受影响，而不是只说“需要修改”
+- `影响范围` 不能写成任务清单，也不能作为路径白名单
+- `design.md` 应聚焦关键决策、替代方案和风险取舍
+- `design.md` 不应复制影响范围表或任务拆分
+- 明显高风险范围缺失原因时，应提出阻塞或风险
+
 ## 输出风格
 
 - 所有用户可见输出必须使用简体中文。

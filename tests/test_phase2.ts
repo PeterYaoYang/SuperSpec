@@ -12,7 +12,7 @@ import { rebuildSnapshot } from "../src/sync.ts";
 import { next } from "../src/next.ts";
 import { proposeReady, transitionExplore } from "../src/transition.ts";
 import { recordUserDecision, recordJobSubmit, jobsPacket } from "../src/record.ts";
-import { countProposeOpenQuestionsInContent } from "../src/format.ts";
+import { countDiscoveryOpenQuestions, countProposeOpenQuestionsInContent } from "../src/format.ts";
 
 // ===== 夹具 =====
 
@@ -91,6 +91,30 @@ test("propose 待用户确认 parser：只统计指定段落内未确认项", ()
     "",
     "- [ ] TASK-001 tdd_required:true",
   ].join("\n")), 0);
+});
+
+test("discovery parser：新增章节中的 checklist 不作为待确认问题", () => {
+  assert.equal(countDiscoveryOpenQuestions([
+    "# Discovery",
+    "",
+    "## 当前代码事实",
+    "",
+    "- [ ] 普通事实 checklist 不应阻塞",
+    "- src/transition.ts:284 explore 状态推进入口",
+    "",
+    "## 影响范围候选",
+    "",
+    "- [ ] 普通影响范围 checklist 不应阻塞",
+    "",
+    "## 待确认问题",
+    "",
+    "- [ ] DEC-001 需要用户确认",
+    "- [x] DEC-002 已确认",
+    "",
+    "## 风险和边界",
+    "",
+    "- [ ] 这里已经不是待确认段，不应阻塞",
+  ].join("\n")), 1);
 });
 
 test("explore→propose：无 discovery.md 时不推进", () => {

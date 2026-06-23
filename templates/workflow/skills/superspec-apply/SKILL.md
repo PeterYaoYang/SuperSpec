@@ -54,6 +54,11 @@ no-TDD 任务（tdd_required:false + no_tdd_reason）跳过 RED/GREEN。
 ## Guardrails
 
 - 只改 tasks.md 里本任务范围相关的文件
+- 需要判断影响范围或改动原因不自明时，参考 `proposal.md` 的 `## Impact`，但不要把它当作路径白名单
+- 编码时发现未列入影响范围的文件，如果从 diff 或引用链能直接解释为同一任务下的局部引用、测试辅助或机械连带改动，可以继续
+- 如果发现新增能力、用户可见行为、明显新增影响范围或原因不自明，停止扩大实现并报告给主流程；不要在 apply 阶段补改 `proposal.md`
+- 不修改 `proposal.md`、`design.md`、`specs/**` 或 `.superspec/**`
+- active attempt 期间不要修改 `tasks.md` 中除 `task-complete` 自动勾选目标 checkbox 外的内容
 - 不跳过 RED 直接写 GREEN
 - 退出码 0 ≠ 测试通过——semantic_status 才是证据
 - 环境错误 / 构建失败不算 RED 或 GREEN
