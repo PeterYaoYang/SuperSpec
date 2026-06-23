@@ -37,7 +37,7 @@ argument-hint: "本次反方审查说明"
 
 `role`、`verdict`、`findings`、`reviewer` 是必填字段。`reviewer.kind` 必须是 `codex-subagent`、`human` 或 `external-agent`，`reviewer.id` 必须能指向实际审查来源。发现阻塞问题时必须使用 `verdict:"fail"`，并在 `findings` 中给出证据和修复建议。
 
-当你在 `review_complete` 中承担 verification lane 时，必须确认本次任务说明要求输出验证意见；否则只输出 source guidance。
+当你在 `review_complete` 中承担验证职责时，必须确认本次任务说明要求输出验证意见；否则只输出 source guidance。
 
 ## Discovery 审查口径
 
@@ -61,13 +61,19 @@ argument-hint: "本次反方审查说明"
 阻塞条件：
 
 - `proposal.md` 缺少 `## Impact`
-- `## Impact` 没有说明 `范围 / 原因`
-- `范围` 只有泛目录，且没有原因或不确定性说明
-- `原因` 只写“要改这里”，没有解释为什么受影响
+- `## Impact` 没有说明 `Area` / `Reason`
+- `Area` 只有泛目录，且没有原因或不确定性说明
+- `Reason` 只写“要改这里”，没有解释为什么受影响
 - `## Impact` 写成任务清单或路径白名单
 - `design.md` 把影响范围表、任务拆分或实现清单复制进去，导致技术决策不清
+- `tasks.md` 的任务拆分过粗，把多个独立行为放进同一个执行单元，导致 apply 难以用一组清晰的 RED/GREEN 证据验收
+- task id 重复、不稳定，或分组标题混入 task id，导致后续执行命令容易指错任务
+- 普通说明或缩进 checkbox 承载了实际未完成工作，导致工作流无法自然推进
+- task 中写入 RED/GREEN 命令、断言或预期输出，导致任务计划和实际执行证据混在一起
 
 发现这些问题时使用 `verdict:"fail"`，并给出最小拆分或补充建议。
+
+负例：一个 task 同时要求修改运行时行为、发布流程和文档，并且这些改动不能由同一组测试证据验收，应要求拆分；普通说明里出现 `TODO` / `follow-up` / “后续补”，但没有对应顶格 task，应使用 `verdict:"fail"`。
 
 ## 输出风格
 

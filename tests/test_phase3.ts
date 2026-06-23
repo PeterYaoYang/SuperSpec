@@ -42,13 +42,15 @@ function setupApply(): { projectRoot: string; change: string; changeRoot: string
   };
 }
 
-function setupTaskInProgress(): ReturnType<typeof setupApply> & { taskId: string } {
+function setupTaskInProgress(): ReturnType<typeof setupApply> & { taskId: string; attemptId: string } {
   const fx = setupApply();
   // start-apply
   startApply(fx.projectRoot, fx.change, fx.changeRoot);
   // task-start
-  taskStart(fx.projectRoot, fx.change, fx.changeRoot, "TASK-001");
-  return { ...fx, taskId: "TASK-001" };
+  const started = taskStart(fx.projectRoot, fx.change, fx.changeRoot, "TASK-001");
+  const attemptId = started.details?.attempt_id;
+  if (typeof attemptId !== "string") throw new Error("task-start should return attempt_id");
+  return { ...fx, taskId: "TASK-001", attemptId };
 }
 
 function setupPropose(): ReturnType<typeof setupApply> {
@@ -186,6 +188,45 @@ test("task-start：创建 task_attempt", () => {
   } finally { fx.cleanup(); }
 });
 
+test("grouped tasks：next 支持标题分组下的顶格任务", () => {
+  const fx = setupApply();
+  try {
+    writeFileSync(join(fx.changeRoot, "tasks.md"), [
+      "# Tasks",
+      "",
+      "## Group A",
+      "",
+      "- [ ] 1.1 first task tdd_required:false no_tdd_reason:documentation-only",
+      "  - ordinary note",
+      "",
+      "## Group B",
+      "",
+      "- [ ] 1.2 second task tdd_required:false no_tdd_reason:documentation-only",
+      "",
+    ].join("\n"));
+
+    startApply(fx.projectRoot, fx.change, fx.changeRoot);
+
+    const first = next(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.equal(first.path, "next_command");
+    assert.equal(first.next_command, 'superspec transition task-start --change "test-change" --task 1.1');
+
+    const start = taskStart(fx.projectRoot, fx.change, fx.changeRoot, "1.1");
+    assert.equal(start.outcome, "advanced");
+
+    const completeNext = next(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.equal(completeNext.path, "next_command");
+    assert.equal(completeNext.next_command, 'superspec transition task-complete --change "test-change" --task 1.1');
+
+    const complete = taskComplete(fx.projectRoot, fx.change, fx.changeRoot, "1.1");
+    assert.equal(complete.outcome, "advanced");
+
+    const second = next(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.equal(second.path, "next_command");
+    assert.equal(second.next_command, 'superspec transition task-start --change "test-change" --task 1.2');
+  } finally { fx.cleanup(); }
+});
+
 test("task-start：已完成任务拒绝", () => {
   const fx = setupApply();
   try {
@@ -205,6 +246,7 @@ test("record test-run：RED 登记", () => {
     const testFile = join(fx.projectRoot, "red.json");
     writeFileSync(testFile, JSON.stringify({
       test_id: "TEST-001",
+      attempt_id: fx.attemptId,
       task_structure_digest: structDigest,
       command: "npm test",
       cwd: fx.projectRoot,
@@ -237,6 +279,7 @@ test("record test-run：raw_index 跳过损坏 JSONL 行", () => {
     const testFile = join(fx.projectRoot, "red.json");
     writeFileSync(testFile, JSON.stringify({
       test_id: "TEST-001",
+      attempt_id: fx.attemptId,
       task_structure_digest: structDigest,
       command: "npm test",
       cwd: fx.projectRoot,
@@ -285,6 +328,7 @@ test("record test-run：raw append 失败时不写 accepted event", () => {
     const testFile = join(fx.projectRoot, "red.json");
     writeFileSync(testFile, JSON.stringify({
       test_id: "TEST-001",
+      attempt_id: fx.attemptId,
       task_structure_digest: structDigest,
       command: "npm test",
       cwd: fx.projectRoot,
@@ -314,7 +358,7 @@ test("task-complete：RED + GREEN → 完成 + 勾选", () => {
     // RED
     const redFile = join(fx.projectRoot, "red.json");
     writeFileSync(redFile, JSON.stringify({
-      test_id: "TEST-001", task_structure_digest: structDigest,
+      test_id: "TEST-001", attempt_id: fx.attemptId, task_structure_digest: structDigest,
       command: "npm test", cwd: fx.projectRoot, exit_code: 1, semantic_status: "expected_failure",
     }));
     recordTestRun(fx.projectRoot, fx.change, redFile);
@@ -322,7 +366,7 @@ test("task-complete：RED + GREEN → 完成 + 勾选", () => {
     // GREEN
     const greenFile = join(fx.projectRoot, "green.json");
     writeFileSync(greenFile, JSON.stringify({
-      test_id: "TEST-001", task_structure_digest: structDigest,
+      test_id: "TEST-001", attempt_id: fx.attemptId, task_structure_digest: structDigest,
       command: "npm test", cwd: fx.projectRoot, exit_code: 0, semantic_status: "expected_success",
     }));
     recordTestRun(fx.projectRoot, fx.change, greenFile);

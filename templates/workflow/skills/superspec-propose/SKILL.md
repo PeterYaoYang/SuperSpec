@@ -36,16 +36,16 @@ next 返回需要审查时，先按返回的审查说明完成对应审查，再
 SuperSpec 只增加一个轻量要求：在 OpenSpec 原生 `## Impact` 段落中，必须能看出受影响范围和原因。推荐写成：
 
 ```markdown
-| 范围 | 原因 |
+| Area | Reason |
 |---|---|
 | src/review.ts | 需要核对 review verifier 如何绑定文档和执行证据 |
 ```
 
 规则：
 - `proposal.md` 说明为什么要做、做什么、能力变化和影响范围
-- `影响范围` 可以写代码区域、API、依赖、系统、配置或文档
-- `原因` 只解释为什么该范围受影响，不写详细实现方案
-- `影响范围` 不作为路径白名单
+- `Area` 可以写代码区域、API、依赖、系统、配置或文档
+- `Reason` 只解释为什么该范围受影响，不写详细实现方案
+- `Area` 不作为路径白名单
 - 不写任务拆分
 - 只有存在阻塞确认项时才增加 `## 待用户确认`
 
@@ -62,19 +62,32 @@ OpenSpec 能力规范增量（`openspec instructions specs` 格式）。
 - 只有存在阻塞确认项时才增加 `## 待用户确认`
 
 ### tasks.md
-任务列表，格式：
+使用 OpenSpec tasks 原生分组结构。每个顶格 checkbox 行是一个 SuperSpec 可执行 task，Markdown 标题只用于分组。
 
 ```markdown
 # Tasks
 
-- [ ] TASK-001 实现登录功能 tdd_required:true
-- [ ] TASK-002 更新文档 tdd_required:false no_tdd_reason:documentation-only
-- [ ] TASK-003 配置变更 tdd_required:false no_tdd_reason:configuration-only
+## Review verifier
+
+- [ ] 1.1 检查 verifier 绑定文档 tdd_required:true
+- [ ] 1.2 检查 verifier 绑定执行证据 tdd_required:true
+
+## Documentation
+
+- [ ] 2.1 更新文档 tdd_required:false no_tdd_reason:documentation-only
 ```
 
 规则：
+- 标题只分组，不是可执行 task；标题不要包含可执行 task id token，例如不要写 `## 1.1 Review verifier`
+- 顶格 `- [ ] <task_id> ...` 才是可执行 task，`<task_id>` 可以是 `1.1` 或 `TASK-001.1`
+- 每个可执行 task id 必须唯一、稳定
+- 不展示、不推荐缩进 checkbox；task 内部步骤用普通 bullet，不用 checkbox
 - `tdd_required:true`（默认）——改运行时代码/业务逻辑/数据迁移/权限/外部接口
 - `tdd_required:false` + `no_tdd_reason:xxx`——纯文档/配置/机械改名/生成物
+- task 行只标记是否需要 TDD，不写 RED/GREEN 命令、断言或预期输出；实际 RED/GREEN 由 apply 阶段执行，并通过 `record test-run` 绑定到 attempt
+- 一个 task 对应一个可独立验证的行为变化，或一个明确的非行为改动
+- 多个行为变化、多个入口、多个运行时模块混在一起，且不能形成同一个 RED/GREEN 闭环时，应拆开
+- 如果一个 task 需要“顺便”改很多不相邻模块，应在 propose 阶段重新拆分或补充任务，不留到 apply 阶段扩大范围
 
 ### business-invariants.md
 格式：

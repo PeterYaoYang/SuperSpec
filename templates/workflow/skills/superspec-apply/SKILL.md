@@ -23,14 +23,18 @@ metadata:
 
 每个任务的循环：
 
-1. **任务开始**：`superspec transition task-start --change "<change>" --task TASK-XXX`
+1. **任务开始**：`superspec transition task-start --change "<change>" --task <task_id>`
 2. **拿到执行尝试 ID**：从 task-start 的返回结果或 `superspec status` 中读取当前活跃 attempt 的 `attempt_id`
 3. **红灯验证**：写测试，跑测试确认失败，`superspec record test-run --change "<change>" --input <FILE>`
 4. **代码实现**：根据任务写代码实现,保证代码不出现过渡设计以及代码质量
 5. **绿灯验证**：跑测试确认通过，`superspec record test-run --change "<change>" --input <FILE>`
-6. **任务结束标记完成**：`superspec transition task-complete --change "<change>" --task TASK-XXX`
+6. **任务结束标记完成**：`superspec transition task-complete --change "<change>" --task <task_id>`
 
 no-TDD 任务（tdd_required:false + no_tdd_reason）跳过 RED/GREEN。
+
+只执行 `tasks.md` 中顶格 checkbox 行里的 `<task_id>`，例如 `1.1` 或 `TASK-001.1`。Markdown 标题只是分组，不传给 `task-start` / `task-complete`；普通 bullet 只是说明，不单独成为工作流执行单元。
+
+`tasks.md` 不写 RED/GREEN 命令、断言或预期输出。RED/GREEN 的真实证明来自 apply 阶段实际执行后登记的 `record test-run`。
 
 ## test-run 输入格式
 
@@ -50,6 +54,9 @@ no-TDD 任务（tdd_required:false + no_tdd_reason）跳过 RED/GREEN。
 - `attempt_id`：从 task-start 结果获取，确保 RED/GREEN 绑定到正确的执行尝试
 - `semantic_status`：`expected_failure`（RED）/ `expected_success`（GREEN）/ `characterization_pass`
 - `task_structure_digest`：tasks.md 复选框归一化后的 sha256（引擎计算，你不需要手动算）
+- 新产生的 TDD 证据必须带当前 `attempt_id`；缺少 `attempt_id`、只靠 `task_structure_digest` 匹配的 test-run 仅用于旧数据兼容，不作为新流程强证明
+- `test_id`、`command`、`cwd`、`exit_code`、`semantic_status` 和目标测试身份必须能说明目标测试确实运行；退出码本身不等于证明
+- 可追溯证据以引擎记录的 test-run 事件为准；如有额外日志或 test-runner report，可作为补充引用，不作为必填字段
 
 ## Guardrails
 

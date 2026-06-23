@@ -35,7 +35,7 @@ argument-hint: "本次验证说明"
 
 `role`、`verdict`、`findings` 是必填字段。`verdict` 只能是 `pass` 或 `fail`。任务未完成、测试证据缺失、文档与实现状态不一致、绑定文件无法核对时输出 `verdict:"fail"`。
 
-`superspec-review` verification lane 先读主流程提供的本次验证说明；以本次任务说明中的引用范围、输出格式、字段要求和停止条件为准；不要依赖本 prompt 记忆输出 schema。
+`superspec-review` 验证环节先读主流程提供的本次验证说明；以本次任务说明中的引用范围、输出格式、字段要求和停止条件为准；不要依赖本 prompt 记忆输出 schema。
 
 确认本次任务说明要求输出 verification review 后，再输出 verification review。
 
@@ -49,11 +49,13 @@ apply worker report 字段以本次任务说明中的 `verifier_report_required_
 
 核对最终实现和计划文档时：
 
-- 实际运行时代码改动应能从 `proposal.md` 的 `## Impact` 找到合理解释
-- 未列入影响范围的改动，如果能从 diff 或引用链直接解释为同一任务下的局部引用、测试辅助或机械连带改动，可以作为残余风险记录
-- 未列入影响范围且原因不自明，或出现新增能力、用户可见行为、明显新增影响范围时，应使用 `verdict:"fail"`
-- `design.md` 应聚焦关键决策和风险取舍，不应复制影响范围表或任务清单
-- active attempt 期间不应修改 `tasks.md` 中除 `task-complete` 自动勾选目标 checkbox 外的内容
+- 实际代码改动应能从 `proposal.md` 的 `## Impact`、`design.md` 的关键决策或已完成 task 找到合理解释；无法解释的用户可见行为、新能力或大范围改动应使用 `verdict:"fail"`
+- `tasks.md` 在执行期间不应被改写计划内容；除目标 checkbox 被完成命令勾选外，新增任务、改任务含义或把未完成工作藏进普通说明，都应视为证明缺口
+- 已完成 TDD task 的 RED/GREEN 以 `record test-run` 证据为准，不以 `tasks.md` 的文字描述为准
+- 对每个已完成 TDD task，核对同一个 `task_completed.attempt_id` 下是否同时存在 RED/characterization 和 GREEN；新证据必须带同一 `attempt_id`
+- 缺少 `attempt_id`、只靠 `task_structure_digest` 匹配的 test-run 只能视为旧数据兼容，不作为新流程“确实跑了红绿验证”的强证明
+- test-run 证据应说明目标测试身份、`test_id`、`command`、`cwd`、`exit_code` 和 `semantic_status`；退出码本身不等于证明，环境错误 / 构建错误不算 RED/GREEN
+- 可追溯性以引擎记录的 test-run 事件、`raw_index` 和 `raw_digest` 为准；额外日志或 test-runner report 只作为补充引用
 
 ## 输出风格
 

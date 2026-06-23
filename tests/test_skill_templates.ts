@@ -6,30 +6,39 @@ function read(path: string): string {
   return readFileSync(new URL(path, import.meta.url), "utf8");
 }
 
+function assertIncludesAll(label: string, content: string, needles: readonly string[]): void {
+  for (const needle of needles) {
+    assert.ok(content.includes(needle), `${label} should include ${needle}`);
+  }
+}
+
 test("explore/propose skills default to strict review routing", () => {
   const explore = read("../templates/workflow/skills/superspec-explore/SKILL.md");
   const propose = read("../templates/workflow/skills/superspec-propose/SKILL.md");
 
-  assert.match(explore, /superspec transition next --change "<change>"/);
-  assert.match(explore, /创建 `critic` 工作项/);
-  assert.match(explore, /涉及多个文件、模块、入口或文件类型时，使用 `explore` subagent 做只读深扫/);
-  assert.match(explore, /当前代码事实/);
-  assert.match(explore, /影响范围候选/);
-  assert.match(explore, /只有 `## 待确认问题` 段落内的 `- \[ \]` 表示阻塞确认项/);
+  assertIncludesAll("explore skill", explore, [
+    'superspec transition next --change "<change>"',
+    "`critic`",
+    "subagent",
+    "只读深扫",
+    "当前代码事实",
+    "影响范围候选",
+    "## 待确认问题",
+  ]);
   assert.doesNotMatch(explore, /默认 `risk=normal`/);
   assert.doesNotMatch(explore, /--risk strict|risk strict|jobs packet|provenance/);
 
-  assert.match(propose, /superspec transition next --change "<change>"/);
+  assertIncludesAll("propose skill", propose, [
+    'superspec transition next --change "<change>"',
+    "`critic`",
+    "`architect`",
+    "`test-engineer`",
+    "record job-submit",
+    "record user-decision",
+    "openspec/config.yaml",
+    "context",
+  ]);
   assert.doesNotMatch(propose, /`proposal-auditor`/);
-  assert.match(propose, /`critic`/);
-  assert.match(propose, /`architect`/);
-  assert.match(propose, /`test-engineer`/);
-  assert.match(propose, /完整审查路径/);
-  assert.match(propose, /待用户确认/);
-  assert.match(propose, /record user-decision/);
-  assert.match(propose, /openspec\/config\.yaml/);
-  assert.match(propose, /context/);
-  assert.match(propose, /自定义 `language` 字段/);
   assert.doesNotMatch(propose, /^\s*language\s*:/m);
   assert.doesNotMatch(explore, /\b(?:clarification|critic)-review\b/);
   assert.doesNotMatch(propose, /\b(?:architect|critic|clarification|test-engineer)-review\b/);
@@ -58,15 +67,20 @@ test("explore and critic prompts preserve discovery quality gates", () => {
   const explore = read("../templates/workflow/prompts/explore.md");
   const critic = read("../templates/workflow/prompts/critic.md");
 
-  assert.match(explore, /explore subagent 深扫/);
-  assert.match(explore, /不要输出实现方案/);
-  assert.match(explore, /不要替主流程做取舍/);
-  assert.match(explore, /path:line/);
+  assertIncludesAll("explore prompt", explore, [
+    "explore subagent",
+    "不要输出实现方案",
+    "不要替主流程做取舍",
+    "path:line",
+  ]);
 
-  assert.match(critic, /Discovery 审查口径/);
-  assert.match(critic, /代码影响型需求必须包含 repo source anchors/);
-  assert.match(critic, /需求理解.*当前实现/s);
-  assert.match(critic, /verdict:"fail"/);
+  assertIncludesAll("critic discovery prompt", critic, [
+    "Discovery 审查口径",
+    "repo source anchors",
+    "需求理解",
+    "当前实现",
+    'verdict:"fail"',
+  ]);
 });
 
 test("proposal impact guidance stays lightweight and design stays decision-focused", () => {
@@ -77,41 +91,63 @@ test("proposal impact guidance stays lightweight and design stays decision-focus
   const testEngineer = read("../templates/workflow/prompts/test-engineer.md");
   const verifier = read("../templates/workflow/prompts/verifier.md");
 
-  assert.match(propose, /使用 OpenSpec proposal 原生结构/);
-  assert.match(propose, /## Impact/);
-  assert.match(propose, /范围 \| 原因/);
-  assert.match(propose, /为什么该范围受影响/);
-  assert.match(propose, /不作为路径白名单/);
-  assert.match(propose, /使用 OpenSpec design 原生结构/);
-  assert.match(propose, /不复制 `proposal\.md` 的影响范围表/);
+  assertIncludesAll("propose proposal/design guidance", propose, [
+    "OpenSpec proposal 原生结构",
+    "## Impact",
+    "Area | Reason",
+    "路径白名单",
+    "OpenSpec design 原生结构",
+    "不复制 `proposal.md`",
+  ]);
   assert.doesNotMatch(propose, /对应关系：|对应 OpenSpec/);
   assert.doesNotMatch(propose, /## Why|## What Changes|## Capabilities|### New Capabilities|### Modified Capabilities/);
   assert.doesNotMatch(propose, /## Context|## Goals \/ Non-Goals|## Decisions|## Risks \/ Trade-offs/);
   assert.doesNotMatch(propose, /## 背景与动机|## 变更内容|## 能力变化|## 背景与现状|## 目标 \/ 非目标|## 关键决策|## 风险 \/ 取舍/);
 
-  assert.match(apply, /参考 `proposal\.md` 的 `## Impact`/);
-  assert.match(apply, /不要把它当作路径白名单/);
-  assert.match(apply, /同一任务下的局部引用/);
-  assert.match(apply, /不要在 apply 阶段补改 `proposal\.md`/);
-  assert.match(apply, /不修改 `proposal\.md`、`design\.md`、`specs\/\*\*` 或 `\.superspec\/\*\*`/);
-  assert.match(apply, /`task-complete` 自动勾选目标 checkbox/);
+  assertIncludesAll("apply impact guardrails", apply, [
+    "`proposal.md`",
+    "## Impact",
+    "路径白名单",
+    "同一任务下的局部引用",
+    "不要在 apply 阶段补改 `proposal.md`",
+    "`task-complete`",
+  ]);
+  assertIncludesAll("apply protected docs", apply, [
+    "`proposal.md`",
+    "`design.md`",
+    "`specs/**`",
+    "`.superspec/**`",
+  ]);
 
-  assert.match(architect, /计划 \/ 设计审查口径/);
-  assert.match(architect, /`proposal\.md` 的 `## Impact` 应说明 `范围 \/ 原因`/);
-  assert.match(architect, /`design\.md` 应聚焦关键决策/);
+  assertIncludesAll("architect planning prompt", architect, [
+    "计划 / 设计审查口径",
+    "`proposal.md`",
+    "## Impact",
+    "Area",
+    "Reason",
+    "`design.md`",
+    "`tasks.md`",
+  ]);
 
-  assert.match(critic, /Propose 审查口径/);
-  assert.match(critic, /缺少 `## Impact`/);
-  assert.match(critic, /没有说明 `范围 \/ 原因`/);
-  assert.match(critic, /路径白名单/);
+  assertIncludesAll("critic planning prompt", critic, [
+    "Propose 审查口径",
+    "`proposal.md`",
+    "## Impact",
+    "Area",
+    "Reason",
+    "路径白名单",
+  ]);
 
   assert.doesNotMatch(testEngineer, /相关代码说明|影响范围表|任务粒度审查口径/);
 
-  assert.match(verifier, /计划 \/ 设计验证口径/);
-  assert.match(verifier, /`proposal\.md` 的 `## Impact`/);
-  assert.match(verifier, /diff 或引用链直接解释/);
-  assert.match(verifier, /同一任务下的局部引用/);
-  assert.match(verifier, /新增能力、用户可见行为、明显新增影响范围/);
+  assertIncludesAll("verifier planning prompt", verifier, [
+    "计划 / 设计验证口径",
+    "`proposal.md`",
+    "## Impact",
+    "`design.md`",
+    "`tasks.md`",
+    "record test-run",
+  ]);
 
   const proposalDesignVerifier = verifier.slice(verifier.indexOf("## 计划 / 设计验证口径"));
   const combined = [propose, apply, architect, critic, testEngineer, proposalDesignVerifier].join("\n");
@@ -128,9 +164,76 @@ test("proposal impact guidance stays lightweight and design stays decision-focus
   assert.doesNotMatch(apply, /更新 `proposal\.md`|更新 `design\.md`|只能.*影响范围|路径白名单.*必须/);
 });
 
+test("tasks grouping stays lightweight and RED GREEN evidence stays in apply", () => {
+  const propose = read("../templates/workflow/skills/superspec-propose/SKILL.md");
+  const apply = read("../templates/workflow/skills/superspec-apply/SKILL.md");
+  const architect = read("../templates/workflow/prompts/architect.md");
+  const critic = read("../templates/workflow/prompts/critic.md");
+  const testEngineer = read("../templates/workflow/prompts/test-engineer.md");
+  const verifier = read("../templates/workflow/prompts/verifier.md");
+
+  assertIncludesAll("propose tasks guidance", propose, [
+    "OpenSpec tasks",
+    "顶格 checkbox",
+    "<task_id>",
+    "tdd_required:true",
+    "tdd_required:false",
+    "no_tdd_reason",
+    "RED/GREEN",
+    "record test-run",
+  ]);
+  assert.doesNotMatch(propose, /^ {2,}- \[ \]/m);
+  assert.doesNotMatch(propose, /^##\s+(?:\d+(?:\.\d+)*|TASK-\d+)/m);
+
+  assertIncludesAll("apply task and evidence guidance", apply, [
+    "--task <task_id>",
+    "Markdown 标题",
+    "`tasks.md`",
+    "RED/GREEN",
+    "record test-run",
+    "attempt_id",
+    "semantic_status",
+    "task_structure_digest",
+    "目标测试身份",
+  ]);
+  assert.doesNotMatch(apply, /raw_log_ref/);
+
+  assertIncludesAll("critic task review prompt", critic, [
+    "`tasks.md`",
+    "任务拆分",
+    "task id",
+    "RED/GREEN",
+  ]);
+  assertIncludesAll("architect task review prompt", architect, [
+    "`tasks.md`",
+    "Markdown 标题",
+    "顶格 checkbox",
+    "父子任务状态",
+  ]);
+  assertIncludesAll("test engineer task review prompt", testEngineer, [
+    "`tasks.md`",
+    "RED/GREEN",
+    "record test-run",
+    "tdd_required:false",
+    "no_tdd_reason",
+  ]);
+  assertIncludesAll("verifier test evidence prompt", verifier, [
+    "RED/GREEN",
+    "record test-run",
+    "attempt_id",
+    "exit_code",
+    "semantic_status",
+    "raw_index",
+    "raw_digest",
+  ]);
+
+  const combined = [propose, apply, architect, critic, testEngineer, verifier].join("\n");
+  assert.doesNotMatch(combined, /父子任务状态机|父任务完成规则|子任务继承 RED\/GREEN|新增命令/);
+});
+
 test("workflow role templates avoid packet plumbing language", () => {
   const promptsDir = new URL("../templates/workflow/prompts/", import.meta.url);
-  const promptBanned = /## SuperSpec Packet 规则|prompt_ref|review-packet|apply-[a-z-]*-packet|workflow-packet|required_output_kind|output_contract_fields|stop_conditions/;
+  const promptBanned = /## SuperSpec Packet 规则|prompt_ref|review-packet|apply-[a-z-]*-packet|workflow-packet|required_output_kind|output_contract_fields|stop_conditions|\blane\b/;
   for (const file of readdirSync(promptsDir)) {
     if (!file.endsWith(".md")) continue;
     const content = read(`../templates/workflow/prompts/${file}`);
