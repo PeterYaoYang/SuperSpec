@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // SuperSpec 流程引擎 — CLI 入口
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, type ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 import { readFileSync } from "node:fs";
 import { installProject } from "./install.ts";
@@ -159,6 +159,16 @@ function windowsAwareCommand(name: string): string {
   return runtimePlatform() === "win32" ? `${name}.cmd` : name;
 }
 
+function windowsCommandHost(): string {
+  return testEnv("SUPERSPEC_TEST_CMD_EXE") ?? process.env.ComSpec ?? "cmd.exe";
+}
+
+function execFileTextSync(command: string, args: string[], options: ExecFileSyncOptionsWithStringEncoding): string {
+  if (runtimePlatform() !== "win32") return execFileSync(command, args, options);
+
+  return execFileSync(windowsCommandHost(), ["/d", "/s", "/c", command, ...args], options);
+}
+
 function npmCommand(): string {
   return windowsAwareCommand("npm");
 }
@@ -268,7 +278,7 @@ function pathOpenSpecVersion(): string {
     return parsed;
   }
 
-  const output = execFileSync(openspecCommand(), ["--version"], {
+  const output = execFileTextSync(openspecCommand(), ["--version"], {
     encoding: "utf8",
     env: process.env,
   });
@@ -283,7 +293,7 @@ function installRequiredOpenSpecGlobal(before: string | null): void {
   if (testEnv("SUPERSPEC_TEST_SKIP_OPENSPEC_INSTALL") === "1") return;
 
   try {
-    execFileSync(npmCommand(), ["install", "-g", `${OPENSPEC_PACKAGE_NAME}@${OPENSPEC_REQUIRED_VERSION}`], {
+    execFileTextSync(npmCommand(), ["install", "-g", `${OPENSPEC_PACKAGE_NAME}@${OPENSPEC_REQUIRED_VERSION}`], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -351,7 +361,7 @@ function npmLatestVersion(): string {
   if (testLatest) return testLatest;
 
   try {
-    const output = execFileSync(npmCommand(), ["view", PACKAGE_NAME, "version"], { encoding: "utf8" });
+    const output = execFileTextSync(npmCommand(), ["view", PACKAGE_NAME, "version"], { encoding: "utf8" });
     return output.trim().replace(/^"|"$/g, "");
   } catch (err) {
     throw selfUpdateError("npm_view", err);
@@ -364,7 +374,7 @@ function installLatestGlobal(): void {
   if (testEnv("SUPERSPEC_TEST_SKIP_GLOBAL_INSTALL") === "1") return;
 
   try {
-    execFileSync(npmCommand(), ["install", "-g", `${PACKAGE_NAME}@latest`], {
+    execFileTextSync(npmCommand(), ["install", "-g", `${PACKAGE_NAME}@latest`], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -390,7 +400,7 @@ function pathCliVersion(): string {
     return parsed;
   }
 
-  const output = execFileSync(superspecCommand(), ["--version"], {
+  const output = execFileTextSync(superspecCommand(), ["--version"], {
     encoding: "utf8",
     env: process.env,
   });
@@ -422,7 +432,7 @@ function rerunUpdatedCli(projectRoot: string, args: string[]): string {
   if (testOutput) return testOutput;
 
   try {
-    return execFileSync(superspecCommand(), args, {
+    return execFileTextSync(superspecCommand(), args, {
       cwd: projectRoot,
       encoding: "utf8",
       env: process.env,

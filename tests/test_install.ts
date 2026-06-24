@@ -51,6 +51,17 @@ function writeExecutable(filePath: string, content: string): void {
   chmodSync(filePath, 0o755);
 }
 
+function writeWindowsCmdShim(binDir: string, commandLog: string): void {
+  const escapedLog = commandLog.replace(/'/g, "'\\''");
+  writeExecutable(join(binDir, "cmd.exe"), `#!/bin/sh
+echo "cmd.exe $@" >> '${escapedLog}'
+if [ "$1" = "/d" ]; then shift; fi
+if [ "$1" = "/s" ]; then shift; fi
+if [ "$1" = "/c" ]; then shift; fi
+exec "$@"
+`);
+}
+
 test("installProject installs engine, workflow skills, role prompts, and agents", () => {
   withTempProject(projectRoot => {
     const result = installProject(projectRoot);
@@ -167,6 +178,47 @@ test("CLI init installs pinned OpenSpec when CLI is missing", () => {
       action: "installed",
     });
     assert.equal(existsSync(join(projectRoot, ".codex", "skills", "superspec-explore", "SKILL.md")), true);
+  });
+});
+
+test("CLI init installs OpenSpec through cmd.exe on Windows", () => {
+  withTempProject(projectRoot => {
+    const binDir = join(projectRoot, "bin");
+    mkdirSync(binDir, { recursive: true });
+    const commandLog = join(projectRoot, "commands.log");
+    const escapedLog = commandLog.replace(/'/g, "'\\''");
+    writeWindowsCmdShim(binDir, commandLog);
+    writeExecutable(join(binDir, "npm.cmd"), `#!/bin/sh
+echo "npm.cmd $@" >> '${escapedLog}'
+if [ "$1" = "install" ]; then
+  exit 0
+fi
+echo "unexpected npm.cmd $@" >&2
+exit 1
+`);
+
+    const output = execFileSync(process.execPath, [cliPath(), "init", "--scope", "project"], {
+      cwd: projectRoot,
+      encoding: "utf8",
+      env: testEnv({
+        SUPERSPEC_TEST_PLATFORM: "win32",
+        SUPERSPEC_TEST_OPENSPEC_VERSION_SEQUENCE: `missing|${OPENSPEC_REQUIRED_VERSION}`,
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+      }),
+    });
+    const result = JSON.parse(output);
+    const log = readFileSync(commandLog, "utf8");
+
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.openspec, {
+      package: "@fission-ai/openspec",
+      required_version: OPENSPEC_REQUIRED_VERSION,
+      before: null,
+      after: OPENSPEC_REQUIRED_VERSION,
+      action: "installed",
+    });
+    assert.match(log, /^cmd\.exe \/d \/s \/c npm\.cmd install -g @fission-ai\/openspec@1\.4\.1$/m);
+    assert.match(log, /^npm\.cmd install -g @fission-ai\/openspec@1\.4\.1$/m);
   });
 });
 
@@ -298,6 +350,7 @@ test("CLI init 在 Windows 平台使用 npm.cmd 和 superspec.cmd 自升级", ()
     mkdirSync(binDir, { recursive: true });
     const commandLog = join(projectRoot, "commands.log");
     const escapedLog = commandLog.replace(/'/g, "'\\''");
+    writeWindowsCmdShim(binDir, commandLog);
     const rerunPayload = JSON.stringify({
       ok: true,
       message: "SuperSpec 99.0.0 已安装",
@@ -350,6 +403,10 @@ exit 1
       from: PACKAGE_VERSION,
       to: "99.0.0",
     });
+    assert.match(log, /^cmd\.exe \/d \/s \/c npm\.cmd view @peterxiaoyang\/superspec version$/m);
+    assert.match(log, /^cmd\.exe \/d \/s \/c npm\.cmd install -g @peterxiaoyang\/superspec@latest$/m);
+    assert.match(log, /^cmd\.exe \/d \/s \/c superspec\.cmd --version$/m);
+    assert.match(log, /^cmd\.exe \/d \/s \/c superspec\.cmd init --scope project --skip-self-update$/m);
     assert.match(log, /^npm\.cmd view @peterxiaoyang\/superspec version$/m);
     assert.match(log, /^npm\.cmd install -g @peterxiaoyang\/superspec@latest$/m);
     assert.match(log, /^superspec\.cmd --version$/m);
@@ -509,6 +566,7 @@ test("CLI update 在 Windows 平台使用 npm.cmd 和 superspec.cmd 自升级", 
     mkdirSync(binDir, { recursive: true });
     const commandLog = join(projectRoot, "commands.log");
     const escapedLog = commandLog.replace(/'/g, "'\\''");
+    writeWindowsCmdShim(binDir, commandLog);
     const rerunPayload = JSON.stringify({
       ok: true,
       message: "SuperSpec 99.0.0 已更新项目工作流",
@@ -559,6 +617,10 @@ exit 1
       from: PACKAGE_VERSION,
       to: "99.0.0",
     });
+    assert.match(log, /^cmd\.exe \/d \/s \/c npm\.cmd view @peterxiaoyang\/superspec version$/m);
+    assert.match(log, /^cmd\.exe \/d \/s \/c npm\.cmd install -g @peterxiaoyang\/superspec@latest$/m);
+    assert.match(log, /^cmd\.exe \/d \/s \/c superspec\.cmd --version$/m);
+    assert.match(log, /^cmd\.exe \/d \/s \/c superspec\.cmd update --skip-self-update$/m);
     assert.match(log, /^npm\.cmd view @peterxiaoyang\/superspec version$/m);
     assert.match(log, /^npm\.cmd install -g @peterxiaoyang\/superspec@latest$/m);
     assert.match(log, /^superspec\.cmd --version$/m);
