@@ -41,6 +41,7 @@ export interface InstallResult {
     prompts: string[];
     agents: string[];
     config: string;
+    agents_md: string;
     openspec_config: string;
   };
 }
@@ -80,6 +81,8 @@ function assertWorkflowTemplates(templateRoot: string): void {
     const file = join(templateRoot, "agents", agent);
     if (!existsSync(file)) missing.push(file);
   }
+  const agentsMdTemplate = join(templateRoot, "AGENTS.md");
+  if (!existsSync(agentsMdTemplate)) missing.push(agentsMdTemplate);
 
   if (missing.length > 0) {
     throw new Error(`workflow templates missing: ${missing.join(", ")}`);
@@ -92,7 +95,6 @@ function writeBundledFile(src: string, dest: string): void {
   if (existsSync(dest)) {
     const current = readFileSync(dest, "utf8");
     if (current === next) return;
-    writeFileSync(`${dest}.bak`, current);
   }
   writeFileSync(dest, next);
 }
@@ -289,6 +291,42 @@ function ensureOpenSpecChineseContext(projectRoot: string): string {
   return OPENSPEC_CONFIG_PATH;
 }
 
+const AGENTS_MD_PATH = "AGENTS.md";
+const SUPERSPEC_AGENTS_START = "<!-- SUPERSPEC:AGENTS:START -->";
+const SUPERSPEC_AGENTS_END = "<!-- SUPERSPEC:AGENTS:END -->";
+
+function readAgentsMdTemplate(templateRoot: string): string {
+  const template = readFileSync(join(templateRoot, AGENTS_MD_PATH), "utf8").trimEnd();
+  if (!template.includes(SUPERSPEC_AGENTS_START) || !template.includes(SUPERSPEC_AGENTS_END)) {
+    throw new Error(`workflow AGENTS.md template missing SuperSpec markers: ${join(templateRoot, AGENTS_MD_PATH)}`);
+  }
+  return template;
+}
+
+function replaceMarkerBlock(content: string, block: string): string | null {
+  const start = content.indexOf(SUPERSPEC_AGENTS_START);
+  const end = content.indexOf(SUPERSPEC_AGENTS_END);
+  if (start < 0 || end < 0 || end < start) return null;
+  const afterEnd = end + SUPERSPEC_AGENTS_END.length;
+  return `${content.slice(0, start)}${block}${content.slice(afterEnd)}`;
+}
+
+function ensureAgentsMd(projectRoot: string, block: string): string {
+  const agentsPath = join(projectRoot, AGENTS_MD_PATH);
+  if (!existsSync(agentsPath)) {
+    writeFileSync(agentsPath, `${block}\n`);
+    return AGENTS_MD_PATH;
+  }
+
+  const current = readFileSync(agentsPath, "utf8");
+  const replaced = replaceMarkerBlock(current, block);
+  const next = replaced ?? `${current.trimEnd()}\n\n${block}\n`;
+  if (next === current) return AGENTS_MD_PATH;
+
+  writeFileSync(agentsPath, next);
+  return AGENTS_MD_PATH;
+}
+
 export function installProject(projectRoot: string, options: InstallOptions = {}): InstallResult {
   if (!options.allowLegacyState && legacyStateFound(projectRoot)) {
     throw new Error(
@@ -301,6 +339,7 @@ export function installProject(projectRoot: string, options: InstallOptions = {}
 
   const templateRoot = options.templateRoot ?? defaultTemplateRoot();
   assertWorkflowTemplates(templateRoot);
+  const agentsMdTemplate = readAgentsMdTemplate(templateRoot);
 
   const engineDir = join(projectRoot, ".superspec");
   mkdirSync(join(engineDir, "changes"), { recursive: true });
@@ -317,6 +356,7 @@ export function installProject(projectRoot: string, options: InstallOptions = {}
       prompts: copyPrompts(templateRoot, projectRoot),
       agents: copyAgents(templateRoot, projectRoot),
       config: ensureCodexConfig(projectRoot),
+      agents_md: ensureAgentsMd(projectRoot, agentsMdTemplate),
       openspec_config: ensureOpenSpecChineseContext(projectRoot),
     },
   };

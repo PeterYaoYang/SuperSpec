@@ -2,7 +2,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -12,6 +12,8 @@ import { rebuildSnapshot } from "../src/sync.ts";
 import { next } from "../src/next.ts";
 import { reviewReady, taskStart, taskComplete, reopen, accept, archive } from "../src/transition.ts";
 import { jobsPacket, recordJobSubmit } from "../src/record.ts";
+import { reviewEvidenceDigest } from "../src/review.ts";
+import type { Job, JobRole, State } from "../src/types.ts";
 
 function setupApplyWithDoneTask(): { projectRoot: string; change: string; changeRoot: string; cleanup: () => void } {
   const projectRoot = mkdtempSync(join(tmpdir(), "superspec-p4-"));
@@ -64,6 +66,34 @@ function appendTestRunEvent(
     raw_log_ref: null,
     ...payload,
   }));
+}
+
+function appendOpenJob(
+  projectRoot: string,
+  change: string,
+  state: State,
+  overrides: Partial<Job> & { job_id: string; role: JobRole; created_from_transition: string },
+): Job {
+  const job: Job = {
+    ...overrides,
+    job_id: overrides.job_id,
+    role: overrides.role,
+    state: overrides.state ?? "requested",
+    boundFiles: overrides.boundFiles ?? [],
+    packet_digest: overrides.packet_digest ?? "sha256:test-job",
+    created_from_transition: overrides.created_from_transition,
+    created_at: overrides.created_at ?? new Date().toISOString(),
+  };
+  appendEvent(projectRoot, change, makeEvent(change, "transition_commit", {
+    transition: job.created_from_transition,
+    from_state: state,
+    to_state: state,
+    outcome: "job_created",
+    created_job_ids: [job.job_id],
+    new_jobs: [job],
+    reason: "test open job",
+  }, { transitionId: `T-${job.job_id}`, idempotencyKey: `${job.job_id}-key` }));
+  return job;
 }
 
 test("review-ready：apply → apply_done（所有任务完成）", () => {
@@ -377,6 +407,16 @@ test("review-ready：apply_done → 创建 verifier final gate job", () => {
     assert.equal(snap.open_jobs[0].role, "verifier");
     assert.equal(snap.open_jobs[0].created_from_transition, "review-ready");
 
+    const beforeBlockedEvents = readEvents(projectRoot, change).length;
+    const blocked = reviewReady(projectRoot, change, changeRoot);
+    assert.equal(blocked.outcome, "blocked");
+    assert.equal(blocked.events_written, 0);
+    assert.equal(blocked.required_jobs?.[0]?.job_id, result.created_jobs[0]);
+    assert.deepEqual(blocked.required_jobs?.[0]?.packet_argv, [
+      "superspec", "jobs", "packet", "--change", change, "--job", result.created_jobs[0],
+    ]);
+    assert.equal(readEvents(projectRoot, change).length, beforeBlockedEvents);
+
     const packet = jobsPacket(projectRoot, change, result.created_jobs[0]);
     assert.equal(packet.found, true);
     assert.deepEqual(packet.packet?.output_contract_fields, ["role", "verdict", "findings"]);
@@ -391,6 +431,136 @@ test("review-ready：apply_done → 创建 verifier final gate job", () => {
     assert.equal(advanced.outcome, "advanced");
     assert.equal(advanced.to_state, "review");
   } finally { rmSync(projectRoot, { recursive: true, force: true }); }
+});
+
+test("CLI transition review-ready：已有 verifier job 时 blocked 退出码为 0", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    const toApplyDone = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(toApplyDone.to_state, "apply_done");
+    const created = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(created.outcome, "job_created");
+
+    const cli = new URL("../src/cli.ts", import.meta.url).pathname;
+    const cliResult = spawnSync(process.execPath, [
+      cli,
+      "transition",
+      "review-ready",
+      "--change",
+      fx.change,
+    ], {
+      cwd: fx.projectRoot,
+      encoding: "utf8",
+    });
+
+    assert.equal(cliResult.status, 0, cliResult.stderr || cliResult.stdout);
+    const parsed = JSON.parse(cliResult.stdout);
+    assert.equal(parsed.outcome, "blocked");
+    assert.equal(parsed.events_written, 0);
+    assert.equal(parsed.required_jobs[0].job_id, created.created_jobs[0]);
+  } finally { fx.cleanup(); }
+});
+
+test("next：review 有 pending task 时优先 reopen，再处理 verifier job", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    writeFileSync(join(fx.changeRoot, "tasks.md"), "# Tasks\n\n- [x] TASK-001 Done\n- [ ] TASK-025 Review followup\n");
+    const job = appendOpenJob(fx.projectRoot, fx.change, "review", {
+      job_id: "JOB-review-verifier",
+      role: "verifier",
+      created_from_transition: "review-ready",
+      review_evidence_digest: reviewEvidenceDigest(readEvents(fx.projectRoot, fx.change)),
+    });
+
+    const result = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(result.path, "next_command");
+    assert.match(result.next_command, /transition reopen/);
+
+    writeFileSync(join(fx.changeRoot, "tasks.md"), "# Tasks\n\n- [x] TASK-001 Done\n- [x] TASK-025 Review followup\n");
+
+    const afterCompleted = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(afterCompleted.path, "required_job");
+    assert.equal(afterCompleted.required_jobs[0].job_id, job.job_id);
+  } finally { fx.cleanup(); }
+});
+
+test("next：review 非阶段 open job 不抢占 pending task reopen", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    writeFileSync(join(fx.changeRoot, "tasks.md"), "# Tasks\n\n- [x] TASK-001 Done\n- [ ] TASK-025 Review followup\n");
+    appendOpenJob(fx.projectRoot, fx.change, "review", {
+      job_id: "JOB-review-executor",
+      role: "executor",
+      created_from_transition: "apply",
+    });
+
+    const result = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(result.path, "next_command");
+    assert.match(result.next_command, /reopen/);
+  } finally { fx.cleanup(); }
+});
+
+test("next：accepted 和 archive 有 open job 时不走普通完成路径", () => {
+  const acceptedFx = setupApplyWithDoneTask();
+  try {
+    reviewReady(acceptedFx.projectRoot, acceptedFx.change, acceptedFx.changeRoot, "minimal");
+    reviewReady(acceptedFx.projectRoot, acceptedFx.change, acceptedFx.changeRoot, "minimal");
+    accept(acceptedFx.projectRoot, acceptedFx.change, acceptedFx.changeRoot);
+    const job = appendOpenJob(acceptedFx.projectRoot, acceptedFx.change, "accepted", {
+      job_id: "JOB-accepted-open",
+      role: "executor",
+      created_from_transition: "apply",
+    });
+
+    const result = next(acceptedFx.projectRoot, acceptedFx.change, acceptedFx.changeRoot);
+    assert.equal(result.path, "required_job");
+    assert.equal(result.required_jobs[0].job_id, job.job_id);
+  } finally { acceptedFx.cleanup(); }
+
+  const archiveFx = setupApplyWithDoneTask();
+  try {
+    reviewReady(archiveFx.projectRoot, archiveFx.change, archiveFx.changeRoot, "minimal");
+    reviewReady(archiveFx.projectRoot, archiveFx.change, archiveFx.changeRoot, "minimal");
+    accept(archiveFx.projectRoot, archiveFx.change, archiveFx.changeRoot);
+    archive(archiveFx.projectRoot, archiveFx.change, archiveFx.changeRoot);
+    const job = appendOpenJob(archiveFx.projectRoot, archiveFx.change, "archive", {
+      job_id: "JOB-archive-open",
+      role: "executor",
+      created_from_transition: "apply",
+    });
+
+    const result = next(archiveFx.projectRoot, archiveFx.change, archiveFx.changeRoot);
+    assert.equal(result.path, "required_job");
+    assert.equal(result.required_jobs[0].job_id, job.job_id);
+  } finally { archiveFx.cleanup(); }
+});
+
+test("next：abandoned 是终态，即使存在 open job 也不继续驱动", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "transition_commit", {
+      transition: "abandon",
+      from_state: "apply",
+      to_state: "abandoned",
+      outcome: "advanced",
+      created_job_ids: [],
+      reason: "simulate abandoned state",
+    }, { transitionId: "T-abandoned", idempotencyKey: "abandoned-key" }));
+    appendOpenJob(fx.projectRoot, fx.change, "abandoned", {
+      job_id: "JOB-abandoned-open",
+      role: "executor",
+      created_from_transition: "apply",
+    });
+
+    const result = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(result.path, "done");
+    assert.equal(result.state, "abandoned");
+    assert.match(result.reason, /放弃/);
+  } finally { fx.cleanup(); }
 });
 
 test("review-ready：忽略非 review-ready 来源的 verifier job", () => {

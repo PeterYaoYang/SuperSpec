@@ -34,7 +34,17 @@ test("simulateLoop：next_command → done 两步完成", () => {
 test("simulateLoop：required_job → next_command → done", () => {
   let callCount = 0;
   const outputs: NextOutput[] = [
-    { state: "propose", path: "required_job", required_jobs: [{ job_id: "JOB-1", role: "critic", packet_command: "superspec jobs packet" }], reason: "需要审查" },
+    {
+      state: "propose",
+      path: "required_job",
+      required_jobs: [{
+        job_id: "JOB-1",
+        role: "critic",
+        packet_command: "superspec jobs packet --change test-change --job JOB-1",
+        packet_argv: ["superspec", "jobs", "packet", "--change", "test-change", "--job", "JOB-1"],
+      }],
+      reason: "需要审查",
+    },
     { state: "propose", path: "next_command", next_command: "superspec transition propose-ready", reason: "推进", missing_inputs: [] },
     { state: "propose_ready", path: "next_command", next_command: "superspec transition start-apply", reason: "执行", missing_inputs: [] },
     { state: "archive", path: "done", reason: "完成" },

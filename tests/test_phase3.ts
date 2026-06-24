@@ -12,6 +12,7 @@ import { next } from "../src/next.ts";
 import { proposeReady, startApply, taskStart, taskComplete } from "../src/transition.ts";
 import { recordJobSubmit } from "../src/record.ts";
 import { recordTestRun, tasksStructureDigestOf } from "../src/task.ts";
+import type { Job, JobRole, State } from "../src/types.ts";
 
 // ===== 夹具：seed 到 propose_ready =====
 
@@ -88,6 +89,34 @@ function reviewerReport(role: "critic" | "architect" | "test-engineer" = "critic
 
 function rawDirFiles(projectRoot: string, change: string): string[] {
   return readdirSync(join(projectRoot, ".superspec", "changes", change, "raw")).sort();
+}
+
+function appendOpenJob(
+  projectRoot: string,
+  change: string,
+  state: State,
+  overrides: Partial<Job> & { job_id: string; role: JobRole; created_from_transition: string },
+): Job {
+  const job: Job = {
+    ...overrides,
+    job_id: overrides.job_id,
+    role: overrides.role,
+    state: overrides.state ?? "requested",
+    boundFiles: overrides.boundFiles ?? [],
+    packet_digest: overrides.packet_digest ?? "sha256:test-job",
+    created_from_transition: overrides.created_from_transition,
+    created_at: overrides.created_at ?? new Date().toISOString(),
+  };
+  appendEvent(projectRoot, change, makeEvent(change, "transition_commit", {
+    transition: job.created_from_transition,
+    from_state: state,
+    to_state: state,
+    outcome: "job_created",
+    created_job_ids: [job.job_id],
+    new_jobs: [job],
+    reason: "test open job",
+  }, { transitionId: `T-${job.job_id}`, idempotencyKey: `${job.job_id}-key` }));
+  return job;
 }
 
 // ===== 测试 =====
@@ -185,6 +214,55 @@ test("task-start：创建 task_attempt", () => {
     assert.equal(snap.active_task_attempts.length, 1);
     assert.equal(snap.active_task_attempts[0].task_id, "TASK-001");
     assert.equal(snap.active_task_attempts[0].state, "active");
+  } finally { fx.cleanup(); }
+});
+
+test("next：apply 有 open job 时优先于 pending task", () => {
+  const fx = setupApply();
+  try {
+    startApply(fx.projectRoot, fx.change, fx.changeRoot);
+    const job = appendOpenJob(fx.projectRoot, fx.change, "apply", {
+      job_id: "JOB-apply-executor",
+      role: "executor",
+      created_from_transition: "apply",
+    });
+
+    const result = next(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.equal(result.path, "required_job");
+    assert.equal(result.required_jobs[0].job_id, job.job_id);
+    assert.deepEqual(result.required_jobs[0].packet_argv, [
+      "superspec", "jobs", "packet", "--change", fx.change, "--job", job.job_id,
+    ]);
+  } finally { fx.cleanup(); }
+});
+
+test("next：apply_done 有 pending task 时优先 reopen，再处理 open job", () => {
+  const fx = setupApply();
+  try {
+    startApply(fx.projectRoot, fx.change, fx.changeRoot);
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "transition_commit", {
+      transition: "review-ready",
+      from_state: "apply",
+      to_state: "apply_done",
+      outcome: "advanced",
+      created_job_ids: [],
+      reason: "simulate apply_done with pending task",
+    }, { transitionId: "T-apply-done-pending", idempotencyKey: "apply-done-pending-key" }));
+    const job = appendOpenJob(fx.projectRoot, fx.change, "apply_done", {
+      job_id: "JOB-apply-done-executor",
+      role: "executor",
+      created_from_transition: "apply",
+    });
+
+    const result = next(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.equal(result.path, "next_command");
+    assert.match(result.next_command, /transition reopen/);
+
+    writeFileSync(join(fx.changeRoot, "tasks.md"), "# Tasks\n\n- [x] TASK-001 Do something\n- [x] TASK-002 Do more\n");
+
+    const afterCompleted = next(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.equal(afterCompleted.path, "required_job");
+    assert.equal(afterCompleted.required_jobs[0].job_id, job.job_id);
   } finally { fx.cleanup(); }
 });
 

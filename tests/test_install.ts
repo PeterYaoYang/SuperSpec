@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { installProject, WORKFLOW_AGENTS, WORKFLOW_PROMPTS, WORKFLOW_SKILLS } from "../src/install.ts";
 
 const PACKAGE_VERSION = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version as string;
+const AGENTS_TEMPLATE = readFileSync(new URL("../templates/workflow/AGENTS.md", import.meta.url), "utf8").trimEnd();
 
 function withTempProject(fn: (projectRoot: string) => void): void {
   const projectRoot = mkdtempSync(join(tmpdir(), "superspec-install-test-"));
@@ -63,6 +64,7 @@ test("installProject installs engine, workflow skills, role prompts, and agents"
       [],
     );
     assert.equal(result.installed.config, ".codex/config.toml");
+    assert.equal(result.installed.agents_md, "AGENTS.md");
     assert.equal(result.installed.openspec_config, "openspec/config.yaml");
     assert.equal(existsSync(join(projectRoot, ".superspec", "changes")), true);
     assert.equal(readFileSync(join(projectRoot, ".superspec", ".gitignore"), "utf8"), "changes/\n*.log\n*.tmp\n");
@@ -86,6 +88,15 @@ test("installProject installs engine, workflow skills, role prompts, and agents"
     assert.match(config, /\[agents\]/);
     assert.match(config, /max_threads = 12/);
     assert.match(config, /max_depth = 1/);
+
+    const agentsMd = readFileSync(join(projectRoot, "AGENTS.md"), "utf8");
+    assert.equal(agentsMd.trimEnd(), AGENTS_TEMPLATE);
+    assert.match(agentsMd, /SUPERSPEC:AGENTS:START/);
+    assert.match(agentsMd, /superspec transition next --change "<change>"/);
+    assert.match(agentsMd, /\*_argv/);
+    assert.match(agentsMd, /用户可见回复使用自然语言/);
+    assert.doesNotMatch(agentsMd, /reviewer\.kind\/id/);
+    assert.doesNotMatch(agentsMd, /external-agent/);
 
     const openspecConfig = readFileSync(join(projectRoot, "openspec", "config.yaml"), "utf8");
     assert.match(openspecConfig, /^schema: spec-driven$/m);
@@ -121,6 +132,7 @@ test("CLI init --scope project is a compatibility alias for install", () => {
     assert.equal(existsSync(join(projectRoot, ".codex", "prompts", "executor.md")), true);
     assert.equal(existsSync(join(projectRoot, ".codex", "agents", "executor.toml")), true);
     assert.equal(existsSync(join(projectRoot, ".codex", "config.toml")), true);
+    assert.equal(existsSync(join(projectRoot, "AGENTS.md")), true);
     assert.equal(existsSync(join(projectRoot, "openspec", "config.yaml")), true);
   });
 });
@@ -216,12 +228,15 @@ test("CLI init latest 查询失败时提示 stderr 并继续安装", () => {
   });
 });
 
-test("CLI update refreshes installed workflow skills from bundled templates", () => {
+test("CLI update refreshes installed workflow templates without backups", () => {
   withTempProject(projectRoot => {
     installProject(projectRoot);
     const skillPath = join(projectRoot, ".codex", "skills", "superspec-explore", "SKILL.md");
+    const promptPath = join(projectRoot, ".codex", "prompts", "explore.md");
+    const agentPath = join(projectRoot, ".codex", "agents", "explore.toml");
     writeFileSync(skillPath, "stale skill template\n");
-    writeFileSync(`${skillPath}.bak`, "older backup\n");
+    writeFileSync(promptPath, "stale prompt template\n");
+    writeFileSync(agentPath, "stale agent template\n");
 
     const output = execFileSync(process.execPath, [cliPath(), "update", "--skip-self-update"], {
       cwd: projectRoot,
@@ -232,11 +247,77 @@ test("CLI update refreshes installed workflow skills from bundled templates", ()
     assert.equal(result.ok, true);
     assert.equal(result.message, `SuperSpec ${PACKAGE_VERSION} 已更新项目工作流`);
     assert.deepEqual(result.installed.skills, [...WORKFLOW_SKILLS]);
+    assert.equal(result.installed.agents_md, "AGENTS.md");
     assert.equal(
       readFileSync(skillPath, "utf8"),
       readFileSync(new URL("../templates/workflow/skills/superspec-explore/SKILL.md", import.meta.url), "utf8"),
     );
-    assert.equal(readFileSync(`${skillPath}.bak`, "utf8"), "stale skill template\n");
+    assert.equal(
+      readFileSync(promptPath, "utf8"),
+      readFileSync(new URL("../templates/workflow/prompts/explore.md", import.meta.url), "utf8"),
+    );
+    assert.equal(
+      readFileSync(agentPath, "utf8"),
+      readFileSync(new URL("../templates/workflow/agents/explore.toml", import.meta.url), "utf8"),
+    );
+    assert.equal(existsSync(`${skillPath}.bak`), false);
+    assert.equal(existsSync(`${promptPath}.bak`), false);
+    assert.equal(existsSync(`${agentPath}.bak`), false);
+  });
+});
+
+test("installProject appends and updates marker-bounded AGENTS.md without replacing user rules", () => {
+  withTempProject(projectRoot => {
+    const agentsPath = join(projectRoot, "AGENTS.md");
+    writeFileSync(agentsPath, [
+      "# Project Rules",
+      "",
+      "- Keep this user rule.",
+      "",
+    ].join("\n"));
+
+    installProject(projectRoot);
+    const first = readFileSync(agentsPath, "utf8");
+    assert.match(first, /Keep this user rule/);
+    assert.match(first, /SUPERSPEC:AGENTS:START/);
+    assert.equal(existsSync(`${agentsPath}.bak`), false);
+
+    const changed = first.replace("用户可见回复使用自然语言", "用户可见回复倾倒 JSON");
+    writeFileSync(agentsPath, changed);
+    installProject(projectRoot, { allowLegacyState: true });
+    const second = readFileSync(agentsPath, "utf8");
+    assert.match(second, /Keep this user rule/);
+    assert.match(second, /用户可见回复使用自然语言/);
+    assert.doesNotMatch(second, /用户可见回复倾倒 JSON/);
+    assert.equal((second.match(/SUPERSPEC:AGENTS:START/g) ?? []).length, 1);
+    assert.equal(existsSync(`${agentsPath}.bak`), false);
+  });
+});
+
+test("installProject rejects AGENTS.md workflow template without SuperSpec markers", () => {
+  withTempProject(projectRoot => {
+    const templateRoot = join(projectRoot, "template");
+    for (const skill of WORKFLOW_SKILLS) {
+      const dir = join(templateRoot, "skills", skill);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "SKILL.md"), "---\nname: test\n---\n");
+    }
+    for (const prompt of WORKFLOW_PROMPTS) {
+      const dir = join(templateRoot, "prompts");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, prompt), "# Prompt\n");
+    }
+    for (const agent of WORKFLOW_AGENTS) {
+      const dir = join(templateRoot, "agents");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, agent), "# Agent\n");
+    }
+    writeFileSync(join(templateRoot, "AGENTS.md"), "# Missing markers\n");
+
+    assert.throws(
+      () => installProject(projectRoot, { templateRoot }),
+      /template missing SuperSpec markers/,
+    );
   });
 });
 

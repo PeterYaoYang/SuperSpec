@@ -81,7 +81,7 @@ superspec install
 ```
 
 这条命令的意思是：把 SuperSpec 当前可用的工作流入口安装到项目里。
-当前 beta 会安装 `.superspec/` 引擎目录、`.codex/skills/superspec-*` 阶段入口、`.codex/prompts/*.md` 角色 prompt、`.codex/agents/*.toml` 子智能体配置，并补齐 `.codex/config.toml` 的多 agent 开关。`superspec init --scope project` 仍作为兼容别名可用。
+当前 beta 会安装 `.superspec/` 引擎目录、`.codex/skills/superspec-*` 阶段入口、`.codex/prompts/*.md` 角色 prompt、`.codex/agents/*.toml` 子智能体配置，补齐 `.codex/config.toml` 的多 agent 开关，并在项目根 `AGENTS.md` 中维护 SuperSpec 轻量门禁片段。`superspec init --scope project` 仍作为兼容别名可用。
 
 Windows PowerShell 如果拦截 npm 的 `.ps1` 脚本，请改用：
 
@@ -159,6 +159,14 @@ openspec/changes/<变更ID>/.superspec/
 
 `.superspec/` 要不要提交到 git，由你的团队决定。
 如果不提交，删掉后就没有 git 历史可以恢复。
+
+## 流程门禁
+
+SuperSpec 的阶段入口由 `superspec transition next --change <变更ID>` 驱动。
+
+当当前阶段还有未完成的用户确认、审查、验证或工作项时，`next` 会先返回这些事项，不会把下一阶段命令作为推荐路径。重复运行会创建审查工作项的 transition 时，如果同阶段工作项已经存在，CLI 会返回正常的门禁结果，不会写入新事件，也不会把它当作程序错误。
+
+这仍然是轻量流程控制，不是写入拦截。它约束按 SuperSpec 正常入口执行时的下一步建议和状态提交结果，不承诺阻止绕过流程的手动编辑。
 
 ## Hook 会做什么
 
@@ -238,7 +246,7 @@ superspec status
 superspec update
 ```
 
-这条命令会先检查 npm 上的 latest 版本；如果有新版，会自动执行全局升级并用新版 CLI 重新同步项目入口。同步内容包括补齐 `.superspec/changes` 运行时目录，并把当前 CLI 内置的 `.codex/skills/superspec-*`、`.codex/prompts/*.md`、`.codex/agents/*.toml` 同步到项目里。
+这条命令会先检查 npm 上的 latest 版本；如果有新版，会自动执行全局升级并用新版 CLI 重新同步项目入口。同步内容包括补齐 `.superspec/changes` 运行时目录，把当前 CLI 内置的 `.codex/skills/superspec-*`、`.codex/prompts/*.md`、`.codex/agents/*.toml` 同步到项目里，并更新 `AGENTS.md` 中 marker 包裹的 SuperSpec 轻量门禁片段。
 
 ## 进阶信息
 

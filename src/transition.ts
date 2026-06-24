@@ -8,6 +8,7 @@ import {
   sha256File, sha256Text,
 } from "./store.ts";
 import { rebuildSnapshot } from "./sync.ts";
+import { requiredJobActions } from "./job_action.ts";
 import {
   assertCommitPayloadExtension,
   isFreshReviewVerifier,
@@ -50,11 +51,11 @@ function checkOrCreateReviewJobs(
   change: string,
   transitionName: string,
   bindDocPaths: string[],
-): Decision | null {
+): Decision | BlockedDecision | null {
   const staleRoles: { role: JobRole; reason: string }[] = [];
   for (const role of requiredRoles) {
     const openForRole = snapshot.open_jobs.find(j => j.role === role && j.created_from_transition === transitionName);
-    if (openForRole) return { fromState: snapshot.state, toState: snapshot.state, outcome: "advanced" as const, reason: `工作项 ${role} 已存在（${openForRole.job_id}），请先完成它` };
+    if (openForRole) return { blocked: true, reason: `状态未推进；已有待完成工作项 ${role}（${openForRole.job_id}）`, jobs: [openForRole] };
     const fresh = snapshot.accepted_jobs.find(j => j.role === role && j.created_from_transition === transitionName);
     if (!fresh) {
       staleRoles.push({ role, reason: `需求 ${role} 无已接受的工作项` });
@@ -138,6 +139,18 @@ interface Decision {
   postCommit?: (projectRoot: string, change: string, changeRoot: string) => void;
 }
 
+interface SkipDecision {
+  skip: true;
+  message: string;
+}
+
+interface BlockedDecision {
+  blocked: true;
+  reason: string;
+  jobs: Job[];
+  details?: Record<string, unknown>;
+}
+
 /**
  * 统一 transition 提交协议——所有校验在锁内。
  */
@@ -145,7 +158,7 @@ export function commitTransition(
   projectRoot: string, change: string, changeRoot: string,
   opts: {
     name: string;
-    decide: (snapshot: Snapshot) => Decision | { skip: true; message: string };
+    decide: (snapshot: Snapshot) => Decision | SkipDecision | BlockedDecision;
     idempotencyInputs?: Record<string, unknown>;
   }
 ): TransitionResult {
@@ -160,15 +173,30 @@ export function commitTransition(
     const events = readEvents(projectRoot, change);
     const existing = events.find(e => e.idempotency_key === idemKey && e.event_type === "transition_commit");
     if (existing) {
-      const p = existing.payload as { outcome: string; from_state: State; to_state: State; created_job_ids?: string[] };
+      const p = existing.payload as { outcome: string; from_state: State; to_state: State; created_job_ids?: string[]; new_jobs?: Job[] };
+      const newJobs = p.new_jobs ?? [];
       return {
         transition: name, outcome: p.outcome as "advanced" | "job_created",
         from_state: p.from_state, to_state: p.to_state,
         created_jobs: p.created_job_ids ?? [], message: "幂等返回", events_written: 0,
+        ...(newJobs.length > 0 ? { required_jobs: requiredJobActions(change, newJobs) } : {}),
       };
     }
 
     const decision = opts.decide(snapshot);
+    if ("blocked" in decision) {
+      return {
+        transition: name,
+        outcome: "blocked",
+        from_state: snapshot.state,
+        to_state: snapshot.state,
+        created_jobs: [],
+        required_jobs: requiredJobActions(change, decision.jobs),
+        message: decision.reason,
+        events_written: 0,
+        ...(decision.details ? { details: decision.details } : {}),
+      };
+    }
     if ("skip" in decision) {
       return {
         transition: name, outcome: "advanced",
@@ -220,6 +248,7 @@ export function commitTransition(
     return {
       transition: name, outcome, from_state: fromState, to_state: toState,
       created_jobs: newJobs.map(j => j.job_id),
+      ...(newJobs.length > 0 ? { required_jobs: requiredJobActions(change, newJobs) } : {}),
       message: outcome === "advanced" ? `状态推进：${fromState} → ${toState}` : `状态不变（${fromState}），创建了 ${newJobs.length} 个工作项`,
       events_written: 1 + extraEvents.length,
       ...(details ? { details } : {}),
@@ -423,7 +452,7 @@ export function reviewReady(projectRoot: string, change: string, changeRoot: str
       }
       if (snapshot.state === "apply_done" || snapshot.state === "review") {
         const verifierOpen = snapshot.open_jobs.find(isReviewReadyVerifier);
-        if (verifierOpen) return { skip: true, message: `有待完成的最终验证工作项 ${verifierOpen.job_id}` };
+        if (verifierOpen) return { blocked: true, reason: `状态未推进；已有待完成最终验证工作项 ${verifierOpen.job_id}`, jobs: [verifierOpen] };
 
         const verifierAccepted = snapshot.accepted_jobs.find(job => isFreshReviewVerifier(job, changeRoot, currentEvidenceDigest));
         if (!policy.requires_verifier) {

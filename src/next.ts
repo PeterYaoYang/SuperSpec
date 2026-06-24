@@ -5,7 +5,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { readEvents, sha256Text } from "./store.ts";
 import { isFreshReviewVerifier, isReviewReadyVerifier, readReviewPolicyFromEvents, reviewEvidenceDigest } from "./review.ts";
-import type { Job, NextOutput, AskUser, TaskAttempt } from "./types.ts";
+import { requiredJobActions } from "./job_action.ts";
+import type { Job, NextOutput, AskUser, TaskAttempt, State } from "./types.ts";
 import { validateDiscovery, countDiscoveryOpenQuestions, collectProposeOpenQuestions, parseTasksMd, pendingTasksInContent } from "./format.ts";
 
 const ACTIVE_PROPOSAL_REVIEW_ROLES = new Set(["critic", "architect", "test-engineer"]);
@@ -14,8 +15,17 @@ function isActiveProposalReviewJob(job: Job): boolean {
   return job.created_from_transition === "propose-ready" && ACTIVE_PROPOSAL_REVIEW_ROLES.has(job.role);
 }
 
-function packetCommand(change: string, jobId: string): string {
-  return `superspec jobs packet --change "${change}" --job "${jobId}"`;
+function isExploreReviewJob(job: Job): boolean {
+  return job.created_from_transition === "explore" && job.role === "critic";
+}
+
+function requiredJobsOutput(state: State, change: string, jobs: Job[], reason: string): NextOutput {
+  return {
+    state,
+    path: "required_job",
+    required_jobs: requiredJobActions(change, jobs),
+    reason,
+  };
 }
 
 function transitionCommand(change: string, name: string, extra = ""): string {
@@ -85,6 +95,9 @@ export function next(
 
   switch (snapshot.state) {
     case "init":
+      if (snapshot.open_jobs.length > 0) {
+        return requiredJobsOutput("init", change, snapshot.open_jobs, `有 ${snapshot.open_jobs.length} 个待完成工作项`);
+      }
       return {
         state: "init",
         path: "next_command",
@@ -94,6 +107,10 @@ export function next(
       };
 
     case "explore": {
+      const exploreReviewJobs = snapshot.open_jobs.filter(isExploreReviewJob);
+      if (exploreReviewJobs.length > 0) {
+        return requiredJobsOutput("explore", change, exploreReviewJobs, `有 ${exploreReviewJobs.length} 个待完成探索审查工作项`);
+      }
       // Phase 2：检查 discovery.md
       const discoveryCheck = validateDiscovery(changeRoot);
       if (!discoveryCheck.ok) {
@@ -138,17 +155,7 @@ export function next(
 
       const proposalReviewJobs = snapshot.open_jobs.filter(isActiveProposalReviewJob);
       if (proposalReviewJobs.length > 0) {
-        const jobs = proposalReviewJobs.map(j => ({
-          job_id: j.job_id,
-          role: j.role,
-          packet_command: packetCommand(change, j.job_id),
-        }));
-        return {
-          state: "propose",
-          path: "required_job",
-          required_jobs: jobs,
-          reason: `有 ${jobs.length} 个待完成工作项`,
-        };
+        return requiredJobsOutput("propose", change, proposalReviewJobs, `有 ${proposalReviewJobs.length} 个待完成 proposal 审查工作项`);
       }
 
       return {
@@ -163,16 +170,7 @@ export function next(
     case "propose_ready": {
       const proposalReviewJobs = snapshot.open_jobs.filter(isActiveProposalReviewJob);
       if (proposalReviewJobs.length > 0) {
-        return {
-          state: "propose_ready",
-          path: "required_job",
-          required_jobs: proposalReviewJobs.map(j => ({
-            job_id: j.job_id,
-            role: j.role,
-            packet_command: packetCommand(change, j.job_id),
-          })),
-          reason: `有 ${proposalReviewJobs.length} 个待完成 proposal 审查工作项`,
-        };
+        return requiredJobsOutput("propose_ready", change, proposalReviewJobs, `有 ${proposalReviewJobs.length} 个待完成 proposal 审查工作项`);
       }
       return {
         state: "propose_ready",
@@ -184,6 +182,9 @@ export function next(
     }
 
     case "apply": {
+      if (snapshot.open_jobs.length > 0) {
+        return requiredJobsOutput("apply", change, snapshot.open_jobs, `有 ${snapshot.open_jobs.length} 个待完成工作项`);
+      }
       // 检查是否所有任务已完成
       const pending = pendingTaskIds(changeRoot);
       if (pending.length > 0) {
@@ -216,15 +217,6 @@ export function next(
           missing_inputs: [],
         };
       }
-      // 有 open job → 做
-      if (snapshot.open_jobs.length > 0) {
-        return {
-          state: "apply",
-          path: "required_job",
-          required_jobs: snapshot.open_jobs.map(j => ({ job_id: j.job_id, role: j.role, packet_command: packetCommand(change, j.job_id) })),
-          reason: `有 ${snapshot.open_jobs.length} 个待完成工作项`,
-        };
-      }
       return {
         state: "apply",
         path: "next_command",
@@ -246,12 +238,7 @@ export function next(
         };
       }
       if (snapshot.open_jobs.length > 0) {
-        return {
-          state: "apply_done",
-          path: "required_job",
-          required_jobs: snapshot.open_jobs.map(j => ({ job_id: j.job_id, role: j.role, packet_command: packetCommand(change, j.job_id) })),
-          reason: `有 ${snapshot.open_jobs.length} 个待完成工作项`,
-        };
+        return requiredJobsOutput("apply_done", change, snapshot.open_jobs, `有 ${snapshot.open_jobs.length} 个待完成工作项`);
       }
       return {
         state: "apply_done",
@@ -275,16 +262,7 @@ export function next(
       }
       const reviewVerifierJobs = snapshot.open_jobs.filter(isReviewReadyVerifier);
       if (reviewVerifierJobs.length > 0) {
-        return {
-          state: "review",
-          path: "required_job",
-          required_jobs: reviewVerifierJobs.map(j => ({
-            job_id: j.job_id,
-            role: j.role,
-            packet_command: packetCommand(change, j.job_id),
-          })),
-          reason: `有 ${reviewVerifierJobs.length} 个待完成最终验证工作项`,
-        };
+        return requiredJobsOutput("review", change, reviewVerifierJobs, `有 ${reviewVerifierJobs.length} 个待完成最终验证工作项`);
       }
       const events = readEvents(projectRoot, change);
       const policy = readReviewPolicyFromEvents(events);
@@ -320,6 +298,9 @@ export function next(
     }
 
     case "accepted":
+      if (snapshot.open_jobs.length > 0) {
+        return requiredJobsOutput("accepted", change, snapshot.open_jobs, `有 ${snapshot.open_jobs.length} 个待完成工作项，暂不归档`);
+      }
       return {
         state: "accepted",
         path: "next_command",
@@ -329,10 +310,20 @@ export function next(
       };
 
     case "archive":
+      if (snapshot.open_jobs.length > 0) {
+        return requiredJobsOutput("archive", change, snapshot.open_jobs, `有 ${snapshot.open_jobs.length} 个待完成工作项，暂不结束`);
+      }
       return {
         state: "archive",
         path: "done",
         reason: "已归档，流程完成。",
+      };
+
+    case "abandoned":
+      return {
+        state: "abandoned",
+        path: "done",
+        reason: "变更已放弃，流程终止。",
       };
 
     default:

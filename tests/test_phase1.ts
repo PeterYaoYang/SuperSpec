@@ -175,6 +175,10 @@ test("propose-ready --risk normal：创建 critic job，状态不变", () => {
     assert.equal(result.outcome, "job_created");
     assert.equal(result.to_state, "propose"); // 状态不变
     assert.equal(result.created_jobs.length, 1);
+    assert.equal(result.required_jobs?.[0]?.job_id, result.created_jobs[0]);
+    assert.deepEqual(result.required_jobs?.[0]?.packet_argv, [
+      "superspec", "jobs", "packet", "--change", fx.change, "--job", result.created_jobs[0],
+    ]);
 
     const snapshot = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(snapshot.state, "propose"); // 仍 propose
@@ -194,6 +198,37 @@ test("next 返回 required_job 当有 open job", () => {
     assert.ok(result.required_jobs.length > 0);
     assert.equal(result.required_jobs[0].role, "critic");
     assert.ok(result.required_jobs[0].packet_command.includes("jobs packet"));
+    assert.deepEqual(result.required_jobs[0].packet_argv, [
+      "superspec", "jobs", "packet", "--change", fx.change, "--job", result.required_jobs[0].job_id,
+    ]);
+  } finally { fx.cleanup(); }
+});
+
+test("next 在 init 有 open job 时返回诊断 required_job 而不进入 explore", () => {
+  const fx = setupFixture("init");
+  try {
+    const job = {
+      job_id: "JOB-init-open",
+      role: "critic",
+      state: "requested",
+      boundFiles: [],
+      packet_digest: "sha256:init-job",
+      created_from_transition: "explore",
+      created_at: new Date().toISOString(),
+    };
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "transition_commit", {
+      transition: "explore",
+      from_state: "init",
+      to_state: "init",
+      outcome: "job_created",
+      created_job_ids: [job.job_id],
+      new_jobs: [job],
+      reason: "test init open job",
+    }, { transitionId: "T-init-open-job", idempotencyKey: "init-open-job-key" }));
+
+    const result = next(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.equal(result.path, "required_job");
+    assert.equal(result.required_jobs[0].job_id, job.job_id);
   } finally { fx.cleanup(); }
 });
 

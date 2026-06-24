@@ -19,7 +19,9 @@ metadata:
 3. 登记结果
 4. 回到 1
 
-next 返回需要审查时，先按返回的审查说明完成对应审查，再优先用 `superspec record job-submit --change "<change>" --job <JOB> --report -` 从 stdin 提交 JSON 审查报告内容；文件路径模式仍可作为 fallback。
+如果下一步提示当前阶段还有用户确认、审查或验证事项，先完成这些事项。完成前不要进入下一阶段，也不要修改业务代码；对用户说明时使用自然语言，不默认复述内部 JSON 字段或完整 packet。
+
+如果下一步需要审查，先按返回的审查说明完成对应审查，再优先用 `superspec record job-submit --change "<change>" --job <JOB> --report -` 从 stdin 提交 JSON 审查报告内容；文件路径模式仍可作为 fallback。
 
 人类可读正文默认使用简体中文；OpenSpec 结构标题、规范关键字、命令、路径、JSON 字段、代码标识符保留原文。
 如果 OpenSpec 生成文档语言不符合预期，先检查 `openspec/config.yaml` 的官方 `context` 设置；不要在变更文档里添加自定义 `language` 字段。

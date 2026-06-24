@@ -19,7 +19,9 @@ metadata:
 3. 登记结果
 4. 回到 1
 
-next 返回 `ask_user` 说明 discovery 不完整或有未确认问题。若 scope 是 `explore_discovery`，先检查并填写 discovery 草稿，不要把草稿占位内容直接转问用户；只有真实阻塞问题才向用户提问，收到回答后优先用 `superspec record user-decision --change "<change>" --input -` 从 stdin 登记 JSON 内容；文件路径模式仍可作为 fallback。
+如果下一步提示当前阶段还有用户确认、审查或验证事项，先完成这些事项。完成前不要进入下一阶段，也不要修改业务代码；对用户说明时使用自然语言，不默认复述内部 JSON 字段或完整 packet。
+
+如果下一步说明 discovery 不完整或有未确认问题，先检查并填写 discovery 草稿，不要把草稿占位内容直接转问用户；只有真实阻塞问题才向用户提问，收到回答后优先用 `superspec record user-decision --change "<change>" --input -` 从 stdin 登记 JSON 内容；文件路径模式仍可作为 fallback。
 
 本技能默认走完整审查路径。探索完成后，`explore → propose` 会先创建 `critic` 工作项，由 Critic 角色审查需求澄清记录。审查完成后优先通过 `superspec record job-submit --change "<change>" --job <JOB> --report -` 从 stdin 登记 JSON 报告内容；文件路径模式仍可作为 fallback。
 
@@ -52,22 +54,20 @@ next 返回 `ask_user` 说明 discovery 不完整或有未确认问题。若 sco
 
 写入 `openspec/changes/<change>/.superspec/artifacts/discovery.md`：
 
-如果文件已经存在并包含 `<!-- superspec:discovery-draft -->` 或“待探索后...”占位文本，说明它是引擎生成的草稿。完成探索后必须删除草稿标记并替换所有占位内容，否则引擎会继续阻止推进。
-
 ```markdown
 # Discovery
 
-## 当前代码事实
-- src/path.ts:10 当前系统怎么工作
-
 ## 需求理解
-（用户目标和当前实现之间的差异）
+- 用户目标
 
-## 影响范围候选
-- src/path.ts:10 可能受影响的代码表面和相邻风险
+## 现状
+- 当前系统怎么工作  src/path.ts:10
+
+## 影响范围
+- 可能受影响的代码表面和相邻风险
 
 ## 风险和边界
-（技术风险、依赖、兼容性；尽量绑定代码或文档锚点）
+- 技术风险、依赖、兼容性；尽量绑定代码或文档锚点
 
 ## 待确认问题
 - [ ] 问题1的描述

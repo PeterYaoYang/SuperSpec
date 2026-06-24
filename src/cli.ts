@@ -9,7 +9,7 @@ import { writeSnapshot } from "./store.ts";
 import { rebuildSnapshot } from "./sync.ts";
 import { next as nextCmd } from "./next.ts";
 import { proposeReady, commitTransition, transitionInit, transitionExplore, startApply, taskStart, taskComplete, reopen, reviewReady, accept, archive } from "./transition.ts";
-import type { State } from "./types.ts";
+import type { State, TransitionResult } from "./types.ts";
 import { recordJobSubmit, recordJobSubmitContent, recordUserDecision, recordUserDecisionContent, jobsList, jobsPacket } from "./record.ts";
 import { recordTestRun, recordTestRunContent } from "./task.ts";
 import { probeOpenSpec, openspecStatus, changeRoot } from "./openspec.ts";
@@ -61,6 +61,16 @@ function readStdinRecordContent(flag: "--input" | "--report"): string {
     throw new StdinRecordInputError(flag);
   }
   return readFileSync(0, "utf8");
+}
+
+function transitionExitCode(result: TransitionResult): number {
+  if (result.outcome === "blocked") return 0;
+  return result.events_written === 0 ? 1 : 0;
+}
+
+function proposeReadyExitCode(result: TransitionResult): number {
+  if (result.outcome === "blocked") return 0;
+  return result.events_written === 0 && result.message.includes("不能") ? 1 : 0;
 }
 
 function parseVersion(version: string): { major: number; minor: number; patch: number; prerelease: string | null } | null {
@@ -516,13 +526,13 @@ jobs 子命令：
             const risk = (opts.risk as "minimal" | "normal" | "strict") ?? "strict";
             const result = proposeReady(projectRoot, change, cr, risk);
             console.log(JSON.stringify(result, null, 2));
-            return result.events_written === 0 && result.message.includes("不能") ? 1 : 0;
+            return proposeReadyExitCode(result);
           }
 
           case "start-apply": {
             const result = startApply(projectRoot, change, cr);
             console.log(JSON.stringify(result, null, 2));
-            return result.events_written === 0 ? 1 : 0;
+            return transitionExitCode(result);
           }
 
           case "task-start": {
@@ -530,7 +540,7 @@ jobs 子命令：
             if (!taskId) { console.error("task-start 需要 --task"); return 1; }
             const result = taskStart(projectRoot, change, cr, taskId);
             console.log(JSON.stringify(result, null, 2));
-            return result.events_written === 0 ? 1 : 0;
+            return transitionExitCode(result);
           }
 
           case "task-complete": {
@@ -538,7 +548,7 @@ jobs 子命令：
             if (!taskId) { console.error("task-complete 需要 --task"); return 1; }
             const result = taskComplete(projectRoot, change, cr, taskId);
             console.log(JSON.stringify(result, null, 2));
-            return result.events_written === 0 ? 1 : 0;
+            return transitionExitCode(result);
           }
 
           case "reopen": {
@@ -548,26 +558,26 @@ jobs 子命令：
             if (!reason) { console.error("reopen 需要 --reason"); return 1; }
             const result = reopen(projectRoot, change, cr, to, reason);
             console.log(JSON.stringify(result, null, 2));
-            return result.events_written === 0 ? 1 : 0;
+            return transitionExitCode(result);
           }
 
           case "review-ready": {
             const risk = (opts.risk as "minimal" | "normal" | "strict") ?? "strict";
             const result = reviewReady(projectRoot, change, cr, risk);
             console.log(JSON.stringify(result, null, 2));
-            return result.events_written === 0 ? 1 : 0;
+            return transitionExitCode(result);
           }
 
           case "accept": {
             const result = accept(projectRoot, change, cr);
             console.log(JSON.stringify(result, null, 2));
-            return result.events_written === 0 ? 1 : 0;
+            return transitionExitCode(result);
           }
 
           case "archive": {
             const result = archive(projectRoot, change, cr);
             console.log(JSON.stringify(result, null, 2));
-            return result.events_written === 0 ? 1 : 0;
+            return transitionExitCode(result);
           }
 
           default:

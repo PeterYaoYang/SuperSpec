@@ -7,6 +7,7 @@ import {
   sha256File, sha256Text, withLock, appendRawRecord,
 } from "./store.ts";
 import { reviewEvidenceDigest, reviewVerifierStaleReason } from "./review.ts";
+import { jobSubmitArgv } from "./job_action.ts";
 import type { Event, RecordResult, Job, JobRole, JobState } from "./types.ts";
 
 const REVIEW_REPORT_REQUIRED_FIELDS = ["role", "verdict", "findings"] as const;
@@ -399,6 +400,7 @@ export function jobsPacket(
         required_output_kind: "job_report_json",
         preferred_input_mode: "stdin",
         submission_command: `superspec record job-submit --change "${change}" --job "${job.job_id}" --report -`,
+        submission_argv: jobSubmitArgv(change, job.job_id),
         file_fallback: true,
         output_contract_fields: requiresReviewer(job.role) ? [...REVIEW_REPORT_REQUIRED_FIELDS, "reviewer"] : [...REVIEW_REPORT_REQUIRED_FIELDS],
         output_contract_optional_fields: [...REVIEW_REPORT_OPTIONAL_FIELDS],

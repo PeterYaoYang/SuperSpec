@@ -13,6 +13,7 @@ import { next } from "../src/next.ts";
 import { proposeReady, transitionExplore } from "../src/transition.ts";
 import { recordUserDecision, recordJobSubmit, jobsPacket } from "../src/record.ts";
 import { countDiscoveryOpenQuestions, countProposeOpenQuestionsInContent } from "../src/format.ts";
+import type { Job, JobRole, State } from "../src/types.ts";
 
 // ===== 夹具 =====
 
@@ -58,6 +59,34 @@ function reviewerReport(role: "critic" | "architect" | "test-engineer" = "critic
 
 function rawDirFiles(projectRoot: string, change: string): string[] {
   return readdirSync(join(projectRoot, ".superspec", "changes", change, "raw")).sort();
+}
+
+function appendOpenJob(
+  projectRoot: string,
+  change: string,
+  state: State,
+  overrides: Partial<Job> & { job_id: string; role: JobRole; created_from_transition: string },
+): Job {
+  const job: Job = {
+    ...overrides,
+    job_id: overrides.job_id,
+    role: overrides.role,
+    state: overrides.state ?? "requested",
+    boundFiles: overrides.boundFiles ?? [],
+    packet_digest: overrides.packet_digest ?? "sha256:test-job",
+    created_from_transition: overrides.created_from_transition,
+    created_at: overrides.created_at ?? new Date().toISOString(),
+  };
+  appendEvent(projectRoot, change, makeEvent(change, "transition_commit", {
+    transition: job.created_from_transition,
+    from_state: state,
+    to_state: state,
+    outcome: "job_created",
+    created_job_ids: [job.job_id],
+    new_jobs: [job],
+    reason: "test open job",
+  }, { transitionId: `T-${job.job_id}`, idempotencyKey: `${job.job_id}-key` }));
+  return job;
 }
 
 // ===== 测试 =====
@@ -180,7 +209,7 @@ test("next 在 explore 显式 normal 风险时返回带 risk 的 transition 命�
   } finally { fx.cleanup(); }
 });
 
-test("next 在 propose 有待用户确认问题时返回 ask_user 且优先于审查 job", () => {
+test("next 在 propose 待用户确认问题优先于审查 job", () => {
   const fx = setupPropose();
   try {
     const entered = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal");
@@ -215,7 +244,69 @@ test("next 在 propose 有待用户确认问题时返回 ask_user 且优先于�
     const result = next(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(result.path, "ask_user");
     assert.equal(result.ask_user.scope, "propose_open_questions");
-    assert.match(result.ask_user.question, /proposal\.md/);
+
+    writeFileSync(join(fx.changeRoot, "proposal.md"), [
+      "# Proposal",
+      "",
+      "## 待用户确认",
+      "",
+      "- [x] DEC-001 是否兼容旧 API？",
+    ].join("\n"));
+
+    const afterConfirmed = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(afterConfirmed.path, "required_job");
+    assert.equal(afterConfirmed.required_jobs[0].job_id, job.job_id);
+    assert.equal(afterConfirmed.required_jobs[0].role, "critic");
+    assert.deepEqual(afterConfirmed.required_jobs[0].packet_argv, [
+      "superspec", "jobs", "packet", "--change", fx.change, "--job", job.job_id,
+    ]);
+  } finally { fx.cleanup(); }
+});
+
+test("next 在 explore 有阶段 critic job 时优先于 discovery 校验", () => {
+  const fx = setupExplore();
+  try {
+    const job = appendOpenJob(fx.projectRoot, fx.change, "explore", {
+      job_id: "JOB-explore-critic",
+      role: "critic",
+      created_from_transition: "explore",
+    });
+
+    const result = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(result.path, "required_job");
+    assert.equal(result.required_jobs[0].job_id, job.job_id);
+  } finally { fx.cleanup(); }
+});
+
+test("next 在 explore 不让非阶段 open job 抢占 discovery 校验", () => {
+  const fx = setupExplore();
+  try {
+    appendOpenJob(fx.projectRoot, fx.change, "explore", {
+      job_id: "JOB-proposal-critic-too-early",
+      role: "critic",
+      created_from_transition: "propose-ready",
+    });
+
+    const result = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(result.path, "ask_user");
+    assert.equal(result.ask_user.scope, "explore_discovery");
+  } finally { fx.cleanup(); }
+});
+
+test("next 在 propose 不让非阶段 open job 抢占正常推进", () => {
+  const fx = setupPropose();
+  try {
+    const entered = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.equal(entered.to_state, "propose");
+    appendOpenJob(fx.projectRoot, fx.change, "propose", {
+      job_id: "JOB-apply-executor-too-early",
+      role: "executor",
+      created_from_transition: "apply",
+    });
+
+    const result = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(result.path, "next_command");
+    assert.match(result.next_command, /propose-ready/);
   } finally { fx.cleanup(); }
 });
 
@@ -239,6 +330,10 @@ test("explore→propose 默认完整审查：创建 critic，接受 JSON 报告�
     assert.equal(first.outcome, "job_created");
     assert.equal(first.to_state, "explore");
     assert.equal(first.created_jobs.length, 1);
+    assert.equal(first.required_jobs?.[0]?.job_id, first.created_jobs[0]);
+    assert.deepEqual(first.required_jobs?.[0]?.packet_argv, [
+      "superspec", "jobs", "packet", "--change", fx.change, "--job", first.created_jobs[0],
+    ]);
 
     let snapshot = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(snapshot.state, "explore");
@@ -251,6 +346,9 @@ test("explore→propose 默认完整审查：创建 critic，接受 JSON 报告�
     assert.equal(packet.packet?.required_output_kind, "job_report_json");
     assert.equal(packet.packet?.preferred_input_mode, "stdin");
     assert.equal(packet.packet?.submission_command, `superspec record job-submit --change "${fx.change}" --job "${first.created_jobs[0]}" --report -`);
+    assert.deepEqual(packet.packet?.submission_argv, [
+      "superspec", "record", "job-submit", "--change", fx.change, "--job", first.created_jobs[0], "--report", "-",
+    ]);
     assert.equal(packet.packet?.file_fallback, true);
     assert.deepEqual(packet.packet?.output_contract_fields, ["role", "verdict", "findings", "reviewer"]);
 
@@ -268,6 +366,79 @@ test("explore→propose 默认完整审查：创建 critic，接受 JSON 报告�
   } finally { fx.cleanup(); }
 });
 
+test("explore 已有 open critic 时 transition 返回 blocked 且不写事件", () => {
+  const fx = setupPropose();
+  try {
+    const first = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(first.outcome, "job_created");
+    const beforeEvents = readEvents(fx.projectRoot, fx.change).length;
+    const beforeLastTransition = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot).last_transition;
+
+    const second = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(second.outcome, "blocked");
+    assert.equal(second.events_written, 0);
+    assert.deepEqual(second.created_jobs, []);
+    assert.equal(second.required_jobs?.[0]?.job_id, first.created_jobs[0]);
+    assert.deepEqual(second.required_jobs?.[0]?.packet_argv, [
+      "superspec", "jobs", "packet", "--change", fx.change, "--job", first.created_jobs[0],
+    ]);
+    assert.equal(readEvents(fx.projectRoot, fx.change).length, beforeEvents);
+    assert.equal(rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot).last_transition, beforeLastTransition);
+
+    const cli = new URL("../src/cli.ts", import.meta.url).pathname;
+    const output = execFileSync(process.execPath, [cli, "transition", "explore", "--change", fx.change], {
+      cwd: fx.projectRoot,
+      encoding: "utf8",
+    });
+    const cliResult = JSON.parse(output);
+    assert.equal(cliResult.outcome, "blocked");
+    assert.equal(readEvents(fx.projectRoot, fx.change).length, beforeEvents);
+  } finally { fx.cleanup(); }
+});
+
+test("packet argv 字段保留包含空格和括号的 change/job token", () => {
+  const projectRoot = mkdtempSync(join(tmpdir(), "superspec-p2argv-"));
+  const change = "change with space(1)";
+  const changeRoot = join(projectRoot, "openspec", "changes", change);
+  mkdirSync(join(changeRoot, ".superspec", "artifacts"), { recursive: true });
+  writeFileSync(join(changeRoot, "proposal.md"), "# Proposal\n");
+  writeFileSync(join(changeRoot, "tasks.md"), "# Tasks\n\n- [ ] TASK-001\n");
+  writeFileSync(join(changeRoot, ".superspec", "artifacts", "discovery.md"), "# Discovery\n\nDone.\n");
+  ensureChangeLayout(projectRoot, change);
+  appendEvent(projectRoot, change, makeEvent(change, "transition_commit", {
+    transition: "init",
+    from_state: "init",
+    to_state: "init",
+    outcome: "advanced",
+    created_job_ids: [],
+    reason: "init",
+  }, { transitionId: "T-init", idempotencyKey: "init-key" }));
+  appendEvent(projectRoot, change, makeEvent(change, "transition_commit", {
+    transition: "explore",
+    from_state: "init",
+    to_state: "explore",
+    outcome: "advanced",
+    created_job_ids: [],
+    reason: "enter explore",
+  }, { transitionId: "T-explore", idempotencyKey: "explore-key" }));
+
+  try {
+    const result = transitionExplore(projectRoot, change, changeRoot);
+    assert.equal(result.outcome, "job_created");
+    const jobId = result.created_jobs[0];
+    assert.deepEqual(result.required_jobs?.[0]?.packet_argv, [
+      "superspec", "jobs", "packet", "--change", change, "--job", jobId,
+    ]);
+
+    const packet = jobsPacket(projectRoot, change, jobId);
+    assert.deepEqual(packet.packet?.submission_argv, [
+      "superspec", "record", "job-submit", "--change", change, "--job", jobId, "--report", "-",
+    ]);
+  } finally {
+    rmSync(projectRoot, { recursive: true, force: true });
+  }
+});
+
 test("CLI transition explore 默认完整审查：创建 critic job", () => {
   const fx = setupPropose();
   try {
@@ -282,6 +453,17 @@ test("CLI transition explore 默认完整审查：创建 critic job", () => {
 
     const snapshot = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(snapshot.open_jobs[0].role, "critic");
+
+    const nextOutput = execFileSync(process.execPath, [cli, "transition", "next", "--change", fx.change], {
+      cwd: fx.projectRoot,
+      encoding: "utf8",
+    });
+    const nextResult = JSON.parse(nextOutput);
+    assert.equal(nextResult.path, "required_job");
+    assert.equal(nextResult.required_jobs[0].job_id, result.created_jobs[0]);
+    assert.deepEqual(nextResult.required_jobs[0].packet_argv, [
+      "superspec", "jobs", "packet", "--change", fx.change, "--job", result.created_jobs[0],
+    ]);
   } finally { fx.cleanup(); }
 });
 

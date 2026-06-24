@@ -39,11 +39,19 @@ export interface JobPacket {
   required_output_kind: string;
   preferred_input_mode?: "stdin" | "file";
   submission_command?: string;
+  submission_argv?: string[];
   file_fallback?: boolean;
   output_contract_fields?: string[];
   output_contract_optional_fields?: string[];
   stop_conditions: string[];
   created_from_transition: string;
+}
+
+export interface RequiredJobAction {
+  job_id: string;
+  role: JobRole;
+  packet_command: string;
+  packet_argv: string[];
 }
 
 // ===== 事件 =====
@@ -154,7 +162,7 @@ export type NextOutput = {
   state: State;
 } & (
   | { path: "next_command"; next_command: string; reason: string; missing_inputs: MissingInput[] }
-  | { path: "required_job"; required_jobs: { job_id: string; role: JobRole; packet_command: string }[]; reason: string }
+  | { path: "required_job"; required_jobs: RequiredJobAction[]; reason: string }
   | { path: "ask_user"; ask_user: AskUser; reason: string }
   | { path: "done"; reason: string }
 );
@@ -162,10 +170,11 @@ export type NextOutput = {
 // ===== Transition 结果 =====
 export interface TransitionResult {
   transition: string;
-  outcome: "advanced" | "job_created";
+  outcome: "advanced" | "job_created" | "blocked";
   from_state: State;
   to_state: State;
   created_jobs: string[];
+  required_jobs?: RequiredJobAction[];
   message: string;
   events_written: number;
   details?: Record<string, unknown>;
