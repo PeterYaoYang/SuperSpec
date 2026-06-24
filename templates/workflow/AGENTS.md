@@ -1,7 +1,7 @@
 <!-- SUPERSPEC:AGENTS:START -->
-# SuperSpec
-
 本项目启用 SuperSpec。使用 `superspec-*` 工作流时，以 `superspec transition next --change "<change>"` 返回的下一步为准；流程完成前不得跳阶段、不得自称完成。
+
+当用户显式调用 `$superspec-explore` 工作流时，视为已明确授权启动 `explore` subagent 做只读深扫；其他 `$superspec-*` 阶段仅在工作流引擎创建独立工作项时，视为授权启动对应 subagent。
 
 SuperSpec 创建的独立审查/验证工作项，视为已授权启动对应 subagent；无需再次询问用户。主会话不得自批这些工作项。
 
