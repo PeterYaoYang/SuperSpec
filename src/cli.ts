@@ -127,6 +127,22 @@ function testEnv(name: string): string | undefined {
   return isTestMode() ? process.env[name] : undefined;
 }
 
+function runtimePlatform(): string {
+  return testEnv("SUPERSPEC_TEST_PLATFORM") ?? process.platform;
+}
+
+function windowsAwareCommand(name: string): string {
+  return runtimePlatform() === "win32" ? `${name}.cmd` : name;
+}
+
+function npmCommand(): string {
+  return windowsAwareCommand("npm");
+}
+
+function superspecCommand(): string {
+  return windowsAwareCommand("superspec");
+}
+
 function selfUpdateError(phase: SelfUpdatePhase, err: unknown, latest: string | null = null): SelfUpdateError {
   return new SelfUpdateError(phase, commandErrorMessage(err), latest);
 }
@@ -171,7 +187,7 @@ function npmLatestVersion(): string {
   if (testLatest) return testLatest;
 
   try {
-    const output = execFileSync("npm", ["view", PACKAGE_NAME, "version"], { encoding: "utf8" });
+    const output = execFileSync(npmCommand(), ["view", PACKAGE_NAME, "version"], { encoding: "utf8" });
     return output.trim().replace(/^"|"$/g, "");
   } catch (err) {
     throw selfUpdateError("npm_view", err);
@@ -184,7 +200,7 @@ function installLatestGlobal(): void {
   if (testEnv("SUPERSPEC_TEST_SKIP_GLOBAL_INSTALL") === "1") return;
 
   try {
-    execFileSync("npm", ["install", "-g", `${PACKAGE_NAME}@latest`], {
+    execFileSync(npmCommand(), ["install", "-g", `${PACKAGE_NAME}@latest`], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -210,7 +226,7 @@ function pathCliVersion(): string {
     return parsed;
   }
 
-  const output = execFileSync("superspec", ["--version"], {
+  const output = execFileSync(superspecCommand(), ["--version"], {
     encoding: "utf8",
     env: process.env,
   });
@@ -242,7 +258,7 @@ function rerunUpdatedCli(projectRoot: string, args: string[]): string {
   if (testOutput) return testOutput;
 
   try {
-    return execFileSync("superspec", args, {
+    return execFileSync(superspecCommand(), args, {
       cwd: projectRoot,
       encoding: "utf8",
       env: process.env,

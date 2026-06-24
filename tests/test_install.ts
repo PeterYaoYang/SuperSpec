@@ -213,6 +213,71 @@ test("CLI init 交互默认 yes 时升级并递归运行新版 CLI", () => {
   });
 });
 
+test("CLI init 在 Windows 平台使用 npm.cmd 和 superspec.cmd 自升级", () => {
+  withTempProject(projectRoot => {
+    const binDir = join(projectRoot, "bin");
+    mkdirSync(binDir, { recursive: true });
+    const commandLog = join(projectRoot, "commands.log");
+    const escapedLog = commandLog.replace(/'/g, "'\\''");
+    const rerunPayload = JSON.stringify({
+      ok: true,
+      message: "SuperSpec 99.0.0 已安装",
+    });
+
+    writeExecutable(join(binDir, "npm.cmd"), `#!/bin/sh
+echo "npm.cmd $@" >> '${escapedLog}'
+if [ "$1" = "view" ]; then
+  echo "99.0.0"
+  exit 0
+fi
+if [ "$1" = "install" ]; then
+  exit 0
+fi
+echo "unexpected npm.cmd $@" >&2
+exit 1
+`);
+    writeExecutable(join(binDir, "superspec.cmd"), `#!/bin/sh
+echo "superspec.cmd $@" >> '${escapedLog}'
+if [ "$1" = "--version" ]; then
+  echo "SuperSpec 99.0.0"
+  exit 0
+fi
+if [ "$1" = "init" ]; then
+  cat <<'JSON'
+${rerunPayload}
+JSON
+  exit 0
+fi
+echo "unexpected superspec.cmd $@" >&2
+exit 1
+`);
+
+    const output = execFileSync(process.execPath, [cliPath(), "init", "--scope", "project"], {
+      cwd: projectRoot,
+      encoding: "utf8",
+      env: testEnv({
+        SUPERSPEC_TEST_PLATFORM: "win32",
+        SUPERSPEC_TEST_ASSUME_TTY: "1",
+        SUPERSPEC_TEST_PROMPT_ANSWER: "",
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+      }),
+    });
+    const result = JSON.parse(output);
+    const log = readFileSync(commandLog, "utf8");
+
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.self_update, {
+      updated: true,
+      from: PACKAGE_VERSION,
+      to: "99.0.0",
+    });
+    assert.match(log, /^npm\.cmd view @peterxiaoyang\/superspec version$/m);
+    assert.match(log, /^npm\.cmd install -g @peterxiaoyang\/superspec@latest$/m);
+    assert.match(log, /^superspec\.cmd --version$/m);
+    assert.match(log, /^superspec\.cmd init --scope project --skip-self-update$/m);
+  });
+});
+
 test("CLI init latest 查询失败时提示 stderr 并继续安装", () => {
   withTempProject(projectRoot => {
     const run = runCli(["init", "--scope", "project"], projectRoot, testEnv({
@@ -355,6 +420,69 @@ test("CLI update 默认先安装 npm latest 并递归运行新 CLI", () => {
       from: PACKAGE_VERSION,
       to: "99.0.0",
     });
+  });
+});
+
+test("CLI update 在 Windows 平台使用 npm.cmd 和 superspec.cmd 自升级", () => {
+  withTempProject(projectRoot => {
+    const binDir = join(projectRoot, "bin");
+    mkdirSync(binDir, { recursive: true });
+    const commandLog = join(projectRoot, "commands.log");
+    const escapedLog = commandLog.replace(/'/g, "'\\''");
+    const rerunPayload = JSON.stringify({
+      ok: true,
+      message: "SuperSpec 99.0.0 已更新项目工作流",
+    });
+
+    writeExecutable(join(binDir, "npm.cmd"), `#!/bin/sh
+echo "npm.cmd $@" >> '${escapedLog}'
+if [ "$1" = "view" ]; then
+  echo "99.0.0"
+  exit 0
+fi
+if [ "$1" = "install" ]; then
+  exit 0
+fi
+echo "unexpected npm.cmd $@" >&2
+exit 1
+`);
+    writeExecutable(join(binDir, "superspec.cmd"), `#!/bin/sh
+echo "superspec.cmd $@" >> '${escapedLog}'
+if [ "$1" = "--version" ]; then
+  echo "SuperSpec 99.0.0"
+  exit 0
+fi
+if [ "$1" = "update" ]; then
+  cat <<'JSON'
+${rerunPayload}
+JSON
+  exit 0
+fi
+echo "unexpected superspec.cmd $@" >&2
+exit 1
+`);
+
+    const output = execFileSync(process.execPath, [cliPath(), "update"], {
+      cwd: projectRoot,
+      encoding: "utf8",
+      env: testEnv({
+        SUPERSPEC_TEST_PLATFORM: "win32",
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+      }),
+    });
+    const result = JSON.parse(output);
+    const log = readFileSync(commandLog, "utf8");
+
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.self_update, {
+      updated: true,
+      from: PACKAGE_VERSION,
+      to: "99.0.0",
+    });
+    assert.match(log, /^npm\.cmd view @peterxiaoyang\/superspec version$/m);
+    assert.match(log, /^npm\.cmd install -g @peterxiaoyang\/superspec@latest$/m);
+    assert.match(log, /^superspec\.cmd --version$/m);
+    assert.match(log, /^superspec\.cmd update --skip-self-update$/m);
   });
 });
 
