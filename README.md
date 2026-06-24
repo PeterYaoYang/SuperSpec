@@ -81,6 +81,7 @@ superspec install
 ```
 
 这条命令的意思是：把 SuperSpec 当前可用的工作流入口安装到项目里。
+安装前会检查全局 `openspec` CLI；缺失或版本不一致时，会自动执行 `npm install -g @fission-ai/openspec@1.4.1`，确保后续工作流能调用 OpenSpec。
 当前 beta 会安装 `.superspec/` 引擎目录、`.codex/skills/superspec-*` 阶段入口、`.codex/prompts/*.md` 角色 prompt、`.codex/agents/*.toml` 子智能体配置，补齐 `.codex/config.toml` 的多 agent 开关，并在项目根 `AGENTS.md` 中维护 SuperSpec 轻量门禁片段。`superspec init --scope project` 仍作为兼容别名可用。
 
 Windows PowerShell 如果拦截 npm 的 `.ps1` 脚本，请改用：
@@ -246,7 +247,7 @@ superspec status
 superspec update
 ```
 
-这条命令会先检查 npm 上的 latest 版本；如果有新版，会自动执行全局升级并用新版 CLI 重新同步项目入口。同步内容包括补齐 `.superspec/changes` 运行时目录，把当前 CLI 内置的 `.codex/skills/superspec-*`、`.codex/prompts/*.md`、`.codex/agents/*.toml` 同步到项目里，并更新 `AGENTS.md` 中 marker 包裹的 SuperSpec 轻量门禁片段。
+这条命令会先检查 npm 上的 latest 版本；如果有新版，会自动执行全局升级并用新版 CLI 重新同步项目入口。随后会把全局 OpenSpec CLI 拉齐到 `@fission-ai/openspec@1.4.1`。同步内容包括补齐 `.superspec/changes` 运行时目录，把当前 CLI 内置的 `.codex/skills/superspec-*`、`.codex/prompts/*.md`、`.codex/agents/*.toml` 同步到项目里，并更新 `AGENTS.md` 中 marker 包裹的 SuperSpec 轻量门禁片段。
 
 ## 进阶信息
 

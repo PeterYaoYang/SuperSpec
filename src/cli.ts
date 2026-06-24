@@ -16,6 +16,8 @@ import { probeOpenSpec, openspecStatus, changeRoot } from "./openspec.ts";
 import { SUPERSPEC_VERSION } from "./version.ts";
 
 const PACKAGE_NAME = "@peterxiaoyang/superspec";
+const OPENSPEC_PACKAGE_NAME = "@fission-ai/openspec";
+const OPENSPEC_REQUIRED_VERSION = "1.4.1";
 
 // ===== 参数解析 =====
 
@@ -106,6 +108,16 @@ function commandErrorMessage(err: unknown): string {
 }
 
 type SelfUpdatePhase = "npm_view" | "global_install" | "version_check" | "version_mismatch" | "rerun" | "rerun_output";
+type OpenSpecDependencyPhase = "version_check" | "global_install" | "version_mismatch";
+type OpenSpecEnsureAction = "already_satisfied" | "installed" | "updated";
+
+interface OpenSpecEnsureResult {
+  package: string;
+  required_version: string;
+  before: string | null;
+  after: string;
+  action: OpenSpecEnsureAction;
+}
 
 class SelfUpdateError extends Error {
   readonly phase: SelfUpdatePhase;
@@ -116,6 +128,18 @@ class SelfUpdateError extends Error {
     this.name = "SelfUpdateError";
     this.phase = phase;
     this.latest = latest;
+  }
+}
+
+class OpenSpecDependencyError extends Error {
+  readonly phase: OpenSpecDependencyPhase;
+  readonly before: string | null;
+
+  constructor(phase: OpenSpecDependencyPhase, message: string, before: string | null = null) {
+    super(message);
+    this.name = "OpenSpecDependencyError";
+    this.phase = phase;
+    this.before = before;
   }
 }
 
@@ -141,6 +165,10 @@ function npmCommand(): string {
 
 function superspecCommand(): string {
   return windowsAwareCommand("superspec");
+}
+
+function openspecCommand(): string {
+  return windowsAwareCommand("openspec");
 }
 
 function selfUpdateError(phase: SelfUpdatePhase, err: unknown, latest: string | null = null): SelfUpdateError {
@@ -177,6 +205,142 @@ function selfUpdateFailurePayload(err: unknown): { ok: false; message: string; s
       to: null,
       phase: "unknown",
     },
+  };
+}
+
+function openSpecDependencyFailurePayload(err: OpenSpecDependencyError): {
+  ok: false;
+  message: string;
+  openspec: {
+    package: string;
+    required_version: string;
+    before: string | null;
+    after: null;
+    action: "failed";
+    phase: OpenSpecDependencyPhase;
+  };
+} {
+  return {
+    ok: false,
+    message: err.message,
+    openspec: {
+      package: OPENSPEC_PACKAGE_NAME,
+      required_version: OPENSPEC_REQUIRED_VERSION,
+      before: err.before,
+      after: null,
+      action: "failed",
+      phase: err.phase,
+    },
+  };
+}
+
+function parseOpenSpecVersion(output: string): string | null {
+  const match = output.trim().match(/(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/);
+  return match?.[1] ?? null;
+}
+
+let openSpecVersionProbeCount = 0;
+
+function mockedOpenSpecVersion(): string | undefined {
+  const sequence = testEnv("SUPERSPEC_TEST_OPENSPEC_VERSION_SEQUENCE");
+  if (sequence !== undefined) {
+    const parts = sequence.split("|");
+    const raw = parts[Math.min(openSpecVersionProbeCount, parts.length - 1)]?.trim() ?? "";
+    openSpecVersionProbeCount += 1;
+    if (/^(missing|error)$/i.test(raw)) throw new Error("openspec CLI 不可用");
+    return raw;
+  }
+
+  const explicit = testEnv("SUPERSPEC_TEST_OPENSPEC_VERSION");
+  if (explicit !== undefined) {
+    if (/^(missing|error)$/i.test(explicit.trim())) throw new Error("openspec CLI 不可用");
+    return explicit;
+  }
+
+  return isTestMode() ? OPENSPEC_REQUIRED_VERSION : undefined;
+}
+
+function pathOpenSpecVersion(): string {
+  const mocked = mockedOpenSpecVersion();
+  if (mocked !== undefined) {
+    const parsed = parseOpenSpecVersion(mocked);
+    if (!parsed) throw new Error(`无法解析 openspec --version 输出：${mocked}`);
+    return parsed;
+  }
+
+  const output = execFileSync(openspecCommand(), ["--version"], {
+    encoding: "utf8",
+    env: process.env,
+  });
+  const parsed = parseOpenSpecVersion(output);
+  if (!parsed) throw new Error(`无法解析 openspec --version 输出：${output.trim()}`);
+  return parsed;
+}
+
+function installRequiredOpenSpecGlobal(before: string | null): void {
+  const testError = testEnv("SUPERSPEC_TEST_OPENSPEC_INSTALL_ERROR");
+  if (testError) throw new OpenSpecDependencyError("global_install", testError, before);
+  if (testEnv("SUPERSPEC_TEST_SKIP_OPENSPEC_INSTALL") === "1") return;
+
+  try {
+    execFileSync(npmCommand(), ["install", "-g", `${OPENSPEC_PACKAGE_NAME}@${OPENSPEC_REQUIRED_VERSION}`], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch (err) {
+    throw new OpenSpecDependencyError(
+      "global_install",
+      `安装 OpenSpec ${OPENSPEC_REQUIRED_VERSION} 失败：${commandErrorMessage(err)}`,
+      before,
+    );
+  }
+}
+
+function ensureOpenSpecCli(): OpenSpecEnsureResult {
+  let before: string | null = null;
+  try {
+    before = pathOpenSpecVersion();
+  } catch {
+    before = null;
+  }
+
+  if (before === OPENSPEC_REQUIRED_VERSION) {
+    return {
+      package: OPENSPEC_PACKAGE_NAME,
+      required_version: OPENSPEC_REQUIRED_VERSION,
+      before,
+      after: before,
+      action: "already_satisfied",
+    };
+  }
+
+  installRequiredOpenSpecGlobal(before);
+
+  let after: string;
+  try {
+    after = pathOpenSpecVersion();
+  } catch (err) {
+    throw new OpenSpecDependencyError(
+      "version_check",
+      `安装后仍无法读取 openspec --version：${commandErrorMessage(err)}`,
+      before,
+    );
+  }
+
+  if (after !== OPENSPEC_REQUIRED_VERSION) {
+    throw new OpenSpecDependencyError(
+      "version_mismatch",
+      `全局 openspec 版本仍为 ${after}，期望 ${OPENSPEC_REQUIRED_VERSION}。请检查 npm 全局 bin 是否在 PATH 前置。`,
+      before,
+    );
+  }
+
+  return {
+    package: OPENSPEC_PACKAGE_NAME,
+    required_version: OPENSPEC_REQUIRED_VERSION,
+    before,
+    after,
+    action: before === null ? "installed" : "updated",
   };
 }
 
@@ -433,11 +597,17 @@ jobs 子命令：
           return rerun.exitCode;
         }
       }
-      console.log(JSON.stringify(installProject(projectRoot)));
+      const openspec = ensureOpenSpecCli();
+      console.log(JSON.stringify({
+        ...installProject(projectRoot),
+        openspec,
+      }));
       return 0;
     } catch (err) {
       console.log(JSON.stringify(err instanceof SelfUpdateError
         ? selfUpdateFailurePayload(err)
+        : err instanceof OpenSpecDependencyError
+          ? openSpecDependencyFailurePayload(err)
         : { ok: false, message: commandErrorMessage(err) }));
       return 1;
     }
@@ -452,15 +622,19 @@ jobs 子命令：
           return rerun.exitCode;
         }
       }
+      const openspec = ensureOpenSpecCli();
       const result = installProject(projectRoot, { allowLegacyState: true });
       console.log(JSON.stringify({
         ...result,
+        openspec,
         message: `SuperSpec ${SUPERSPEC_VERSION} 已更新项目工作流`,
       }));
       return 0;
     } catch (err) {
       console.log(JSON.stringify(err instanceof SelfUpdateError
         ? selfUpdateFailurePayload(err)
+        : err instanceof OpenSpecDependencyError
+          ? openSpecDependencyFailurePayload(err)
         : { ok: false, message: commandErrorMessage(err) }));
       return 1;
     }

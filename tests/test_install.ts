@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { installProject, WORKFLOW_AGENTS, WORKFLOW_PROMPTS, WORKFLOW_SKILLS } from "../src/install.ts";
 
 const PACKAGE_VERSION = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version as string;
+const OPENSPEC_REQUIRED_VERSION = "1.4.1";
 const AGENTS_TEMPLATE = readFileSync(new URL("../templates/workflow/AGENTS.md", import.meta.url), "utf8").trimEnd();
 
 function withTempProject(fn: (projectRoot: string) => void): void {
@@ -120,6 +121,7 @@ test("CLI init --scope project is a compatibility alias for install", () => {
     const output = execFileSync(process.execPath, [cliPath(), "init", "--scope", "project"], {
       cwd: projectRoot,
       encoding: "utf8",
+      env: testEnv(),
     });
     const result = JSON.parse(output);
 
@@ -134,6 +136,83 @@ test("CLI init --scope project is a compatibility alias for install", () => {
     assert.equal(existsSync(join(projectRoot, ".codex", "config.toml")), true);
     assert.equal(existsSync(join(projectRoot, "AGENTS.md")), true);
     assert.equal(existsSync(join(projectRoot, "openspec", "config.yaml")), true);
+    assert.deepEqual(result.openspec, {
+      package: "@fission-ai/openspec",
+      required_version: OPENSPEC_REQUIRED_VERSION,
+      before: OPENSPEC_REQUIRED_VERSION,
+      after: OPENSPEC_REQUIRED_VERSION,
+      action: "already_satisfied",
+    });
+  });
+});
+
+test("CLI init installs pinned OpenSpec when CLI is missing", () => {
+  withTempProject(projectRoot => {
+    const output = execFileSync(process.execPath, [cliPath(), "init", "--scope", "project"], {
+      cwd: projectRoot,
+      encoding: "utf8",
+      env: testEnv({
+        SUPERSPEC_TEST_OPENSPEC_VERSION_SEQUENCE: `missing|${OPENSPEC_REQUIRED_VERSION}`,
+        SUPERSPEC_TEST_SKIP_OPENSPEC_INSTALL: "1",
+      }),
+    });
+    const result = JSON.parse(output);
+
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.openspec, {
+      package: "@fission-ai/openspec",
+      required_version: OPENSPEC_REQUIRED_VERSION,
+      before: null,
+      after: OPENSPEC_REQUIRED_VERSION,
+      action: "installed",
+    });
+    assert.equal(existsSync(join(projectRoot, ".codex", "skills", "superspec-explore", "SKILL.md")), true);
+  });
+});
+
+test("CLI update upgrades OpenSpec when version differs", () => {
+  withTempProject(projectRoot => {
+    const output = execFileSync(process.execPath, [cliPath(), "update", "--skip-self-update"], {
+      cwd: projectRoot,
+      encoding: "utf8",
+      env: testEnv({
+        SUPERSPEC_TEST_OPENSPEC_VERSION_SEQUENCE: `1.0.0|${OPENSPEC_REQUIRED_VERSION}`,
+        SUPERSPEC_TEST_SKIP_OPENSPEC_INSTALL: "1",
+      }),
+    });
+    const result = JSON.parse(output);
+
+    assert.equal(result.ok, true);
+    assert.equal(result.message, `SuperSpec ${PACKAGE_VERSION} 已更新项目工作流`);
+    assert.deepEqual(result.openspec, {
+      package: "@fission-ai/openspec",
+      required_version: OPENSPEC_REQUIRED_VERSION,
+      before: "1.0.0",
+      after: OPENSPEC_REQUIRED_VERSION,
+      action: "updated",
+    });
+  });
+});
+
+test("CLI init returns structured error when OpenSpec install fails", () => {
+  withTempProject(projectRoot => {
+    const run = runCli(["init", "--scope", "project"], projectRoot, testEnv({
+      SUPERSPEC_TEST_OPENSPEC_VERSION_SEQUENCE: "missing",
+      SUPERSPEC_TEST_OPENSPEC_INSTALL_ERROR: "permission denied",
+    }));
+    const result = JSON.parse(run.stdout);
+
+    assert.equal(run.status, 1);
+    assert.equal(result.ok, false);
+    assert.match(result.message, /permission denied/);
+    assert.deepEqual(result.openspec, {
+      package: "@fission-ai/openspec",
+      required_version: OPENSPEC_REQUIRED_VERSION,
+      before: null,
+      after: null,
+      action: "failed",
+      phase: "global_install",
+    });
   });
 });
 
@@ -306,6 +385,7 @@ test("CLI update refreshes installed workflow templates without backups", () => 
     const output = execFileSync(process.execPath, [cliPath(), "update", "--skip-self-update"], {
       cwd: projectRoot,
       encoding: "utf8",
+      env: testEnv(),
     });
     const result = JSON.parse(output);
 
@@ -639,6 +719,14 @@ fi
 echo "unexpected npm $@" >&2
 exit 1
 `);
+    writeExecutable(join(binDir, "openspec"), `#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "${OPENSPEC_REQUIRED_VERSION}"
+  exit 0
+fi
+echo "unexpected openspec $@" >&2
+exit 1
+`);
 
     const output = execFileSync(process.execPath, [cliPath(), "update"], {
       cwd: projectRoot,
@@ -666,6 +754,7 @@ test("CLI update bootstraps old projects and ignores legacy self-update flags", 
     const output = execFileSync(process.execPath, [cliPath(), "update", "--scope", "project", "--skip-self-update"], {
       cwd: projectRoot,
       encoding: "utf8",
+      env: testEnv(),
     });
     const result = JSON.parse(output);
 
@@ -692,6 +781,7 @@ test("CLI update allows legacy state while install still blocks it", () => {
     const output = execFileSync(process.execPath, [cliPath(), "update", "--skip-self-update"], {
       cwd: projectRoot,
       encoding: "utf8",
+      env: testEnv(),
     });
     const result = JSON.parse(output);
 
