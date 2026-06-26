@@ -539,6 +539,22 @@ test("next：accepted 和 archive 有 open job 时不走普通完成路径", () 
   } finally { archiveFx.cleanup(); }
 });
 
+test("next：accepted 无 open job 时等待用户确认归档", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    accept(fx.projectRoot, fx.change, fx.changeRoot);
+
+    const result = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(result.path, "ask_user");
+    assert.equal(result.state, "accepted");
+    assert.equal(result.ask_user.scope, "archive_confirmation");
+    assert.match(result.ask_user.question, /确认归档/);
+    assert.match(result.reason, /等待用户确认归档/);
+  } finally { fx.cleanup(); }
+});
+
 test("next：abandoned 是终态，即使存在 open job 也不继续驱动", () => {
   const fx = setupApplyWithDoneTask();
   try {

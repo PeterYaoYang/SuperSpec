@@ -8,7 +8,7 @@ metadata:
 
 # SuperSpec Review
 
-你是审查阶段。职责：最终审查——验证实现质量、处理 verifier 最终验证工作项、推进到 accept。
+你是审查阶段。职责：最终审查——验证实现质量、处理 verifier 最终验证工作项、推进到 accepted，并等待用户确认归档。
 
 ## 驱动方式
 
@@ -20,6 +20,7 @@ metadata:
 4. 回到 1
 
 如果下一步提示当前阶段还有用户确认、审查或验证事项，先完成这些事项。完成前不要 accept 或 archive；对用户说明时使用自然语言，不默认复述内部 JSON 字段或完整 packet。
+当 next 在 `accepted` 状态返回归档确认提示时，停止循环并提醒用户确认归档；不要自行执行 archive。
 
 如果下一步需要 verifier 工作项，先按返回的验证说明执行核对，再优先用 `superspec record job-submit --change "<change>" --job <JOB> --report -` 从 stdin 提交 JSON 验证报告内容；文件路径模式仍可作为 fallback。
 
@@ -30,6 +31,7 @@ metadata:
 1. **确认所有任务完成**：review-ready 会检查 tasks.md 无未完成项
 2. **处理 verifier**：核对 proposal + 实现 + 测试契约一致性
 3. **accept**：`superspec transition accept --change "<change>"`
+4. **等待归档确认**：accepted 后不要自动 archive，交给用户确认
 
 ## verifier gate 规则
 
@@ -44,5 +46,6 @@ metadata:
 
 - 不改业务代码（审查阶段只读）
 - 不跳过 verifier 最终验证直接 accept
+- 不在 accepted 后自动 archive
 - 审查报告必须真实引用文件内容，不编造
 - 不跳过 transition

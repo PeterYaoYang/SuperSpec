@@ -301,12 +301,16 @@ export function next(
       if (snapshot.open_jobs.length > 0) {
         return requiredJobsOutput("accepted", change, snapshot.open_jobs, `有 ${snapshot.open_jobs.length} 个待完成工作项，暂不归档`);
       }
+      const ask: AskUser = {
+        question: `审查已通过，流程停在 accepted。确认归档时请执行 ${transitionCommand(change, "archive")}`,
+        allowed_answers: ["确认归档"],
+        scope: "archive_confirmation",
+      };
       return {
         state: "accepted",
-        path: "next_command",
-        next_command: transitionCommand(change, "archive"),
-        reason: "审查通过，提交归档",
-        missing_inputs: [],
+        path: "ask_user",
+        ask_user: ask,
+        reason: "审查通过，等待用户确认归档",
       };
 
     case "archive":

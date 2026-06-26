@@ -89,6 +89,22 @@ test("review agent toml contracts require reviewer only for proposal review role
   assert.doesNotMatch(verifier, /reviewer:\{kind,id\}|reviewer provenance|reviewer\.kind/);
 });
 
+test("review and archive skills require user confirmation before archive", () => {
+  const review = read("../templates/workflow/skills/superspec-review/SKILL.md");
+  const archive = read("../templates/workflow/skills/superspec-archive/SKILL.md");
+
+  assertIncludesAll("review skill archive confirmation", review, [
+    "推进到 accepted",
+    "等待用户确认归档",
+    "不要自动 archive",
+  ]);
+  assertIncludesAll("archive skill archive confirmation", archive, [
+    "用户明确确认归档",
+    "`archive_confirmation`",
+    "不替用户确认归档",
+  ]);
+});
+
 test("explore and critic prompts preserve discovery quality gates", () => {
   const explore = read("../templates/workflow/prompts/explore.md");
   const critic = read("../templates/workflow/prompts/critic.md");

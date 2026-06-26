@@ -15,20 +15,24 @@ test("simulateLoop：done 路径立即停止", () => {
   assert.equal(result.finalState, "archive");
 });
 
-test("simulateLoop：next_command → done 两步完成", () => {
-  let callCount = 0;
+test("simulateLoop：accepted 归档确认会暂停", () => {
   const outputs: NextOutput[] = [
-    { state: "accepted", path: "next_command", next_command: "superspec transition archive", reason: "归档", missing_inputs: [] },
-    { state: "archive", path: "done", reason: "已完成" },
+    {
+      state: "accepted",
+      path: "ask_user",
+      ask_user: { question: "审查已通过，确认归档时请执行 superspec transition archive", allowed_answers: ["确认归档"], scope: "archive_confirmation" },
+      reason: "等待确认",
+    },
   ];
   const result = simulateLoop(
-    () => outputs[callCount++],
+    () => outputs[0],
     () => true,
   );
-  assert.equal(result.completed, true);
-  assert.equal(result.steps.length, 2);
-  assert.equal(result.steps[0].action, "execute");
-  assert.equal(result.steps[1].action, "stop");
+  assert.equal(result.completed, false);
+  assert.equal(result.steps.length, 1);
+  assert.equal(result.steps[0].action, "ask");
+  assert.equal(result.finalState, "accepted");
+  assert.match(result.message, /需要用户确认/);
 });
 
 test("simulateLoop：required_job → next_command → done", () => {
