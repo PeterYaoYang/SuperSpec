@@ -105,6 +105,36 @@ test("review and archive skills require user confirmation before archive", () =>
   ]);
 });
 
+test("agents route post-apply requirement changes without new workflow state", () => {
+  const agents = read("../templates/workflow/AGENTS.md");
+  const apply = read("../templates/workflow/skills/superspec-apply/SKILL.md");
+  const executor = read("../templates/workflow/prompts/executor.md");
+
+  assertIncludesAll("agents natural language SuperSpec routing", agents, [
+    "没有显式调用 `superspec-*`",
+    "编辑代码前先提醒并做只读确认",
+    "实现偏差",
+    "`superspec-propose`",
+    "不要直接把这类自然语言当作 apply 授权",
+  ]);
+  assertIncludesAll("apply latest requirement guard", apply, [
+    "补充“最新要求”",
+    "验收标准",
+    "`superspec-propose`",
+    "不把自然语言当作 task 授权",
+  ]);
+  assertIncludesAll("executor latest requirement blocker", executor, [
+    "最新业务规则",
+    "验收标准",
+    "报告 blocker",
+    "不要把这类自然语言输入当作本 task 的实现授权",
+  ]);
+
+  const combined = [agents, apply, executor].join("\n");
+  assert.doesNotMatch(combined, /\bintake\b|doc-sync|requirement_change|requirement-change/);
+  assert.doesNotMatch(combined, /superspec transition (?!next\b|reopen\b|task-start\b|task-complete\b)[a-z-]+/);
+});
+
 test("explore and critic prompts preserve discovery quality gates", () => {
   const explore = read("../templates/workflow/prompts/explore.md");
   const critic = read("../templates/workflow/prompts/critic.md");

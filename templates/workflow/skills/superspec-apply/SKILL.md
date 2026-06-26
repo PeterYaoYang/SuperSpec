@@ -66,6 +66,7 @@ no-TDD 任务（tdd_required:false + no_tdd_reason）跳过 RED/GREEN。
 - 需要判断影响范围或改动原因不自明时，参考 `proposal.md` 的 `## Impact`，但不要把它当作路径白名单
 - 编码时发现未列入影响范围的文件，如果从 diff 或引用链能直接解释为同一任务下的局部引用、测试辅助或机械连带改动，可以继续
 - 如果发现新增能力、用户可见行为、明显新增影响范围或原因不自明，停止扩大实现并报告给主流程；不要在 apply 阶段补改 `proposal.md`
+- 用户在 apply 期间或 apply 后补充“最新要求”时，先判断它是否改变业务规则、产品口径、验收标准、示例规范、兼容策略或影响范围；若改变，停止实现并交回主流程使用 `superspec-propose` 更新相关计划文档，不把自然语言当作 task 授权
 - 不修改 `proposal.md`、`design.md`、`specs/**` 或 `.superspec/**`
 - active attempt 期间不要修改 `tasks.md` 中除 `task-complete` 自动勾选目标 checkbox 外的内容
 - 不跳过 RED 直接写 GREEN

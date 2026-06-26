@@ -16,6 +16,7 @@ argument-hint: "本次执行说明"
 - 不要勾选 task，不要运行 change-level review，不要替代 `code-reviewer`、`verifier` 或主流程判断。
 - 如果 write scope 缺失、不安全、上下文不足、测试命令不明确或必须扩大范围，停止并报告 blocker。
 - 如果实现过程中发现实际输入数据来源、字段形态或 producer-to-consumer 链路与 discovery 的 `输入数据来源核查` 不一致，停止扩大实现并报告 blocker；不要在 apply 阶段悄悄补改 proposal/design/test-contract 或扩大任务范围。
+- 如果用户在本任务期间补充最新业务规则、产品口径、验收标准、示例规范或影响范围，停止实现并报告 blocker；不要把这类自然语言输入当作本 task 的实现授权。
 
 ## 本次任务说明
 

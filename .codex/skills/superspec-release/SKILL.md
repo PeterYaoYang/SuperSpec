@@ -18,6 +18,7 @@ metadata:
 
 - 默认使用简体中文写人类可读内容；命令、路径、tag、版本号、包名保留原文。
 - commit message、tag notes、GitHub Release notes 使用中文。
+- tag notes 和 GitHub Release notes 必须使用真实换行；禁止把 `\n`、`/n`、`\n\n`、`/n/n` 这类转义文本写进 notes。
 - 不把 npm/GitHub token、OTP、认证 URL 的敏感部分写入最终报告。
 
 ## 阶段职责
@@ -231,12 +232,55 @@ npm view @peterxiaoyang/superspec@<version> version dist-tags.<distTag> dist.tar
 
 只有确认 npm registry 已显示目标版本且 `dist-tags.<distTag>` 指向目标版本后，才进入 tag / GitHub Release。
 
-## Git tag
+## Release notes 内容
 
-创建 annotated tag：
+创建 tag / GitHub Release 前，先写一个临时 Markdown notes 文件，tag 和 GitHub Release 共用它。内容只写本次版本对用户可见的新增、改进或修复：
+
+- 可以从用户发布说明、`CHANGELOG`、OpenSpec 变更、或上一版本 tag 以来的 commit 中提炼。
+- 只保留功能、行为、兼容性、文档或缺陷修复相关条目。
+- 不写发布流水线信息，例如 npm 发布、registry 验证、GitHub Release 创建、tarball 上传、worktree 清理、测试通过、版本号提交等。
+- 不写空泛过程描述，例如“完成发布”“执行发布”“上传包”。
+- 如果某个分类没有内容，就省略该分类。
+
+示例格式：
+
+```markdown
+### 新增与改进
+
+- 支持 <用户可见功能或行为>。
+
+### 修复
+
+- 修复 <用户遇到的问题>。
+```
+
+生成文件时使用 heredoc 或编辑器写入真实多行文本，不要在 shell 参数里拼 `\n`：
 
 ```text
-git tag -a v<version> -m "v<version>" -m "发布 <中文摘要>。"
+cat > /tmp/superspec-release-notes-v<version>.md <<'EOF'
+### 新增与改进
+
+- <本次用户可见功能或行为变更>。
+
+### 修复
+
+- <本次修复的问题>。
+EOF
+```
+
+提交前检查 notes 中没有转义换行或发布流水线噪音：
+
+```text
+grep -nE '\\n|/n|npm|registry|tarball|worktree|GitHub Release|发布成功|测试通过|验证通过' /tmp/superspec-release-notes-v<version>.md || true
+sed -n '1,120p' /tmp/superspec-release-notes-v<version>.md
+```
+
+## Git tag
+
+创建 annotated tag。必须用 notes 文件，避免把换行转义写进 GitHub tag 内容：
+
+```text
+git tag -a v<version> -F /tmp/superspec-release-notes-v<version>.md
 git push origin v<version>
 ```
 
@@ -255,7 +299,7 @@ git rev-parse HEAD
 gh release create v<version> peterxiaoyang-superspec-<version>.tgz \
   --repo PeterYaoYang/SuperSpec \
   --title "v<version>" \
-  --notes "<中文 release notes>"
+  --notes-file /tmp/superspec-release-notes-v<version>.md
 ```
 
 发布后验证：
