@@ -25,10 +25,11 @@ metadata:
 
 每个任务的循环：
 
+0. **设计核对**：执行 `task-start` 前，确认本任务符合 `design.md` 的实现方向。缺少方向时先停止，不写 RED
 1. **任务开始**：`superspec transition task-start --change "<change>" --task <task_id>`
 2. **拿到执行尝试 ID**：从 task-start 的返回结果或 `superspec status` 中读取当前活跃 attempt 的 `attempt_id`
 3. **红灯验证**：写测试，跑测试确认失败，优先用 `superspec record test-run --change "<change>" --input -` 从 stdin 登记 JSON 内容；文件路径模式仍可作为 fallback
-4. **代码实现**：根据任务写代码实现,保证代码不出现过渡设计以及代码质量
+4. **代码实现**：根据任务写代码实现，避免过度设计，并保持代码质量。`design.md` 不锁死字段名、函数名、SQL 或局部写法
 5. **绿灯验证**：跑测试确认通过，优先用 `superspec record test-run --change "<change>" --input -` 从 stdin 登记 JSON 内容；文件路径模式仍可作为 fallback
 6. **任务结束标记完成**：`superspec transition task-complete --change "<change>" --task <task_id>`
 

@@ -158,27 +158,6 @@ openspec/changes/<变更ID>/.superspec/
 
 这里的 `<变更ID>` 就是一次需求变更的名字。
 
-`.superspec/` 要不要提交到 git，由你的团队决定。
-如果不提交，删掉后就没有 git 历史可以恢复。
-
-## 流程门禁
-
-SuperSpec 的阶段入口由 `superspec transition next --change <变更ID>` 驱动。
-
-当当前阶段还有未完成的用户确认、审查、验证或工作项时，`next` 会先返回这些事项，不会把下一阶段命令作为推荐路径。重复运行会创建审查工作项的 transition 时，如果同阶段工作项已经存在，CLI 会返回正常的门禁结果，不会写入新事件，也不会把它当作程序错误。
-
-这仍然是轻量流程控制，不是写入拦截。它约束按 SuperSpec 正常入口执行时的下一步建议和状态提交结果，不承诺阻止绕过流程的手动编辑。
-
-## Hook 会做什么
-
-SuperSpec 默认安装的 hook 只在子智能体启动和停止时运行：
-
-- 子智能体启动和停止时：记录这次子智能体运行的基本信息
-
-这些 hook 的默认超时时间是 `120` 秒。这个时间限制的是 hook 自己的检查过程，不限制 `npm test`、构建命令或子智能体本身能运行多久。
-
-hook 不是安全沙箱。默认 hook 只留下子智能体审计线索；它不会机械阻止写入，也不能把记录变成不可伪造的安全证明。
-
 ## 重要边界
 
 SuperSpec 能让流程更规范，但它不是安全锁。
@@ -214,18 +193,6 @@ superspec install
 ```
 
 `superspec init --scope project` 是兼容别名，也会执行同一套安装逻辑。
-
-### OpenSpec 中文输出
-
-OpenSpec 生成文档的语言应通过官方项目配置控制。在 `openspec/config.yaml` 中使用 `context`：
-
-```yaml
-schema: spec-driven
-
-context: |
-  语言：中文（简体）
-  所有产出物必须用简体中文撰写。
-```
 
 `superspec install` 会创建缺失的 `openspec/config.yaml`，或在没有顶层 `context` 时追加这段官方中文 context。如果文件已经有顶层 `context`，SuperSpec 不会覆盖它。
 

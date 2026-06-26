@@ -43,6 +43,7 @@ argument-hint: "本次测试审查说明"
 
 - TDD task 应能形成清晰 RED/GREEN 闭环，但 RED/GREEN 命令、断言或预期输出不应写进 `tasks.md`
 - `tasks.md` 只声明任务边界和 `tdd_required:true/false`；实际 RED/GREEN 细节属于 apply 阶段的 `record test-run` 证据
+- 根据 `design.md` 的实现方向判断测试契约是否覆盖主要风险；不要要求把具体测试命令或断言写回计划文档
 - 无法定义目标测试身份、RED 失败信号、GREEN 覆盖映射，或只靠退出码/笼统命令证明的测试方案，应使用 `verdict:"fail"`
 - `tdd_required:false` 必须有明确 `no_tdd_reason`
 - 不要求建立新的 test-contract 关联，也不要求把 RED/GREEN 细节塞回 task 行

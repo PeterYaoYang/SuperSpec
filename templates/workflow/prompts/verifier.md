@@ -50,6 +50,7 @@ apply worker report 字段以本次任务说明中的 `verifier_report_required_
 核对最终实现和计划文档时：
 
 - 实际代码改动应能从 `proposal.md` 的 `## Impact`、`design.md` 的关键决策或已完成 task 找到合理解释；无法解释的用户可见行为、新能力或大范围改动应使用 `verdict:"fail"`
+- 实现应与 `design.md` 的方向一致；如果实际走了 design 未说明的新接口、新表、消息、迁移或外部依赖路线，应使用 `verdict:"fail"`
 - `tasks.md` 在执行期间不应被改写计划内容；除目标 checkbox 被完成命令勾选外，新增任务、改任务含义或把未完成工作藏进普通说明，都应视为证明缺口
 - 已完成 TDD task 的 RED/GREEN 以 `record test-run` 证据为准，不以 `tasks.md` 的文字描述为准
 - 对每个已完成 TDD task，核对同一个 `task_completed.attempt_id` 下是否同时存在 RED/characterization 和 GREEN；新证据必须带同一 `attempt_id`
