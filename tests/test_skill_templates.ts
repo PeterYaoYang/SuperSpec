@@ -109,6 +109,63 @@ test("explore and critic prompts preserve discovery quality gates", () => {
   ]);
 });
 
+test("input data source contract is consistent across producer and consumers", () => {
+  const exploreSkill = read("../templates/workflow/skills/superspec-explore/SKILL.md");
+  const explorePrompt = read("../templates/workflow/prompts/explore.md");
+  const proposeSkill = read("../templates/workflow/skills/superspec-propose/SKILL.md");
+  const critic = read("../templates/workflow/prompts/critic.md");
+  const architect = read("../templates/workflow/prompts/architect.md");
+  const testEngineer = read("../templates/workflow/prompts/test-engineer.md");
+  const verifier = read("../templates/workflow/prompts/verifier.md");
+  const executor = read("../templates/workflow/prompts/executor.md");
+
+  const SECTION = "## 输入数据来源核查";
+
+  // producer defines the full schema, default-on (not selective-trigger)
+  assertIncludesAll("explore skill defines schema", exploreSkill, [
+    SECTION, "默认必做",
+    "核查ID", "消费位置", "必需输入", "数据来源", "区分依据", "状态/理由",
+    "已证明", "未知阻塞", "未知非阻塞",
+    "producer", "consumer", "最后一次变形",
+  ]);
+  // 区分依据 must carry negative examples (anti empty-talk)
+  assertIncludesAll("explore skill 区分依据 anti-patterns", exploreSkill, ["代码审查", "见上"]);
+  // explore subagent prompt aligned with skill (producer-internal consistency)
+  assertIncludesAll("explore prompt aligned", explorePrompt, [
+    SECTION, "默认必做", "区分依据", "未知阻塞", "producer", "consumer", "最后一次变形",
+  ]);
+
+  // propose threads IDC into Impact/design + 输入数据覆盖验证
+  assertIncludesAll("propose threads IDC + coverage", proposeSkill, [
+    "IDC-xxx", "## 输入数据覆盖验证", "输入链路声明", "producer",
+  ]);
+
+  // every consumer references the SAME section name (canonical term consistency)
+  for (const c of [critic, architect, testEngineer, verifier]) {
+    assert.ok(c.includes(SECTION), "consumer should reference ## 输入数据来源核查");
+  }
+  // gating consumers reference 未知阻塞; test-engineer references 未知非阻塞
+  for (const c of [critic, architect, verifier]) {
+    assert.ok(c.includes("未知阻塞"), "consumer should reference 未知阻塞");
+  }
+  assert.ok(testEngineer.includes("未知非阻塞"), "test-engineer should reference 未知非阻塞");
+
+  // critic is default-on and enforces 区分依据 quality bar
+  assertIncludesAll("critic default-on + 区分依据 bar", critic, ["必须含 `## 输入数据来源核查`", "代码审查"]);
+  // verifier keeps don't-trust-GREEN; executor keeps producer-to-consumer stop-condition
+  assert.ok(verifier.includes("不得只用 GREEN"), "verifier keeps don't-trust-GREEN");
+  assert.ok(executor.includes("producer-to-consumer"), "executor keeps producer-to-consumer stop-condition");
+  assertIncludesAll("coverage trigger stays tied to IDC or runtime dependency", testEngineer + verifier, [
+    "存在 `IDC-xxx` 核查项",
+    "producer-to-consumer 输入数据依赖",
+    "无运行时数据依赖并给出具体原因",
+  ]);
+
+  // negative: the dropped 适用性 marker must not survive anywhere
+  const all = [exploreSkill, explorePrompt, proposeSkill, critic, architect, testEngineer, verifier, executor].join("\n");
+  assert.doesNotMatch(all, /适用性: required|适用性: not_required/);
+});
+
 test("proposal impact guidance stays lightweight and design stays decision-focused", () => {
   const propose = read("../templates/workflow/skills/superspec-propose/SKILL.md");
   const apply = read("../templates/workflow/skills/superspec-apply/SKILL.md");

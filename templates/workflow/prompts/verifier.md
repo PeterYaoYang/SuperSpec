@@ -56,6 +56,10 @@ apply worker report 字段以本次任务说明中的 `verifier_report_required_
 - 缺少 `attempt_id`、只靠 `task_structure_digest` 匹配的 test-run 只能视为旧数据兼容，不作为新流程“确实跑了红绿验证”的强证明
 - test-run 证据应说明目标测试身份、`test_id`、`command`、`cwd`、`exit_code` 和 `semantic_status`；退出码本身不等于证明，环境错误 / 构建错误不算 RED/GREEN
 - 可追溯性以引擎记录的 test-run 事件、`raw_index` 和 `raw_digest` 为准；额外日志或 test-runner report 只作为补充引用
+- 当 discovery 的 `## 输入数据来源核查` 段中存在 `IDC-xxx` 核查项，或明确存在运行时 producer-to-consumer 输入数据依赖时，核对相关 `IDC-xxx` / 输入链路是否闭环：`未知阻塞` 不得进入完成结论，`未知非阻塞` 必须有不影响验收的理由，`test-contract.md` 必须有对应 `输入数据覆盖验证`
+- discovery 明确说明无运行时数据依赖并给出具体原因时，不要求 `test-contract.md` 增加 `输入数据覆盖验证`；但不得用空泛“无依赖”跳过来源检查
+- 没有 producer-to-consumer 证据时，只能作为未完成风险或已确认的非阻塞例外记录；不得用“明确残余风险”替代完成证明
+- 不得只用 GREEN 测试或 task 勾选证明输入完整性；如果测试只覆盖 consumer 算法而没有 producer-to-consumer 证据，应输出 `verdict:"fail"`
 
 ## 输出风格
 

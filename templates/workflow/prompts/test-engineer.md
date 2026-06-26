@@ -47,6 +47,16 @@ argument-hint: "本次测试审查说明"
 - `tdd_required:false` 必须有明确 `no_tdd_reason`
 - 不要求建立新的 test-contract 关联，也不要求把 RED/GREEN 细节塞回 task 行
 
+## 输入数据覆盖审查口径
+
+当 discovery 的 `## 输入数据来源核查` 段中存在 `IDC-xxx` 核查项，或明确描述运行时 producer-to-consumer 输入数据依赖时，`test-contract.md` 应包含 `## 输入数据覆盖验证`，并说明 producer 到 consumer 的输入完整性如何证明。
+
+如果该段明确写明无运行时数据依赖并给出具体原因，不要求 `## 输入数据覆盖验证`；但原因空泛、与改动范围矛盾，或疑似遗漏运行时数据依赖时，应使用 `verdict:"fail"`。
+
+可接受的证明方式包括源码锚点、fixture、targeted test、日志或 trace；不强制集成测试，但必须说明证明力。只证明 consumer 算法正确、没有证明目标输入从 producer 进入 consumer 时，应使用 `verdict:"fail"`。
+
+`未知非阻塞` 的测试策略必须说明为什么该未知不影响验收；缺少说明时按覆盖缺口处理。
+
 ## 输出风格
 
 - 所有用户可见输出必须使用简体中文。
