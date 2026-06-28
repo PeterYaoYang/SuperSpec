@@ -562,7 +562,8 @@ async function main(argv: string[]): Promise<number> {
 transition 子命令：
   init / explore / sync / next / propose-ready / start-apply
   task-start --task <T> / task-complete --task <T>
-  reopen --to apply --reason <TEXT>
+  reopen --to apply --reason <TEXT> [--review-fix <JOB#FINDING>]
+  reopen --to propose --reason <TEXT> --review-finding <JOB#FINDING>
   review-ready / accept / archive
 
 record 子命令：
@@ -756,7 +757,10 @@ jobs 子命令：
             const reason = opts.reason;
             if (!to) { console.error("reopen 需要 --to"); return 1; }
             if (!reason) { console.error("reopen 需要 --reason"); return 1; }
-            const result = reopen(projectRoot, change, cr, to, reason);
+            const result = reopen(projectRoot, change, cr, to, reason, {
+              ...(opts["review-fix"] ? { reviewFix: opts["review-fix"] } : {}),
+              ...(opts["review-finding"] ? { reviewFinding: opts["review-finding"] } : {}),
+            });
             console.log(JSON.stringify(result, null, 2));
             return transitionExitCode(result);
           }

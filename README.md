@@ -11,7 +11,7 @@
 SuperSpec 会把一次需求变更拆成 5 步：
 
 ```text
-探索需求 -> 写方案 -> 做实现 -> 做审查 -> 归档收尾
+探索需求 -> 写方案 -> 做实现 -> 代码审查与最终验证 -> 归档收尾
 ```
 
 这样做的目的很简单：
@@ -112,10 +112,10 @@ superspec.cmd install
 使用 superspec-apply，按任务实现。
 ```
 
-实现完成后，审查：
+实现完成后，代码审查与最终验证：
 
 ```text
-使用 superspec-review，检查实现、测试和风险。
+使用 superspec-review，完成代码审查、问题处理和最终验证。
 ```
 
 审查通过后，归档：
@@ -131,7 +131,7 @@ superspec.cmd install
 | `superspec-explore` | 需求刚开始时 | 读代码、查现状、整理范围和风险；这一步不改业务代码 |
 | `superspec-propose` | 需求已经清楚后 | 写正式方案、规格、设计和任务，并提前规划测试 |
 | `superspec-apply` | 方案通过后 | 按任务实现代码，记录测试或验证结果 |
-| `superspec-review` | 实现完成后 | 做代码审查、架构审查、反方审查和最终验证 |
+| `superspec-review` | 实现完成后 | 检查代码实现是否符合方案，处理审查问题，并完成最终验证 |
 | `superspec-archive` | 审查通过后 | 用 OpenSpec 完成归档，并检查关键记录是否保留 |
 
 你日常主要记住这五个入口就够了。

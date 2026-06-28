@@ -16,7 +16,15 @@ export type JobState = "requested" | "accepted" | "rejected";
 
 export type JobRole =
   | "critic" | "architect" | "test-engineer"
-  | "executor" | "test-run" | "verifier";
+  | "executor" | "test-run" | "verifier" | "code-reviewer";
+
+export type CodeReviewResultKind = "invalid_report" | "non_actionable_report" | "review_failed";
+
+export interface CodeReviewPreviousRejection {
+  result_kind: CodeReviewResultKind;
+  reason: string;
+  job_id: string;
+}
 
 export interface Job {
   job_id: string;
@@ -27,6 +35,7 @@ export interface Job {
   packet_digest: string;
   created_from_transition: string;
   created_at: string;
+  previous_rejection?: CodeReviewPreviousRejection;
 }
 
 export interface JobPacket {
@@ -43,6 +52,7 @@ export interface JobPacket {
   file_fallback?: boolean;
   output_contract_fields?: string[];
   output_contract_optional_fields?: string[];
+  output_instructions?: string;
   stop_conditions: string[];
   created_from_transition: string;
 }
@@ -94,6 +104,11 @@ export interface TransitionCommitPayload {
   review_policy?: {
     review_risk: "minimal" | "normal" | "strict";
     requires_verifier: boolean;
+  };
+  code_review_gate?: {
+    decision: "passed" | "skipped";
+    job_id?: string;
+    reason?: "no_code_changes";
   };
 }
 

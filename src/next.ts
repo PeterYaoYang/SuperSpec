@@ -5,6 +5,11 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { readEvents, sha256Text } from "./store.ts";
 import { isFreshReviewVerifier, isReviewReadyVerifier, readReviewPolicyFromEvents, reviewEvidenceDigest } from "./review.ts";
+import {
+  CODE_REVIEW_REPAIR_SCOPE_PREFIX,
+  collectCodeReviewGateFacts,
+  requiresFinalVerifierForCurrentReview,
+} from "./code_review.ts";
 import { requiredJobActions } from "./job_action.ts";
 import type { Job, NextOutput, AskUser, TaskAttempt, State } from "./types.ts";
 import { validateDiscovery, countDiscoveryOpenQuestions, collectProposeOpenQuestions, parseTasksMd, pendingTasksInContent } from "./format.ts";
@@ -43,6 +48,16 @@ function pendingTaskIds(changeRoot: string): string[] {
 
 function reopenCommand(change: string, pending: string[]): string {
   return transitionCommand(change, "reopen", `--to apply --reason "pending tasks: ${pending.join(", ")}"`);
+}
+
+function firstBlockingFinding(payload: Record<string, unknown>): Record<string, unknown> | null {
+  const findings = Array.isArray(payload.findings) ? payload.findings : [];
+  for (const item of findings) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const finding = item as Record<string, unknown>;
+    if (finding.blocking === true) return finding;
+  }
+  return null;
 }
 
 function taskCompletionReadiness(
@@ -240,6 +255,57 @@ export function next(
       if (snapshot.open_jobs.length > 0) {
         return requiredJobsOutput("apply_done", change, snapshot.open_jobs, `有 ${snapshot.open_jobs.length} 个待完成工作项`);
       }
+      const events = readEvents(projectRoot, change);
+      const facts = collectCodeReviewGateFacts(events);
+      const latest = facts.latestTerminal;
+      if (latest?.state === "rejected" && latest.result_kind === "review_failed") {
+        const payload = latest.event.payload as Record<string, unknown>;
+        const finding = firstBlockingFinding(payload);
+        const findingId = typeof finding?.id === "string" ? finding.id : "";
+        const type = finding?.type;
+        if (findingId && type === "implementation") {
+          return {
+            state: "apply_done",
+            path: "next_command",
+            next_command: transitionCommand(
+              change,
+              "reopen",
+              `--to apply --review-fix ${latest.job.job_id}#${findingId} --reason "修复代码审查问题 ${findingId}"`,
+            ),
+            reason: `代码审查发现纯代码实现问题 ${findingId}，回到实现阶段修复`,
+            missing_inputs: [],
+          };
+        }
+        if (findingId && (type === "spec" || type === "mixed")) {
+          const problemKind = type === "spec"
+            ? "方案或需求文档可能需要调整"
+            : "代码实现和方案文档都可能有关";
+          const ask: AskUser = {
+            question: `代码审查发现问题 ${findingId}：${problemKind}。请选择回到计划阶段修改文档，或确认现有文档方向不变、回到实现阶段修代码。`,
+            allowed_answers: ["reopen_propose", "fix_in_apply"],
+            scope: `code_review_decision:${latest.job.job_id}#${findingId}`,
+          };
+          return { state: "apply_done", path: "ask_user", ask_user: ask, reason: `代码审查发现需要使用者判断的问题 ${findingId}` };
+        }
+        const ask: AskUser = {
+          question: "代码审查报告里缺少可用于处理问题的编号或分类。请修正审查报告后重新执行 review-ready。",
+          allowed_answers: ["报告已修正"],
+          scope: `${CODE_REVIEW_REPAIR_SCOPE_PREFIX}${change}`,
+        };
+        return { state: "apply_done", path: "ask_user", ask_user: ask, reason: "代码审查报告中的阻塞问题无法处理" };
+      }
+      if (
+        latest?.state === "rejected" &&
+        (latest.result_kind === "invalid_report" || latest.result_kind === "non_actionable_report") &&
+        facts.consecutiveRejected >= 2
+      ) {
+        const ask: AskUser = {
+          question: "代码审查报告连续两次不符合要求，或者没有给出可处理的问题。请先修正报告生成方式、模板或审查口径；修正后仍可显式执行 review-ready。",
+          allowed_answers: ["已修正"],
+          scope: `${CODE_REVIEW_REPAIR_SCOPE_PREFIX}${change}`,
+        };
+        return { state: "apply_done", path: "ask_user", ask_user: ask, reason: "代码审查报告连续不符合要求或没有可处理问题" };
+      }
       return {
         state: "apply_done",
         path: "next_command",
@@ -275,7 +341,7 @@ export function next(
           missing_inputs: [],
         };
       }
-      if (policy.requires_verifier) {
+      if (requiresFinalVerifierForCurrentReview(events) || policy.requires_verifier) {
         const currentEvidenceDigest = reviewEvidenceDigest(events);
         const verifierAccepted = snapshot.accepted_jobs.find(job => isFreshReviewVerifier(job, changeRoot, currentEvidenceDigest));
         if (!verifierAccepted) {
@@ -283,7 +349,7 @@ export function next(
             state: "review",
             path: "next_command",
             next_command: transitionCommand(change, "review-ready", riskFlag(defaultRisk)),
-            reason: "缺少 fresh verifier，先补最终验证",
+            reason: "最终验证已经缺失或不再匹配当前证据，先补最终验证",
             missing_inputs: [],
           };
         }

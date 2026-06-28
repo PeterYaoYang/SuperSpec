@@ -6,6 +6,7 @@ import {
   readEvents, eventsDigest, computeDocumentDigests, sha256Text, ensureChangeLayout,
 } from "./store.ts";
 import { reviewEvidenceDigest, reviewVerifierStaleReason } from "./review.ts";
+import { codeReviewJobStaleReason } from "./code_review.ts";
 import type { Event, Snapshot, Job, State, TaskAttempt } from "./types.ts";
 
 const TRACKED_DOCS = [
@@ -93,12 +94,15 @@ function replayEvents(events: Event[]): {
 /** 粗粒度失效：检查 job 的 boundFiles 是否仍匹配当前文档 */
 function checkStaleJobs(
   jobs: Job[],
+  projectRoot: string,
   changeRoot: string,
   currentReviewEvidenceDigest: string,
 ): { job_id: string; reason: string }[] {
   const stale: { job_id: string; reason: string }[] = [];
   for (const job of jobs) {
-    const reason = reviewVerifierStaleReason(job, changeRoot, currentReviewEvidenceDigest);
+    const reason = job.role === "code-reviewer"
+      ? codeReviewJobStaleReason(projectRoot, job)
+      : reviewVerifierStaleReason(job, changeRoot, currentReviewEvidenceDigest);
     if (reason) {
       stale.push({ job_id: job.job_id, reason });
     }
@@ -133,10 +137,18 @@ export function rebuildSnapshot(
   const { state, openJobs, acceptedJobs, activeAttempts, taskStatuses, lastTransition } = replayEvents(events);
   const currentReviewEvidenceDigest = reviewEvidenceDigest(events);
 
-  // 粗粒度失效检查（只读，不写事件）：snapshot 只暴露当前可执行/可复用 job。
-  const staleOpenInfo = checkStaleJobs(openJobs, changeRoot, currentReviewEvidenceDigest);
-  const staleAcceptedInfo = checkStaleJobs(acceptedJobs, changeRoot, currentReviewEvidenceDigest);
-  const freshOpen = openJobs.filter(j => !staleOpenInfo.some(s => s.job_id === j.job_id));
+  // 粗粒度失效检查（只读，不写事件）：open code-reviewer job 防止提交过期报告；
+  // accepted code-reviewer pass 不做持续 freshness gate，避免 apply_done 循环重审。
+  const staleOpenInfo = checkStaleJobs(openJobs, projectRoot, changeRoot, currentReviewEvidenceDigest);
+  const staleAcceptedInfo = checkStaleJobs(
+    acceptedJobs.filter(j => j.role !== "code-reviewer"),
+    projectRoot,
+    changeRoot,
+    currentReviewEvidenceDigest,
+  );
+  const freshOpen = openJobs
+    .filter(j => !staleOpenInfo.some(s => s.job_id === j.job_id))
+    .filter(j => j.role !== "code-reviewer" || state === "apply_done");
   const freshAccepted = acceptedJobs.filter(j => !staleAcceptedInfo.some(s => s.job_id === j.job_id));
 
   return {
