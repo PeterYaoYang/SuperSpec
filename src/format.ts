@@ -166,14 +166,22 @@ export function tasksStructureDigest(content: string, sha256Text: (s: string) =>
 //     "cwd": "/path",
 //     "exit_code": 1,
 //     "semantic_status": "expected_failure",
+//     "covers_task_ids": ["TASK-001"],
 //     "target_fingerprint": "sha256:..."
 //   }
 //
-// 引擎校验：test_id + task_structure_digest 必填，其余可选
+// 引擎校验：test_id + task_structure_digest 必填，covers_task_ids 如存在必须是非空字符串数组，其余可选
 
 export function validateTestRunInput(tr: Record<string, unknown>): { ok: boolean; message: string } {
   if (!tr.test_id) return { ok: false, message: "缺少 test_id" };
   if (!tr.task_structure_digest) return { ok: false, message: "缺少 task_structure_digest" };
+  if (tr.covers_task_ids !== undefined) {
+    if (!Array.isArray(tr.covers_task_ids)) return { ok: false, message: "covers_task_ids 必须是字符串数组" };
+    if (tr.covers_task_ids.length === 0) return { ok: false, message: "covers_task_ids 不能是空数组" };
+    if (!tr.covers_task_ids.every(item => typeof item === "string" && item.trim().length > 0)) {
+      return { ok: false, message: "covers_task_ids 不能包含空字符串或非字符串" };
+    }
+  }
   return { ok: true, message: "" };
 }
 

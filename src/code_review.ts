@@ -3,10 +3,17 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { join, extname } from "node:path";
-import { sha256File, sha256Text } from "./store.ts";
+import { findLatestEvent, sha256File, sha256Text } from "./store.ts";
 import type { CodeReviewResultKind, Event, Job, Ref } from "./types.ts";
 
 export const CODE_REVIEW_REPAIR_SCOPE_PREFIX = "code_reviewer_report_repair:";
+export const CODE_REVIEW_DECISION_SCOPE_PREFIX = "code_review_decision:";
+export type CodeReviewDecisionAnswer = "reopen_propose" | "reopen_apply" | "dismiss";
+export const CODE_REVIEW_DECISION_ANSWER_LABELS: Record<CodeReviewDecisionAnswer, string> = {
+  reopen_propose: "回到计划阶段",
+  reopen_apply: "回到实现阶段",
+  dismiss: "驳回该问题",
+};
 
 const PROCESS_DOC_RE = /^(?:openspec\/changes\/[^/]+\/)?(?:proposal|design|tasks)\.md$/;
 const PROCESS_ARTIFACT_RE = /^(?:openspec\/changes\/[^/]+\/)?\.superspec\/artifacts\/(?:discovery|business-invariants|test-contract)\.md$/;
@@ -34,6 +41,26 @@ export interface CodeReviewTerminalResult {
   state: "accepted" | "rejected";
   result_kind?: CodeReviewResultKind;
   reason?: string;
+}
+
+export interface CodeReviewDecision {
+  answer: CodeReviewDecisionAnswer;
+  reason: string;
+  event: Event;
+}
+
+export interface CodeReviewFindingStatus {
+  id: string;
+  type: "implementation" | "spec" | "mixed";
+  finding: Record<string, unknown>;
+  decision: CodeReviewDecision | null;
+}
+
+export interface CodeReviewFailedStatus {
+  terminal: CodeReviewTerminalResult;
+  findings: CodeReviewFindingStatus[];
+  unresolved: CodeReviewFindingStatus[];
+  dismissed: CodeReviewFindingStatus[];
 }
 
 export interface CodeReviewGateFacts {
@@ -169,6 +196,86 @@ function codeReviewResultKind(value: unknown): CodeReviewResultKind | undefined 
   return value === "invalid_report" || value === "non_actionable_report" || value === "review_failed"
     ? value
     : undefined;
+}
+
+export function codeReviewDecisionScope(jobId: string, findingId: string): string {
+  return `${CODE_REVIEW_DECISION_SCOPE_PREFIX}${jobId}#${findingId}`;
+}
+
+export function isCodeReviewDecisionAnswer(value: unknown): value is CodeReviewDecisionAnswer {
+  return value === "reopen_propose" || value === "reopen_apply" || value === "dismiss";
+}
+
+export function codeReviewDecisionAnswerLabel(answer: CodeReviewDecisionAnswer): string {
+  return CODE_REVIEW_DECISION_ANSWER_LABELS[answer];
+}
+
+export function normalizeCodeReviewDecisionAnswer(value: unknown): CodeReviewDecisionAnswer | null {
+  if (isCodeReviewDecisionAnswer(value)) return value;
+  if (value === CODE_REVIEW_DECISION_ANSWER_LABELS.reopen_propose) return "reopen_propose";
+  if (value === CODE_REVIEW_DECISION_ANSWER_LABELS.reopen_apply) return "reopen_apply";
+  if (value === CODE_REVIEW_DECISION_ANSWER_LABELS.dismiss) return "dismiss";
+  return null;
+}
+
+export function latestCodeReviewDecision(events: Event[], scope: string): CodeReviewDecision | null {
+  const event = findLatestEvent(events, "user_decision_recorded", ev => {
+    const payload = ev.payload as { scope?: unknown; answer?: unknown; accepted?: unknown; reason?: unknown };
+    if (payload.scope !== scope) return false;
+    if (payload.accepted === false) return false;
+    if (!normalizeCodeReviewDecisionAnswer(payload.answer)) return false;
+    if (typeof payload.reason !== "string" || payload.reason.trim() === "") return false;
+    return true;
+  });
+  if (!event) return null;
+  const payload = event.payload as { answer: unknown; reason?: unknown };
+  const answer = normalizeCodeReviewDecisionAnswer(payload.answer);
+  if (!answer) return null;
+  return {
+    answer,
+    reason: typeof payload.reason === "string" ? payload.reason.trim() : "",
+    event,
+  };
+}
+
+function blockingFindingsFromReviewFailed(event: Event, jobId: string, events: Event[]): CodeReviewFindingStatus[] {
+  const payload = event.payload as { findings?: unknown };
+  const findings = Array.isArray(payload.findings) ? payload.findings : [];
+  const result: CodeReviewFindingStatus[] = [];
+  for (const raw of findings) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const finding = raw as Record<string, unknown>;
+    if (finding.blocking !== true) continue;
+    if (typeof finding.id !== "string" || finding.id.trim() === "") continue;
+    if (finding.type !== "implementation" && finding.type !== "spec" && finding.type !== "mixed") continue;
+    const id = finding.id;
+    result.push({
+      id,
+      type: finding.type,
+      finding,
+      decision: latestCodeReviewDecision(events, codeReviewDecisionScope(jobId, id)),
+    });
+  }
+  return result;
+}
+
+export function latestCodeReviewFailedStatus(events: Event[]): CodeReviewFailedStatus | null {
+  const facts = collectCodeReviewGateFacts(events);
+  const terminal = facts.latestTerminal;
+  if (!terminal || terminal.state !== "rejected" || terminal.result_kind !== "review_failed") return null;
+  const findings = blockingFindingsFromReviewFailed(terminal.event, terminal.job.job_id, events);
+  const dismissed = findings.filter(item => item.decision?.answer === "dismiss");
+  const unresolved = findings.filter(item => item.decision?.answer !== "dismiss");
+  return { terminal, findings, unresolved, dismissed };
+}
+
+export function dismissedCodeReviewSummary(status: CodeReviewFailedStatus): string {
+  const details = status.dismissed
+    .map(item => `${item.id}：${item.decision?.reason || "主流程已驳回该问题"}`)
+    .join("；");
+  return details
+    ? `上一次代码审查提出的问题已被主流程复核驳回：${details}。没有新的具体证据时，不要重复提出同一问题。`
+    : "上一次代码审查提出的问题已被主流程复核驳回。没有新的具体证据时，不要重复提出同一问题。";
 }
 
 export function currentApplyDoneCycleStart(events: Event[]): number {

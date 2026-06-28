@@ -39,22 +39,7 @@ no-TDD 任务（`tdd_required:false` + `no_tdd_reason`）跳过 RED/GREEN，但�
 
 `tasks.md` 不写 RED/GREEN 命令、断言或预期输出。RED/GREEN 的真实证明来自 apply 阶段实际执行后登记的 `record test-run`。
 
-## 审查修复任务
-
-代码审查发现纯实现问题后，主流程会通过 `reopen --to apply --review-fix <job_id>#<problem_id>` 回到 apply，并由引擎追加审查修复任务。
-
-审查修复任务的 task id 格式为 `REVIEW-FIX-<job_id>#<problem_id>`。任务行里的 `review_fix_of:<job_id>#<problem_id>` 是机器追溯标记，只用于让最终验证找到对应的代码审查问题；它不是新需求。
-
-执行审查修复任务时：
-
-- 只修对应代码审查问题，不扩大需求或方案范围。
-- 仍执行 `task-start`、RED/characterization、GREEN、`task-complete`。
-- RED 应证明该问题在修复前确实存在；无法写 RED 时，必须有等价 characterization 证据。
-- GREEN 应证明该问题已修复。
-- 完成前必须跑所有已完成任务的 GREEN 回归，或等价更大范围回归。
-- 回归也必须通过 `record test-run` 登记，并说明覆盖了哪些已完成任务。
-
-如果修复过程中发现 proposal/design/tasks/test-contract 本身需要变化，停止扩大实现，向主流程报告需要回 propose；不要在 apply 阶段直接改计划文档。
+如果 task id 以 `REVIEW-FIX-` 开头，或任务行带 `review_fix_of:<job_id>#<problem_id>`，把它当作普通 task 执行，不另起流程。它只表示该任务来自代码审查问题：实现范围只限对应问题；RED 或 characterization 要证明问题存在，GREEN 要证明问题已修复；完成前还要登记已完成任务的 GREEN 回归，或等价更大范围回归。修复中发现计划文档需要变化时，停止扩大实现，交回主流程处理。
 
 ## test-run 输入
 
@@ -77,6 +62,7 @@ no-TDD 任务（`tdd_required:false` + `no_tdd_reason`）跳过 RED/GREEN，但�
 - `record test-run` 入库至少需要 `test_id` 和 `task_structure_digest`；RED/GREEN 完成判定优先核对当前 `attempt_id`。
 - `attempt_id` 来自当前 task attempt；新产生的 TDD 证据必须带当前 `attempt_id`。
 - `semantic_status` 使用 `expected_failure`（RED）/ `expected_success`（GREEN）/ `characterization_pass`。
+- `covers_task_ids` 可选，只在回归或等价场景中填写到同一份 test-run JSON，用来说明这次测试覆盖了哪些已完成任务；省略表示不声明覆盖关系。
 - `command`、`cwd`、`exit_code` 和目标测试身份必须能说明目标测试确实运行。
 - 退出码本身不等于证明；环境错误或构建失败不算 RED 或 GREEN。
 - 缺少 `attempt_id`、只靠 `task_structure_digest` 匹配的 test-run 只能作为弱引用，不作为强证明。

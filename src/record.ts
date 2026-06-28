@@ -7,7 +7,14 @@ import {
   sha256File, sha256Text, withLock, appendRawRecord, type RawRecordRef,
 } from "./store.ts";
 import { reviewEvidenceDigest, reviewVerifierStaleReason } from "./review.ts";
-import { codeReviewJobStaleReason, scanCodeChanges } from "./code_review.ts";
+import {
+  CODE_REVIEW_DECISION_ANSWER_LABELS,
+  CODE_REVIEW_DECISION_SCOPE_PREFIX,
+  codeReviewDecisionAnswerLabel,
+  codeReviewJobStaleReason,
+  normalizeCodeReviewDecisionAnswer,
+  scanCodeChanges,
+} from "./code_review.ts";
 import { jobSubmitArgv } from "./job_action.ts";
 import type { CodeReviewResultKind, Event, RecordResult, Job, JobRole, JobState } from "./types.ts";
 
@@ -566,39 +573,85 @@ function recordUserDecisionLoaded(
   content: string,
   inputDigest: string,
 ): RecordResult {
-  let decision: { scope?: string; question?: string; answer?: string };
-  try {
-    decision = JSON.parse(content);
-  } catch {
-    appendEvent(projectRoot, change, makeEvent(change, "user_decision_recorded", { accepted: false, reason: "invalid_json" }));
-    return { event_type: "user_decision_recorded" as const, accepted: false, message: "决策文件不是有效 JSON" };
-  }
-
-  if (!decision.scope || !decision.answer) {
-    appendEvent(projectRoot, change, makeEvent(change, "user_decision_recorded", { accepted: false, reason: "missing_scope_or_answer" }));
-    return { event_type: "user_decision_recorded" as const, accepted: false, message: "决策文件缺少 scope 或 answer" };
-  }
-
   const existing = events.find(
     e => e.event_type === "user_decision_recorded"
       && (e.payload as { input_digest?: string }).input_digest === inputDigest
   );
   if (existing) {
+    const accepted = (existing.payload as { accepted?: unknown }).accepted !== false;
     return {
       event_type: "user_decision_recorded" as const,
-      accepted: true,
-      message: "幂等返回：同一用户决策已登记",
+      accepted,
+      message: accepted ? "幂等返回：同一用户决策已登记" : "幂等返回：同一无效用户决策已登记",
     };
   }
 
+  let decision: { scope?: unknown; question?: unknown; answer?: unknown; reason?: unknown };
+  try {
+    decision = JSON.parse(content);
+  } catch {
+    appendEvent(projectRoot, change, makeEvent(change, "user_decision_recorded", {
+      accepted: false,
+      reason: "invalid_json",
+      input_digest: inputDigest,
+    }));
+    return { event_type: "user_decision_recorded" as const, accepted: false, message: "决策文件不是有效 JSON" };
+  }
+
+  if (!nonEmptyString(decision.scope) || !nonEmptyString(decision.answer)) {
+    appendEvent(projectRoot, change, makeEvent(change, "user_decision_recorded", {
+      accepted: false,
+      reason: "missing_scope_or_answer",
+      input_digest: inputDigest,
+    }));
+    return { event_type: "user_decision_recorded" as const, accepted: false, message: "决策文件缺少 scope 或 answer" };
+  }
+
+  if (decision.scope.startsWith(CODE_REVIEW_DECISION_SCOPE_PREFIX)) {
+    const normalizedAnswer = normalizeCodeReviewDecisionAnswer(decision.answer);
+    if (!normalizedAnswer) {
+      appendEvent(projectRoot, change, makeEvent(change, "user_decision_recorded", {
+        accepted: false,
+        scope: decision.scope,
+        answer: decision.answer,
+        reason: "invalid_code_review_decision_answer",
+        input_digest: inputDigest,
+      }));
+      return {
+        event_type: "user_decision_recorded" as const,
+        accepted: false,
+        message: `代码审查决策必须是 ${CODE_REVIEW_DECISION_ANSWER_LABELS.reopen_propose}、${CODE_REVIEW_DECISION_ANSWER_LABELS.reopen_apply} 或 ${CODE_REVIEW_DECISION_ANSWER_LABELS.dismiss}`,
+      };
+    }
+    if (!nonEmptyString(decision.reason)) {
+      appendEvent(projectRoot, change, makeEvent(change, "user_decision_recorded", {
+        accepted: false,
+        scope: decision.scope,
+        answer: decision.answer,
+        reason: "missing_reason",
+        input_digest: inputDigest,
+      }));
+      return {
+        event_type: "user_decision_recorded" as const,
+        accepted: false,
+        message: "代码审查决策必须写明原因",
+      };
+    }
+  }
+
+  const normalizedAnswer = decision.scope.startsWith(CODE_REVIEW_DECISION_SCOPE_PREFIX)
+    ? normalizeCodeReviewDecisionAnswer(decision.answer)
+    : null;
   const normalizedDecision = {
     scope: decision.scope,
-    question: decision.question ?? "",
-    answer: decision.answer,
+    question: typeof decision.question === "string" ? decision.question : "",
+    answer: normalizedAnswer ? codeReviewDecisionAnswerLabel(normalizedAnswer) : decision.answer,
+    ...(typeof decision.reason === "string" ? { reason: decision.reason.trim() } : {}),
   };
   const rawRef = appendRawRecord(projectRoot, change, "user-decisions", normalizedDecision);
   const event = makeEvent(change, "user_decision_recorded", {
     ...normalizedDecision,
+    accepted: true,
     input_digest: inputDigest,
     ...rawRef,
   });
@@ -716,14 +769,14 @@ export function jobsPacket(
         output_instructions:
           `${roleDescription(job.role)}。请审查 ${job.boundFiles.map(f => f.path).join(", ")}，` +
           (job.review_evidence_digest ? `本工作项对应的执行证据版本为 ${job.review_evidence_digest}，` : "") +
-          (job.previous_rejection ? `上一次代码审查报告未被接受，原因：${job.previous_rejection.reason}。本次必须修正这个问题，` : "") +
+          (job.previous_rejection ? `上一次代码审查没有形成可推进结论，原因：${job.previous_rejection.reason}。本次请根据该原因重新审查，` : "") +
           (requiresReviewer(job.role) ? `必须由独立 ${recommendedAgentForRole(job.role)} 审查角色执行，并在 reviewer.kind/id 中记录来源，` : "") +
           `产出 JSON 报告内容并优先通过 --report - 从 stdin 登记；文件路径模式仍可作为 fallback。以下 JSON 合约给审查代理使用，普通对话不要原样复述。` +
           (isCodeReviewer
             ? `最小格式：{"role":"code-reviewer","verdict":"pass|fail","review_scope":{"job_id":"${job.job_id}","packet_digest":"${job.packet_digest}","checked_paths":${JSON.stringify(job.boundFiles.map(f => f.path))},"checked_docs":["proposal.md","design.md","tasks.md",".superspec/artifacts/test-contract.md"],"unchecked":[]},"findings":[],"reviewer":{"kind":"codex-subagent","id":"<thread-or-agent-id>"}}；review_scope 用来说明本次审查覆盖了哪些文件和文档，checked_paths 与 unchecked 必须合起来覆盖全部 boundFiles，unchecked 条目格式为 {"path":"<path>","reason":"<reason>"}。`
               + `报告结论为 fail 时，findings 至少包含一个可处理、可追溯的阻塞问题，字段为 {"id":"<stable-id>","blocking":true,"type":"implementation|spec|mixed","description":"<what>","evidence":"<why>","source_refs":["<path:line>"],"impact":"<impact>","suggested_action":"apply|propose"}。type 中 implementation 表示纯代码实现问题，spec 表示方案/需求文档问题，mixed 表示需要使用者判断的混合问题。`
             : job.role === "verifier"
-            ? `最小格式：{"role":"verifier","verdict":"pass|fail","findings":[]}。核对代码审查记录 code_review_gate：passed 必须能追溯到已接受的代码审查工作项，skipped 必须能证明本次没有代码类改动。核对代码审查问题闭环：实现修复任务必须带 review_fix_of:<job_id>#<problem_id>，方案/混合问题必须有用户决策或后续修复证据。核对 RED/GREEN：同一 task_completed.attempt_id 下必须有 RED/characterization 与 GREEN；test-run 证据应包含 test_id、command、cwd、exit_code、semantic_status；缺少 attempt_id 的旧证据只能弱引用。`
+            ? `最小格式：{"role":"verifier","verdict":"pass|fail","findings":[]}。核对代码审查记录 code_review_gate：passed 必须能追溯到已接受的代码审查工作项，skipped 必须能证明本次没有代码类改动。核对代码审查问题闭环：实现修复任务必须带 review_fix_of:<job_id>#<problem_id>，方案/混合问题必须有用户决策或后续修复证据。核对 RED/GREEN：同一 task_completed.attempt_id 下必须有 RED/characterization 与 GREEN；test-run 证据应包含 test_id、command、cwd、exit_code、semantic_status；审查修复的回归 test-run 可用 covers_task_ids 说明覆盖了哪些已完成任务；缺少 attempt_id 的旧证据只能弱引用。`
             : requiresReviewer(job.role)
             ? `最小格式：{"role":"${job.role}","verdict":"pass|fail","findings":[],"reviewer":{"kind":"codex-subagent","id":"<thread-or-agent-id>"}}`
             : `最小格式：{"role":"${job.role}","verdict":"pass|fail","findings":[]}`),

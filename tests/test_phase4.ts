@@ -7,7 +7,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "nod
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { ensureChangeLayout, appendEvent, makeEvent, readEvents, rawFile } from "../src/store.ts";
+import { ensureChangeLayout, appendEvent, makeEvent, readEvents, rawFile, sha256Text } from "../src/store.ts";
 import { rebuildSnapshot } from "../src/sync.ts";
 import { next } from "../src/next.ts";
 import { reviewReady, taskStart, taskComplete, reopen, accept, archive } from "../src/transition.ts";
@@ -55,6 +55,7 @@ function appendTestRunEvent(
     command?: string;
     cwd?: string;
     exit_code?: number;
+    covers_task_ids?: string[];
     target_fingerprint?: string | null;
   },
 ): void {
@@ -1043,6 +1044,106 @@ test("code-reviewer：实现问题可 reopen apply 并追加审查修复 task", 
   } finally { fx.cleanup(); }
 });
 
+test("code-reviewer：reopen 只能引用当前最新代码审查失败里的阻塞问题", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    const first = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(first.outcome, "job_created");
+    const oldJobId = first.created_jobs[0];
+    submitCodeReviewerReport(
+      fx.projectRoot,
+      fx.change,
+      fx.changeRoot,
+      oldJobId,
+      codeReviewerReport(fx.projectRoot, fx.change, oldJobId, "fail", [{
+        id: "CR-OLD-IMPL",
+        type: "implementation",
+        blocking: true,
+        description: "旧实现问题",
+        evidence: "src/old.ts:1",
+        source_refs: ["src/old.ts:1"],
+        impact: "旧问题影响",
+        suggested_action: "apply",
+      }]),
+    );
+
+    const latestJob = appendOpenJob(fx.projectRoot, fx.change, "apply_done", {
+      job_id: "JOB-latest-code-review",
+      role: "code-reviewer",
+      created_from_transition: "review-ready",
+    });
+    submitCodeReviewerReport(
+      fx.projectRoot,
+      fx.change,
+      fx.changeRoot,
+      latestJob.job_id,
+      codeReviewerReport(fx.projectRoot, fx.change, latestJob.job_id, "fail", [{
+        id: "CR-LATEST-SPEC",
+        type: "spec",
+        blocking: true,
+        description: "当前文档问题",
+        evidence: "design.md 与 tasks.md 不一致",
+        source_refs: ["design.md", "tasks.md"],
+        impact: "当前问题需要用户判断",
+        suggested_action: "propose",
+      }]),
+    );
+
+    const oldReopen = reopen(fx.projectRoot, fx.change, fx.changeRoot, "apply", "不能用旧问题回 apply", {
+      reviewFix: `${oldJobId}#CR-OLD-IMPL`,
+    });
+    assert.equal(oldReopen.events_written, 0);
+    assert.match(oldReopen.message, /找不到有效的代码审查问题/);
+
+    const ask = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(ask.path, "ask_user");
+    assert.equal(ask.ask_user.scope, "code_review_decision:JOB-latest-code-review#CR-LATEST-SPEC");
+  } finally { fx.cleanup(); }
+});
+
+test("code-reviewer：同 id 非阻塞项不能覆盖真正阻塞 finding", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    const created = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(created.outcome, "job_created");
+    const jobId = created.created_jobs[0];
+    submitCodeReviewerReport(
+      fx.projectRoot,
+      fx.change,
+      fx.changeRoot,
+      jobId,
+      codeReviewerReport(fx.projectRoot, fx.change, jobId, "fail", [
+        {
+          id: "CR-SAME-ID",
+          type: "spec",
+          blocking: false,
+          description: "非阻塞提示不应驱动 reopen",
+        },
+        {
+          id: "CR-SAME-ID",
+          type: "implementation",
+          blocking: true,
+          description: "真正阻塞的实现问题",
+          evidence: "src/example.ts:1",
+          source_refs: ["src/example.ts:1"],
+          impact: "运行时失败",
+          suggested_action: "apply",
+        },
+      ]),
+    );
+
+    const reopened = reopen(fx.projectRoot, fx.change, fx.changeRoot, "apply", "修复真正阻塞问题", {
+      reviewFix: `${jobId}#CR-SAME-ID`,
+    });
+    assert.equal(reopened.to_state, "apply");
+    const tasks = readFileSync(join(fx.changeRoot, "tasks.md"), "utf8");
+    assert.match(tasks, /真正阻塞的实现问题/);
+    assert.doesNotMatch(tasks, /非阻塞提示不应驱动 reopen tdd_required:true/);
+  } finally { fx.cleanup(); }
+});
+
 test("code-reviewer：spec 问题必须经用户决策才能 reopen propose", () => {
   const fx = setupApplyWithDoneTask();
   try {
@@ -1071,7 +1172,7 @@ test("code-reviewer：spec 问题必须经用户决策才能 reopen propose", ()
     const ask = next(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(ask.path, "ask_user");
     assert.equal(ask.ask_user.scope, `code_review_decision:${jobId}#CR-SPEC-001`);
-    assert.deepEqual(ask.ask_user.allowed_answers, ["reopen_propose", "fix_in_apply"]);
+    assert.deepEqual(ask.ask_user.allowed_answers, ["回到计划阶段", "回到实现阶段", "驳回该问题"]);
 
     const blocked = reopen(fx.projectRoot, fx.change, fx.changeRoot, "propose", "补充降级路径设计", {
       reviewFinding: `${jobId}#CR-SPEC-001`,
@@ -1082,7 +1183,8 @@ test("code-reviewer：spec 问题必须经用户决策才能 reopen propose", ()
     const decision = recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({
       scope: `code_review_decision:${jobId}#CR-SPEC-001`,
       question: ask.ask_user.question,
-      answer: "reopen_propose",
+      answer: "回到计划阶段",
+      reason: "设计文档需要补充降级路径",
     }));
     assert.equal(decision.accepted, true);
 
@@ -1139,7 +1241,8 @@ test("code-reviewer：mixed 问题可经用户决策回 apply 修实现", () => 
     const decision = recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({
       scope: `code_review_decision:${jobId}#CR-MIX-001`,
       question: ask.ask_user.question,
-      answer: "fix_in_apply",
+      answer: "回到实现阶段",
+      reason: "文档方向不变，只修实现偏差",
     }));
     assert.equal(decision.accepted, true);
 
@@ -1150,6 +1253,298 @@ test("code-reviewer：mixed 问题可经用户决策回 apply 修实现", () => 
     const tasks = readFileSync(join(fx.changeRoot, "tasks.md"), "utf8");
     assert.match(tasks, new RegExp(`REVIEW-FIX-${jobId}#CR-MIX-001`));
     assert.match(tasks, new RegExp(`review_fix_of:${jobId}#CR-MIX-001`));
+  } finally { fx.cleanup(); }
+});
+
+test("record user-decision：代码审查决策必须写明原因，重复无效输入保持幂等", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    const missingReason = JSON.stringify({
+      scope: "code_review_decision:JOB-test#CR-001",
+      answer: "驳回该问题",
+    });
+    const before = readEvents(fx.projectRoot, fx.change).length;
+    const rejected = recordUserDecisionContent(fx.projectRoot, fx.change, missingReason);
+    assert.equal(rejected.accepted, false);
+    assert.match(rejected.message, /写明原因/);
+    const afterFirst = readEvents(fx.projectRoot, fx.change);
+    assert.equal(afterFirst.length, before + 1);
+    const event = afterFirst.at(-1);
+    assert.equal(event?.event_type, "user_decision_recorded");
+    assert.equal((event?.payload as { accepted?: unknown }).accepted, false);
+    assert.equal(typeof (event?.payload as { input_digest?: unknown }).input_digest, "string");
+
+    const repeated = recordUserDecisionContent(fx.projectRoot, fx.change, missingReason);
+    assert.equal(repeated.accepted, false);
+    assert.match(repeated.message, /幂等/);
+    assert.equal(readEvents(fx.projectRoot, fx.change).length, afterFirst.length);
+
+    const invalidAnswer = recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({
+      scope: "code_review_decision:JOB-test#CR-001",
+      answer: "ignore",
+      reason: "这不是合法选择",
+    }));
+    assert.equal(invalidAnswer.accepted, false);
+    assert.match(invalidAnswer.message, /回到计划阶段、回到实现阶段 或 驳回该问题/);
+
+    const valid = recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({
+      scope: "code_review_decision:JOB-test#CR-001",
+      answer: "驳回该问题",
+      reason: "该问题不是本次阻塞项",
+    }));
+    assert.equal(valid.accepted, true);
+    const acceptedEvent = readEvents(fx.projectRoot, fx.change).at(-1);
+    assert.equal((acceptedEvent?.payload as { answer?: unknown }).answer, "驳回该问题");
+  } finally { fx.cleanup(); }
+});
+
+test("code-reviewer：驳回问题不允许使用旧回退决策，最后有效决策生效", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    const created = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(created.outcome, "job_created");
+    const jobId = created.created_jobs[0];
+    const finding = {
+      id: "CR-LATEST-001",
+      type: "mixed",
+      blocking: true,
+      description: "实现与文档边界需要判断",
+      evidence: "tasks.md 与 src/example.ts 边界不一致",
+      source_refs: ["tasks.md", "src/example.ts"],
+      impact: "可能遗漏兼容场景",
+      suggested_action: "apply",
+    };
+    submitCodeReviewerReport(
+      fx.projectRoot,
+      fx.change,
+      fx.changeRoot,
+      jobId,
+      codeReviewerReport(fx.projectRoot, fx.change, jobId, "fail", [finding]),
+    );
+
+    const scope = `code_review_decision:${jobId}#CR-LATEST-001`;
+    assert.equal(recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({
+      scope,
+      answer: "回到实现阶段",
+      reason: "先确认直接修实现",
+    })).accepted, true);
+
+    assert.equal(recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({
+      scope,
+      answer: "驳回该问题",
+      reason: "复核后认为已有证据覆盖",
+    })).accepted, true);
+
+    const blocked = reopen(fx.projectRoot, fx.change, fx.changeRoot, "apply", "尝试使用旧决策", {
+      reviewFix: `${jobId}#CR-LATEST-001`,
+    });
+    assert.equal(blocked.events_written, 0);
+    assert.match(blocked.message, /缺少使用者确认/);
+
+    assert.equal(recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({
+      scope,
+      answer: "回到实现阶段",
+      reason: "重新确认仍需直接修实现",
+    })).accepted, true);
+
+    const reopened = reopen(fx.projectRoot, fx.change, fx.changeRoot, "apply", "根据最新决策修实现", {
+      reviewFix: `${jobId}#CR-LATEST-001`,
+    });
+    assert.equal(reopened.to_state, "apply");
+  } finally { fx.cleanup(); }
+});
+
+test("code-reviewer：raw-only 用户决策不会驱动 reopen", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    const created = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(created.outcome, "job_created");
+    const jobId = created.created_jobs[0];
+    submitCodeReviewerReport(
+      fx.projectRoot,
+      fx.change,
+      fx.changeRoot,
+      jobId,
+      codeReviewerReport(fx.projectRoot, fx.change, jobId, "fail", [{
+        id: "CR-RAW-ONLY",
+        type: "spec",
+        blocking: true,
+        description: "需要用户确认的文档问题",
+        evidence: "design.md 与 tasks.md 不一致",
+        source_refs: ["design.md", "tasks.md"],
+        impact: "可能影响实现方向",
+        suggested_action: "propose",
+      }]),
+    );
+
+    writeFileSync(rawFile(fx.projectRoot, fx.change, "user-decisions"), JSON.stringify({
+      scope: `code_review_decision:${jobId}#CR-RAW-ONLY`,
+      answer: "回到计划阶段",
+      reason: "raw-only 不应生效",
+    }) + "\n");
+
+    const blocked = reopen(fx.projectRoot, fx.change, fx.changeRoot, "propose", "尝试使用 raw-only 决策", {
+      reviewFinding: `${jobId}#CR-RAW-ONLY`,
+    });
+    assert.equal(blocked.events_written, 0);
+    assert.match(blocked.message, /缺少使用者确认/);
+  } finally { fx.cleanup(); }
+});
+
+test("code-reviewer：未接受的决策不会覆盖之前有效决策", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    const created = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(created.outcome, "job_created");
+    const jobId = created.created_jobs[0];
+    submitCodeReviewerReport(
+      fx.projectRoot,
+      fx.change,
+      fx.changeRoot,
+      jobId,
+      codeReviewerReport(fx.projectRoot, fx.change, jobId, "fail", [{
+        id: "CR-INVALID-LATEST",
+        type: "mixed",
+        blocking: true,
+        description: "需要确认是否直接修实现",
+        evidence: "tasks.md 与 src/example.ts 不一致",
+        source_refs: ["tasks.md", "src/example.ts"],
+        impact: "可能遗漏兼容场景",
+        suggested_action: "apply",
+      }]),
+    );
+
+    const scope = `code_review_decision:${jobId}#CR-INVALID-LATEST`;
+    assert.equal(recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({
+      scope,
+      answer: "回到实现阶段",
+      reason: "确认直接修实现",
+    })).accepted, true);
+    assert.equal(recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({
+      scope,
+      answer: "驳回该问题",
+    })).accepted, false);
+
+    const reopened = reopen(fx.projectRoot, fx.change, fx.changeRoot, "apply", "无效决策不覆盖有效决策", {
+      reviewFix: `${jobId}#CR-INVALID-LATEST`,
+    });
+    assert.equal(reopened.to_state, "apply");
+  } finally { fx.cleanup(); }
+});
+
+test("code-reviewer：驳回第一个问题后 next 继续处理下一个阻塞问题", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    const created = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(created.outcome, "job_created");
+    const jobId = created.created_jobs[0];
+    const findings = [
+      {
+        id: "CR-SPEC-FIRST",
+        type: "spec",
+        blocking: true,
+        description: "设计文档需要确认",
+        evidence: "design.md 与 tasks.md 不一致",
+        source_refs: ["design.md", "tasks.md"],
+        impact: "可能影响实现方向",
+        suggested_action: "propose",
+      },
+      {
+        id: "CR-IMPL-SECOND",
+        type: "implementation",
+        blocking: true,
+        description: "实现缺少空输入处理",
+        evidence: "src/example.ts 没有空输入分支",
+        source_refs: ["src/example.ts"],
+        impact: "空输入会失败",
+        suggested_action: "apply",
+      },
+    ];
+    submitCodeReviewerReport(
+      fx.projectRoot,
+      fx.change,
+      fx.changeRoot,
+      jobId,
+      codeReviewerReport(fx.projectRoot, fx.change, jobId, "fail", findings),
+    );
+
+    const ask = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(ask.path, "ask_user");
+    assert.equal(ask.ask_user.scope, `code_review_decision:${jobId}#CR-SPEC-FIRST`);
+    assert.equal(recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({
+      scope: `code_review_decision:${jobId}#CR-SPEC-FIRST`,
+      answer: "驳回该问题",
+      reason: "该文档分歧已有用户确认记录覆盖",
+    })).accepted, true);
+
+    const nextResult = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(nextResult.path, "next_command");
+    assert.match(nextResult.next_command, new RegExp(`--review-fix ${jobId}#CR-IMPL-SECOND`));
+  } finally { fx.cleanup(); }
+});
+
+test("code-reviewer：所有阻塞问题被驳回后重新创建代码审查工作项", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    const created = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(created.outcome, "job_created");
+    const jobId = created.created_jobs[0];
+    const findings = [
+      {
+        id: "CR-DISMISS-001",
+        type: "spec",
+        blocking: true,
+        description: "文档问题被复核驳回",
+        evidence: "design.md:1",
+        source_refs: ["design.md:1"],
+        impact: "可能影响计划",
+        suggested_action: "propose",
+      },
+      {
+        id: "CR-DISMISS-002",
+        type: "mixed",
+        blocking: true,
+        description: "混合问题被复核驳回",
+        evidence: "tasks.md:1",
+        source_refs: ["tasks.md:1"],
+        impact: "可能影响实现",
+        suggested_action: "apply",
+      },
+    ];
+    submitCodeReviewerReport(
+      fx.projectRoot,
+      fx.change,
+      fx.changeRoot,
+      jobId,
+      codeReviewerReport(fx.projectRoot, fx.change, jobId, "fail", findings),
+    );
+
+    for (const finding of findings) {
+      assert.equal(recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({
+        scope: `code_review_decision:${jobId}#${finding.id}`,
+        answer: "驳回该问题",
+        reason: `${finding.id} 已由主流程复核驳回`,
+      })).accepted, true);
+    }
+
+    const nextResult = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(nextResult.path, "next_command");
+    assert.match(nextResult.next_command, /review-ready/);
+
+    const retry = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(retry.outcome, "job_created");
+    assert.notEqual(retry.created_jobs[0], jobId);
+    const packet = jobsPacket(fx.projectRoot, fx.change, retry.created_jobs[0]);
+    assert.equal((packet.packet?.previous_rejection as { result_kind?: unknown })?.result_kind, "review_failed");
+    const reason = String((packet.packet?.previous_rejection as { reason?: unknown })?.reason);
+    assert.match(reason, /CR-DISMISS-001/);
+    assert.match(reason, /CR-DISMISS-002/);
+    assert.match(reason, /没有新的具体证据/);
   } finally { fx.cleanup(); }
 });
 
@@ -1439,6 +1834,107 @@ test("accept：verifier accepted 后补登记匹配 digest 的 legacy test-run �
     const blocked = accept(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(blocked.events_written, 0);
     assert.match(blocked.message, /缺少仍然匹配当前证据的最终验证/);
+  } finally { fx.cleanup(); }
+});
+
+test("reviewEvidenceDigest：covers_task_ids 变化会刷新最终验证证据版本", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    writeFileSync(join(fx.changeRoot, "tasks.md"), "# Tasks\n\n- [ ] TASK-001 Implement\n");
+
+    taskStart(fx.projectRoot, fx.change, fx.changeRoot, "TASK-001");
+    const attempt = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot).active_task_attempts[0];
+    assert.ok(attempt);
+
+    appendTestRunEvent(fx.projectRoot, fx.change, {
+      test_id: "TEST-RED",
+      attempt_id: attempt.attempt_id,
+      task_structure_digest: attempt.task_structure_digest,
+      semantic_status: "expected_failure",
+      exit_code: 1,
+    });
+    appendTestRunEvent(fx.projectRoot, fx.change, {
+      test_id: "TEST-GREEN",
+      attempt_id: attempt.attempt_id,
+      task_structure_digest: attempt.task_structure_digest,
+      semantic_status: "expected_success",
+      exit_code: 0,
+    });
+    assert.equal(taskComplete(fx.projectRoot, fx.change, fx.changeRoot, "TASK-001").events_written, 2);
+
+    const events = readEvents(fx.projectRoot, fx.change);
+    const completedEvent = events.findLast(ev => ev.event_type === "task_completed");
+    const redEvent = events.findLast(ev => ev.event_type === "test_run_recorded" && (ev.payload as { test_id?: unknown }).test_id === "TEST-RED");
+    const greenEvent = events.findLast(ev => ev.event_type === "test_run_recorded" && (ev.payload as { test_id?: unknown }).test_id === "TEST-GREEN");
+    assert.ok(completedEvent);
+    assert.ok(redEvent);
+    assert.ok(greenEvent);
+    const legacyRecords = [
+      {
+        kind: "task_completed",
+        task_id: "TASK-001",
+        attempt_id: attempt.attempt_id,
+        task_structure_digest: attempt.task_structure_digest,
+        event_digest: completedEvent.event_digest,
+      },
+      {
+        kind: "test_run_recorded",
+        test_id: "TEST-RED",
+        attempt_id: attempt.attempt_id,
+        task_structure_digest: attempt.task_structure_digest,
+        semantic_status: "expected_failure",
+        command: "npm test",
+        cwd: fx.projectRoot,
+        exit_code: 1,
+        target_fingerprint: null,
+        event_digest: redEvent.event_digest,
+      },
+      {
+        kind: "test_run_recorded",
+        test_id: "TEST-GREEN",
+        attempt_id: attempt.attempt_id,
+        task_structure_digest: attempt.task_structure_digest,
+        semantic_status: "expected_success",
+        command: "npm test",
+        cwd: fx.projectRoot,
+        exit_code: 0,
+        target_fingerprint: null,
+        event_digest: greenEvent.event_digest,
+      },
+    ].sort((a, b) => [
+      a.kind,
+      "task_id" in a ? a.task_id : "",
+      a.attempt_id,
+      a.task_structure_digest,
+      "test_id" in a ? a.test_id : "",
+      "semantic_status" in a ? a.semantic_status : "",
+      "command" in a ? a.command : "",
+      "cwd" in a ? a.cwd : "",
+      "exit_code" in a ? String(a.exit_code) : "",
+      "target_fingerprint" in a ? a.target_fingerprint : "",
+      a.event_digest,
+    ].join("\u0000").localeCompare([
+      b.kind,
+      "task_id" in b ? b.task_id : "",
+      b.attempt_id,
+      b.task_structure_digest,
+      "test_id" in b ? b.test_id : "",
+      "semantic_status" in b ? b.semantic_status : "",
+      "command" in b ? b.command : "",
+      "cwd" in b ? b.cwd : "",
+      "exit_code" in b ? String(b.exit_code) : "",
+      "target_fingerprint" in b ? b.target_fingerprint : "",
+      b.event_digest,
+    ].join("\u0000")));
+    const withoutCoverage = reviewEvidenceDigest(events);
+    assert.equal(withoutCoverage, sha256Text(JSON.stringify(legacyRecords)));
+    const withCoverage = reviewEvidenceDigest(events.map(ev => {
+      const payload = ev.payload as Record<string, unknown>;
+      if (ev.event_type !== "test_run_recorded" || payload.test_id !== "TEST-GREEN") return ev;
+      return { ...ev, payload: { ...payload, covers_task_ids: ["TASK-001"] } };
+    }));
+
+    assert.notEqual(withCoverage, withoutCoverage);
   } finally { fx.cleanup(); }
 });
 

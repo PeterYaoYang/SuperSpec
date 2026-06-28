@@ -64,8 +64,8 @@ superspec record job-submit --change "<change>" --job <JOB> --report -
 - 代码审查通过：再次执行 `review-ready`，进入 `review`。
 - 报告格式不符合要求，或没有给出可处理的问题：状态停在 `apply_done`，下一轮代码审查工作项说明会带上拒绝原因；按原因修正报告生成方式或审查口径后再执行。
 - 连续两次报告不符合要求或没有可处理问题时，next 会要求先修正报告生成方式、模板或审查口径，避免无限重试。
-- 发现纯代码实现问题：按 next 提示执行 `reopen --to apply --review-fix <job_id>#<problem_id> --reason "<reason>"`，由引擎追加审查修复任务。
-- 发现方案/需求文档问题或混合问题：next 会先返回用户确认。记录使用者选择后，回到计划阶段执行 `reopen --to propose --review-finding <job_id>#<problem_id> --reason "<reason>"`；确认文档方向不变并回到实现阶段执行 `reopen --to apply --review-fix <job_id>#<problem_id> --reason "<reason>"`。
+- 发现纯代码实现问题：按 next 提示执行 `reopen --to apply --review-fix <job_id>#<problem_id> --reason "<reason>"`，由引擎追加普通修复 task。
+- 发现方案/需求文档问题或混合问题：next 会先返回用户确认。记录使用者选择和原因后，按 next 返回的命令回到计划阶段或实现阶段。
 
 最终验证结果处理：
 
@@ -82,6 +82,7 @@ superspec record job-submit --change "<change>" --job <JOB> --report -
 - 审查阶段只读，不改业务代码。
 - 不绕过 `next` / `review-ready` 要求的代码审查或最终验证。
 - 主流程不重审代码，只复核代码审查报告是否可登记、问题是否可分流、回退和闭环证据是否存在。
+- 涉及代码审查问题回退时，以 next 当前返回为准，不手动套用旧 job 或旧问题编号。
 - 不在 accepted 后自动 archive。
 - 审查和验证报告必须引用真实文件、事件或测试证据，不编造。
 - 不跳过 transition。

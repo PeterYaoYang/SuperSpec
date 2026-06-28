@@ -120,6 +120,19 @@ export function readEvents(projectRoot: string, change: string): Event[] {
   return events;
 }
 
+export function findLatestEvent(
+  events: Event[],
+  eventType: Event["event_type"],
+  predicate: (event: Event) => boolean,
+): Event | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i];
+    if (event.event_type !== eventType) continue;
+    if (predicate(event)) return event;
+  }
+  return null;
+}
+
 export function makeEvent(
   change: string,
   eventType: Event["event_type"],

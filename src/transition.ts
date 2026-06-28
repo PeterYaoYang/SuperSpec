@@ -21,9 +21,13 @@ import {
 } from "./review.ts";
 import {
   codeReviewBoundFiles,
+  codeReviewDecisionScope,
   codeReviewJobStaleReason,
   codeReviewPacketDigest,
   collectCodeReviewGateFacts,
+  dismissedCodeReviewSummary,
+  latestCodeReviewDecision,
+  latestCodeReviewFailedStatus,
   requiresFinalVerifierForCurrentReview,
   scanCodeChanges,
 } from "./code_review.ts";
@@ -145,10 +149,13 @@ function createCodeReviewerJob(
   const boundFiles = codeReviewBoundFiles(projectRoot, scan.paths);
   const facts = collectCodeReviewGateFacts(events);
   const latestRejected = facts.latestRejected;
+  const reviewFailedStatus = latestCodeReviewFailedStatus(events);
   const previousRejection = latestRejected && latestRejected.state === "rejected"
     ? {
       result_kind: latestRejected.result_kind ?? "invalid_report",
-      reason: latestRejected.reason ?? "缺少拒绝原因",
+      reason: latestRejected.result_kind === "review_failed" && reviewFailedStatus && reviewFailedStatus.unresolved.length === 0 && reviewFailedStatus.dismissed.length > 0
+        ? dismissedCodeReviewSummary(reviewFailedStatus)
+        : latestRejected.reason ?? "缺少拒绝原因",
       job_id: latestRejected.job.job_id,
     }
     : undefined;
@@ -186,27 +193,11 @@ function parseCodeReviewFindingRef(value: string): CodeReviewFindingRef | null {
 }
 
 function findReviewFailedFinding(events: Event[], ref: CodeReviewFindingRef): { event: Event; finding: Record<string, unknown> } | null {
-  for (let i = events.length - 1; i >= 0; i--) {
-    const ev = events[i];
-    if (ev.event_type !== "job_rejected") continue;
-    const payload = ev.payload as { job_id?: unknown; result_kind?: unknown; findings?: unknown };
-    if (payload.job_id !== ref.jobId || payload.result_kind !== "review_failed") continue;
-    const findings = Array.isArray(payload.findings) ? payload.findings : [];
-    for (const raw of findings) {
-      if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
-      const finding = raw as Record<string, unknown>;
-      if (finding.id === ref.findingId) return { event: ev, finding };
-    }
-  }
-  return null;
-}
-
-function hasUserDecision(events: Event[], scope: string, answer: string): boolean {
-  return events.some(ev =>
-    ev.event_type === "user_decision_recorded" &&
-    (ev.payload as { scope?: unknown; answer?: unknown }).scope === scope &&
-    (ev.payload as { scope?: unknown; answer?: unknown }).answer === answer
-  );
+  const status = latestCodeReviewFailedStatus(events);
+  if (!status || status.terminal.job.job_id !== ref.jobId) return null;
+  const finding = status.findings.find(item => item.id === ref.findingId)?.finding;
+  if (!finding) return null;
+  return { event: status.terminal.event, finding };
 }
 
 function reviewFixMarker(ref: CodeReviewFindingRef): string {
@@ -566,8 +557,9 @@ export function reopen(
         if (!found) return { skip: true, message: `找不到有效的代码审查问题 ${opts.reviewFinding}` };
         const type = found.finding.type;
         if (type !== "spec" && type !== "mixed") return { skip: true, message: "只有方案/需求文档问题或混合问题可以回到计划阶段" };
-        const scope = `code_review_decision:${ref.jobId}#${ref.findingId}`;
-        if (!hasUserDecision(events, scope, "reopen_propose")) return { skip: true, message: `缺少使用者确认：需要先确认问题 ${ref.findingId} 是否回到计划阶段` };
+        const scope = codeReviewDecisionScope(ref.jobId, ref.findingId);
+        const decision = latestCodeReviewDecision(events, scope);
+        if (decision?.answer !== "reopen_propose") return { skip: true, message: `缺少使用者确认：需要先确认问题 ${ref.findingId} 是否回到计划阶段` };
         return {
           fromState: "apply_done",
           toState: "propose",
@@ -592,8 +584,9 @@ export function reopen(
         if (!found) return { skip: true, message: `找不到有效的代码审查问题 ${opts.reviewFix}` };
         const type = found.finding.type;
         if (type === "spec" || type === "mixed") {
-          const scope = `code_review_decision:${ref.jobId}#${ref.findingId}`;
-          if (!hasUserDecision(events, scope, "fix_in_apply")) return { skip: true, message: `缺少使用者确认：需要先确认问题 ${ref.findingId} 是否直接回到实现阶段修复` };
+          const scope = codeReviewDecisionScope(ref.jobId, ref.findingId);
+          const decision = latestCodeReviewDecision(events, scope);
+          if (decision?.answer !== "reopen_apply") return { skip: true, message: `缺少使用者确认：需要先确认问题 ${ref.findingId} 是否直接回到实现阶段修复` };
         } else if (type !== "implementation") {
           return { skip: true, message: "这个代码审查问题不能直接回到实现阶段处理" };
         }
@@ -680,6 +673,15 @@ export function reviewReady(projectRoot: string, change: string, changeRoot: str
             };
           }
           if (latest?.state === "rejected" && latest.result_kind === "review_failed") {
+            const reviewFailedStatus = latestCodeReviewFailedStatus(events);
+            if (reviewFailedStatus && reviewFailedStatus.findings.length > 0 && reviewFailedStatus.unresolved.length === 0) {
+              const { job, scanReason } = createCodeReviewerJob(change, projectRoot, events);
+              return {
+                fromState: "apply_done", toState: "apply_done", outcome: "job_created" as const,
+                newJobs: [job],
+                reason: `重新创建代码审查工作项；${scanReason}；上一次阻塞问题已被主流程复核驳回`,
+              };
+            }
             return {
               skip: true,
               message: "代码审查发现需要处理的问题，请先执行 next，根据提示回到实现阶段修复或让使用者决定是否回到计划阶段",

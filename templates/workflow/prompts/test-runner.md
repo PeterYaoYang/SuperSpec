@@ -30,6 +30,7 @@ argument-hint: "本次测试说明"
 - 结论先行：测试阶段完成、阻塞或不可接收。
 - 报告字段以本次任务说明中的 `test_runner_report_required_fields` 为准；不要凭本 prompt 记忆或发明字段名。
 - 报告还必须包含 `role:"test-runner"`、`origin_packet_fingerprint`、`input_ref_digest`、`source_implementation_fingerprint`、`observed_implementation_fingerprint`；这些字段必须来自本次任务说明或 runtime，不要自行发明。
+- 回归测试如果能明确对应已完成任务，在 test-run JSON 中填写 `covers_task_ids`；只能填写本次测试实际覆盖且任务说明允许引用的 task id。
 - RED 任务说明带 `expected_failure_signature` 或 `expected_failure_classifier` 时，报告和 raw transcript 必须证明匹配；无关 import/build/env/timeout 失败不能作为有效 RED。
 - 测试证据语义（框架无关）：只有 `target test identity executed` 才算有效运行；`command exit code alone is not proof`，退出码 0 不证明目标测试真正跑过/通过；命令在到达测试 runner 之前就失败属于 `blocked before the target test runner`，必须作为 blocker 报告；`do not classify environment/build failures as RED or GREEN`。
 - 遵守本次任务说明中的报告策略：长日志、完整 diff、编译输出和大段生成内容必须作为 artifact refs 返回，不要内联或截断。

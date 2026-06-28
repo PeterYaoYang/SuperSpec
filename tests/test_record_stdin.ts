@@ -209,8 +209,38 @@ test("CLI record test-run reads JSON from stdin", () => {
 
     const rawLines = readFileSync(rawFile(fx.projectRoot, fx.change, "test-runs"), "utf8").trim().split("\n");
     assert.equal(rawLines.length, 1);
-    assert.equal(JSON.parse(rawLines[0]).semantic_status, "expected_success");
+    const raw = JSON.parse(rawLines[0]);
+    assert.equal(raw.semantic_status, "expected_success");
+    assert.equal("covers_task_ids" in raw, false);
     assert.equal(readEvents(fx.projectRoot, fx.change).some(ev => ev.event_type === "test_run_recorded"), true);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("CLI record test-run reads covers_task_ids from stdin", () => {
+  const fx = setupProject();
+  try {
+    const changeRoot = join(fx.projectRoot, "openspec", "changes", fx.change);
+    mkdirSync(changeRoot, { recursive: true });
+    writeFileSync(join(changeRoot, "tasks.md"), "# Tasks\n\n- [ ] TASK-001 Do it\n- [ ] TASK-002 Do more\n");
+    const digest = tasksStructureDigestOf(changeRoot);
+
+    const input = JSON.stringify({
+      test_id: "REGRESSION-001",
+      task_structure_digest: digest,
+      command: "npm test",
+      cwd: fx.projectRoot,
+      exit_code: 0,
+      semantic_status: "expected_success",
+      covers_task_ids: ["TASK-002", " TASK-001 ", "TASK-002"],
+    });
+    const run = runCli(fx.projectRoot, ["record", "test-run", "--change", fx.change, "--input", "-"], input);
+    assert.equal(run.status, 0, run.stderr || run.stdout);
+
+    const rawLines = readFileSync(rawFile(fx.projectRoot, fx.change, "test-runs"), "utf8").trim().split("\n");
+    assert.equal(rawLines.length, 1);
+    assert.deepEqual(JSON.parse(rawLines[0]).covers_task_ids, ["TASK-001", "TASK-002"]);
   } finally {
     fx.cleanup();
   }

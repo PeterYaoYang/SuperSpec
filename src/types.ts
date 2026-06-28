@@ -151,6 +151,7 @@ export interface TestRun {
   test_id: string;
   attempt_id?: string | null;
   task_structure_digest: string;
+  covers_task_ids?: string[];
   command: string;
   cwd: string;
   exit_code: number;

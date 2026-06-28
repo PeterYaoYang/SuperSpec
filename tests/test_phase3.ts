@@ -337,15 +337,77 @@ test("record test-run：RED 登记", () => {
     const rawPath = rawFile(fx.projectRoot, fx.change, "test-runs");
     const rawLines = readFileSync(rawPath, "utf8").trim().split("\n");
     assert.equal(rawLines.length, 1);
-    assert.equal(JSON.parse(rawLines[0]).semantic_status, "expected_failure");
+    const raw = JSON.parse(rawLines[0]);
+    assert.equal(raw.semantic_status, "expected_failure");
+    assert.equal("covers_task_ids" in raw, false);
     assert.deepEqual(rawDirFiles(fx.projectRoot, fx.change), ["test-runs.jsonl"]);
 
     const event = readEvents(fx.projectRoot, fx.change).findLast(e => e.event_type === "test_run_recorded");
     assert.ok(event);
+    assert.equal("covers_task_ids" in event.payload, false);
     assert.equal(event.payload.raw_kind, "test-runs");
     assert.equal(event.payload.raw_index, 0);
     assert.equal(event.payload.raw_digest, sha256Text(rawLines[0]));
   } finally { fx.cleanup(); }
+});
+
+test("record test-run：covers_task_ids 规范化后写入 raw 和 event", () => {
+  const fx = setupTaskInProgress();
+  try {
+    const structDigest = tasksStructureDigestOf(fx.changeRoot);
+    const testFile = join(fx.projectRoot, "regression.json");
+    writeFileSync(testFile, JSON.stringify({
+      test_id: "REGRESSION-001",
+      attempt_id: fx.attemptId,
+      task_structure_digest: structDigest,
+      command: "npm test",
+      cwd: fx.projectRoot,
+      exit_code: 0,
+      semantic_status: "expected_success",
+      covers_task_ids: ["TASK-002", " TASK-001 ", "TASK-002"],
+    }));
+    const result = recordTestRun(fx.projectRoot, fx.change, testFile);
+    assert.equal(result.accepted, true);
+
+    const rawPath = rawFile(fx.projectRoot, fx.change, "test-runs");
+    const rawLine = readFileSync(rawPath, "utf8").trim().split("\n").at(-1);
+    assert.ok(rawLine);
+    assert.deepEqual(JSON.parse(rawLine).covers_task_ids, ["TASK-001", "TASK-002"]);
+
+    const event = readEvents(fx.projectRoot, fx.change).findLast(e => e.event_type === "test_run_recorded");
+    assert.ok(event);
+    assert.deepEqual(event.payload.covers_task_ids, ["TASK-001", "TASK-002"]);
+  } finally { fx.cleanup(); }
+});
+
+test("record test-run：covers_task_ids 非法输入拒绝", () => {
+  const cases = [
+    { name: "not-array", value: "TASK-001" },
+    { name: "empty-array", value: [] },
+    { name: "non-string", value: ["TASK-001", 123] },
+    { name: "blank-string", value: ["TASK-001", " "] },
+  ];
+
+  for (const item of cases) {
+    const fx = setupTaskInProgress();
+    try {
+      const structDigest = tasksStructureDigestOf(fx.changeRoot);
+      const testFile = join(fx.projectRoot, `${item.name}.json`);
+      writeFileSync(testFile, JSON.stringify({
+        test_id: "REGRESSION-001",
+        attempt_id: fx.attemptId,
+        task_structure_digest: structDigest,
+        command: "npm test",
+        cwd: fx.projectRoot,
+        exit_code: 0,
+        semantic_status: "expected_success",
+        covers_task_ids: item.value,
+      }));
+      const result = recordTestRun(fx.projectRoot, fx.change, testFile);
+      assert.equal(result.accepted, false, item.name);
+      assert.equal(readEvents(fx.projectRoot, fx.change).some(e => e.event_type === "test_run_recorded"), false);
+    } finally { fx.cleanup(); }
+  }
 });
 
 test("record test-run：raw_index 跳过损坏 JSONL 行", () => {
@@ -446,6 +508,7 @@ test("task-complete：RED + GREEN → 完成 + 勾选", () => {
     writeFileSync(greenFile, JSON.stringify({
       test_id: "TEST-001", attempt_id: fx.attemptId, task_structure_digest: structDigest,
       command: "npm test", cwd: fx.projectRoot, exit_code: 0, semantic_status: "expected_success",
+      covers_task_ids: ["TASK-001"],
     }));
     recordTestRun(fx.projectRoot, fx.change, greenFile);
 

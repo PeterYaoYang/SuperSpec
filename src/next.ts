@@ -6,8 +6,11 @@ import { join } from "node:path";
 import { readEvents, sha256Text } from "./store.ts";
 import { isFreshReviewVerifier, isReviewReadyVerifier, readReviewPolicyFromEvents, reviewEvidenceDigest } from "./review.ts";
 import {
+  CODE_REVIEW_DECISION_ANSWER_LABELS,
   CODE_REVIEW_REPAIR_SCOPE_PREFIX,
+  codeReviewDecisionScope,
   collectCodeReviewGateFacts,
+  latestCodeReviewFailedStatus,
   requiresFinalVerifierForCurrentReview,
 } from "./code_review.ts";
 import { requiredJobActions } from "./job_action.ts";
@@ -48,16 +51,6 @@ function pendingTaskIds(changeRoot: string): string[] {
 
 function reopenCommand(change: string, pending: string[]): string {
   return transitionCommand(change, "reopen", `--to apply --reason "pending tasks: ${pending.join(", ")}"`);
-}
-
-function firstBlockingFinding(payload: Record<string, unknown>): Record<string, unknown> | null {
-  const findings = Array.isArray(payload.findings) ? payload.findings : [];
-  for (const item of findings) {
-    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
-    const finding = item as Record<string, unknown>;
-    if (finding.blocking === true) return finding;
-  }
-  return null;
 }
 
 function taskCompletionReadiness(
@@ -259,10 +252,20 @@ export function next(
       const facts = collectCodeReviewGateFacts(events);
       const latest = facts.latestTerminal;
       if (latest?.state === "rejected" && latest.result_kind === "review_failed") {
-        const payload = latest.event.payload as Record<string, unknown>;
-        const finding = firstBlockingFinding(payload);
-        const findingId = typeof finding?.id === "string" ? finding.id : "";
-        const type = finding?.type;
+        const status = latestCodeReviewFailedStatus(events);
+        const pending = status?.unresolved[0] ?? null;
+        if (status && status.findings.length > 0 && !pending) {
+          return {
+            state: "apply_done",
+            path: "next_command",
+            next_command: transitionCommand(change, "review-ready", riskFlag(defaultRisk)),
+            reason: "代码审查问题已被主流程复核驳回，重新发起代码审查",
+            missing_inputs: [],
+          };
+        }
+        const findingId = pending?.id ?? "";
+        const type = pending?.type;
+        const decision = pending?.decision;
         if (findingId && type === "implementation") {
           return {
             state: "apply_done",
@@ -277,13 +280,43 @@ export function next(
           };
         }
         if (findingId && (type === "spec" || type === "mixed")) {
+          if (decision?.answer === "reopen_propose") {
+            return {
+              state: "apply_done",
+              path: "next_command",
+              next_command: transitionCommand(
+                change,
+                "reopen",
+                `--to propose --review-finding ${latest.job.job_id}#${findingId} --reason "根据代码审查问题 ${findingId} 回到计划阶段"`,
+              ),
+              reason: `使用者已确认问题 ${findingId} 需要回到计划阶段`,
+              missing_inputs: [],
+            };
+          }
+          if (decision?.answer === "reopen_apply") {
+            return {
+              state: "apply_done",
+              path: "next_command",
+              next_command: transitionCommand(
+                change,
+                "reopen",
+                `--to apply --review-fix ${latest.job.job_id}#${findingId} --reason "根据代码审查问题 ${findingId} 回到实现阶段修复"`,
+              ),
+              reason: `使用者已确认问题 ${findingId} 直接回到实现阶段修复`,
+              missing_inputs: [],
+            };
+          }
           const problemKind = type === "spec"
             ? "方案或需求文档可能需要调整"
             : "代码实现和方案文档都可能有关";
           const ask: AskUser = {
-            question: `代码审查发现问题 ${findingId}：${problemKind}。请选择回到计划阶段修改文档，或确认现有文档方向不变、回到实现阶段修代码。`,
-            allowed_answers: ["reopen_propose", "fix_in_apply"],
-            scope: `code_review_decision:${latest.job.job_id}#${findingId}`,
+            question: `代码审查发现问题 ${findingId}：${problemKind}。请选择回到计划阶段修改文档、确认现有文档方向不变并回到实现阶段修代码，或驳回该问题；无论选择哪一项都必须写明原因。`,
+            allowed_answers: [
+              CODE_REVIEW_DECISION_ANSWER_LABELS.reopen_propose,
+              CODE_REVIEW_DECISION_ANSWER_LABELS.reopen_apply,
+              CODE_REVIEW_DECISION_ANSWER_LABELS.dismiss,
+            ],
+            scope: codeReviewDecisionScope(latest.job.job_id, findingId),
           };
           return { state: "apply_done", path: "ask_user", ask_user: ask, reason: `代码审查发现需要使用者判断的问题 ${findingId}` };
         }

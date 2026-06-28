@@ -30,10 +30,28 @@ function recordTestRunLoaded(
     return { accepted: false, message: "缺少 test_id 或 task_structure_digest" };
   }
 
+  let coversTaskIds: string[] | undefined;
+  if (tr.covers_task_ids !== undefined) {
+    if (!Array.isArray(tr.covers_task_ids)) {
+      return { accepted: false, message: "covers_task_ids 必须是字符串数组" };
+    }
+    if (tr.covers_task_ids.length === 0) {
+      return { accepted: false, message: "covers_task_ids 不能是空数组" };
+    }
+    for (const raw of tr.covers_task_ids) {
+      if (typeof raw !== "string") return { accepted: false, message: "covers_task_ids 必须是字符串数组" };
+      const value = raw.trim();
+      if (!value) return { accepted: false, message: "covers_task_ids 不能包含空字符串" };
+      (coversTaskIds ??= []).push(value);
+    }
+    coversTaskIds = [...new Set(coversTaskIds)].sort();
+  }
+
   const normalizedTestRun = {
     test_id: tr.test_id,
     task_structure_digest: tr.task_structure_digest,
     attempt_id: tr.attempt_id ?? null,
+    ...(coversTaskIds ? { covers_task_ids: coversTaskIds } : {}),
     command: tr.command ?? "",
     cwd: tr.cwd ?? "",
     exit_code: tr.exit_code ?? -1,

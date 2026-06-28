@@ -89,6 +89,7 @@ interface EvidenceRecord {
   task_structure_digest?: string | null;
   test_id?: string | null;
   semantic_status?: string | null;
+  covers_task_ids?: string[];
   command?: string;
   cwd?: string;
   exit_code?: number | null;
@@ -97,19 +98,35 @@ interface EvidenceRecord {
 }
 
 function evidenceSortKey(record: EvidenceRecord): string {
-  return [
+  const parts = [
     record.kind,
     record.task_id ?? "",
     record.attempt_id ?? "",
     record.task_structure_digest ?? "",
     record.test_id ?? "",
     record.semantic_status ?? "",
+  ];
+  if (record.covers_task_ids && record.covers_task_ids.length > 0) {
+    parts.push(`covers:${JSON.stringify(record.covers_task_ids)}`);
+  }
+  parts.push(
     record.command ?? "",
     record.cwd ?? "",
     record.exit_code == null ? "" : String(record.exit_code),
     record.target_fingerprint ?? "",
     record.event_digest,
-  ].join("\u0000");
+  );
+  return parts.join("\u0000");
+}
+
+function normalizedCoveredTaskIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(
+    value
+      .filter((item): item is string => typeof item === "string")
+      .map(item => item.trim())
+      .filter(Boolean),
+  )].sort();
 }
 
 export function reviewEvidenceDigest(events: Event[]): string {
@@ -155,6 +172,7 @@ export function reviewEvidenceDigest(events: Event[]): string {
       attempt_id?: unknown;
       task_structure_digest?: unknown;
       semantic_status?: unknown;
+      covers_task_ids?: unknown;
       command?: unknown;
       cwd?: unknown;
       exit_code?: unknown;
@@ -166,12 +184,14 @@ export function reviewEvidenceDigest(events: Event[]): string {
     const matchesLegacyDigest = attemptId == null && structureDigest != null && completedStructureDigests.has(structureDigest);
     if (!matchesCompletedAttempt && !matchesLegacyDigest) continue;
 
+    const coversTaskIds = normalizedCoveredTaskIds(payload.covers_task_ids);
     records.push({
       kind: "test_run_recorded",
       test_id: typeof payload.test_id === "string" ? payload.test_id : null,
       attempt_id: attemptId,
       task_structure_digest: structureDigest,
       semantic_status: typeof payload.semantic_status === "string" ? payload.semantic_status : null,
+      ...(coversTaskIds.length > 0 ? { covers_task_ids: coversTaskIds } : {}),
       command: typeof payload.command === "string" ? payload.command : "",
       cwd: typeof payload.cwd === "string" ? payload.cwd : "",
       exit_code: typeof payload.exit_code === "number" ? payload.exit_code : null,
