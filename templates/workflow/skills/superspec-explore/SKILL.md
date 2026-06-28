@@ -19,9 +19,9 @@ metadata:
 3. 登记结果
 4. 回到 1
 
-如果下一步提示当前阶段还有用户确认、审查或验证事项，先完成这些事项。完成前不要进入下一阶段，也不要修改业务代码；对用户说明时使用自然语言，不默认复述内部 JSON 字段或完整 packet。
+如果下一步提示当前阶段还有用户确认、审查或验证事项，先完成这些事项。完成前不要进入下一阶段，也不要修改业务代码；就绪或审查后只概括关键事实、真实待确认项和下一步。
 
-如果下一步说明 discovery 不完整或有未确认问题，先检查并填写 discovery 草稿，不要把草稿占位内容直接转问用户；只有真实阻塞问题才向用户提问，收到回答后优先用 `superspec record user-decision --change "<change>" --input -` 从 stdin 登记 JSON 内容；文件路径模式仍可作为 fallback。
+如果下一步说明 discovery 不完整或有未确认问题，先检查并填写 discovery 草稿，不要把草稿占位、格式缺口或路径空白直接转问用户；只有影响范围、验收标准、用户可见行为、数据来源或安全边界存在真实阻塞时才向用户提问，收到回答后优先用 `superspec record user-decision --change "<change>" --input -` 从 stdin 登记 JSON 内容；文件路径模式仍可作为 fallback。
 
 本技能默认走完整审查路径。探索完成后，`explore → propose` 会先创建 `critic` 工作项，由 Critic 角色审查需求澄清记录。审查完成后优先通过 `superspec record job-submit --change "<change>" --job <JOB> --report -` 从 stdin 登记 JSON 报告内容；文件路径模式仍可作为 fallback。
 
