@@ -27,10 +27,10 @@ metadata:
 
 每个 task 的标准循环：
 
-1. **设计核对**：执行 `task-start` 前，确认本任务符合 `design.md` 的实现方向。缺少方向时先停止，不写 RED。
+1. **计划核对**：执行 `task-start` 前，确认当前 task 是 `tasks.md` 顶格任务，并能对应 `design.md` 的实现方向和 `proposal.md` 的 `## Impact` 受影响原因。缺少映射、需要新增能力/验收/影响范围时先停止，交回 propose，不写 RED。
 2. **任务开始**：`superspec transition task-start --change "<change>" --task <task_id>`。
 3. **读取 attempt_id**：从 task-start 返回结果或当前活跃 task attempt 中读取。
-4. **RED**：写测试，运行后确认失败，并用 `superspec record test-run --change "<change>" --input -` 登记。
+4. **RED**：写测试前确认测试意图能对应 `test-contract.md` 的 `test_id` 或 `business-invariants.md`；缺少对应关系时先停止，交回 propose。运行后确认失败，并用 `superspec record test-run --change "<change>" --input -` 登记。
 5. **实现**：根据任务写代码，保持范围小。`design.md` 不锁死字段名、函数名、SQL 或局部写法。
 6. **GREEN**：运行测试确认通过，并登记 test-run。
 7. **完成 task**：`superspec transition task-complete --change "<change>" --task <task_id>`。
@@ -74,7 +74,7 @@ no-TDD 任务（`tdd_required:false` + `no_tdd_reason`）跳过 RED/GREEN，但�
 - 需要判断影响范围或改动原因不自明时，参考 `proposal.md` 的 `## Impact`，但不要把它当作路径白名单。
 - 编码时发现未列入影响范围的文件，如果从 diff 或引用链能直接解释为同一任务下的局部引用、测试辅助或机械连带改动，可以继续。
 - 如果发现新增能力、用户可见行为、明显新增影响范围或原因不自明，停止扩大实现并报告给主流程；不要在 apply 阶段补改 `proposal.md`。
-- 用户在 apply 期间或 apply 后补充最新业务规则、产品口径、验收标准、示例规范、兼容策略或影响范围时，停止实现并交回主流程使用 `superspec-propose` 更新计划文档。
+- 用户在 apply 期间或 apply 后补充最新业务规则、产品口径、验收标准、示例规范、兼容策略、影响范围，或说明需求源已更新时，停止实现并交回主流程使用 `superspec-propose` 更新计划文档；交回时说明变化来源、变化内容、影响范围和建议处理方式。
 - 不修改 `proposal.md`、`design.md`、`specs/**` 或 `.superspec/**`。
 - active attempt 期间不要修改 `tasks.md` 中除 `task-complete` 自动勾选目标 checkbox 外的内容。
 - 不跳过 RED 直接写 GREEN。

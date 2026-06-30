@@ -144,6 +144,8 @@ superspec record user-decision --change "<change>" --input -
 
 然后把用户决定反映到 proposal/design/test-contract，并将对应确认项改为 `[x]` 或移出未确认列表。局部实现细节、命名、普通文件组织和不影响需求/验收/风险的技术微调不要升级为用户确认。
 
+进入 propose 后出现新的业务规则、产品口径、验收标准、示例规范或需求源更新时，不要静默覆盖原计划；默认先在 `proposal.md` 记录 `## 需求变化`，说明变化来源、变化内容、影响范围和处理方式（更新当前 change / 新建后续 change / 暂不处理）。只有影响技术路线、测试契约或业务不变量时，才同步更新 `design.md`、`test-contract.md` 或 `business-invariants.md`。
+
 ## 完成条件
 
 tasks.md 作为计划文档就绪（不是复选框全完成）+ 基础职责文档齐全 → next 返回 propose-ready 命令。

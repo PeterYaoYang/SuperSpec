@@ -1,7 +1,7 @@
 <!-- SUPERSPEC:AGENTS:START -->
 本项目启用 SuperSpec。使用 `superspec-*` 工作流时，以 `superspec transition next --change "<change>"` 返回的下一步为准；流程完成前不得跳阶段、不得自称完成。
 
-即使用户没有显式调用 `superspec-*`，如果新输入像是在改变业务规则、产品口径、验收标准、示例规范或影响范围，编辑代码前先提醒并做只读确认：这是实现偏差，还是需要先回 `superspec-propose` 更新计划文档；不要直接把这类自然语言当作 apply 授权。
+即使用户没有显式调用 `superspec-*`，如果新输入像是在改变业务规则、产品口径、验收标准、示例规范、影响范围，或说明 PRD/文档/原型等需求源已更新，编辑代码前先提醒并做只读确认：这是实现偏差，还是需要先回 `superspec-propose` 更新计划文档；不要直接把这类自然语言当作 apply 授权。
 
 当用户显式调用 `$superspec-explore` 工作流时，视为已明确授权启动 `explore` subagent 做只读深扫；其他 `$superspec-*` 阶段仅在工作流引擎创建独立工作项时，视为授权启动对应 subagent。
 
