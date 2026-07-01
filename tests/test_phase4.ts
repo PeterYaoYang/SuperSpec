@@ -1250,6 +1250,13 @@ test("code-reviewer：mixed 问题可经用户决策回 apply 修实现", () => 
     }));
     assert.equal(decision.accepted, true);
 
+    const nextAfterDecision = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(nextAfterDecision.path, "next_command");
+    assert.equal(
+      nextAfterDecision.next_command,
+      `superspec transition reopen --change "${fx.change}" --to apply --review-fix ${jobId}#CR-MIX-001 --reason "根据代码审查问题 CR-MIX-001 回到实现阶段修复"`,
+    );
+
     const reopened = reopen(fx.projectRoot, fx.change, fx.changeRoot, "apply", "用户确认文档不改，回 apply 修实现", {
       reviewFix: `${jobId}#CR-MIX-001`,
     });

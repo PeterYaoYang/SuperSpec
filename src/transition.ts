@@ -21,8 +21,6 @@ import {
   type ReviewPolicy,
 } from "./review.ts";
 import {
-  EXPLORE_DISCOVERY_REVIEW_GATE,
-  PROPOSE_FINAL_REVIEW_GATE,
   REVIEW_CODE_REVIEW_GATE_ID,
   REVIEW_FINAL_VERIFIER_GATE_ID,
   type ReviewGateRule,
@@ -40,7 +38,14 @@ import {
   scanCodeChanges,
 } from "./code_review.ts";
 import { taskEvidenceReadiness } from "./task_evidence.ts";
-import { validateDiscovery, collectProposeOpenQuestions, findTaskInLines, pendingTasksInContent } from "./format.ts";
+import { findTaskInLines } from "./format.ts";
+import {
+  formatPendingTaskMessage,
+  pendingTaskIds,
+  planTransition,
+  proposalDocsBaseline,
+  type TransitionDecisionPlan,
+} from "./phase_plan.ts";
 import type { Event, Snapshot, State, Job, JobRole, TransitionResult, Ref, TaskAttempt } from "./types.ts";
 
 let transitionSeq = 0;
@@ -48,73 +53,41 @@ function newTransitionId(): string { return `T-${Date.now()}-${++transitionSeq}`
 let jobSeq = 0;
 function newJobId(change: string, role: string): string { return `JOB-${change.slice(0, 8)}-${role.slice(0, 4)}-${Date.now()}-${++jobSeq}`; }
 
-/**
- * 通用 job 检查/创建逻辑——任何 transition 都能调用。
- * 检查 requiredRoles 是否有 fresh accepted job；缺则创建新 job。
- * 返回 null = 全部满足；返回 Decision = 需要创建 job（状态不变）。
- */
-function checkOrCreateReviewJobs(
-  snapshot: Snapshot,
+function createReviewJobsForGate(
+  state: State,
   gate: ReviewGateRule,
-  requiredRoles: JobRole[],
+  roles: JobRole[],
   changeRoot: string,
   change: string,
-): Decision | BlockedDecision | null {
-  const staleRoles: { role: JobRole; reason: string }[] = [];
-  for (const role of requiredRoles) {
-    const openForRole = snapshot.open_jobs.find(j => gate.isJobForGate(j) && j.role === role);
-    if (openForRole) return { blocked: true, reason: `状态未推进；已有待完成工作项 ${role}（${openForRole.job_id}）`, jobs: [openForRole] };
-    const fresh = snapshot.accepted_jobs.find(j => gate.isJobForGate(j) && j.role === role);
-    if (!fresh) {
-      staleRoles.push({ role, reason: `需求 ${role} 无已接受的工作项` });
-    } else {
-      for (const bf of fresh.boundFiles) {
-        const currentSha = sha256File(join(changeRoot, bf.path)) ?? "sha256:missing";
-        if (currentSha !== bf.sha) { staleRoles.push({ role, reason: `${role} 绑定文件 ${bf.path} 已变化` }); break; }
-      }
-    }
-  }
-
-  if (staleRoles.length > 0) {
-    const newJobs: Job[] = staleRoles.map(({ role }) => {
-      const boundFiles: Ref[] = gate.reviewedDocPaths.filter(p => existsSync(join(changeRoot, p))).map(p => ({ path: p, sha: sha256File(join(changeRoot, p)) ?? "sha256:missing" }));
-      return {
-        job_id: newJobId(change, role),
+  reason: string,
+): Decision {
+  const newJobs: Job[] = roles.map(role => {
+    const boundFiles: Ref[] = gate.reviewedDocPaths
+      .filter(p => existsSync(join(changeRoot, p)))
+      .map(p => ({ path: p, sha: sha256File(join(changeRoot, p)) ?? "sha256:missing" }));
+    return {
+      job_id: newJobId(change, role),
+      role,
+      state: "requested" as const,
+      gate_id: gate.gate_id,
+      boundFiles,
+      packet_digest: sha256Text(JSON.stringify({
         role,
-        state: "requested" as const,
         gate_id: gate.gate_id,
         boundFiles,
-        packet_digest: sha256Text(JSON.stringify({
-          role,
-          gate_id: gate.gate_id,
-          boundFiles,
-          created_from_transition: gate.created_from_transition,
-        })),
         created_from_transition: gate.created_from_transition,
-        created_at: new Date().toISOString(),
-      };
-    });
-    return {
-      fromState: snapshot.state, toState: snapshot.state, outcome: "job_created" as const,
-      newJobs, reason: staleRoles.map(s => s.reason).join("; "),
+      })),
+      created_from_transition: gate.created_from_transition,
+      created_at: new Date().toISOString(),
     };
-  }
-  return null; // 全部满足
-}
-
-function historicalProposeReadyRoles(projectRoot: string, change: string): JobRole[] {
-  const roles = new Set<JobRole>();
-  for (const ev of readEvents(projectRoot, change)) {
-    if (ev.event_type !== "transition_commit") continue;
-    const newJobs = (ev.payload as { new_jobs?: Job[] }).new_jobs ?? [];
-    for (const job of newJobs) {
-      if (
-        PROPOSE_FINAL_REVIEW_GATE.isJobForGate(job) &&
-        (job.role === "critic" || job.role === "architect" || job.role === "test-engineer")
-      ) roles.add(job.role);
-    }
-  }
-  return [...roles];
+  });
+  return {
+    fromState: state,
+    toState: state,
+    outcome: "job_created",
+    newJobs,
+    reason,
+  };
 }
 
 /**
@@ -123,15 +96,6 @@ function historicalProposeReadyRoles(projectRoot: string, change: string): JobRo
  */
 function findTaskLine(lines: string[], taskId: string): number {
   return findTaskInLines(lines, taskId);
-}
-
-function pendingTaskIds(changeRoot: string): string[] {
-  const tasksContent = readFileSync(join(changeRoot, "tasks.md"), "utf8");
-  return pendingTasksInContent(tasksContent).map(task => task.taskId);
-}
-
-function formatPendingTaskMessage(ids: string[], action: string): string {
-  return `尚有未完成任务：${ids.join(", ")}；${action}`;
 }
 
 function hasRejectedReviewReadyVerifier(events: Event[]): boolean {
@@ -402,32 +366,6 @@ function evaluateFinalVerifierGate(input: {
   return { skip: true, message: "已在 review 状态，最终验证仍然有效" };
 }
 
-function documentBaseline(changeRoot: string): Record<string, string> {
-  const docs = ["proposal.md", "design.md", "tasks.md", ".superspec/artifacts/test-contract.md"];
-  const baseline: Record<string, string> = {};
-  for (const doc of docs) {
-    baseline[doc] = sha256File(join(changeRoot, doc)) ?? "sha256:missing";
-  }
-  return baseline;
-}
-
-function latestReopenProposeBaseline(events: Event[]): Record<string, string> | null {
-  for (let i = events.length - 1; i >= 0; i--) {
-    const ev = events[i];
-    if (ev.event_type !== "transition_commit") continue;
-    const payload = ev.payload as { transition?: unknown; reopen_target?: unknown; baseline_docs?: unknown };
-    if (payload.transition !== "reopen" || payload.reopen_target !== "propose") continue;
-    if (!payload.baseline_docs || typeof payload.baseline_docs !== "object" || Array.isArray(payload.baseline_docs)) return null;
-    return payload.baseline_docs as Record<string, string>;
-  }
-  return null;
-}
-
-function proposalDocsChangedSinceBaseline(changeRoot: string, baseline: Record<string, string>): boolean {
-  const current = documentBaseline(changeRoot);
-  return Object.entries(baseline).some(([path, digest]) => current[path] !== digest);
-}
-
 interface Decision {
   fromState: State;
   toState: State;
@@ -450,6 +388,30 @@ interface BlockedDecision {
   reason: string;
   jobs: Job[];
   details?: Record<string, unknown>;
+}
+
+function transitionPlanToDecision(
+  snapshot: Snapshot,
+  changeRoot: string,
+  change: string,
+  plan: TransitionDecisionPlan,
+): Decision | SkipDecision | BlockedDecision {
+  switch (plan.kind) {
+    case "skip":
+      return { skip: true, message: plan.message };
+    case "blocked":
+      return { blocked: true, reason: plan.reason, jobs: plan.jobs };
+    case "create_gate_jobs":
+      return createReviewJobsForGate(snapshot.state, plan.gate, plan.roles, changeRoot, change, plan.reason);
+    case "advance":
+      return {
+        fromState: plan.fromState,
+        toState: plan.toState,
+        outcome: "advanced",
+        reason: plan.reason,
+        commitPayload: plan.payload,
+      };
+  }
 }
 
 /**
@@ -563,34 +525,16 @@ export function proposeReady(projectRoot: string, change: string, changeRoot: st
   return commitTransition(projectRoot, change, changeRoot, {
     name: "propose-ready", idempotencyInputs: { risk },
     decide: (snapshot) => {
-      if (snapshot.state !== "propose") return { skip: true, message: `当前状态 ${snapshot.state}，不能 propose-ready` };
-
-      const tasksPath = join(changeRoot, "tasks.md");
-      if (!existsSync(tasksPath)) return { skip: true, message: "tasks.md 不存在" };
-      const tasksContent = readFileSync(tasksPath, "utf8");
-      if (!tasksContent.includes("# Tasks") && !tasksContent.includes("- [ ]")) return { skip: true, message: "tasks.md 内容不像任务计划文档" };
-
-      const openQuestions = collectProposeOpenQuestions(changeRoot);
-      if (openQuestions.openCount > 0) {
-        const files = openQuestions.files.map(f => `${f.path}(${f.openCount})`).join(", ");
-        return { skip: true, message: `计划文档有 ${openQuestions.openCount} 个待用户确认问题：${files}` };
-      }
-
-      if (risk !== "minimal") {
-        const artifactsDir = join(changeRoot, ".superspec", "artifacts");
-        for (const doc of ["discovery.md", "business-invariants.md", "test-contract.md"]) {
-          if (!existsSync(join(artifactsDir, doc))) return { skip: true, message: `基础职责缺失：${doc} 不存在（risk=${risk} 需要）` };
-        }
-      }
-
-      // 通用 job 检查（用提取的 helper）
-      const requiredRoles = PROPOSE_FINAL_REVIEW_GATE.requiredRolesForRisk(risk);
-      const reviewResult = checkOrCreateReviewJobs(
-        snapshot, PROPOSE_FINAL_REVIEW_GATE, requiredRoles, changeRoot, change,
-      );
-      if (reviewResult) return reviewResult;
-
-      return { fromState: "propose", toState: "propose_ready", outcome: "advanced" as const, reason: `risk=${risk}，所有需求已满足` };
+      const events = readEvents(projectRoot, change);
+      const plan = planTransition("propose-ready", {
+        projectRoot,
+        change,
+        changeRoot,
+        events,
+        snapshot,
+        mode: { kind: "risk", risk },
+      });
+      return transitionPlanToDecision(snapshot, changeRoot, change, plan);
     },
   });
 }
@@ -614,24 +558,16 @@ export function transitionExplore(projectRoot: string, change: string, changeRoo
   return commitTransition(projectRoot, change, changeRoot, {
     name: "explore", idempotencyInputs: { phase: "explore", risk },
     decide: (snapshot) => {
-      if (snapshot.state === "init") return { fromState: "init", toState: "explore", outcome: "advanced" as const, reason: "进入探索阶段" };
-      if (snapshot.state === "explore") {
-        const discoveryPath = join(changeRoot, ".superspec", "artifacts", "discovery.md");
-        if (!existsSync(discoveryPath)) return { skip: true, message: "discovery.md 不存在" };
-        // explore→propose：校验 discovery + strict 模式下的 critic 审查
-        const discoveryCheck = validateDiscovery(changeRoot);
-        if (!discoveryCheck.ok) return { skip: true, message: discoveryCheck.message };
-
-        // 通用 job 审查（和 propose-ready 同一个 helper）
-        const requiredRoles = EXPLORE_DISCOVERY_REVIEW_GATE.requiredRolesForRisk(risk);
-        const reviewResult = checkOrCreateReviewJobs(
-          snapshot, EXPLORE_DISCOVERY_REVIEW_GATE, requiredRoles, changeRoot, change,
-        );
-        if (reviewResult) return reviewResult;
-
-        return { fromState: "explore", toState: "propose", outcome: "advanced" as const, reason: "探索完成" };
-      }
-      return { skip: true, message: `当前状态 ${snapshot.state}，explore 不适用` };
+      const events = readEvents(projectRoot, change);
+      const plan = planTransition("explore", {
+        projectRoot,
+        change,
+        changeRoot,
+        events,
+        snapshot,
+        mode: { kind: "risk", risk },
+      });
+      return transitionPlanToDecision(snapshot, changeRoot, change, plan);
     },
   });
 }
@@ -642,25 +578,16 @@ export function startApply(projectRoot: string, change: string, changeRoot: stri
   return commitTransition(projectRoot, change, changeRoot, {
     name: "start-apply", idempotencyInputs: { phase: "start-apply" },
     decide: (snapshot) => {
-      if (snapshot.state !== "propose_ready") return { skip: true, message: `当前状态 ${snapshot.state}，需要 propose_ready` };
       const events = readEvents(projectRoot, change);
-      const reopenBaseline = latestReopenProposeBaseline(events);
-      if (reopenBaseline && !proposalDocsChangedSinceBaseline(changeRoot, reopenBaseline)) {
-        return { skip: true, message: "回到 propose 后 proposal/design/tasks/test-contract 至少一个文档必须变化" };
-      }
-      const reviewedRoles = historicalProposeReadyRoles(projectRoot, change);
-      if (reviewedRoles.length > 0) {
-        const reviewResult = checkOrCreateReviewJobs(
-          snapshot, PROPOSE_FINAL_REVIEW_GATE, reviewedRoles, changeRoot, change,
-        );
-        if (reviewResult) {
-          return {
-            ...reviewResult,
-            reason: `进入执行阶段前需要重新完成计划文档审查：${reviewResult.reason}`,
-          };
-        }
-      }
-      return { fromState: "propose_ready", toState: "apply", outcome: "advanced" as const, reason: "进入执行阶段" };
+      const plan = planTransition("start-apply", {
+        projectRoot,
+        change,
+        changeRoot,
+        events,
+        snapshot,
+        mode: { kind: "risk", risk: "strict" },
+      });
+      return transitionPlanToDecision(snapshot, changeRoot, change, plan);
     },
   });
 }
@@ -742,7 +669,7 @@ export function reopen(
             source_job_id: ref.jobId,
             finding_id: ref.findingId,
             decision_scope: scope,
-            baseline_docs: documentBaseline(changeRoot),
+            baseline_docs: proposalDocsBaseline(changeRoot),
           },
         };
       }
@@ -852,18 +779,16 @@ export function accept(projectRoot: string, change: string, changeRoot: string):
   return commitTransition(projectRoot, change, changeRoot, {
     name: "accept", idempotencyInputs: { phase: "accept" },
     decide: (snapshot) => {
-      if (snapshot.state !== "review") return { skip: true, message: `当前状态 ${snapshot.state}，需要 review` };
-      const pending = pendingTaskIds(changeRoot);
-      if (pending.length > 0) return { skip: true, message: formatPendingTaskMessage(pending, "请先 reopen --to apply 继续执行") };
       const events = readEvents(projectRoot, change);
-      const policy = readReviewPolicyFromEvents(events);
-      if (!policy) return { skip: true, message: "缺少审查策略，请先运行 review-ready" };
-      if (requiresFinalVerifierForCurrentReview(events) || policy.requires_verifier) {
-        const currentEvidenceDigest = reviewEvidenceDigest(events);
-        const verifierAccepted = snapshot.accepted_jobs.find(job => isFreshReviewVerifier(job, changeRoot, currentEvidenceDigest));
-        if (!verifierAccepted) return { skip: true, message: "缺少仍然匹配当前证据的最终验证，请先运行 review-ready" };
-      }
-      return { fromState: "review", toState: "accepted", outcome: "advanced" as const, reason: "审查通过" };
+      const plan = planTransition("accept", {
+        projectRoot,
+        change,
+        changeRoot,
+        events,
+        snapshot,
+        mode: { kind: "risk", risk: "strict" },
+      });
+      return transitionPlanToDecision(snapshot, changeRoot, change, plan);
     },
   });
 }
