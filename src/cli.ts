@@ -10,6 +10,7 @@ import { rebuildSnapshot } from "./sync.ts";
 import { next as nextCmd } from "./next.ts";
 import { proposeReady, commitTransition, transitionInit, transitionExplore, startApply, taskStart, taskComplete, reopen, reviewReady, accept, archive } from "./transition.ts";
 import type { State, TransitionResult } from "./types.ts";
+import type { ReviewRisk } from "./review.ts";
 import { recordJobSubmit, recordJobSubmitContent, recordUserDecision, recordUserDecisionContent, jobsList, jobsPacket } from "./record.ts";
 import { recordTestRun, recordTestRunContent } from "./task.ts";
 import { probeOpenSpec, openspecStatus, changeRoot } from "./openspec.ts";
@@ -73,6 +74,20 @@ function transitionExitCode(result: TransitionResult): number {
 function proposeReadyExitCode(result: TransitionResult): number {
   if (result.outcome === "blocked") return 0;
   return result.events_written === 0 && result.message.includes("不能") ? 1 : 0;
+}
+
+function parseReviewRisk(value: string | undefined): ReviewRisk | null {
+  if (value == null) return "strict";
+  if (value === "minimal" || value === "normal" || value === "strict") return value;
+  return null;
+}
+
+function readReviewRisk(opts: Record<string, string>): ReviewRisk | null {
+  const risk = parseReviewRisk(opts.risk);
+  if (!risk) {
+    console.error("--risk 只能是 minimal、normal 或 strict");
+  }
+  return risk;
 }
 
 function parseVersion(version: string): { major: number; minor: number; patch: number; prerelease: string | null } | null {
@@ -699,7 +714,8 @@ jobs 子命令：
 
           case "explore":
             {
-              const risk = (opts.risk as "minimal" | "normal" | "strict") ?? "strict";
+              const risk = readReviewRisk(opts);
+              if (!risk) return 1;
               console.log(JSON.stringify(transitionExplore(projectRoot, change, cr, risk), null, 2));
             }
             return 0;
@@ -717,14 +733,16 @@ jobs 子命令：
           }
 
           case "next": {
-            const risk = (opts.risk as "minimal" | "normal" | "strict") ?? "strict";
+            const risk = readReviewRisk(opts);
+            if (!risk) return 1;
             const result = nextCmd(projectRoot, change, cr, risk);
             console.log(JSON.stringify(result, null, 2));
             return 0;
           }
 
           case "propose-ready": {
-            const risk = (opts.risk as "minimal" | "normal" | "strict") ?? "strict";
+            const risk = readReviewRisk(opts);
+            if (!risk) return 1;
             const result = proposeReady(projectRoot, change, cr, risk);
             console.log(JSON.stringify(result, null, 2));
             return proposeReadyExitCode(result);
@@ -766,7 +784,8 @@ jobs 子命令：
           }
 
           case "review-ready": {
-            const risk = (opts.risk as "minimal" | "normal" | "strict") ?? "strict";
+            const risk = readReviewRisk(opts);
+            if (!risk) return 1;
             const result = reviewReady(projectRoot, change, cr, risk);
             console.log(JSON.stringify(result, null, 2));
             return transitionExitCode(result);

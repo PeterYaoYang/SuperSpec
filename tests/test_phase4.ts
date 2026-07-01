@@ -537,6 +537,7 @@ test("review-ready：apply_done → 创建 code-reviewer，review → 创建 ver
     const snap = rebuildSnapshot(projectRoot, change, changeRoot);
     assert.equal(snap.open_jobs[0].role, "code-reviewer");
     assert.equal(snap.open_jobs[0].created_from_transition, "review-ready");
+    assert.equal(snap.open_jobs[0].gate_id, "review.code_review");
 
     const beforeBlockedEvents = readEvents(projectRoot, change).length;
     const blocked = reviewReady(projectRoot, change, changeRoot);
@@ -550,6 +551,7 @@ test("review-ready：apply_done → 创建 code-reviewer，review → 创建 ver
 
     const packet = jobsPacket(projectRoot, change, result.created_jobs[0]);
     assert.equal(packet.found, true);
+    assert.equal(packet.packet?.gate_id, "review.code_review");
     assert.deepEqual(packet.packet?.output_contract_fields, ["role", "verdict", "findings", "reviewer", "review_scope"]);
     assert.equal(packet.packet?.recommended_agent, "code-reviewer");
 
@@ -574,7 +576,9 @@ test("review-ready：apply_done → 创建 code-reviewer，review → 创建 ver
     const reviewSnap = rebuildSnapshot(projectRoot, change, changeRoot);
     const verifierJob = reviewSnap.open_jobs.find(job => job.job_id === verifier.created_jobs[0]);
     assert.equal(verifierJob?.role, "verifier");
+    assert.equal(verifierJob?.gate_id, "review.final_verifier");
     const verifierPacket = jobsPacket(projectRoot, change, verifier.created_jobs[0]);
+    assert.equal(verifierPacket.packet?.gate_id, "review.final_verifier");
     assert.deepEqual(verifierPacket.packet?.output_contract_fields, ["role", "verdict", "findings"]);
     assert.match(String(verifierPacket.packet?.output_instructions), /code_review_gate/);
     assert.match(String(verifierPacket.packet?.output_instructions), /attempt_id/);
@@ -1697,6 +1701,35 @@ test("review-ready：忽略非 review-ready 来源的 verifier job", () => {
     const created = snap.open_jobs.find(job => job.job_id === result.created_jobs[0]);
     assert.equal(created?.role, "verifier");
     assert.equal(created?.created_from_transition, "review-ready");
+  } finally { fx.cleanup(); }
+});
+
+test("review-ready：缺执行证据版本的 legacy verifier 不算最终验证", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    advanceApplyToReview(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+
+    const legacyJob = appendOpenJob(fx.projectRoot, fx.change, "review", {
+      job_id: "JOB-legacy-verifier-no-evidence",
+      role: "verifier",
+      created_from_transition: "review-ready",
+    });
+
+    const result = reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.equal(result.outcome, "job_created");
+    assert.notEqual(result.created_jobs[0], legacyJob.job_id);
+
+    const snap = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot);
+    const created = snap.open_jobs.find(job => job.job_id === result.created_jobs[0]);
+    assert.equal(created?.gate_id, "review.final_verifier");
+    assert.equal(typeof created?.review_evidence_digest, "string");
+    assert.equal(snap.open_jobs.some(job => job.job_id === legacyJob.job_id), false);
+
+    const reportPath = join(fx.projectRoot, "legacy-verifier-no-evidence.json");
+    writeFileSync(reportPath, JSON.stringify({ role: "verifier", findings: [], verdict: "pass" }));
+    const submitted = recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, legacyJob.job_id, reportPath);
+    assert.equal(submitted.accepted, false);
+    assert.match(submitted.message, /缺少执行证据版本/);
   } finally { fx.cleanup(); }
 });
 

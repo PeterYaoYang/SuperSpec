@@ -5,8 +5,8 @@ import { join } from "node:path";
 import {
   readEvents, eventsDigest, computeDocumentDigests, sha256Text, ensureChangeLayout,
 } from "./store.ts";
-import { reviewEvidenceDigest, reviewVerifierStaleReason } from "./review.ts";
-import { codeReviewJobStaleReason } from "./code_review.ts";
+import { reviewEvidenceDigest } from "./review.ts";
+import { invalidReasonForSnapshot } from "./job_validity.ts";
 import type { Event, Snapshot, Job, State, TaskAttempt } from "./types.ts";
 
 const TRACKED_DOCS = [
@@ -100,9 +100,7 @@ function checkStaleJobs(
 ): { job_id: string; reason: string }[] {
   const stale: { job_id: string; reason: string }[] = [];
   for (const job of jobs) {
-    const reason = job.role === "code-reviewer"
-      ? codeReviewJobStaleReason(projectRoot, job)
-      : reviewVerifierStaleReason(job, changeRoot, currentReviewEvidenceDigest);
+    const reason = invalidReasonForSnapshot({ job, projectRoot, changeRoot, currentReviewEvidenceDigest });
     if (reason) {
       stale.push({ job_id: job.job_id, reason });
     }

@@ -18,6 +18,12 @@ export type JobRole =
   | "critic" | "architect" | "test-engineer"
   | "executor" | "test-run" | "verifier" | "code-reviewer";
 
+export type ReviewJobGateId =
+  | "explore.discovery_review"
+  | "propose.final_review"
+  | "review.code_review"
+  | "review.final_verifier";
+
 export type CodeReviewResultKind = "invalid_report" | "non_actionable_report" | "review_failed";
 
 export interface CodeReviewPreviousRejection {
@@ -30,6 +36,7 @@ export interface Job {
   job_id: string;
   role: JobRole;
   state: JobState;
+  gate_id?: ReviewJobGateId;
   boundFiles: Ref[];
   review_evidence_digest?: string;
   packet_digest: string;
@@ -41,9 +48,11 @@ export interface Job {
 export interface JobPacket {
   job_id: string;
   role: JobRole;
+  gate_id?: ReviewJobGateId;
   recommended_agent?: string;
   boundFiles: Ref[];
   review_evidence_digest?: string;
+  previous_rejection?: CodeReviewPreviousRejection;
   packet_digest: string;
   required_output_kind: string;
   preferred_input_mode?: "stdin" | "file";

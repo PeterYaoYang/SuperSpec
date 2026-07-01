@@ -7,7 +7,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { ensureChangeLayout, readEvents, appendEvent, makeEvent, rawFile, sha256Text } from "../src/store.ts";
+import { ensureChangeLayout, readEvents, appendEvent, makeEvent, rawFile, sha256File, sha256Text } from "../src/store.ts";
 import { rebuildSnapshot } from "../src/sync.ts";
 import { next } from "../src/next.ts";
 import { proposeReady, transitionExplore } from "../src/transition.ts";
@@ -338,10 +338,12 @@ test("explore→propose 默认完整审查：创建 critic，接受 JSON 报告�
     let snapshot = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(snapshot.state, "explore");
     assert.equal(snapshot.open_jobs[0].role, "critic");
+    assert.equal(snapshot.open_jobs[0].gate_id, "explore.discovery_review");
 
     const packet = jobsPacket(fx.projectRoot, fx.change, first.created_jobs[0]);
     assert.equal(packet.found, true);
     assert.equal(packet.packet?.role, "critic");
+    assert.equal(packet.packet?.gate_id, "explore.discovery_review");
     assert.equal(packet.packet?.recommended_agent, "critic");
     assert.equal(packet.packet?.required_output_kind, "job_report_json");
     assert.equal(packet.packet?.preferred_input_mode, "stdin");
@@ -363,6 +365,32 @@ test("explore→propose 默认完整审查：创建 critic，接受 JSON 报告�
 
     snapshot = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(snapshot.state, "propose");
+  } finally { fx.cleanup(); }
+});
+
+test("explore→propose strict：旧 accepted critic job 无 gate_id 仍可满足探索审查", () => {
+  const fx = setupPropose();
+  try {
+    const job = appendOpenJob(fx.projectRoot, fx.change, "explore", {
+      job_id: "JOB-legacy-explore-critic",
+      role: "critic",
+      created_from_transition: "explore",
+      boundFiles: [{
+        path: ".superspec/artifacts/discovery.md",
+        sha: sha256File(join(fx.changeRoot, ".superspec", "artifacts", "discovery.md")) ?? "sha256:missing",
+      }],
+    });
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "job_accepted", {
+      job_id: job.job_id,
+      role: job.role,
+      report_digest: "sha256:legacy-explore-report",
+      accepted_at: new Date().toISOString(),
+    }));
+
+    const result = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "strict");
+    assert.equal(result.outcome, "advanced");
+    assert.equal(result.to_state, "propose");
+    assert.equal(result.created_jobs.length, 0);
   } finally { fx.cleanup(); }
 });
 
@@ -732,9 +760,61 @@ test("propose-ready 默认完整审查：创建 critic + architect + test 审核
       "critic",
       "test-engineer",
     ]);
+    assert.deepEqual([...new Set(snapshot.open_jobs.map(j => j.gate_id))], ["propose.final_review"]);
   } finally {
     rmSync(projectRoot, { recursive: true, force: true });
   }
+});
+
+test("propose-ready strict：同一 gate 下 critic 不能满足 architect 或 test-engineer", () => {
+  const fx = setupPropose();
+  try {
+    transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    writeFileSync(join(fx.changeRoot, "design.md"), "# Design\n");
+    writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "business-invariants.md"), "# BI\n");
+    writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");
+
+    const normal = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.equal(normal.outcome, "job_created");
+    const reportPath = join(fx.projectRoot, "critic.json");
+    writeFileSync(reportPath, reviewerReport("critic"));
+    assert.equal(recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, normal.created_jobs[0], reportPath).accepted, true);
+
+    const strict = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "strict");
+    assert.equal(strict.outcome, "job_created");
+    const snapshot = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.deepEqual(snapshot.open_jobs.map(job => job.role).sort(), ["architect", "test-engineer"]);
+    assert.deepEqual([...new Set(snapshot.open_jobs.map(job => job.gate_id))], ["propose.final_review"]);
+  } finally { fx.cleanup(); }
+});
+
+test("propose-ready normal：旧 accepted critic job 无 gate_id 仍可满足最终计划审查", () => {
+  const fx = setupPropose();
+  try {
+    transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    writeFileSync(join(fx.changeRoot, "design.md"), "# Design\n");
+    writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "business-invariants.md"), "# BI\n");
+    writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");
+
+    const job = appendOpenJob(fx.projectRoot, fx.change, "propose", {
+      job_id: "JOB-legacy-propose-critic",
+      role: "critic",
+      created_from_transition: "propose-ready",
+      boundFiles: ["proposal.md", "tasks.md", "design.md", ".superspec/artifacts/discovery.md", ".superspec/artifacts/business-invariants.md", ".superspec/artifacts/test-contract.md"]
+        .map(path => ({ path, sha: sha256File(join(fx.changeRoot, path)) ?? "sha256:missing" })),
+    });
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "job_accepted", {
+      job_id: job.job_id,
+      role: job.role,
+      report_digest: "sha256:legacy-propose-report",
+      accepted_at: new Date().toISOString(),
+    }));
+
+    const result = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.equal(result.outcome, "advanced");
+    assert.equal(result.to_state, "propose_ready");
+    assert.equal(result.created_jobs.length, 0);
+  } finally { fx.cleanup(); }
 });
 
 test("propose-ready strict：explore 阶段 critic accepted 不能满足 proposal critic", () => {

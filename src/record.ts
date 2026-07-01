@@ -6,17 +6,15 @@ import {
   ensureChangeLayout, readEvents, appendEvent, makeEvent,
   sha256File, sha256Text, withLock, appendRawRecord, type RawRecordRef,
 } from "./store.ts";
-import { reviewEvidenceDigest, reviewVerifierStaleReason } from "./review.ts";
 import {
   CODE_REVIEW_DECISION_ANSWER_LABELS,
   CODE_REVIEW_DECISION_SCOPE_PREFIX,
   codeReviewDecisionAnswerLabel,
-  codeReviewJobStaleReason,
   normalizeCodeReviewDecisionAnswer,
-  scanCodeChanges,
 } from "./code_review.ts";
+import { invalidReasonForSubmittedReport } from "./job_validity.ts";
 import { jobSubmitArgv } from "./job_action.ts";
-import type { CodeReviewResultKind, Event, RecordResult, Job, JobRole, JobState } from "./types.ts";
+import type { CodeReviewResultKind, Event, RecordResult, Job, JobPacket, JobRole, JobState } from "./types.ts";
 
 const REVIEW_REPORT_REQUIRED_FIELDS = ["role", "verdict", "findings"] as const;
 const REVIEW_REPORT_OPTIONAL_FIELDS = ["summary", "evidence_refs", "risks", "open_questions"] as const;
@@ -259,28 +257,6 @@ function projectRelativePath(projectRoot: string, path: string): string | null {
   return rel;
 }
 
-function staleBoundFilesChecks(
-  job: Job,
-  projectRoot: string,
-  changeRoot: string,
-  ignoredCodePaths: string[] = [],
-): string[] {
-  const checks: string[] = [];
-  if (job.role === "code-reviewer") {
-    const ignored = new Set(ignoredCodePaths);
-    const currentPaths = scanCodeChanges(projectRoot).paths.filter(path => !ignored.has(path));
-    const reason = codeReviewJobStaleReason(projectRoot, job, currentPaths);
-    return reason ? [reason] : [];
-  }
-  for (const bf of job.boundFiles) {
-    const currentSha = sha256File(join(changeRoot, bf.path)) ?? "sha256:missing";
-    if (currentSha !== bf.sha) {
-      checks.push(`绑定文件 ${bf.path} 已变化（${bf.sha} → ${currentSha}）`);
-    }
-  }
-  return checks;
-}
-
 /** 从 events 中查找 job（H4 修复：job 只在 transition_commit 的 new_jobs payload 里） */
 function findJob(events: Event[], jobId: string): Job | null {
   for (const ev of events) {
@@ -373,12 +349,14 @@ function recordJobSubmitLoaded(
   }
 
   const reportPath = reportFile ? projectRelativePath(projectRoot, reportFile) : null;
-  checks.push(...staleBoundFilesChecks(job, projectRoot, changeRoot, reportPath ? [reportPath] : []));
-  const reviewStaleReason = job.role === "code-reviewer"
-    ? null
-    : reviewVerifierStaleReason(job, changeRoot, reviewEvidenceDigest(events));
-  if (reviewStaleReason && !checks.includes(reviewStaleReason)) {
-    checks.push(reviewStaleReason);
+  const invalidReason = invalidReasonForSubmittedReport(job, {
+    projectRoot,
+    changeRoot,
+    events,
+    reportPath,
+  });
+  if (invalidReason) {
+    checks.push(invalidReason);
   }
 
   if (!reportContent.trim()) {
@@ -740,7 +718,7 @@ export function jobsPacket(
   projectRoot: string,
   change: string,
   jobId: string,
-): { found: boolean; packet?: Record<string, unknown>; message: string } {
+): { found: boolean; packet?: JobPacket; message: string } {
   const events = readEvents(projectRoot, change);
   const job = findJob(events, jobId);
   if (!job) {
@@ -752,6 +730,7 @@ export function jobsPacket(
       packet: {
         job_id: job.job_id,
         role: job.role,
+        ...(job.gate_id ? { gate_id: job.gate_id } : {}),
         recommended_agent: recommendedAgentForRole(job.role),
         boundFiles: job.boundFiles,
         ...(job.review_evidence_digest ? { review_evidence_digest: job.review_evidence_digest } : {}),

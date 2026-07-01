@@ -184,6 +184,11 @@ test("propose-ready --risk normal：创建 critic job，状态不变", () => {
     assert.equal(snapshot.state, "propose"); // 仍 propose
     assert.equal(snapshot.open_jobs.length, 1);
     assert.equal(snapshot.open_jobs[0].role, "critic");
+    assert.equal(snapshot.open_jobs[0].gate_id, "propose.final_review");
+
+    const packet = jobsPacket(fx.projectRoot, fx.change, snapshot.open_jobs[0].job_id);
+    assert.equal(packet.found, true);
+    assert.equal(packet.packet?.gate_id, "propose.final_review");
   } finally { fx.cleanup(); }
 });
 
@@ -327,6 +332,7 @@ test("完整 e2e：propose → job → accept → propose_ready", () => {
     // 3. jobs packet → 拿到执行说明
     const step3 = jobsPacket(fx.projectRoot, fx.change, jobId);
     assert.equal(step3.found, true);
+    assert.equal(step3.packet?.gate_id, "propose.final_review");
 
     // 4. record job-submit → accepted
     const reportPath = join(fx.projectRoot, "report.json");

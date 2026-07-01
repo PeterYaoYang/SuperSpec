@@ -3,6 +3,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { sha256File, sha256Text } from "./store.ts";
+import { REVIEW_FINAL_VERIFIER_GATE } from "./review_job_gates.ts";
 import type { Event, Job, Ref, TaskAttempt } from "./types.ts";
 
 export type ReviewRisk = "minimal" | "normal" | "strict";
@@ -66,7 +67,7 @@ export function readReviewPolicyFromEvents(events: Event[]): ReviewPolicy | null
 }
 
 export function isReviewReadyVerifier(job: Job): boolean {
-  return job.role === "verifier" && job.created_from_transition === "review-ready";
+  return job.role === "verifier" && REVIEW_FINAL_VERIFIER_GATE.isJobForGate(job);
 }
 
 export function reviewBoundFiles(changeRoot: string): Ref[] {

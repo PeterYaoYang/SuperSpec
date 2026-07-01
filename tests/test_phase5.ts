@@ -2,8 +2,94 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 import { simulateLoop } from "../src/skill_loop.ts";
-import type { NextOutput } from "../src/types.ts";
+import { reviewRolesForGate, resolveWorkflowProfile, workflowProfileForRisk } from "../src/workflow_profile.ts";
+import { PROPOSE_FINAL_REVIEW_GATE } from "../src/review_job_gates.ts";
+import type { Job, NextOutput, Snapshot } from "../src/types.ts";
+
+test("workflow profile：默认 resolver 保持现有 gate 角色矩阵", () => {
+  assert.equal(workflowProfileForRisk("minimal"), "light");
+  assert.equal(workflowProfileForRisk("normal"), "normal");
+  assert.equal(workflowProfileForRisk("strict"), "strict");
+
+  assert.deepEqual(reviewRolesForGate("explore.discovery_review", "minimal"), []);
+  assert.deepEqual(reviewRolesForGate("explore.discovery_review", "normal"), []);
+  assert.deepEqual(reviewRolesForGate("explore.discovery_review", "strict"), ["critic"]);
+
+  assert.deepEqual(reviewRolesForGate("propose.final_review", "minimal"), []);
+  assert.deepEqual(reviewRolesForGate("propose.final_review", "normal"), ["critic"]);
+  assert.deepEqual(reviewRolesForGate("propose.final_review", "strict"), ["critic", "architect", "test-engineer"]);
+
+  assert.deepEqual(reviewRolesForGate("review.code_review", "minimal"), ["code-reviewer"]);
+  assert.deepEqual(reviewRolesForGate("review.final_verifier", "strict"), ["verifier"]);
+});
+
+test("workflow profile：resolver 返回角色副本，调用方不能污染默认矩阵", () => {
+  const resolved = resolveWorkflowProfile("normal");
+  resolved.reviewRolesByGate["propose.final_review"]?.push("architect");
+
+  assert.deepEqual(reviewRolesForGate("propose.final_review", "normal"), ["critic"]);
+});
+
+test("review gate：gate_id 不能绕过角色边界", () => {
+  const wrongRoleJob: Job = {
+    job_id: "JOB-wrong-role",
+    role: "verifier",
+    state: "requested",
+    gate_id: "propose.final_review",
+    boundFiles: [],
+    packet_digest: "sha256:wrong-role",
+    created_from_transition: "propose-ready",
+    created_at: new Date().toISOString(),
+  };
+  const snapshot: Snapshot = {
+    change_id: "test-change",
+    state: "propose",
+    openspec_status_digest: "sha256:test",
+    events_digest: "sha256:test",
+    document_digests: {},
+    tasks_structure_digest: null,
+    task_statuses: {},
+    open_jobs: [wrongRoleJob],
+    accepted_jobs: [],
+    active_task_attempts: [],
+    pending_user_decisions: [],
+    last_transition: null,
+    computed_at: new Date().toISOString(),
+  };
+
+  assert.equal(PROPOSE_FINAL_REVIEW_GATE.isJobForGate(wrongRoleJob), false);
+  assert.deepEqual(PROPOSE_FINAL_REVIEW_GATE.openJobsForGate(snapshot), []);
+});
+
+test("CLI：非法 risk 不会进入 profile resolver", () => {
+  const projectRoot = mkdtempSync(join(tmpdir(), "superspec-risk-"));
+  try {
+    const cli = new URL("../src/cli.ts", import.meta.url).pathname;
+    const result = spawnSync(process.execPath, [
+      cli,
+      "transition",
+      "next",
+      "--change",
+      "test-change",
+      "--risk",
+      "ultra-strict",
+    ], {
+      cwd: projectRoot,
+      encoding: "utf8",
+    });
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /--risk 只能是 minimal、normal 或 strict/);
+    assert.equal(result.stdout.trim(), "");
+  } finally {
+    rmSync(projectRoot, { recursive: true, force: true });
+  }
+});
 
 test("simulateLoop：done 路径立即停止", () => {
   const result = simulateLoop(

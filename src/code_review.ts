@@ -4,6 +4,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { join, extname } from "node:path";
 import { findLatestEvent, sha256File, sha256Text } from "./store.ts";
+import { REVIEW_CODE_REVIEW_GATE } from "./review_job_gates.ts";
 import type { CodeReviewResultKind, Event, Job, Ref } from "./types.ts";
 
 export const CODE_REVIEW_REPAIR_SCOPE_PREFIX = "code_reviewer_report_repair:";
@@ -180,6 +181,7 @@ export function codeReviewJobStaleReason(projectRoot: string, job: Job, currentP
 
 export function codeReviewPacketDigest(input: {
   role: "code-reviewer";
+  gate_id?: "review.code_review";
   boundFiles: Ref[];
   checkedDocs: string[];
   created_from_transition: string;
@@ -189,7 +191,7 @@ export function codeReviewPacketDigest(input: {
 }
 
 function isCodeReviewerJob(job: Job): boolean {
-  return job.role === "code-reviewer" && job.created_from_transition === "review-ready";
+  return job.role === "code-reviewer" && REVIEW_CODE_REVIEW_GATE.isJobForGate(job);
 }
 
 function codeReviewResultKind(value: unknown): CodeReviewResultKind | undefined {

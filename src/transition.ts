@@ -18,7 +18,15 @@ import {
   reviewEvidenceDigest,
   reviewPolicyForRisk,
   REVIEW_DOC_PATHS,
+  type ReviewPolicy,
 } from "./review.ts";
+import {
+  EXPLORE_DISCOVERY_REVIEW_GATE,
+  PROPOSE_FINAL_REVIEW_GATE,
+  REVIEW_CODE_REVIEW_GATE_ID,
+  REVIEW_FINAL_VERIFIER_GATE_ID,
+  type ReviewGateRule,
+} from "./review_job_gates.ts";
 import {
   codeReviewBoundFiles,
   codeReviewDecisionScope,
@@ -31,26 +39,14 @@ import {
   requiresFinalVerifierForCurrentReview,
   scanCodeChanges,
 } from "./code_review.ts";
-import { validateDiscovery, collectProposeOpenQuestions, findTaskInLines, parseTasksMd, pendingTasksInContent, tasksStructureDigest } from "./format.ts";
+import { taskEvidenceReadiness } from "./task_evidence.ts";
+import { validateDiscovery, collectProposeOpenQuestions, findTaskInLines, pendingTasksInContent } from "./format.ts";
 import type { Event, Snapshot, State, Job, JobRole, TransitionResult, Ref, TaskAttempt } from "./types.ts";
 
 let transitionSeq = 0;
 function newTransitionId(): string { return `T-${Date.now()}-${++transitionSeq}`; }
 let jobSeq = 0;
 function newJobId(change: string, role: string): string { return `JOB-${change.slice(0, 8)}-${role.slice(0, 4)}-${Date.now()}-${++jobSeq}`; }
-
-const TRANSITION_REQUIREMENTS: Record<string, Record<string, JobRole[]>> = {
-  "propose-ready": {
-    minimal: [],
-    normal:  ["critic"],
-    strict:  ["critic", "architect", "test-engineer"],
-  },
-  "explore": {
-    minimal: [],
-    normal:  [],
-    strict:  ["critic"],
-  },
-};
 
 /**
  * 通用 job 检查/创建逻辑——任何 transition 都能调用。
@@ -59,17 +55,16 @@ const TRANSITION_REQUIREMENTS: Record<string, Record<string, JobRole[]>> = {
  */
 function checkOrCreateReviewJobs(
   snapshot: Snapshot,
+  gate: ReviewGateRule,
   requiredRoles: JobRole[],
   changeRoot: string,
   change: string,
-  transitionName: string,
-  bindDocPaths: string[],
 ): Decision | BlockedDecision | null {
   const staleRoles: { role: JobRole; reason: string }[] = [];
   for (const role of requiredRoles) {
-    const openForRole = snapshot.open_jobs.find(j => j.role === role && j.created_from_transition === transitionName);
+    const openForRole = snapshot.open_jobs.find(j => gate.isJobForGate(j) && j.role === role);
     if (openForRole) return { blocked: true, reason: `状态未推进；已有待完成工作项 ${role}（${openForRole.job_id}）`, jobs: [openForRole] };
-    const fresh = snapshot.accepted_jobs.find(j => j.role === role && j.created_from_transition === transitionName);
+    const fresh = snapshot.accepted_jobs.find(j => gate.isJobForGate(j) && j.role === role);
     if (!fresh) {
       staleRoles.push({ role, reason: `需求 ${role} 无已接受的工作项` });
     } else {
@@ -82,8 +77,22 @@ function checkOrCreateReviewJobs(
 
   if (staleRoles.length > 0) {
     const newJobs: Job[] = staleRoles.map(({ role }) => {
-      const boundFiles: Ref[] = bindDocPaths.filter(p => existsSync(join(changeRoot, p))).map(p => ({ path: p, sha: sha256File(join(changeRoot, p)) ?? "sha256:missing" }));
-      return { job_id: newJobId(change, role), role, state: "requested" as const, boundFiles, packet_digest: sha256Text(JSON.stringify({ role, boundFiles })), created_from_transition: transitionName, created_at: new Date().toISOString() };
+      const boundFiles: Ref[] = gate.reviewedDocPaths.filter(p => existsSync(join(changeRoot, p))).map(p => ({ path: p, sha: sha256File(join(changeRoot, p)) ?? "sha256:missing" }));
+      return {
+        job_id: newJobId(change, role),
+        role,
+        state: "requested" as const,
+        gate_id: gate.gate_id,
+        boundFiles,
+        packet_digest: sha256Text(JSON.stringify({
+          role,
+          gate_id: gate.gate_id,
+          boundFiles,
+          created_from_transition: gate.created_from_transition,
+        })),
+        created_from_transition: gate.created_from_transition,
+        created_at: new Date().toISOString(),
+      };
     });
     return {
       fromState: snapshot.state, toState: snapshot.state, outcome: "job_created" as const,
@@ -100,7 +109,7 @@ function historicalProposeReadyRoles(projectRoot: string, change: string): JobRo
     const newJobs = (ev.payload as { new_jobs?: Job[] }).new_jobs ?? [];
     for (const job of newJobs) {
       if (
-        job.created_from_transition === "propose-ready" &&
+        PROPOSE_FINAL_REVIEW_GATE.isJobForGate(job) &&
         (job.role === "critic" || job.role === "architect" || job.role === "test-engineer")
       ) roles.add(job.role);
     }
@@ -161,6 +170,7 @@ function createCodeReviewerJob(
     : undefined;
   const packetInput = {
     role: "code-reviewer" as const,
+    gate_id: REVIEW_CODE_REVIEW_GATE_ID,
     boundFiles,
     checkedDocs: REVIEW_DOC_PATHS,
     created_from_transition: "review-ready",
@@ -172,6 +182,7 @@ function createCodeReviewerJob(
       job_id: newJobId(change, "code-reviewer"),
       role: "code-reviewer",
       state: "requested" as const,
+      gate_id: REVIEW_CODE_REVIEW_GATE_ID,
       boundFiles,
       packet_digest: codeReviewPacketDigest(packetInput),
       created_from_transition: "review-ready",
@@ -225,6 +236,170 @@ function appendReviewFixTask(changeRoot: string, ref: CodeReviewFindingRef, find
 
 function isFreshOpenCodeReviewerJob(job: Job, projectRoot: string): boolean {
   return codeReviewJobStaleReason(projectRoot, job) == null;
+}
+
+function evaluateApplyDoneCodeReviewGate(input: {
+  events: Event[];
+  projectRoot: string;
+  change: string;
+  policyPayload: Record<string, unknown>;
+}): Decision | BlockedDecision | SkipDecision {
+  const scan = scanCodeChanges(input.projectRoot);
+  const facts = collectCodeReviewGateFacts(input.events);
+  if (scan.hasCodeChanges) {
+    const freshOpenJobs = facts.openJobs.filter(job => isFreshOpenCodeReviewerJob(job, input.projectRoot));
+    if (freshOpenJobs.length > 0) {
+      return {
+        blocked: true,
+        reason: `状态未推进；已有待完成代码审查工作项 ${freshOpenJobs[0].job_id}`,
+        jobs: [freshOpenJobs[0]],
+      };
+    }
+
+    const latest = facts.latestTerminal;
+    if (latest?.state === "accepted") {
+      return {
+        fromState: "apply_done",
+        toState: "review",
+        outcome: "advanced" as const,
+        reason: "代码审查已通过，进入最终审查阶段",
+        commitPayload: {
+          ...input.policyPayload,
+          code_review_gate: { decision: "passed", job_id: latest.job.job_id },
+        },
+      };
+    }
+    if (latest?.state === "rejected" && latest.result_kind === "review_failed") {
+      const reviewFailedStatus = latestCodeReviewFailedStatus(input.events);
+      if (reviewFailedStatus && reviewFailedStatus.findings.length > 0 && reviewFailedStatus.unresolved.length === 0) {
+        const { job, scanReason } = createCodeReviewerJob(input.change, input.projectRoot, input.events);
+        return {
+          fromState: "apply_done",
+          toState: "apply_done",
+          outcome: "job_created" as const,
+          newJobs: [job],
+          reason: `重新创建代码审查工作项；${scanReason}；上一次阻塞问题已被主流程复核驳回`,
+        };
+      }
+      return {
+        skip: true,
+        message: "代码审查发现需要处理的问题，请先执行 next，根据提示回到实现阶段修复或让使用者决定是否回到计划阶段",
+      };
+    }
+
+    const { job, scanReason } = createCodeReviewerJob(input.change, input.projectRoot, input.events);
+    return {
+      fromState: "apply_done",
+      toState: "apply_done",
+      outcome: "job_created" as const,
+      newJobs: [job],
+      reason: latest?.state === "rejected"
+        ? `重新创建代码审查工作项；上一次报告未被接受，原因：${latest.reason ?? "报告不符合要求"}`
+        : `创建代码审查工作项；${scanReason}`,
+    };
+  }
+
+  return {
+    fromState: "apply_done",
+    toState: "review",
+    outcome: "advanced" as const,
+    reason: "没有代码类改动，直接进入最终审查阶段",
+    commitPayload: {
+      ...input.policyPayload,
+      code_review_gate: { decision: "skipped", reason: "no_code_changes" },
+    },
+  };
+}
+
+function createFinalVerifierJob(
+  change: string,
+  changeRoot: string,
+  currentEvidenceDigest: string,
+): Job {
+  const boundFiles = reviewBoundFiles(changeRoot);
+  return {
+    job_id: newJobId(change, "verifier"),
+    role: "verifier",
+    state: "requested" as const,
+    gate_id: REVIEW_FINAL_VERIFIER_GATE_ID,
+    boundFiles,
+    review_evidence_digest: currentEvidenceDigest,
+    packet_digest: sha256Text(JSON.stringify({
+      role: "verifier",
+      gate_id: REVIEW_FINAL_VERIFIER_GATE_ID,
+      boundFiles,
+      review_evidence_digest: currentEvidenceDigest,
+      created_from_transition: "review-ready",
+    })),
+    created_from_transition: "review-ready",
+    created_at: new Date().toISOString(),
+  };
+}
+
+function evaluateFinalVerifierGate(input: {
+  snapshot: Snapshot;
+  events: Event[];
+  change: string;
+  changeRoot: string;
+  currentEvidenceDigest: string;
+  policy: ReviewPolicy;
+  policyPayload: Record<string, unknown>;
+  hasStoredPolicy: boolean;
+}): Decision | BlockedDecision | SkipDecision {
+  const verifierOpen = input.snapshot.open_jobs.find(isReviewReadyVerifier);
+  if (verifierOpen) {
+    return {
+      blocked: true,
+      reason: `状态未推进；已有待完成最终验证工作项 ${verifierOpen.job_id}`,
+      jobs: [verifierOpen],
+    };
+  }
+
+  const verifierAccepted = input.snapshot.accepted_jobs.find(job =>
+    isFreshReviewVerifier(job, input.changeRoot, input.currentEvidenceDigest)
+  );
+  const finalVerifierRequired = requiresFinalVerifierForCurrentReview(input.events) || input.policy.requires_verifier;
+  if (!finalVerifierRequired) {
+    if (!input.hasStoredPolicy) {
+      return {
+        fromState: "review",
+        toState: "review",
+        outcome: "advanced" as const,
+        reason: `补写审查策略=${input.policy.review_risk}`,
+        commitPayload: input.policyPayload,
+      };
+    }
+    return { skip: true, message: "已在 review 状态，审查策略无需 verifier" };
+  }
+
+  if (!verifierAccepted) {
+    const previousVerifierRejected = hasRejectedReviewReadyVerifier(input.events);
+    const job = createFinalVerifierJob(input.change, input.changeRoot, input.currentEvidenceDigest);
+    return {
+      fromState: input.snapshot.state,
+      toState: input.snapshot.state,
+      outcome: "job_created" as const,
+      newJobs: [job],
+      reason: previousVerifierRejected
+        ? "此前最终验证未通过；请先根据验证报告修改任务或文档，确认无需修改时再执行新的最终验证工作项"
+        : "创建最终验证工作项",
+      commitPayload: input.policyPayload,
+      ...(previousVerifierRejected ? {
+        details: { advisory: "此前最终验证未通过；请先根据验证报告修改任务或文档，确认无需修改时再执行新的最终验证工作项" },
+      } : {}),
+    };
+  }
+
+  if (!input.hasStoredPolicy) {
+    return {
+      fromState: "review",
+      toState: "review",
+      outcome: "advanced" as const,
+      reason: `补写审查策略=${input.policy.review_risk}`,
+      commitPayload: input.policyPayload,
+    };
+  }
+  return { skip: true, message: "已在 review 状态，最终验证仍然有效" };
 }
 
 function documentBaseline(changeRoot: string): Record<string, string> {
@@ -409,10 +584,9 @@ export function proposeReady(projectRoot: string, change: string, changeRoot: st
       }
 
       // 通用 job 检查（用提取的 helper）
-      const requiredRoles = TRANSITION_REQUIREMENTS["propose-ready"]?.[risk] ?? [];
+      const requiredRoles = PROPOSE_FINAL_REVIEW_GATE.requiredRolesForRisk(risk);
       const reviewResult = checkOrCreateReviewJobs(
-        snapshot, requiredRoles, changeRoot, change, "propose-ready",
-        ["proposal.md", "tasks.md", "design.md", ".superspec/artifacts/discovery.md", ".superspec/artifacts/business-invariants.md", ".superspec/artifacts/test-contract.md"],
+        snapshot, PROPOSE_FINAL_REVIEW_GATE, requiredRoles, changeRoot, change,
       );
       if (reviewResult) return reviewResult;
 
@@ -449,10 +623,9 @@ export function transitionExplore(projectRoot: string, change: string, changeRoo
         if (!discoveryCheck.ok) return { skip: true, message: discoveryCheck.message };
 
         // 通用 job 审查（和 propose-ready 同一个 helper）
-        const requiredRoles = TRANSITION_REQUIREMENTS["explore"]?.[risk] ?? [];
+        const requiredRoles = EXPLORE_DISCOVERY_REVIEW_GATE.requiredRolesForRisk(risk);
         const reviewResult = checkOrCreateReviewJobs(
-          snapshot, requiredRoles, changeRoot, change, "explore",
-          [".superspec/artifacts/discovery.md"],
+          snapshot, EXPLORE_DISCOVERY_REVIEW_GATE, requiredRoles, changeRoot, change,
         );
         if (reviewResult) return reviewResult;
 
@@ -478,8 +651,7 @@ export function startApply(projectRoot: string, change: string, changeRoot: stri
       const reviewedRoles = historicalProposeReadyRoles(projectRoot, change);
       if (reviewedRoles.length > 0) {
         const reviewResult = checkOrCreateReviewJobs(
-          snapshot, reviewedRoles, changeRoot, change, "propose-ready",
-          ["proposal.md", "tasks.md", "design.md", ".superspec/artifacts/discovery.md", ".superspec/artifacts/business-invariants.md", ".superspec/artifacts/test-contract.md"],
+          snapshot, PROPOSE_FINAL_REVIEW_GATE, reviewedRoles, changeRoot, change,
         );
         if (reviewResult) {
           return {
@@ -649,117 +821,25 @@ export function reviewReady(projectRoot: string, change: string, changeRoot: str
         };
       }
       if (snapshot.state === "apply_done") {
-        const scan = scanCodeChanges(projectRoot);
-        const facts = collectCodeReviewGateFacts(events);
-        if (scan.hasCodeChanges) {
-          const freshOpenJobs = facts.openJobs.filter(job => isFreshOpenCodeReviewerJob(job, projectRoot));
-          if (freshOpenJobs.length > 0) {
-            return {
-              blocked: true,
-              reason: `状态未推进；已有待完成代码审查工作项 ${freshOpenJobs[0].job_id}`,
-              jobs: [freshOpenJobs[0]],
-            };
-          }
-
-          const latest = facts.latestTerminal;
-          if (latest?.state === "accepted") {
-            return {
-              fromState: "apply_done", toState: "review", outcome: "advanced" as const,
-              reason: "代码审查已通过，进入最终审查阶段",
-              commitPayload: {
-                ...policyPayload,
-                code_review_gate: { decision: "passed", job_id: latest.job.job_id },
-              },
-            };
-          }
-          if (latest?.state === "rejected" && latest.result_kind === "review_failed") {
-            const reviewFailedStatus = latestCodeReviewFailedStatus(events);
-            if (reviewFailedStatus && reviewFailedStatus.findings.length > 0 && reviewFailedStatus.unresolved.length === 0) {
-              const { job, scanReason } = createCodeReviewerJob(change, projectRoot, events);
-              return {
-                fromState: "apply_done", toState: "apply_done", outcome: "job_created" as const,
-                newJobs: [job],
-                reason: `重新创建代码审查工作项；${scanReason}；上一次阻塞问题已被主流程复核驳回`,
-              };
-            }
-            return {
-              skip: true,
-              message: "代码审查发现需要处理的问题，请先执行 next，根据提示回到实现阶段修复或让使用者决定是否回到计划阶段",
-            };
-          }
-
-          const { job, scanReason } = createCodeReviewerJob(change, projectRoot, events);
-          return {
-            fromState: "apply_done", toState: "apply_done", outcome: "job_created" as const,
-            newJobs: [job],
-            reason: latest?.state === "rejected"
-              ? `重新创建代码审查工作项；上一次报告未被接受，原因：${latest.reason ?? "报告不符合要求"}`
-              : `创建代码审查工作项；${scanReason}`,
-          };
-        }
-
-        return {
-          fromState: "apply_done", toState: "review", outcome: "advanced" as const,
-          reason: "没有代码类改动，直接进入最终审查阶段",
-          commitPayload: {
-            ...policyPayload,
-            code_review_gate: { decision: "skipped", reason: "no_code_changes" },
-          },
-        };
+        return evaluateApplyDoneCodeReviewGate({
+          events,
+          projectRoot,
+          change,
+          policyPayload,
+        });
       }
 
       if (snapshot.state === "review") {
-        const verifierOpen = snapshot.open_jobs.find(isReviewReadyVerifier);
-        if (verifierOpen) return { blocked: true, reason: `状态未推进；已有待完成最终验证工作项 ${verifierOpen.job_id}`, jobs: [verifierOpen] };
-
-        const verifierAccepted = snapshot.accepted_jobs.find(job => isFreshReviewVerifier(job, changeRoot, currentEvidenceDigest));
-        const finalVerifierRequired = requiresFinalVerifierForCurrentReview(events) || policy.requires_verifier;
-        if (!finalVerifierRequired) {
-          if (!storedPolicy) {
-            return {
-              fromState: "review", toState: "review", outcome: "advanced" as const,
-              reason: `补写审查策略=${policy.review_risk}`,
-              commitPayload: policyPayload,
-            };
-          }
-          return { skip: true, message: "已在 review 状态，审查策略无需 verifier" };
-        }
-
-        if (!verifierAccepted) {
-          const boundFiles = reviewBoundFiles(changeRoot);
-          const previousVerifierRejected = hasRejectedReviewReadyVerifier(events);
-          const job: Job = {
-            job_id: newJobId(change, "verifier"), role: "verifier", state: "requested" as const,
-            boundFiles, review_evidence_digest: currentEvidenceDigest,
-            packet_digest: sha256Text(JSON.stringify({
-              role: "verifier",
-              boundFiles,
-              review_evidence_digest: currentEvidenceDigest,
-              created_from_transition: "review-ready",
-            })),
-            created_from_transition: "review-ready", created_at: new Date().toISOString(),
-          };
-          return {
-            fromState: snapshot.state, toState: snapshot.state, outcome: "job_created" as const,
-            newJobs: [job],
-            reason: previousVerifierRejected
-              ? "此前最终验证未通过；请先根据验证报告修改任务或文档，确认无需修改时再执行新的最终验证工作项"
-              : "创建最终验证工作项",
-            commitPayload: policyPayload,
-            ...(previousVerifierRejected ? {
-              details: { advisory: "此前最终验证未通过；请先根据验证报告修改任务或文档，确认无需修改时再执行新的最终验证工作项" },
-            } : {}),
-          };
-        }
-
-        if (!storedPolicy) {
-          return {
-            fromState: "review", toState: "review", outcome: "advanced" as const,
-            reason: `补写审查策略=${policy.review_risk}`,
-            commitPayload: policyPayload,
-          };
-        }
-        return { skip: true, message: "已在 review 状态，最终验证仍然有效" };
+        return evaluateFinalVerifierGate({
+          snapshot,
+          events,
+          change,
+          changeRoot,
+          currentEvidenceDigest,
+          policy,
+          policyPayload,
+          hasStoredPolicy: Boolean(storedPolicy),
+        });
       }
       return { skip: true, message: `当前状态 ${snapshot.state}，review-ready 不适用` };
     },
@@ -827,38 +907,8 @@ export function taskComplete(projectRoot: string, change: string, changeRoot: st
       const attempt = snapshot.active_task_attempts?.find(a => a.task_id === taskId && a.state === "active");
       if (!attempt) return { skip: true, message: `任务 ${taskId} 无活跃执行尝试` };
 
-      const tasksContent = readFileSync(join(changeRoot, "tasks.md"), "utf8");
-      const currentDigest = sha256Text(tasksContent.replace(/- \[[xX]\]/g, "- [ ]"));
-      if (currentDigest !== attempt.task_structure_digest) return { skip: true, message: "任务结构指纹不匹配" };
-
-      // 解析任务属性（委托给 format.ts 的 parseTasksMd）
-      const tasks = parseTasksMd(tasksContent);
-      const taskInfo = tasks.find(t => t.taskId === taskId);
-      const isTdd = taskInfo?.tddRequired ?? true;
-      const hasNoTddReason = taskInfo?.noTddReason != null;
-
-      // RED/GREEN 检查（HIGH-2 修复：按 attempt_id 匹配，避免多任务 digest 碰撞）
-      const events = readEvents(projectRoot, change);
-      let hasRed = false, hasGreen = false;
-      for (const ev of events) {
-        if (ev.event_type === "test_run_recorded") {
-          const tr = ev.payload as { task_structure_digest?: string; attempt_id?: string; semantic_status?: string };
-          // 匹配当前 attempt（优先按 attempt_id，回退到 digest）
-          const matches = tr.attempt_id === attempt.attempt_id ||
-            (!tr.attempt_id && tr.task_structure_digest === attempt.task_structure_digest);
-          if (matches) {
-            if (tr.semantic_status === "expected_failure" || tr.semantic_status === "characterization_pass") hasRed = true;
-            if (tr.semantic_status === "expected_success") hasGreen = true;
-          }
-        }
-      }
-
-      if (isTdd) {
-        if (!hasRed) return { skip: true, message: `TDD 任务 ${taskId} 缺少 RED 证据` };
-        if (!hasGreen) return { skip: true, message: `TDD 任务 ${taskId} 缺少 GREEN 证据` };
-      } else {
-        if (!hasNoTddReason) return { skip: true, message: `非 TDD 任务 ${taskId} 缺少 no_tdd_reason` };
-      }
+      const readiness = taskEvidenceReadiness(projectRoot, change, changeRoot, attempt);
+      if (!readiness.ready) return { skip: true, message: `任务 ${taskId} 无法完成：${readiness.reason}` };
 
       // B1 修复：checkbox 写入移到 postCommit（commit 事件写入后执行）
       return {
