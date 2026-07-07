@@ -1,11 +1,11 @@
 // SuperSpec 流程引擎 — transition：提交协议 + 所有 transition 处理器
 
 import { join } from "node:path";
-import { existsSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import {
   ensureChangeLayout, readEvents, appendEvent, makeEvent,
   writeSnapshot, snapshotDigest, withLock, idempotencyKey,
-  sha256File, sha256Text,
+  docRef, listMarkdownFiles, sha256File, sha256Text,
 } from "./store.ts";
 import { rebuildSnapshot } from "./sync.ts";
 import { requiredJobActions } from "./job_action.ts";
@@ -62,9 +62,10 @@ function createReviewJobsForGate(
   reason: string,
 ): Decision {
   const newJobs: Job[] = roles.map(role => {
+    // 目录路径（以 / 结尾）始终绑定聚合指纹：审查时不存在、审查后新建同样视为变化
     const boundFiles: Ref[] = gate.reviewedDocPaths
-      .filter(p => existsSync(join(changeRoot, p)))
-      .map(p => ({ path: p, sha: sha256File(join(changeRoot, p)) ?? "sha256:missing" }));
+      .filter(p => p.endsWith("/") || existsSync(join(changeRoot, p)))
+      .map(p => docRef(changeRoot, p));
     return {
       job_id: newJobId(change, role),
       role,
@@ -806,12 +807,10 @@ export function archive(projectRoot: string, change: string, changeRoot: string)
       for (const p of docPaths) {
         manifest[p] = sha256File(join(changeRoot, p)) ?? "sha256:missing";
       }
-      // specs/ 目录
+      // specs/ 目录：递归收录 .md（覆盖 specs/<capability>/spec.md 布局）
       const specsDir = join(changeRoot, "specs");
-      if (existsSync(specsDir)) {
-        for (const f of readdirSync(specsDir)) {
-          if (f.endsWith(".md")) manifest[`specs/${f}`] = sha256File(join(specsDir, f)) ?? "sha256:missing";
-        }
+      for (const rel of listMarkdownFiles(specsDir)) {
+        manifest[`specs/${rel}`] = sha256File(join(specsDir, rel)) ?? "sha256:missing";
       }
       return {
         fromState: "accepted", toState: "archive", outcome: "advanced" as const,

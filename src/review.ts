@@ -2,7 +2,7 @@
 
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { sha256File, sha256Text } from "./store.ts";
+import { docRef, sha256File, sha256Text } from "./store.ts";
 import { REVIEW_FINAL_VERIFIER_GATE } from "./review_job_gates.ts";
 import type { Event, Job, Ref, TaskAttempt } from "./types.ts";
 
@@ -17,6 +17,7 @@ export const REVIEW_DOC_PATHS = [
   "proposal.md",
   "tasks.md",
   "design.md",
+  "specs/",
   ".superspec/artifacts/discovery.md",
   ".superspec/artifacts/business-invariants.md",
   ".superspec/artifacts/test-contract.md",
@@ -71,9 +72,10 @@ export function isReviewReadyVerifier(job: Job): boolean {
 }
 
 export function reviewBoundFiles(changeRoot: string): Ref[] {
+  // 目录路径（以 / 结尾）始终绑定聚合指纹，与 boundFilesStaleReason 的 docRef 比对保持一致
   return REVIEW_DOC_PATHS
-    .filter(path => existsSync(join(changeRoot, path)))
-    .map(path => ({ path, sha: sha256File(join(changeRoot, path)) ?? "sha256:missing" }));
+    .filter(path => path.endsWith("/") || existsSync(join(changeRoot, path)))
+    .map(path => docRef(changeRoot, path));
 }
 
 interface CompletedAttempt {
@@ -207,7 +209,8 @@ export function reviewEvidenceDigest(events: Event[]): string {
 
 export function boundFilesStaleReason(job: Job, changeRoot: string): string | null {
   for (const bf of job.boundFiles) {
-    const current = sha256File(join(changeRoot, bf.path)) ?? "sha256:missing";
+    // 目录绑定（path 以 / 结尾）比对聚合指纹，覆盖目录内文件的增/删/改
+    const current = docRef(changeRoot, bf.path).sha;
     if (current !== bf.sha) {
       return `绑定文件 ${bf.path} 已变化（${bf.sha} → ${current}）`;
     }

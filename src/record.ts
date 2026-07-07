@@ -14,6 +14,7 @@ import {
 } from "./code_review.ts";
 import { invalidReasonForSubmittedReport } from "./job_validity.ts";
 import { jobSubmitArgv } from "./job_action.ts";
+import { REVIEW_DOC_PATHS } from "./review.ts";
 import type { CodeReviewResultKind, Event, RecordResult, Job, JobPacket, JobRole, JobState } from "./types.ts";
 
 const REVIEW_REPORT_REQUIRED_FIELDS = ["role", "verdict", "findings"] as const;
@@ -752,7 +753,7 @@ export function jobsPacket(
           (requiresReviewer(job.role) ? `必须由独立 ${recommendedAgentForRole(job.role)} 审查角色执行，并在 reviewer.kind/id 中记录来源，` : "") +
           `产出 JSON 报告内容并优先通过 --report - 从 stdin 登记；文件路径模式仍可作为 fallback。以下 JSON 合约给审查代理使用，普通对话不要原样复述。` +
           (isCodeReviewer
-            ? `最小格式：{"role":"code-reviewer","verdict":"pass|fail","review_scope":{"job_id":"${job.job_id}","packet_digest":"${job.packet_digest}","checked_paths":${JSON.stringify(job.boundFiles.map(f => f.path))},"checked_docs":["proposal.md","design.md","tasks.md",".superspec/artifacts/test-contract.md"],"unchecked":[]},"findings":[],"reviewer":{"kind":"codex-subagent","id":"<thread-or-agent-id>"}}；review_scope 用来说明本次审查覆盖了哪些文件和文档，checked_paths 与 unchecked 必须合起来覆盖全部 boundFiles，unchecked 条目格式为 {"path":"<path>","reason":"<reason>"}。`
+            ? `最小格式：{"role":"code-reviewer","verdict":"pass|fail","review_scope":{"job_id":"${job.job_id}","packet_digest":"${job.packet_digest}","checked_paths":${JSON.stringify(job.boundFiles.map(f => f.path))},"checked_docs":${JSON.stringify(REVIEW_DOC_PATHS)},"unchecked":[]},"findings":[],"reviewer":{"kind":"codex-subagent","id":"<thread-or-agent-id>"}}；review_scope 用来说明本次审查覆盖了哪些文件和文档，checked_paths 与 unchecked 必须合起来覆盖全部 boundFiles，unchecked 条目格式为 {"path":"<path>","reason":"<reason>"}。`
               + `报告结论为 fail 时，findings 至少包含一个可处理、可追溯的阻塞问题，字段为 {"id":"<stable-id>","blocking":true,"type":"implementation|spec|mixed","description":"<what>","evidence":"<why>","source_refs":["<path:line>"],"impact":"<impact>","suggested_action":"apply|propose"}。type 中 implementation 表示纯代码实现问题，spec 表示方案/需求文档问题，mixed 表示需要使用者判断的混合问题。`
             : job.role === "verifier"
             ? `最小格式：{"role":"verifier","verdict":"pass|fail","findings":[]}。核对代码审查记录 code_review_gate：passed 必须能追溯到已接受的代码审查工作项，skipped 必须能证明本次没有代码类改动。核对代码审查问题闭环：实现修复任务必须带 review_fix_of:<job_id>#<problem_id>，方案/混合问题必须有用户决策或后续修复证据。核对 RED/GREEN：同一 task_completed.attempt_id 下必须有 RED/characterization 与 GREEN；test-run 证据应包含 test_id、command、cwd、exit_code、semantic_status；审查修复的回归 test-run 可用 covers_task_ids 说明覆盖了哪些已完成任务；缺少 attempt_id 的旧证据只能弱引用。`

@@ -1,7 +1,7 @@
 // SuperSpec 流程引擎 — 存储层：路径、指纹、事件日志、快照、锁
 
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, openSync, closeSync, unlinkSync, statSync, renameSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, openSync, closeSync, unlinkSync, statSync, lstatSync, renameSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { hostname } from "node:os";
 import type { Event, Snapshot, Ref } from "./types.ts";
@@ -70,14 +70,52 @@ export function sha256File(filePath: string): string | null {
   return "sha256:" + createHash("sha256").update(readFileSync(filePath)).digest("hex");
 }
 
+/**
+ * 递归列出目录下全部 .md 文件（相对路径，确定性顺序：逐层排序的深度优先）。
+ * 目录缺失返回空数组；symlink、并发删除的条目跳过（不参与聚合），
+ * 避免 specs/ 出现异常项时打断 rebuildSnapshot 的所有调用方。
+ */
+export function listMarkdownFiles(dirPath: string): string[] {
+  const out: string[] = [];
+  const lstatOrNull = (p: string) => { try { return lstatSync(p); } catch { return null; } };
+  const walk = (dir: string, prefix: string): void => {
+    const dirStat = lstatOrNull(dir);
+    if (!dirStat?.isDirectory() || dirStat.isSymbolicLink()) return;
+    let names: string[];
+    try { names = readdirSync(dir).sort(); } catch { return; }
+    for (const name of names) {
+      const full = join(dir, name);
+      const rel = prefix ? `${prefix}/${name}` : name;
+      const st = lstatOrNull(full);
+      if (!st || st.isSymbolicLink()) continue;
+      if (st.isDirectory()) walk(full, rel);
+      else if (name.endsWith(".md")) out.push(rel);
+    }
+  };
+  walk(dirPath, "");
+  return out;
+}
+
+/** 目录聚合指纹：排序后的相对路径 + 逐文件内容 sha，只聚合 .md（临时/系统文件不参与）；增/删/改任一 .md 都会变化。目录缺失或为空返回稳定空指纹 */
+export function sha256Dir(dirPath: string): string {
+  const entries = listMarkdownFiles(dirPath)
+    .map(rel => `${rel}\u0000${sha256File(join(dirPath, rel)) ?? "sha256:missing"}`);
+  return sha256Text(entries.join("\n"));
+}
+
+/** 文档引用：路径以 / 结尾按目录聚合指纹绑定，其余按单文件 sha */
+export function docRef(root: string, path: string): Ref {
+  if (path.endsWith("/")) return { path, sha: sha256Dir(join(root, path)) };
+  return { path, sha: sha256File(join(root, path)) ?? "sha256:missing" };
+}
+
 export function computeDocumentDigests(
   changeRoot: string,
   docPaths: string[]
 ): Record<string, string> {
   const digests: Record<string, string> = {};
   for (const p of docPaths) {
-    const full = join(changeRoot, p);
-    digests[p] = sha256File(full) ?? "sha256:missing";
+    digests[p] = docRef(changeRoot, p).sha;
   }
   return digests;
 }

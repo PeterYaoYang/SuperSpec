@@ -60,6 +60,7 @@ export const PROPOSE_FINAL_REVIEW_GATE = makeReviewGateRule({
     "proposal.md",
     "tasks.md",
     "design.md",
+    "specs/",
     ".superspec/artifacts/discovery.md",
     ".superspec/artifacts/business-invariants.md",
     ".superspec/artifacts/test-contract.md",

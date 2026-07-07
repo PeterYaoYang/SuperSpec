@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { EXPLORE_DISCOVERY_REVIEW_GATE, PROPOSE_FINAL_REVIEW_GATE } from "./review_job_gates.ts";
 import type { ReviewGateRule } from "./review_job_gates.ts";
 import { collectProposeOpenQuestions, countDiscoveryOpenQuestions, pendingTasksInContent, validateDiscovery } from "./format.ts";
-import { sha256File } from "./store.ts";
+import { docRef, sha256File } from "./store.ts";
 import {
   isReviewReadyVerifier,
   isFreshReviewVerifier,
@@ -116,10 +116,11 @@ function missingBaseArtifact(changeRoot: string, risk: ReviewRisk): string | nul
 }
 
 export function proposalDocsBaseline(changeRoot: string): Record<string, string> {
-  const docs = ["proposal.md", "design.md", "tasks.md", ".superspec/artifacts/test-contract.md"];
+  // specs/ 用目录聚合指纹：审查可能只对 specs 提出修复，reopen 后仅改 specs 也算文档变化
+  const docs = ["proposal.md", "design.md", "tasks.md", "specs/", ".superspec/artifacts/test-contract.md"];
   const baseline: Record<string, string> = {};
   for (const doc of docs) {
-    baseline[doc] = sha256File(join(changeRoot, doc)) ?? "sha256:missing";
+    baseline[doc] = docRef(changeRoot, doc).sha;
   }
   return baseline;
 }
@@ -550,7 +551,8 @@ function planStartApplyTransition(context: TransitionPlanContext): TransitionDec
 
   const reopenBaseline = latestReopenProposeBaseline(events);
   if (reopenBaseline && !proposalDocsChangedSinceBaseline(changeRoot, reopenBaseline)) {
-    return { kind: "skip", message: "回到 propose 后 proposal/design/tasks/test-contract 至少一个文档必须变化" };
+    // 按基线实际键名提示：升级前留下的旧基线可能不含 specs/，静态清单会误导
+    return { kind: "skip", message: `回到 propose 后至少一个计划文档必须变化（基线绑定：${Object.keys(reopenBaseline).join("、")}）` };
   }
 
   const reviewedRoles = historicalProposeReadyRoles(events);

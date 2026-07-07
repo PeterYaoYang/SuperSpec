@@ -3,7 +3,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync, readdirSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync, readdirSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -12,7 +12,7 @@ import { rebuildSnapshot } from "../src/sync.ts";
 import { next } from "../src/next.ts";
 import { proposeReady, transitionExplore } from "../src/transition.ts";
 import { recordUserDecision, recordJobSubmit, jobsPacket } from "../src/record.ts";
-import { countDiscoveryOpenQuestions, countProposeOpenQuestionsInContent } from "../src/format.ts";
+import { countDiscoveryOpenQuestions, countProposeOpenQuestionsInContent, validateDiscovery, validateDiscoveryChainCoverage } from "../src/format.ts";
 import type { Job, JobRole, State } from "../src/types.ts";
 
 // ===== 夹具 =====
@@ -144,6 +144,191 @@ test("discovery parser：新增章节中的 checklist 不作为待确认问题",
     "",
     "- [ ] 这里已经不是待确认段，不应阻塞",
   ].join("\n")), 1);
+});
+
+test("discovery 链路五要素：legacy 缺段不硬失败", () => {
+  const result = validateDiscoveryChainCoverage("# Discovery\n\nFound stuff.\n");
+  assert.equal(result.ok, true);
+  assert.equal(result.present, false);
+});
+
+test("discovery 链路五要素：缺必需列时失败", () => {
+  const result = validateDiscoveryChainCoverage([
+    "# Discovery",
+    "",
+    "## 链路五要素",
+    "",
+    "| ID | 发现方式 | 上游来源 | 证据 | 状态 |",
+    "|---|---|---|---|---|",
+    "| CHAIN-001 | rg 字段名 + 调用方反查 | 表单输入 | src/a.ts:10 | 已确认 |",
+  ].join("\n"));
+  assert.equal(result.ok, false);
+  assert.match(result.message, /规则变形/);
+});
+
+test("discovery 链路五要素：空表失败", () => {
+  const result = validateDiscoveryChainCoverage([
+    "# Discovery",
+    "",
+    "## 链路五要素",
+    "",
+    "| ID | 发现方式 | 上游来源 | 规则变形 | 持久化语义 | 下游消费者 | 视图差异 | 未知/排除 | 证据 | 状态 |",
+    "|---|---|---|---|---|---|---|---|---|---|",
+  ].join("\n"));
+  assert.equal(result.ok, false);
+  assert.match(result.message, /至少需要一行/);
+});
+
+test("discovery 链路五要素：行级缺证据或状态失败", () => {
+  const missingEvidence = validateDiscoveryChainCoverage([
+    "# Discovery",
+    "",
+    "## 链路五要素",
+    "",
+    "| ID | 发现方式 | 上游来源 | 规则变形 | 持久化语义 | 下游消费者 | 视图差异 | 未知/排除 | 证据 | 状态 |",
+    "|---|---|---|---|---|---|---|---|---|---|",
+    "| CHAIN-001 | rg 字段名 + 调用方反查 | 表单输入 | 无 | 不落库 | 保存接口 | 无 | 无 |  | 已确认 |",
+  ].join("\n"));
+  assert.equal(missingEvidence.ok, false);
+  assert.match(missingEvidence.message, /缺少证据/);
+
+  const missingStatus = validateDiscoveryChainCoverage([
+    "# Discovery",
+    "",
+    "## 链路五要素",
+    "",
+    "| ID | 发现方式 | 上游来源 | 规则变形 | 持久化语义 | 下游消费者 | 视图差异 | 未知/排除 | 证据 | 状态 |",
+    "|---|---|---|---|---|---|---|---|---|---|",
+    "| CHAIN-001 | rg 字段名 + 调用方反查 | 表单输入 | 无 | 不落库 | 保存接口 | 无 | 无 | src/a.ts:10 |  |",
+  ].join("\n"));
+  assert.equal(missingStatus.ok, false);
+  assert.match(missingStatus.message, /缺少状态/);
+});
+
+test("discovery 链路五要素：行级缺核心列或未知排除失败", () => {
+  const missingUpstream = validateDiscoveryChainCoverage([
+    "# Discovery",
+    "",
+    "## 链路五要素",
+    "",
+    "| ID | 发现方式 | 上游来源 | 规则变形 | 持久化语义 | 下游消费者 | 视图差异 | 未知/排除 | 证据 | 状态 |",
+    "|---|---|---|---|---|---|---|---|---|---|",
+    "| CHAIN-001 | rg 字段名 + 调用方反查 |  | 无 | 不落库 | 保存接口 | 无 | 无 | src/a.ts:10 | 已确认 |",
+  ].join("\n"));
+  assert.equal(missingUpstream.ok, false);
+  assert.match(missingUpstream.message, /缺少上游来源/);
+
+  const missingUnknownExclusion = validateDiscoveryChainCoverage([
+    "# Discovery",
+    "",
+    "## 链路五要素",
+    "",
+    "| ID | 发现方式 | 上游来源 | 规则变形 | 持久化语义 | 下游消费者 | 视图差异 | 未知/排除 | 证据 | 状态 |",
+    "|---|---|---|---|---|---|---|---|---|---|",
+    "| CHAIN-001 | rg 字段名 + 调用方反查 | 表单输入 | 无 | 不落库 | 保存接口 | 无 |  | src/a.ts:10 | 已确认 |",
+  ].join("\n"));
+  assert.equal(missingUnknownExclusion.ok, false);
+  assert.match(missingUnknownExclusion.message, /缺少未知\/排除/);
+});
+
+test("discovery 链路五要素：未知阻塞必须进入待确认问题", () => {
+  const result = validateDiscoveryChainCoverage([
+    "# Discovery",
+    "",
+    "## 链路五要素",
+    "",
+    "| ID | 发现方式 | 上游来源 | 规则变形 | 持久化语义 | 下游消费者 | 视图差异 | 未知/排除 | 证据 | 状态 |",
+    "|---|---|---|---|---|---|---|---|---|---|",
+    "| CHAIN-001 | rg 字段名 + 调用方反查 | 表单输入 | 未知 | 不落库 | 保存接口 | 无 | 规则变形未知 | src/a.ts:10 | 未知阻塞 |",
+  ].join("\n"));
+  assert.equal(result.ok, false);
+  assert.match(result.message, /未知阻塞/);
+});
+
+test("discovery 链路五要素：发现方式空泛与否由 critic 审查，引擎不拦截", () => {
+  const result = validateDiscoveryChainCoverage([
+    "# Discovery",
+    "",
+    "## 链路五要素",
+    "",
+    "| ID | 发现方式 | 上游来源 | 规则变形 | 持久化语义 | 下游消费者 | 视图差异 | 未知/排除 | 证据 | 状态 |",
+    "|---|---|---|---|---|---|---|---|---|---|",
+    "| CHAIN-001 | 代码审查 | 表单输入 | 无 | 不落库 | 保存接口 | 无 | 无 | src/a.ts:10 | 已确认 |",
+  ].join("\n"));
+  assert.equal(result.ok, true);
+});
+
+test("discovery 链路五要素：单元格内转义竖线不破坏解析", () => {
+  const result = validateDiscoveryChainCoverage([
+    "# Discovery",
+    "",
+    "## 链路五要素",
+    "",
+    "| ID | 发现方式 | 上游来源 | 规则变形 | 持久化语义 | 下游消费者 | 视图差异 | 未知/排除 | 证据 | 状态 |",
+    "|---|---|---|---|---|---|---|---|---|---|",
+    "| CHAIN-001 | rg \"status\\|flag\" + 调用方反查 | 表单输入 | 无 | 不落库 | 保存接口 | 无 | 无 | src/a.ts:10 | 已确认 |",
+  ].join("\n"));
+  assert.equal(result.ok, true);
+});
+
+test("validateDiscovery：合法链路五要素可通过", () => {
+  const fx = setupExplore();
+  try {
+    writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "discovery.md"), [
+      "# Discovery",
+      "",
+      "## 链路五要素",
+      "",
+      "| ID | 发现方式 | 上游来源 | 规则变形 | 持久化语义 | 下游消费者 | 视图差异 | 未知/排除 | 证据 | 状态 |",
+      "|---|---|---|---|---|---|---|---|---|---|",
+      "| CHAIN-001 | rg 字段名 + 调用方反查 | 表单输入 | 无 | 不落库 | 保存接口 | 无 | 无 | src/a.ts:10 | 已确认 |",
+      "",
+      "## 待确认问题",
+      "",
+    ].join("\n"));
+    const result = validateDiscovery(fx.changeRoot);
+    assert.equal(result.ok, true);
+  } finally { fx.cleanup(); }
+});
+
+test("validateDiscovery：未知阻塞即使有待确认项也阻断推进", () => {
+  const fx = setupExplore();
+  try {
+    writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "discovery.md"), [
+      "# Discovery",
+      "",
+      "## 链路五要素",
+      "",
+      "| ID | 发现方式 | 上游来源 | 规则变形 | 持久化语义 | 下游消费者 | 视图差异 | 未知/排除 | 证据 | 状态 |",
+      "|---|---|---|---|---|---|---|---|---|---|",
+      "| CHAIN-001 | rg 字段名 + 调用方反查 | 表单输入 | 未知 | 不落库 | 保存接口 | 无 | 规则变形未知 | src/a.ts:10 | 未知阻塞 |",
+      "",
+      "## 待确认问题",
+      "",
+      "- [ ] CHAIN-001 规则变形是否存在？",
+    ].join("\n"));
+    const result = validateDiscovery(fx.changeRoot);
+    assert.equal(result.ok, false);
+    assert.match(result.message, /未确认问题/);
+  } finally { fx.cleanup(); }
+});
+
+test("validateDiscovery：声明链路五要素的新格式会执行结构校验", () => {
+  const fx = setupExplore();
+  try {
+    writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "discovery.md"), [
+      "# Discovery",
+      "",
+      "## 链路五要素",
+      "",
+      "| ID | 证据 | 状态 |",
+      "|---|---|---|",
+      "| CHAIN-001 | src/a.ts:10 | 已确认 |",
+    ].join("\n"));
+    const result = validateDiscovery(fx.changeRoot);
+    assert.equal(result.ok, false);
+    assert.match(result.message, /发现方式/);
+  } finally { fx.cleanup(); }
 });
 
 test("explore→propose：无 discovery.md 时不推进", () => {
@@ -981,4 +1166,132 @@ test("CLI status：区分 fresh/historical/stale accepted jobs", () => {
   } finally {
     rmSync(projectRoot, { recursive: true, force: true });
   }
+});
+
+// ===== specs/ 目录绑定与 freshness =====
+
+function setupProposeWithSpecs(): ReturnType<typeof setupPropose> {
+  const fx = setupPropose();
+  writeFileSync(join(fx.changeRoot, "design.md"), "# Design\n");
+  writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "business-invariants.md"), "# BI\n");
+  writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");
+  mkdirSync(join(fx.changeRoot, "specs", "auth"), { recursive: true });
+  writeFileSync(join(fx.changeRoot, "specs", "auth", "spec.md"), "# Auth Spec\n\n## ADDED Requirements\n");
+  return fx;
+}
+
+function acceptAllProposeJobs(fx: { projectRoot: string; change: string; changeRoot: string }): void {
+  const snapshot = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot);
+  for (const job of snapshot.open_jobs) {
+    const reportPath = join(fx.projectRoot, `${job.role}.json`);
+    writeFileSync(reportPath, reviewerReport(job.role as "critic" | "architect" | "test-engineer"));
+    assert.equal(recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, job.job_id, reportPath).accepted, true);
+  }
+}
+
+test("specs 绑定：propose-ready job 的 boundFiles 含 specs/ 目录聚合指纹", () => {
+  const fx = setupProposeWithSpecs();
+  try {
+    transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    const result = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.equal(result.outcome, "job_created");
+    const snapshot = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot);
+    const specsRef = snapshot.open_jobs[0].boundFiles.find(f => f.path === "specs/");
+    assert.ok(specsRef, "boundFiles 应包含 specs/");
+    assert.match(specsRef.sha, /^sha256:/);
+  } finally { fx.cleanup(); }
+});
+
+test("specs freshness：审查通过后修改 specs 文件，accepted job 变 stale", () => {
+  const fx = setupProposeWithSpecs();
+  try {
+    transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    acceptAllProposeJobs(fx);
+    assert.equal(rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot).accepted_jobs.length, 1);
+
+    writeFileSync(join(fx.changeRoot, "specs", "auth", "spec.md"), "# Auth Spec\n\n## ADDED Requirements\n\n改动\n");
+    const snap = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(snap.accepted_jobs.length, 0, "修改 specs 文件应作废已通过的计划审查");
+  } finally { fx.cleanup(); }
+});
+
+test("specs freshness：审查通过后新增 specs 文件同样作废审查", () => {
+  const fx = setupProposeWithSpecs();
+  try {
+    transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    acceptAllProposeJobs(fx);
+
+    mkdirSync(join(fx.changeRoot, "specs", "billing"), { recursive: true });
+    writeFileSync(join(fx.changeRoot, "specs", "billing", "spec.md"), "# Billing Spec\n");
+    const snap = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(snap.accepted_jobs.length, 0, "新增 specs 文件应作废已通过的计划审查");
+  } finally { fx.cleanup(); }
+});
+
+test("specs freshness：删除 specs 文件同样作废审查", () => {
+  const fx = setupProposeWithSpecs();
+  try {
+    transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    acceptAllProposeJobs(fx);
+
+    rmSync(join(fx.changeRoot, "specs", "auth", "spec.md"));
+    const snap = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(snap.accepted_jobs.length, 0, "删除 specs 文件应作废已通过的计划审查");
+  } finally { fx.cleanup(); }
+});
+
+test("specs freshness：审查时无 specs 目录、通过后新建 specs 同样作废审查", () => {
+  const fx = setupPropose();
+  try {
+    writeFileSync(join(fx.changeRoot, "design.md"), "# Design\n");
+    writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "business-invariants.md"), "# BI\n");
+    writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");
+    transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    const openSnap = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.ok(openSnap.open_jobs[0].boundFiles.some(f => f.path === "specs/"), "无 specs 目录时也应绑定空指纹");
+    acceptAllProposeJobs(fx);
+
+    mkdirSync(join(fx.changeRoot, "specs", "auth"), { recursive: true });
+    writeFileSync(join(fx.changeRoot, "specs", "auth", "spec.md"), "# Auth Spec\n");
+    const snap = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(snap.accepted_jobs.length, 0, "审查后新建 specs 目录应作废已通过的计划审查");
+  } finally { fx.cleanup(); }
+});
+
+test("specs freshness：specs 未变化时审查保持 accepted 不误伤", () => {
+  const fx = setupProposeWithSpecs();
+  try {
+    transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    acceptAllProposeJobs(fx);
+
+    const snap = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(snap.accepted_jobs.length, 1, "specs 未变化不应误判 stale");
+  } finally { fx.cleanup(); }
+});
+
+test("specs 容错：specs/ 含损坏 symlink 时 rebuildSnapshot 不崩溃，异常项不参与指纹", () => {
+  const fx = setupProposeWithSpecs();
+  try {
+    const before = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot).document_digests["specs/"];
+    symlinkSync(join(fx.changeRoot, "specs", "no-such-target.md"), join(fx.changeRoot, "specs", "broken-link.md"));
+    const after = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot).document_digests["specs/"];
+    assert.equal(after, before, "损坏 symlink 应被跳过，不影响 specs/ 聚合指纹");
+  } finally { fx.cleanup(); }
+});
+
+test("specs 容错：specs/ 中指向外部目录的 symlink 不参与指纹", () => {
+  const fx = setupProposeWithSpecs();
+  try {
+    mkdirSync(join(fx.projectRoot, "outside-specs"), { recursive: true });
+    writeFileSync(join(fx.projectRoot, "outside-specs", "external.md"), "# External\n");
+    const before = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot).document_digests["specs/"];
+    symlinkSync(join(fx.projectRoot, "outside-specs"), join(fx.changeRoot, "specs", "outside-link"));
+    const after = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot).document_digests["specs/"];
+    assert.equal(after, before, "目录 symlink 应被跳过，不应把 specs/ 外部 Markdown 算进聚合指纹");
+  } finally { fx.cleanup(); }
 });

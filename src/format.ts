@@ -20,22 +20,105 @@ function escapeRegex(value: string): string {
 }
 
 function countOpenChecklistItemsInSection(content: string, headings: readonly string[]): number {
-  const headingPattern = headings.map(escapeRegex).join("|");
-  const sectionMatch = new RegExp(`^#{1,6}\\s*(?:${headingPattern})\\s*$`, "im").exec(content);
-  if (!sectionMatch) return 0;
-  const sectionStart = sectionMatch.index! + sectionMatch[0].length;
-  // 截取到下一个标题或文件末尾
-  const restContent = content.slice(sectionStart);
-  const nextHeadingMatch = restContent.match(/^#{1,6}\s+/m);
-  const sectionBody = nextHeadingMatch ? restContent.slice(0, nextHeadingMatch.index) : restContent;
+  const sectionBody = sectionBodyByHeadings(content, headings);
+  if (sectionBody == null) return 0;
   // 数未确认项
   const matches = sectionBody.match(/^\s*-\s+\[ \]/gm);
   return matches ? matches.length : 0;
 }
 
+function sectionBodyByHeadings(content: string, headings: readonly string[]): string | null {
+  const headingPattern = headings.map(escapeRegex).join("|");
+  const sectionMatch = new RegExp(`^#{1,6}\\s*(?:${headingPattern})\\s*$`, "im").exec(content);
+  if (!sectionMatch) return null;
+  const sectionStart = sectionMatch.index! + sectionMatch[0].length;
+  // 截取到下一个标题或文件末尾
+  const restContent = content.slice(sectionStart);
+  const nextHeadingMatch = restContent.match(/^#{1,6}\s+/m);
+  return nextHeadingMatch ? restContent.slice(0, nextHeadingMatch.index) : restContent;
+}
+
 /** 从 discovery.md 提取"待确认问题"段内的未确认项数量 */
 export function countDiscoveryOpenQuestions(content: string): number {
   return countOpenChecklistItemsInSection(content, ["待确认问题", "Open Questions", "Pending Questions"]);
+}
+
+export interface DiscoveryChainCoverageCheck {
+  ok: boolean;
+  message: string;
+  present: boolean;
+}
+
+const DISCOVERY_CHAIN_HEADINGS = ["链路五要素"] as const;
+const DISCOVERY_CHAIN_REQUIRED_COLUMNS = [
+  "ID",
+  "发现方式",
+  "上游来源",
+  "规则变形",
+  "持久化语义",
+  "下游消费者",
+  "视图差异",
+  "未知/排除",
+  "证据",
+  "状态",
+] as const;
+
+function splitMarkdownTableRow(line: string): string[] {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith("|") || !trimmed.endsWith("|")) return [];
+  // GFM 表格中字面竖线写作 \|，按未转义竖线切分后还原
+  return trimmed.slice(1, -1).split(/(?<!\\)\|/).map(cell => cell.trim().replace(/\\\|/g, "|"));
+}
+
+function isMarkdownTableSeparator(line: string): boolean {
+  return /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(line);
+}
+
+/** 轻量校验 discovery.md 的链路五要素段。只校验结构和阻塞未知，不判断业务真假。 */
+export function validateDiscoveryChainCoverage(content: string): DiscoveryChainCoverageCheck {
+  const sectionBody = sectionBodyByHeadings(content, DISCOVERY_CHAIN_HEADINGS);
+  if (sectionBody == null) {
+    // 兼容缺少链路五要素段的历史 discovery：不阻塞，实质要求由 critic 审查
+    return { ok: true, message: "discovery.md 未声明链路五要素", present: false };
+  }
+
+  const tableLines = sectionBody.split("\n").filter(line => line.trim().startsWith("|"));
+  if (tableLines.length < 2) {
+    return { ok: false, message: "链路五要素缺少 Markdown 表格", present: true };
+  }
+
+  const header = splitMarkdownTableRow(tableLines[0]);
+  if (header.length === 0 || !isMarkdownTableSeparator(tableLines[1])) {
+    return { ok: false, message: "链路五要素表格格式无效", present: true };
+  }
+
+  const missingColumns = DISCOVERY_CHAIN_REQUIRED_COLUMNS.filter(col => !header.includes(col));
+  if (missingColumns.length > 0) {
+    return { ok: false, message: `链路五要素缺少必需列：${missingColumns.join(", ")}`, present: true };
+  }
+
+  const rows = tableLines.slice(2).map(splitMarkdownTableRow).filter(cells => cells.length > 0);
+  if (rows.length === 0) {
+    return { ok: false, message: "链路五要素至少需要一行链路记录", present: true };
+  }
+
+  const statusIdx = header.indexOf("状态");
+  const requiredColumnIndexes = DISCOVERY_CHAIN_REQUIRED_COLUMNS.map(col => ({ col, idx: header.indexOf(col) }));
+
+  for (const [idx, cells] of rows.entries()) {
+    const rowNum = idx + 1;
+    for (const { col, idx: colIdx } of requiredColumnIndexes) {
+      if (!(cells[colIdx]?.trim())) {
+        return { ok: false, message: `链路五要素第 ${rowNum} 行缺少${col}`, present: true };
+      }
+    }
+    const status = cells[statusIdx]?.trim() ?? "";
+    if (status.includes("未知阻塞") && countDiscoveryOpenQuestions(content) === 0) {
+      return { ok: false, message: "链路五要素存在未知阻塞，但待确认问题中没有未解决项", present: true };
+    }
+  }
+
+  return { ok: true, message: "链路五要素就绪", present: true };
 }
 
 /** 完整校验 discovery.md：存在 + 非空 + 无未确认问题 */
@@ -44,6 +127,8 @@ export function validateDiscovery(changeRoot: string): { ok: boolean; message: s
   if (!existsSync(path)) return { ok: false, message: "discovery.md 不存在", openCount: -1 };
   const content = readFileSync(path, "utf8");
   if (!content.trim()) return { ok: false, message: "discovery.md 为空", openCount: -1 };
+  const chainCoverage = validateDiscoveryChainCoverage(content);
+  if (!chainCoverage.ok) return { ok: false, message: chainCoverage.message, openCount: -1 };
   const openCount = countDiscoveryOpenQuestions(content);
   if (openCount > 0) return { ok: false, message: `discovery.md 有 ${openCount} 个未确认问题`, openCount };
   return { ok: true, message: "discovery.md 就绪", openCount: 0 };

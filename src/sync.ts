@@ -10,7 +10,7 @@ import { invalidReasonForSnapshot } from "./job_validity.ts";
 import type { Event, Snapshot, Job, State, TaskAttempt } from "./types.ts";
 
 const TRACKED_DOCS = [
-  "proposal.md", "design.md", "tasks.md",
+  "proposal.md", "design.md", "tasks.md", "specs/",
   ".superspec/artifacts/discovery.md",
   ".superspec/artifacts/business-invariants.md",
   ".superspec/artifacts/test-contract.md",
