@@ -19,12 +19,16 @@ argument-hint: "本次测试审查说明"
 
 ## 任务拆分与 RED/GREEN 审查口径
 
-- TDD task 应能形成清晰 RED/GREEN 闭环；`tasks.md` 只声明任务边界和 `tdd_required:true/false`，RED/GREEN 命令、断言或预期输出不写进 `tasks.md`，实际细节属于工作流记录的 test-run 证据
-- 根据 `design.md` 的实现方向判断测试契约是否覆盖主要风险；不要求把测试命令或断言写回计划文档
-- `tasks.md` 存在绑定到 task 的 `执行依据:` 块时，审查执行依据的 `测试` 字段与 `test-contract.md` 场景的对应关系：声明的 `TEST-xxx` 必须存在且其 scenario 确实是该 task 的验收场景；scenario 无法推导断言、或与 task 描述明显不匹配时，应使用失败结论（`verdict:"fail"`）。反向也要核对：task 的主要验收路径（含其 `边界` 声明要保护的行为）没有任何声明测试覆盖且无豁免安排时，按覆盖缺口处理
-- 此时 `test-contract.md` 必须可解析（表头含 `test_id` 和 `scenario`，无重复 `test_id`）；`test-contract.md` 中未绑定任何 task `测试` 字段的 TEST，应有合理说明或留待用户豁免决策，无解释的悬空 TEST 按覆盖缺口处理。注意：文档里写了不覆盖理由不等于已豁免，进入 review 前引擎仍要求登记用户豁免决策
-- 无法定义目标测试身份、RED 失败信号、GREEN 覆盖映射，或只靠退出码/笼统命令证明的测试方案，应使用失败结论（`verdict:"fail"`）
-- `tdd_required:false` 必须有明确 `no_tdd_reason`；只有 `no_tdd_reason:characterization` 的 task 可以在执行阶段以特征化通过作为测试证据
+重点审查设计约束是否可验证，以及 task / design / test-contract 是否形成可信闭环。能力覆盖和文档可审查性由 Critic 主责；技术路线和系统边界由 Architect 主责。
+
+- TDD task 应形成清晰 RED/GREEN 闭环；`tasks.md` 只声明任务边界和 `tdd_required:true/false`，不得写 RED/GREEN 命令、断言或预期输出
+- 根据 design 的实现方案、边界约束、共享契约和真实风险判断 test-contract 是否覆盖主要风险；不要求 design 使用固定字段或可选风险章节
+- task 或 test-contract 场景无法定位到对应实现方案、共享契约或边界约束，因而无法推导测试条件和预期结果时，应失败
+- task 执行依据声明的 `TEST-xxx` 必须存在，scenario 必须确实验收该 task；scenario 无法推导断言、与 task 描述明显不匹配，或 task 的主要验收路径及其边界没有测试覆盖且无豁免时，应失败
+- task 的 `设计` 引用与声明测试必须匹配；测试只覆盖 happy path、没有覆盖方案关键边界、状态转换、优先级、一致性 / 并发 / 兼容约束或真实风险时，应判为覆盖缺口
+- `test-contract.md` 必须可解析，表头含 `test_id` 和 `scenario`，无重复 `test_id`；未绑定任何 task 的 TEST 必须有合理说明或留待用户豁免，不能把文档内的不覆盖理由当成已豁免
+- 测试方案必须能定义目标测试身份、RED 失败信号和 GREEN 覆盖映射；不能只靠退出码或笼统命令证明
+- `tdd_required:false` 必须有明确 `no_tdd_reason`；只有 `no_tdd_reason:characterization` 的 task 可以用特征化通过作为测试证据
 
 ## 输入数据与链路覆盖审查口径
 
@@ -32,7 +36,7 @@ argument-hint: "本次测试审查说明"
 
 可接受的证明方式包括源码锚点、fixture、targeted test、日志或 trace；不强制集成测试，但必须说明证明力。只证明 consumer 算法正确、没有证明目标输入从 producer 进入 consumer 时，应使用失败结论（`verdict:"fail"`）。
 
-`proposal.md` 的 `## Impact` 引用 `CHAIN-xxx`（链路五要素）时，对应的下游消费者/视图差异应映射到 test-contract 场景并在 scenario 中引用该 `CHAIN-xxx`；未映射且无不覆盖理由时，按覆盖缺口使用失败结论（`verdict:"fail"`）。
+`proposal.md` 的 `## Impact` 引用 `CHAIN-xxx`（链路五要素）时，对应的下游消费者/视图差异应映射到 test-contract 场景并在 scenario 中引用该 `CHAIN-xxx`；未映射且无不覆盖理由时，按覆盖缺口使用失败结论（`verdict:"fail"`）。design 仅引用 CHAIN 作为方案依据时不重复产生测试映射要求；若 design 暴露了 Impact 未记录的消费者、视图差异或用户 / 系统可观察行为影响，应先按 Impact 对账缺口处理，再核对对应测试。测试脆弱性、实现复杂度等纯实施风险只在 design / test-contract 内处理，不要求写入 Impact。
 
 `未知非阻塞` 的测试策略必须说明为什么该未知不影响验收；缺少说明时按覆盖缺口处理。
 

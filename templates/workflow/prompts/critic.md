@@ -40,22 +40,28 @@ argument-hint: "本次反方审查说明"
 
 ## Proposal / Design / Tasks 审查
 
+重点审查计划文档是否完整、一致、可定位和可审查。技术路线优劣、系统边界合理性和绑定性技术契约由 Architect 主责；测试策略和证明力由 Test Engineer 主责。除非缺失已经造成文档无法对应能力、任务或来源，否则不要代替专业角色重复技术判断。
+
 阻塞条件：
 
-- `proposal.md` 缺 `## Impact`，或 `Area / Reason` 不能说明受影响范围和原因。
-- `Impact` 写成任务清单、路径白名单，或 `Reason` 只写“要改这里”。
-- `design.md` 缺路线级实现方向，或写成任务拆分/代码步骤。
-- 关键路线未决却未进入 `## 待用户确认`。
-- `tasks.md` 无法从 `design.md` 推出，任务过粗，或多个独立行为混在同一 RED/GREEN 闭环。
-- task id 重复/不稳定，标题混入 task id，缩进 checkbox 或普通说明承载实际工作。
-- task 中写 RED/GREEN 命令、断言或预期输出。
-- discovery 含 IDC 时，`Impact Reason` 未引用相关 `IDC-xxx`；`design.md` 在相关 IDC 为 `未知阻塞` 时仍声称 ready。
-- 已勾选的 `## 待用户确认` 项无行内结论，或结论未反映到 proposal / design / test-contract 相关内容。
-- discovery 含链路五要素时，非 `未知阻塞` 链路行中已确证的下游消费者/视图差异未进入 `Impact`（引用 `CHAIN-xxx`）也无排除理由；或 `Impact` 引用的 `CHAIN-xxx` 无测试场景映射且无不覆盖理由。对账不要求逐行进入 Impact；同一链路已由 IDC 覆盖且互指的，不重复报错。
-- `design.md` 基于与已确证链路事实不符的现状假设（如重复上游已有处理且无理由），或变更已确证的规则变形/持久化语义却未声明为本次目标。
-- `specs/` 规范增量与 `proposal.md` 能力变化不对应：声明的能力变化缺规范增量、specs 引入未声明的能力变化，或规范正文写成实现路线/过程性描述。`specs/` 以目录形式绑定在审查材料中，须打开目录内的规范文件逐个核对；无法读取时在报告中说明材料缺口并给 `verdict:"fail"`，不得默认通过。
-- `business-invariants.md` 条目不可证伪（不存在能使其失败的具体操作和可观察结果），或本次行为变化触及的核心规则缺少对应不变量。
-- `tasks.md` 任务顺序与依赖矛盾：被依赖的 task（含行内注明的跨组依赖）出现在依赖它的 task 之后。引擎按全文顶格 checkbox 行顺序驱动，标题分组和行内注明都不改变执行顺序。
+- `proposal.md` 缺 `## Impact`，或 `Area / Reason` 无法说明受影响范围和原因；Impact 写成任务清单、路径白名单或纯实现步骤。
+- proposal / specs 必须符合当前 `openspec instructions proposal` 和 `openspec instructions specs` 的原生结构与语义；审查前须在项目根目录运行 `openspec validate <change> --strict --no-interactive`。命令失败，或仍存在原生校验未覆盖的核心结构、Capabilities / BREAKING、delta 操作、完整 MODIFIED requirement、REMOVED Reason / Migration、RENAMED FROM / TO、requirement / scenario 格式问题时必须失败；命令通过不能替代语义审查。
+- `proposal.md` 声明的每个代码影响型能力，无论 specs 是否已完整具体化，都必须能定位到 design 中对应的实现方案；不要求能力与方案一一对应，多个紧密相关能力可以共用方案，只有存在独立技术路线时才要求拆分。design 引入 proposal / specs 未声明的新能力时必须失败。
+- 方案标题只有“策略复用”“数据处理”“接口调整”等泛称，导致审查者无法判断实现什么、采用什么路线。内容等价的 `## 实现路线`、`## 架构决策` 等结构可以接受，不因标题不同失败。
+- 无法从 design 的等价语义判断本次范围边界或各实现方案的总体关系，导致文档不可审查时阻塞。新模板的 `## 非目标` 和 `## 总体方案` 由生成侧保证；审查不机械要求标题，也不在不存在真实非目标时要求用“无”或“不适用”占位。
+- “不采用”、`## 整体方案取舍`、`## 关键契约`、`## 风险 / 取舍`、`## 迁移与回滚` 没有真实内容时应省略；不得仅因缺少可选章节判失败，但空章节、“无 / 不适用”占位或为了模板编造内容应按文档噪声处理。真实技术风险、取舍或迁移约束是否遗漏由 Architect 审查。
+- design 写成 discovery 调查记录、Impact 复述、specs 行为复述、文件浏览记录、task 拆分、测试操作或执行日志。算法、数据 / 控制流、状态转换和事务顺序可以有序表达，不因编号或顺序词失败。
+- 同一事实、约束或契约在多个方案中重复堆叠，导致真实方案差异无法辨识；共享内容应有一个可定位的权威定义。
+- 文档显式标注的未决路线没有登记到 `## 待用户确认`；或已确认 DEC 没有行内结论，结论未回写 proposal、design、specs、test-contract。
+- discovery 含 IDC 时，`Impact Reason` 未引用相关 `IDC-xxx`；IDC 状态、Impact 和 design readiness 相互矛盾；`未知阻塞` 仍存在时 design 不得 ready。`未知非阻塞` 必须有不影响验收的理由，不能只抄状态。
+- discovery 含链路五要素时，已确认的下游消费者或视图差异未进入 Impact 且无排除理由；或 Impact 引用的 `CHAIN-xxx` 没有测试场景映射且无不覆盖理由。design 仅引用 CHAIN 解释路线不重复产生测试映射；design 暴露的新消费者、视图差异或可观察行为影响必须先进入 Impact。对账不要求每条 CHAIN 单独进入 Impact；同一链路已由 IDC 覆盖且互相引用时不重复报错。
+- proposal、design、specs 与已确认的 CHAIN / IDC 结论显式矛盾，且没有声明为待确认或本次有意变更。
+- `specs/` 增量与 proposal 能力变化不对应：声明的能力缺规范增量、specs 引入未声明能力，或规范正文写成实现路线 / 过程描述。绑定为目录时须逐个打开 Markdown 规范；无法读取时必须失败。
+- `business-invariants.md` 条目不可证伪，或本次行为变化触及的核心规则缺少对应不变量。
+- `tasks.md` 无法定位到 design 的实现方案或边界约束，任务过粗，或多个独立行为混在同一 RED/GREEN 闭环。
+- task ID 重复 / 不稳定，标题混入 task ID，缩进 checkbox 或普通说明承载实际工作，task 中写入 RED/GREEN 命令、断言或预期输出。
+- tasks 顺序与依赖矛盾：被依赖 task 出现在依赖它的 task 之后；标题分组和行内依赖说明不改变全文顶格 checkbox 执行顺序。
+- 分组标题、task ID 或任务文本会让执行者容易启动错任务时应失败；不要为弥补拆分不清而要求父子任务状态、额外设计字段或 tasks 反向引用 design。
 
 ### 执行依据审查
 
@@ -68,11 +74,11 @@ argument-hint: "本次反方审查说明"
 - 普通 `tdd_required:true` task 缺 `执行依据:`，或其执行依据缺 `测试` 字段（`tdd_required:false` task 的 `测试` 按需填写，不作为阻塞条件）。
 - 普通 `tdd_required:true` task 的执行依据缺 `设计`、`来源`、`原因` 或 `边界` 字段。
 - 执行依据字段重复，或块内出现 checkbox（会变成无人执行的暗任务）。
-- `设计`、`来源`、`边界` 引用无法定位到原文（对应文件不存在该标题/摘录/ID），或引用不带文件前缀导致无法回读。
+- `设计`、`来源` 引用无法定位到原文（对应文件不存在该标题/摘录/ID），或引用不带文件前缀导致无法回读。`边界` 默认可以直接写具体保护语义，不要求文件前缀；只有它声明引用既有文档原文时，才要求可定位。
 - 声明的 `TEST-xxx` 不存在于 `test-contract.md`。
 - 单个 task 声明的测试超过 3 个但 `原因` 未说明为什么不再拆分；或 `原因` 与 `来源` 明显不支持该 task 的拆分边界。
 - 字段内容是放在任何 task 上都成立的套话（如 `边界` 写"不破坏现有功能"、`原因` 写"需要单独实现"），无法用来对照实现或审查越界；或多个 task 的执行依据互相复制、与各自任务内容不对应。
-- `设计` 引用能定位，但原文内容不支持该 task 的实现路线（引用与任务实质脱节）。
+- `设计` 引用虽可定位，但内容与 task 实质无关时阻塞；引用方案在技术上是否可行、边界是否充分，由 Architect 审查。
 
 ## 输出风格
 
