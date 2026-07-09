@@ -27,6 +27,8 @@ metadata:
 
 人类可读正文默认使用简体中文；OpenSpec 结构标题、规范关键字、命令、路径、JSON 字段、代码标识符保留原文。OpenSpec 生成文档语言不符合预期时，先检查 `openspec/config.yaml` 的官方 `context` 设置；不要在变更文档里添加自定义 `language` 字段。
 
+路径/锚点写法：proposal/design/tasks/test-contract 正文里的代码区域和源码证据默认使用短写法，例如 `MatchingProcessor`、`AttendanceReportCalculationRuleController#getSelectShiftBlockStrategy`、`ShiftBlockMatchStrategyType.java:8`。不要写绝对路径，也不要反复写项目相对长路径；只有短名在当前仓库无法唯一定位时，才加最短必要目录前缀（如 `meta/ShiftBlockMatchStrategyType.java:8`）。文档引用仍须带文件名前缀，例如 `design.md#实现路线`、`test-contract.md#TEST-001`、`specs/review/spec.md#verifier 绑定`；CLI 参数、job packet、JSON 报告字段和 `.superspec/artifacts/...` 补充材料路径仍按协议保留原始路径。
+
 ## 本阶段做什么
 
 ### proposal.md
@@ -35,11 +37,11 @@ metadata:
 ```markdown
 | Area | Reason |
 |---|---|
-| src/review.ts | 需要核对 review verifier 如何绑定文档和执行证据 |
+| review.ts | 需要核对 verifier 如何绑定文档和执行证据 |
 ```
 
 规则：
-- `Area` 可以写代码区域、API、依赖、系统、配置或文档；不作为路径白名单
+- `Area` 可以写代码区域、API、依赖、系统、配置或文档；优先用模块/类/接口名等短代码区域，不作为路径白名单
 - `Reason` 只解释为什么该范围受影响，不写详细实现方案
 - discovery 含 `## 输入数据来源核查` 的 IDC 项时，相关 `Reason` 须引用对应 `IDC-xxx` 状态（`已证明` / `未知阻塞` / `未知非阻塞`）
 - discovery 含 `## 链路五要素` 时，`## Impact` 须与非 `未知阻塞` 链路行中已确证的下游消费者/视图差异对账：受本次改动影响的写入 Area/Reason 并引用对应 `CHAIN-xxx`；不受影响的在 `## Impact` 中写明排除理由（可按组书写，排除理由不回写 discovery.md）。对账不要求逐行进入 Impact；同一链路已由 `IDC-xxx` 覆盖时，引用其一并注明对应即可
@@ -96,7 +98,7 @@ OpenSpec 能力规范增量（`openspec instructions specs` 格式）。
 规则：
 - 每个普通 TDD task（`tdd_required:true`）必须紧跟一个 `执行依据:` 块，包含五个字段：`测试`（该 task 必须兑现的 test-contract 场景，引用 `test-contract.md#TEST-xxx`，多个用逗号合并）、`设计`（执行路线在 `design.md` 的位置或短摘录）、`来源`（task 产生依据，如 `proposal.md#Impact`、spec delta、`discovery.md#CHAIN-xxx,IDC-xxx`，已有明确文件路径的补充材料用 `.superspec/artifacts/...`）、`原因`（为什么单独拆出这个 task）、`边界`（执行时需要保护的边界）
 - `执行依据:` 必须紧跟所属 task 行（中间最多允许一个空行）；字段不得重复；块内不得出现 checkbox（`- [ ]` / `- [x]`），否则会变成无人执行的暗任务并被引擎拒绝
-- 引用使用带文件前缀的可定位格式；`设计`、`来源`、`边界` 的标题或短摘录引用逐项写完整文件前缀，只有 ID 型引用（TEST/CHAIN/IDC）可以逗号合并
+- 引用使用带文件名前缀的可定位格式；`设计`、`来源`、`边界` 的标题或短摘录引用逐项写明 `design.md#...`、`proposal.md#...`、`specs/.../spec.md#...` 等文档前缀，只有 ID 型引用（TEST/CHAIN/IDC）可以逗号合并
 - 声明的每个 `TEST-xxx` 必须存在于 `test-contract.md`，否则 `propose-ready` 和 `start-apply` 会被阻断
 - 五个字段的内容必须针对该 task 具体可核验，执行者和审查者要拿它们对照实现：`边界` 写出改动不应触碰的具体行为、模块或语义（能对着 diff 判断有没有越界），不写"不破坏现有功能"这类放在任何 task 上都成立的套话；`原因` 说明这个 task 独立存在的理由，不写"需要单独实现"；不同 task 的执行依据不应互相复制
 - 写不出可定位的 `设计` 引用时，说明 `design.md` 缺少该 task 的实现方向——先补设计，不编造引用
@@ -144,7 +146,7 @@ scenario 写到能推导断言的程度：给定什么条件、发生什么动�
 
 | 核查ID | 验证方式 | 输入链路声明 | 证据或计划 |
 |---|---|---|---|
-| IDC-001 | 源码锚点 + 聚焦测试 | producer 产生的目标输入会进入 consumer | src/path.ts:10 + TEST-001 |
+| IDC-001 | 源码锚点 + 聚焦测试 | producer 产生的目标输入会进入 consumer | path.ts:10 + TEST-001 |
 
 证明方式可用源码锚点、fixture、targeted test、日志或 trace，须说明证明力；不强制集成测试。只证 consumer 算法、没证 producer→consumer 输入完整性，测试契约不足。
 

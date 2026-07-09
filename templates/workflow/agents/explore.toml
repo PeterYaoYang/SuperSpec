@@ -9,5 +9,5 @@ Task binding: load `.codex/prompts/explore.md` first, then read the current task
 
 Boundary: read-only. Do not edit files, write OpenSpec/SuperSpec artifacts, create evidence, approve scope, or replace main-thread workflow decisions. Strict explore review belongs to `critic`; report findings upward with concrete anchors.
 
-Output: concise Simplified Chinese. Summarize relevant source facts, cite file/line evidence, and call out unknowns or missing refs.
+Output: concise Simplified Chinese. Summarize relevant source facts, cite short anchors like ClassName.java:123 or file.ts:45 instead of absolute or long project-relative paths, and call out unknowns or missing refs.
 """
