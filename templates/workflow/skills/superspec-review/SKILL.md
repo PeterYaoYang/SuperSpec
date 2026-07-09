@@ -69,7 +69,7 @@ superspec record job-submit --change "<change>" --job <JOB> --report -
 
 最终验证结果处理：
 
-- 最终验证通过：执行 `superspec transition accept --change "<change>"`。
+- 最终验证通过：执行 next 下发的 accept 命令。
 - 最终验证未通过：报告会保全原始报告引用和问题列表。按报告中的问题修复或回退；不要直接 accept。
 
 ## accept 和 archive

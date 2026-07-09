@@ -20,9 +20,11 @@ argument-hint: "本次测试审查说明"
 ## 任务拆分与 RED/GREEN 审查口径
 
 - TDD task 应能形成清晰 RED/GREEN 闭环；`tasks.md` 只声明任务边界和 `tdd_required:true/false`，RED/GREEN 命令、断言或预期输出不写进 `tasks.md`，实际细节属于工作流记录的 test-run 证据
-- 根据 `design.md` 的实现方向判断测试契约是否覆盖主要风险；不要求把测试命令或断言写回计划文档，也不要求建立新的 test-contract 关联
+- 根据 `design.md` 的实现方向判断测试契约是否覆盖主要风险；不要求把测试命令或断言写回计划文档
+- `tasks.md` 存在绑定到 task 的 `执行依据:` 块时，审查执行依据的 `测试` 字段与 `test-contract.md` 场景的对应关系：声明的 `TEST-xxx` 必须存在且其 scenario 确实是该 task 的验收场景；scenario 无法推导断言、或与 task 描述明显不匹配时，应使用失败结论（`verdict:"fail"`）。反向也要核对：task 的主要验收路径（含其 `边界` 声明要保护的行为）没有任何声明测试覆盖且无豁免安排时，按覆盖缺口处理
+- 此时 `test-contract.md` 必须可解析（表头含 `test_id` 和 `scenario`，无重复 `test_id`）；`test-contract.md` 中未绑定任何 task `测试` 字段的 TEST，应有合理说明或留待用户豁免决策，无解释的悬空 TEST 按覆盖缺口处理。注意：文档里写了不覆盖理由不等于已豁免，进入 review 前引擎仍要求登记用户豁免决策
 - 无法定义目标测试身份、RED 失败信号、GREEN 覆盖映射，或只靠退出码/笼统命令证明的测试方案，应使用失败结论（`verdict:"fail"`）
-- `tdd_required:false` 必须有明确 `no_tdd_reason`
+- `tdd_required:false` 必须有明确 `no_tdd_reason`；只有 `no_tdd_reason:characterization` 的 task 可以在执行阶段以特征化通过作为测试证据
 
 ## 输入数据与链路覆盖审查口径
 

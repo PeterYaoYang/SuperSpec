@@ -40,9 +40,79 @@ export interface Job {
   boundFiles: Ref[];
   review_evidence_digest?: string;
   packet_digest: string;
+  packet_context?: JobPacketContext;
   created_from_transition: string;
   created_at: string;
   previous_rejection?: CodeReviewPreviousRejection;
+}
+
+export interface ExecutionContract {
+  tests: string[];
+  design: string | null;
+  source: string[];
+  reason: string | null;
+  guard: string | null;
+}
+
+export interface DirtyFileFingerprint {
+  path: string;
+  status: "added" | "modified" | "deleted";
+  sha256: string | null;
+}
+
+export interface BoundarySnapshot {
+  head: string | null;
+  head_reason?: string;
+  dirty_files_reason?: string;
+  dirty_files: DirtyFileFingerprint[];
+}
+
+export interface CodeReviewScope {
+  base_head: string | null;
+  current_head: string | null;
+  scope_reliable: boolean;
+  scope_reason: string;
+  committed_paths: string[] | null;
+  worktree_paths: string[];
+  untracked_paths: string[];
+  review_paths: string[];
+}
+
+export interface CodeStateCheck {
+  baseline_head: string | null;
+  current_head: string | null;
+  head_matches: boolean;
+  changed_paths: string[];
+  scope_reason: string;
+}
+
+export interface TaskExecutionIndexEntry {
+  task_id: string;
+  attempt_id: string;
+  changed_paths: string[] | null;
+  // committed 段 git diff 失败时的原因；此时 changed_paths 只含 dirty 侧对比结果
+  changed_paths_partial_reason?: string;
+  contract: ExecutionContract | null;
+  declared_tests: string[];
+  scope_note: Record<string, unknown> | null;
+  test_evidence: Record<string, unknown>[];
+  task_completed_event_ref: string;
+}
+
+export interface CoverageExemptionRef {
+  test_id: string;
+  event_id: string;
+  event_digest: string;
+  answer: string;
+}
+
+export interface JobPacketContext {
+  code_review_scope?: CodeReviewScope;
+  coverage_exemption_refs?: CoverageExemptionRef[];
+  task_execution_index?: TaskExecutionIndexEntry[];
+  unattributed_paths?: string[];
+  unknown_attribution_tasks?: string[];
+  code_state_check?: CodeStateCheck;
 }
 
 export interface JobPacket {
@@ -53,6 +123,13 @@ export interface JobPacket {
   boundFiles: Ref[];
   review_evidence_digest?: string;
   previous_rejection?: CodeReviewPreviousRejection;
+  packet_context?: JobPacketContext;
+  code_review_scope?: CodeReviewScope;
+  coverage_exemption_refs?: CoverageExemptionRef[];
+  task_execution_index?: TaskExecutionIndexEntry[];
+  unattributed_paths?: string[];
+  unknown_attribution_tasks?: string[];
+  code_state_check?: CodeStateCheck;
   packet_digest: string;
   required_output_kind: string;
   preferred_input_mode?: "stdin" | "file";
@@ -61,6 +138,7 @@ export interface JobPacket {
   file_fallback?: boolean;
   output_contract_fields?: string[];
   output_contract_optional_fields?: string[];
+  字段说明?: Record<string, string>;
   output_instructions?: string;
   stop_conditions: string[];
   created_from_transition: string;
@@ -117,6 +195,9 @@ export interface TransitionCommitPayload {
   code_review_gate?: {
     decision: "passed" | "skipped";
     job_id?: string;
+    packet_digest?: string;
+    current_head?: string | null;
+    head?: string | null;
     reason?: "no_code_changes";
   };
 }
@@ -146,6 +227,10 @@ export interface TaskAttempt {
   task_id: string;
   state: AttemptState;
   task_structure_digest: string;
+  contract?: ExecutionContract | null;
+  contract_mode?: boolean;
+  tdd_required?: boolean;
+  no_tdd_reason?: string | null;
   declared_write_scope: string[];
   pre_edit_source_fingerprint: string | null;
   pre_edit_red_ref: string | null;
@@ -159,7 +244,7 @@ export interface TaskAttempt {
 export interface TestRun {
   test_id: string;
   attempt_id?: string | null;
-  task_structure_digest: string;
+  task_structure_digest?: string;
   covers_task_ids?: string[];
   command: string;
   cwd: string;

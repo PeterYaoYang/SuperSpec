@@ -29,24 +29,37 @@ import {
   codeReviewBoundFiles,
   codeReviewDecisionScope,
   codeReviewJobStaleReason,
+  codeReviewPacketContext,
   codeReviewPacketDigest,
   collectCodeReviewGateFacts,
+  computeCodeStateCheck,
+  currentCodeReviewWorkingPaths,
   dismissedCodeReviewSummary,
   latestCodeReviewDecision,
   latestCodeReviewFailedStatus,
+  missingCoverageExemptionTestIds,
   requiresFinalVerifierForCurrentReview,
-  scanCodeChanges,
+  scanCodeChangesForReview,
 } from "./code_review.ts";
 import { taskEvidenceReadiness } from "./task_evidence.ts";
-import { findTaskInLines } from "./format.ts";
 import {
+  adoptedContractForTask,
+  findTaskInLines,
+  isReviewFixTaskId,
+  parseTasksMd,
+  parseTestContractEntries,
+  type ParsedExecutionRequirement,
+} from "./format.ts";
+import {
+  applyRequirementModeForCurrentRound,
   formatPendingTaskMessage,
-  pendingTaskIds,
+  pendingTaskStatusForApply,
   planTransition,
   proposalDocsBaseline,
   type TransitionDecisionPlan,
 } from "./phase_plan.ts";
-import type { Event, Snapshot, State, Job, JobRole, TransitionResult, Ref, TaskAttempt } from "./types.ts";
+import { currentGitHead, dirtyCodeFiles } from "./git_state.ts";
+import type { CodeReviewScope, Event, Snapshot, State, Job, JobRole, TransitionResult, Ref, TaskAttempt, BoundarySnapshot } from "./types.ts";
 
 let transitionSeq = 0;
 function newTransitionId(): string { return `T-${Date.now()}-${++transitionSeq}`; }
@@ -99,6 +112,96 @@ function findTaskLine(lines: string[], taskId: string): number {
   return findTaskInLines(lines, taskId);
 }
 
+function boundarySnapshotResult(projectRoot: string): { snapshot: BoundarySnapshot | null; reason?: string } {
+  const head = currentGitHead(projectRoot);
+  const dirty = dirtyCodeFiles(projectRoot);
+  if (!dirty.ok) return { snapshot: null, reason: dirty.reason };
+  return {
+    snapshot: {
+      head: head.head,
+      ...(head.reason !== "ok" ? { head_reason: head.reason } : {}),
+      dirty_files: dirty.files,
+    },
+  };
+}
+
+function boundarySnapshotPayload(projectRoot: string): { boundary_snapshot: BoundarySnapshot | null; boundary_snapshot_reason?: string } {
+  const result = boundarySnapshotResult(projectRoot);
+  return {
+    boundary_snapshot: result.snapshot,
+    ...(result.reason ? { boundary_snapshot_reason: result.reason } : {}),
+  };
+}
+
+function parseScopeNoteInput(inputContent: string | null): { ok: true; value: Record<string, unknown> | null; digest: string | null } | { ok: false; message: string; digest: string | null } {
+  if (inputContent == null) return { ok: true, value: null, digest: null };
+  const digest = sha256Text(inputContent);
+  if (inputContent.trim() === "") return { ok: false, message: "范围扩大说明（scope_note）输入不能为空", digest };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(inputContent);
+  } catch {
+    return { ok: false, message: "范围扩大说明（scope_note）输入必须是有效 JSON", digest };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { ok: false, message: "范围扩大说明（scope_note）输入顶层必须是 JSON object", digest };
+  }
+  const obj = parsed as Record<string, unknown>;
+  const keys = Object.keys(obj);
+  if (keys.some(key => key !== "scope_note")) {
+    return { ok: false, message: "范围扩大说明（scope_note）输入包含未知顶层字段", digest };
+  }
+  const note = obj.scope_note;
+  if (!note || typeof note !== "object" || Array.isArray(note)) {
+    return { ok: false, message: "范围扩大说明（scope_note）必须是对象", digest };
+  }
+  const noteObj = note as Record<string, unknown>;
+  const allowed = new Set(["reason", "changed_area", "plan_alignment", "verification"]);
+  if (Object.keys(noteObj).some(key => !allowed.has(key))) {
+    return { ok: false, message: "范围扩大说明（scope_note）包含未知字段", digest };
+  }
+  for (const field of ["reason", "changed_area", "plan_alignment"] as const) {
+    if (typeof noteObj[field] !== "string" || noteObj[field].trim() === "") {
+      return { ok: false, message: `范围扩大说明里的 ${field} 字段（scope_note.${field}）必须是非空字符串`, digest };
+    }
+  }
+  if (!Array.isArray(noteObj.verification) || noteObj.verification.length === 0 || !noteObj.verification.every(item => typeof item === "string" && item.trim() !== "")) {
+    return { ok: false, message: "范围扩大说明里的验证字段（scope_note.verification）必须是非空字符串数组", digest };
+  }
+  return {
+    ok: true,
+    digest,
+    value: {
+      reason: noteObj.reason,
+      changed_area: noteObj.changed_area,
+      plan_alignment: noteObj.plan_alignment,
+      verification: noteObj.verification,
+    },
+  };
+}
+
+function validateTaskStartContract(
+  changeRoot: string,
+  taskId: string,
+  tddRequired: boolean,
+  parsedContract: ParsedExecutionRequirement | null,
+): string | null {
+  if (!parsedContract) return null;
+  if (parsedContract.errors.length > 0) return parsedContract.errors.join("；");
+  if (tddRequired && !isReviewFixTaskId(taskId) && parsedContract.contract.tests.length === 0) {
+    return `${taskId} 是普通 TDD 任务，执行依据缺少测试`;
+  }
+  if (parsedContract.contract.tests.length === 0) return null;
+
+  const testContractPath = join(changeRoot, ".superspec", "artifacts", "test-contract.md");
+  if (!existsSync(testContractPath)) return "test-contract.md 不存在，无法校验执行依据测试引用";
+  const parsed = parseTestContractEntries(readFileSync(testContractPath, "utf8"));
+  if (!parsed.ok) return parsed.message;
+  const known = new Set(parsed.entries.map(entry => entry.test_id));
+  const missing = parsedContract.contract.tests.filter(testId => !known.has(testId));
+  return missing.length > 0 ? `执行依据引用了不存在的 TEST ID：${missing.join(", ")}` : null;
+}
+
 function hasRejectedReviewReadyVerifier(events: Event[]): boolean {
   const reviewReadyVerifierIds = new Set<string>();
   for (const ev of events) {
@@ -117,10 +220,12 @@ function hasRejectedReviewReadyVerifier(events: Event[]): boolean {
 function createCodeReviewerJob(
   change: string,
   projectRoot: string,
+  changeRoot: string,
   events: Event[],
 ): { job: Job; scanReason: string } {
-  const scan = scanCodeChanges(projectRoot);
+  const scan = scanCodeChangesForReview(projectRoot, events);
   const boundFiles = codeReviewBoundFiles(projectRoot, scan.paths);
+  const packetContext = codeReviewPacketContext(changeRoot, projectRoot, scan.scope!, events);
   const facts = collectCodeReviewGateFacts(events);
   const latestRejected = facts.latestRejected;
   const reviewFailedStatus = latestCodeReviewFailedStatus(events);
@@ -138,6 +243,7 @@ function createCodeReviewerJob(
     gate_id: REVIEW_CODE_REVIEW_GATE_ID,
     boundFiles,
     checkedDocs: REVIEW_DOC_PATHS,
+    packet_context: packetContext,
     created_from_transition: "review-ready",
     ...(previousRejection ? { previous_rejection: previousRejection } : {}),
   };
@@ -149,6 +255,7 @@ function createCodeReviewerJob(
       state: "requested" as const,
       gate_id: REVIEW_CODE_REVIEW_GATE_ID,
       boundFiles,
+      packet_context: packetContext,
       packet_digest: codeReviewPacketDigest(packetInput),
       created_from_transition: "review-ready",
       created_at: new Date().toISOString(),
@@ -199,20 +306,29 @@ function appendReviewFixTask(changeRoot: string, ref: CodeReviewFindingRef, find
   return "created";
 }
 
-function isFreshOpenCodeReviewerJob(job: Job, projectRoot: string): boolean {
-  return codeReviewJobStaleReason(projectRoot, job) == null;
+function isFreshOpenCodeReviewerJob(job: Job, projectRoot: string, currentWorkingPaths?: string[]): boolean {
+  return codeReviewJobStaleReason(projectRoot, job, currentWorkingPaths) == null;
+}
+
+function hasFrozenCodeReviewCurrentHead(scope: CodeReviewScope | undefined): scope is CodeReviewScope {
+  if (!scope || typeof scope !== "object") return false;
+  if (!Object.prototype.hasOwnProperty.call(scope, "current_head")) return false;
+  const currentHead = (scope as { current_head?: unknown }).current_head;
+  return currentHead === null || (typeof currentHead === "string" && currentHead.trim() !== "");
 }
 
 function evaluateApplyDoneCodeReviewGate(input: {
   events: Event[];
   projectRoot: string;
+  changeRoot: string;
   change: string;
   policyPayload: Record<string, unknown>;
 }): Decision | BlockedDecision | SkipDecision {
-  const scan = scanCodeChanges(input.projectRoot);
+  const scan = scanCodeChangesForReview(input.projectRoot, input.events);
   const facts = collectCodeReviewGateFacts(input.events);
   if (scan.hasCodeChanges) {
-    const freshOpenJobs = facts.openJobs.filter(job => isFreshOpenCodeReviewerJob(job, input.projectRoot));
+    const currentWorkingPaths = currentCodeReviewWorkingPaths(input.projectRoot, input.events);
+    const freshOpenJobs = facts.openJobs.filter(job => isFreshOpenCodeReviewerJob(job, input.projectRoot, currentWorkingPaths));
     if (freshOpenJobs.length > 0) {
       return {
         blocked: true,
@@ -223,6 +339,17 @@ function evaluateApplyDoneCodeReviewGate(input: {
 
     const latest = facts.latestTerminal;
     if (latest?.state === "accepted") {
+      const acceptedScope = latest.job.packet_context?.code_review_scope;
+      if (!hasFrozenCodeReviewCurrentHead(acceptedScope)) {
+        const { job, scanReason } = createCodeReviewerJob(input.change, input.projectRoot, input.changeRoot, input.events);
+        return {
+          fromState: "apply_done",
+          toState: "apply_done",
+          outcome: "job_created" as const,
+          newJobs: [job],
+          reason: `已接受代码审查工作项缺少冻结 current_head，重新创建代码审查工作项；${scanReason}`,
+        };
+      }
       return {
         fromState: "apply_done",
         toState: "review",
@@ -230,14 +357,19 @@ function evaluateApplyDoneCodeReviewGate(input: {
         reason: "代码审查已通过，进入最终审查阶段",
         commitPayload: {
           ...input.policyPayload,
-          code_review_gate: { decision: "passed", job_id: latest.job.job_id },
+          code_review_gate: {
+            decision: "passed",
+            job_id: latest.job.job_id,
+            packet_digest: latest.job.packet_digest,
+            current_head: acceptedScope.current_head,
+          },
         },
       };
     }
     if (latest?.state === "rejected" && latest.result_kind === "review_failed") {
       const reviewFailedStatus = latestCodeReviewFailedStatus(input.events);
       if (reviewFailedStatus && reviewFailedStatus.findings.length > 0 && reviewFailedStatus.unresolved.length === 0) {
-        const { job, scanReason } = createCodeReviewerJob(input.change, input.projectRoot, input.events);
+        const { job, scanReason } = createCodeReviewerJob(input.change, input.projectRoot, input.changeRoot, input.events);
         return {
           fromState: "apply_done",
           toState: "apply_done",
@@ -252,7 +384,7 @@ function evaluateApplyDoneCodeReviewGate(input: {
       };
     }
 
-    const { job, scanReason } = createCodeReviewerJob(input.change, input.projectRoot, input.events);
+    const { job, scanReason } = createCodeReviewerJob(input.change, input.projectRoot, input.changeRoot, input.events);
     return {
       fromState: "apply_done",
       toState: "apply_done",
@@ -271,17 +403,26 @@ function evaluateApplyDoneCodeReviewGate(input: {
     reason: "没有代码类改动，直接进入最终审查阶段",
     commitPayload: {
       ...input.policyPayload,
-      code_review_gate: { decision: "skipped", reason: "no_code_changes" },
+      code_review_gate: {
+        decision: "skipped",
+        reason: "no_code_changes",
+        head: scan.scope?.current_head ?? null,
+      },
     },
   };
 }
 
 function createFinalVerifierJob(
   change: string,
+  projectRoot: string,
   changeRoot: string,
+  events: Event[],
   currentEvidenceDigest: string,
 ): Job {
   const boundFiles = reviewBoundFiles(changeRoot);
+  const packetContext = {
+    code_state_check: computeCodeStateCheck(projectRoot, events),
+  };
   return {
     job_id: newJobId(change, "verifier"),
     role: "verifier",
@@ -289,11 +430,13 @@ function createFinalVerifierJob(
     gate_id: REVIEW_FINAL_VERIFIER_GATE_ID,
     boundFiles,
     review_evidence_digest: currentEvidenceDigest,
+    packet_context: packetContext,
     packet_digest: sha256Text(JSON.stringify({
       role: "verifier",
       gate_id: REVIEW_FINAL_VERIFIER_GATE_ID,
       boundFiles,
       review_evidence_digest: currentEvidenceDigest,
+      packet_context: packetContext,
       created_from_transition: "review-ready",
     })),
     created_from_transition: "review-ready",
@@ -305,6 +448,7 @@ function evaluateFinalVerifierGate(input: {
   snapshot: Snapshot;
   events: Event[];
   change: string;
+  projectRoot: string;
   changeRoot: string;
   currentEvidenceDigest: string;
   policy: ReviewPolicy;
@@ -321,7 +465,7 @@ function evaluateFinalVerifierGate(input: {
   }
 
   const verifierAccepted = input.snapshot.accepted_jobs.find(job =>
-    isFreshReviewVerifier(job, input.changeRoot, input.currentEvidenceDigest)
+    isFreshReviewVerifier(job, input.changeRoot, input.currentEvidenceDigest, input.projectRoot, input.events)
   );
   const finalVerifierRequired = requiresFinalVerifierForCurrentReview(input.events) || input.policy.requires_verifier;
   if (!finalVerifierRequired) {
@@ -339,7 +483,7 @@ function evaluateFinalVerifierGate(input: {
 
   if (!verifierAccepted) {
     const previousVerifierRejected = hasRejectedReviewReadyVerifier(input.events);
-    const job = createFinalVerifierJob(input.change, input.changeRoot, input.currentEvidenceDigest);
+    const job = createFinalVerifierJob(input.change, input.projectRoot, input.changeRoot, input.events, input.currentEvidenceDigest);
     return {
       fromState: input.snapshot.state,
       toState: input.snapshot.state,
@@ -602,31 +746,63 @@ export function taskStart(projectRoot: string, change: string, changeRoot: strin
     name: "task-start", idempotencyInputs: { task: taskId },
     decide: (snapshot) => {
       if (snapshot.state !== "apply") return { skip: true, message: `当前状态 ${snapshot.state}，需要 apply` };
+      const events = readEvents(projectRoot, change);
       const tasksContent = readFileSync(join(changeRoot, "tasks.md"), "utf8");
       const lines = tasksContent.split("\n");
       const taskLineIdx = findTaskLine(lines, taskId);
       if (taskLineIdx < 0) return { skip: true, message: `任务 ${taskId} 不存在` };
-      if (lines[taskLineIdx].match(/- \[x\]/)) return { skip: true, message: `任务 ${taskId} 已完成` };
+      const contractMode = applyRequirementModeForCurrentRound(events);
+      if (contractMode && pendingTaskStatusForApply(changeRoot, events).completedByEvent.includes(taskId)) {
+        return { skip: true, message: `任务 ${taskId} 已通过完成事件完成` };
+      }
+      if (lines[taskLineIdx].match(/- \[[xX]\]/)) return { skip: true, message: `任务 ${taskId} 已完成` };
+      const taskInfo = parseTasksMd(tasksContent).find(task => task.taskId === taskId);
+      if (!taskInfo) return { skip: true, message: `任务 ${taskId} 不存在` };
 
       const existing = snapshot.active_task_attempts?.find(a => a.task_id === taskId && a.state === "active");
       if (existing) return { skip: true, message: `任务 ${taskId} 已有活跃尝试` };
+
+      // 统一出口：adopted.contract 非 null 当且仅当契约模式下有绑定块；
+      // legacy 轮即使 task 带执行依据文本也输出 null，避免"看似契约、实按 legacy 校验"的误导态
+      const adopted = adoptedContractForTask(tasksContent, taskId, contractMode);
+      if (contractMode && taskInfo.tddRequired && !isReviewFixTaskId(taskId) && !adopted.parsed) {
+        return { skip: true, message: `执行依据模式下，普通 TDD 任务 ${taskId} 缺少执行依据` };
+      }
+      if (contractMode) {
+        const contractError = validateTaskStartContract(changeRoot, taskId, taskInfo.tddRequired, adopted.parsed);
+        if (contractError) return { skip: true, message: contractError };
+      }
 
       const structureDigest = sha256Text(tasksContent.replace(/- \[[xX]\]/g, "- [ ]"));
       const attempt: TaskAttempt = {
         attempt_id: `ATT-${taskId}-${Date.now()}-${++attemptSeq}`,
         task_id: taskId, state: "active",
         task_structure_digest: structureDigest,
+        contract_mode: contractMode,
+        contract: adopted.contract,
+        tdd_required: taskInfo.tddRequired,
+        no_tdd_reason: taskInfo.noTddReason,
         declared_write_scope: [], pre_edit_source_fingerprint: null,
         pre_edit_red_ref: null, executor_packet_digest: null,
         executor_result_ref: null, post_edit_green_ref: null,
         created_at: new Date().toISOString(),
       };
+      const eventPayload = {
+        ...attempt,
+        ...boundarySnapshotPayload(projectRoot),
+      };
 
       return {
         fromState: "apply", toState: "apply", outcome: "advanced" as const,
         reason: `创建任务 ${taskId} 执行尝试`,
-        extraEvents: [{ type: "task_started", payload: attempt as unknown as Record<string, unknown> }],
-        details: { attempt_id: attempt.attempt_id },
+        extraEvents: [{ type: "task_started", payload: eventPayload as unknown as Record<string, unknown> }],
+        details: {
+          attempt_id: attempt.attempt_id,
+          task_id: taskId,
+          contract: adopted.contract,
+          // legacy 轮统一标注历史模式（无论有无执行依据文本）；契约轮无块时标 false（如 REVIEW-FIX）
+          ...(adopted.contract ? {} : { legacy_contract: !contractMode }),
+        },
       };
     },
   });
@@ -711,7 +887,7 @@ export function reopen(
         return { skip: true, message: `当前状态 ${snapshot.state}，不能 reopen 到 apply` };
       }
 
-      const pending = pendingTaskIds(changeRoot);
+      const pending = pendingTaskStatusForApply(changeRoot, events).pending;
       if (pending.length === 0) return { skip: true, message: "没有未完成任务，不能 reopen 到 apply" };
 
       return {
@@ -737,8 +913,17 @@ export function reviewReady(projectRoot: string, change: string, changeRoot: str
       const currentEvidenceDigest = reviewEvidenceDigest(events);
 
       // 检查是否所有任务已完成
-      const pending = pendingTaskIds(changeRoot);
+      const pending = pendingTaskStatusForApply(changeRoot, events).pending;
       if (pending.length > 0) return { skip: true, message: formatPendingTaskMessage(pending, "请先通过 next/reopen 继续执行") };
+      if (applyRequirementModeForCurrentRound(events)) {
+        const missingExemptions = missingCoverageExemptionTestIds(changeRoot, events);
+        if (missingExemptions.length > 0) {
+          return {
+            skip: true,
+            message: `test-contract 中存在未绑定任务且缺少覆盖豁免的 TEST：${missingExemptions.join(", ")}；请先向用户确认原因（不要代替用户决策），再执行 superspec record user-decision --change "${change}" --input - 登记，stdin 传入 JSON：{"scope":"test_coverage_exemption:${missingExemptions[0]}","question":"<向用户提出的问题>","answer":"<用户给出的豁免原因>"}`,
+          };
+        }
+      }
 
       // 如果当前是 apply，先推进到 apply_done
       if (snapshot.state === "apply") {
@@ -752,6 +937,7 @@ export function reviewReady(projectRoot: string, change: string, changeRoot: str
         return evaluateApplyDoneCodeReviewGate({
           events,
           projectRoot,
+          changeRoot,
           change,
           policyPayload,
         });
@@ -762,6 +948,7 @@ export function reviewReady(projectRoot: string, change: string, changeRoot: str
           snapshot,
           events,
           change,
+          projectRoot,
           changeRoot,
           currentEvidenceDigest,
           policy,
@@ -823,10 +1010,12 @@ export function archive(projectRoot: string, change: string, changeRoot: string)
 
 // ===== task-complete =====
 
-export function taskComplete(projectRoot: string, change: string, changeRoot: string, taskId: string): TransitionResult {
+export function taskComplete(projectRoot: string, change: string, changeRoot: string, taskId: string, inputContent: string | null = null): TransitionResult {
+  const scopeInput = parseScopeNoteInput(inputContent);
   return commitTransition(projectRoot, change, changeRoot, {
-    name: "task-complete", idempotencyInputs: { task: taskId, phase: "complete" },
+    name: "task-complete", idempotencyInputs: { task: taskId, phase: "complete", scope_note_digest: scopeInput.digest ?? "" },
     decide: (snapshot) => {
+      if (!scopeInput.ok) return { skip: true, message: scopeInput.message };
       if (snapshot.state !== "apply") return { skip: true, message: `当前状态 ${snapshot.state}，需要 apply` };
       const attempt = snapshot.active_task_attempts?.find(a => a.task_id === taskId && a.state === "active");
       if (!attempt) return { skip: true, message: `任务 ${taskId} 无活跃执行尝试` };
@@ -834,27 +1023,36 @@ export function taskComplete(projectRoot: string, change: string, changeRoot: st
       const readiness = taskEvidenceReadiness(projectRoot, change, changeRoot, attempt);
       if (!readiness.ready) return { skip: true, message: `任务 ${taskId} 无法完成：${readiness.reason}` };
 
-      // B1 修复：checkbox 写入移到 postCommit（commit 事件写入后执行）
+      const completedPayload: Record<string, unknown> = {
+        task_id: taskId,
+        attempt_id: attempt.attempt_id,
+        ...boundarySnapshotPayload(projectRoot),
+        checkbox_update: { status: "pending" },
+        ...(scopeInput.value ? { scope_note: scopeInput.value } : {}),
+      };
+
       return {
         fromState: "apply", toState: "apply", outcome: "advanced" as const,
         reason: `任务 ${taskId} 完成`,
-        extraEvents: [{ type: "task_completed", payload: { task_id: taskId, attempt_id: attempt.attempt_id } }],
+        extraEvents: [{ type: "task_completed", payload: completedPayload }],
         postCommit: (_pr: string, _ch: string, cr: string) => {
           const lines = readFileSync(join(cr, "tasks.md"), "utf8").split("\n");
           const idx = findTaskLine(lines, taskId);
-          if (idx < 0 || !lines[idx].match(/- \[ \]/)) throw new Error(`找不到 ${taskId} 的未完成复选框`);
-          // H2 修复：应用前验证结构指纹
-          const beforeDigest = sha256Text(lines.join("\n").replace(/- \[[xX]\]/g, "- [ ]"));
+          if (idx < 0) {
+            completedPayload.checkbox_update = { status: "failed", reason: `找不到 ${taskId} 的任务行` };
+            return;
+          }
+          if (lines[idx].match(/- \[[xX]\]/)) {
+            completedPayload.checkbox_update = { status: "applied" };
+            return;
+          }
+          if (!lines[idx].match(/- \[ \]/)) {
+            completedPayload.checkbox_update = { status: "failed", reason: `找不到 ${taskId} 的未完成复选框` };
+            return;
+          }
           lines[idx] = lines[idx].replace(/- \[ \]/, "- [x]");
           writeFileSync(join(cr, "tasks.md"), lines.join("\n"));
-          // H2 修复：应用后验证只有目标变了
-          const afterLines = readFileSync(join(cr, "tasks.md"), "utf8").split("\n");
-          const afterDigest = sha256Text(afterLines.join("\n").replace(/- \[[xX]\]/g, "- [ ]"));
-          if (afterDigest !== beforeDigest) {
-            afterLines[idx] = afterLines[idx].replace(/- \[x\]/, "- [ ]");
-            writeFileSync(join(cr, "tasks.md"), afterLines.join("\n"));
-            throw new Error(`复选框补丁导致结构变化：${taskId}`);
-          }
+          completedPayload.checkbox_update = { status: "applied" };
         },
       };
     },

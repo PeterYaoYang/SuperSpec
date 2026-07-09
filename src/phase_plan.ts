@@ -2,7 +2,15 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { EXPLORE_DISCOVERY_REVIEW_GATE, PROPOSE_FINAL_REVIEW_GATE } from "./review_job_gates.ts";
 import type { ReviewGateRule } from "./review_job_gates.ts";
-import { collectProposeOpenQuestions, countDiscoveryOpenQuestions, pendingTasksInContent, validateDiscovery } from "./format.ts";
+import {
+  collectProposeOpenQuestions,
+  countDiscoveryOpenQuestions,
+  parseTasksMd,
+  pendingTasksInContent,
+  validateDiscovery,
+  validateExecutionRequirements,
+} from "./format.ts";
+import { currentGitHead } from "./git_state.ts";
 import { docRef, sha256File } from "./store.ts";
 import {
   isReviewReadyVerifier,
@@ -65,6 +73,13 @@ export type TransitionDecisionPlan =
   | { kind: "create_gate_jobs"; gate: ReviewGateRule; roles: JobRole[]; reason: string }
   | { kind: "advance"; fromState: State; toState: State; reason: string; payload?: Record<string, unknown> };
 
+export interface ApplyPendingTaskStatus {
+  mode: "legacy" | "contract";
+  pending: string[];
+  needsCompletionEvent: string[];
+  completedByEvent: string[];
+}
+
 type ReviewGatePlanResult = Extract<TransitionDecisionPlan, { kind: "blocked" | "create_gate_jobs" }>;
 
 function requiredJobs(state: State, jobs: Job[], reason: string): NextStepPlan {
@@ -104,6 +119,18 @@ function validateTasksPlan(changeRoot: string): string | null {
   const tasksContent = readFileSync(tasksPath, "utf8");
   if (!tasksContent.includes("# Tasks") && !tasksContent.includes("- [ ]")) return "tasks.md 内容不像任务计划文档";
   return null;
+}
+
+function validateExecutionRequirementPlan(changeRoot: string): { ok: true; mode: boolean } | { ok: false; message: string; mode: boolean } {
+  const tasksPath = join(changeRoot, "tasks.md");
+  if (!existsSync(tasksPath)) return { ok: true, mode: false };
+  const tasksContent = readFileSync(tasksPath, "utf8");
+  const testContractPath = join(changeRoot, ".superspec", "artifacts", "test-contract.md");
+  const testContractContent = existsSync(testContractPath) ? readFileSync(testContractPath, "utf8") : null;
+  const validation = validateExecutionRequirements(tasksContent, testContractContent);
+  return validation.ok
+    ? { ok: true, mode: validation.mode }
+    : { ok: false, mode: validation.mode, message: validation.errors.join("；") };
 }
 
 function missingBaseArtifact(changeRoot: string, risk: ReviewRisk): string | null {
@@ -160,6 +187,80 @@ export function historicalProposeReadyRoles(events: Event[]): JobRole[] {
 export function pendingTaskIds(changeRoot: string): string[] {
   const tasksContent = readFileSync(join(changeRoot, "tasks.md"), "utf8");
   return pendingTasksInContent(tasksContent).map(task => task.taskId);
+}
+
+function latestStartApplyIndex(events: Event[]): number {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i];
+    if (ev.event_type !== "transition_commit") continue;
+    const payload = ev.payload as { transition?: unknown; to_state?: unknown };
+    if (payload.transition === "start-apply" && payload.to_state === "apply") return i;
+  }
+  return -1;
+}
+
+export function applyRequirementModeForCurrentRound(events: Event[]): boolean {
+  const index = latestStartApplyIndex(events);
+  if (index < 0) return false;
+  const payload = events[index].payload as { apply_contract_mode?: unknown; execution_requirement_mode?: unknown };
+  return payload.apply_contract_mode === true || payload.execution_requirement_mode === true;
+}
+
+export function pendingTaskStatusForApply(changeRoot: string, events: Event[]): ApplyPendingTaskStatus {
+  const tasksContent = readFileSync(join(changeRoot, "tasks.md"), "utf8");
+  const tasks = parseTasksMd(tasksContent);
+  if (!applyRequirementModeForCurrentRound(events)) {
+    return {
+      mode: "legacy",
+      pending: tasks.filter(task => !task.done).map(task => task.taskId),
+      needsCompletionEvent: [],
+      completedByEvent: [],
+    };
+  }
+
+  const startIndex = latestStartApplyIndex(events);
+  const completedAttemptKeys = new Set<string>();
+  const completedByTask = new Set<string>();
+  const startedByTask = new Map<string, string[]>();
+  for (const ev of events.slice(startIndex + 1)) {
+    if (ev.event_type === "task_started") {
+      const payload = ev.payload as { task_id?: unknown; attempt_id?: unknown };
+      if (typeof payload.task_id !== "string" || typeof payload.attempt_id !== "string") continue;
+      const attempts = startedByTask.get(payload.task_id) ?? [];
+      attempts.push(payload.attempt_id);
+      startedByTask.set(payload.task_id, attempts);
+    } else if (ev.event_type === "task_completed") {
+      const payload = ev.payload as { task_id?: unknown; attempt_id?: unknown };
+      if (typeof payload.task_id !== "string" || typeof payload.attempt_id !== "string") continue;
+      completedAttemptKeys.add(`${payload.task_id}\u0000${payload.attempt_id}`);
+      completedByTask.add(payload.task_id);
+    }
+  }
+
+  const pending: string[] = [];
+  const needsCompletionEvent: string[] = [];
+  const completedByEvent: string[] = [];
+  for (const task of tasks) {
+    const startedAttempts = startedByTask.get(task.taskId) ?? [];
+    const hasActiveCurrentAttempt = startedAttempts.some(attemptId => !completedAttemptKeys.has(`${task.taskId}\u0000${attemptId}`));
+    if (hasActiveCurrentAttempt) {
+      pending.push(task.taskId);
+      needsCompletionEvent.push(task.taskId);
+      continue;
+    }
+    if (completedByTask.has(task.taskId)) {
+      completedByEvent.push(task.taskId);
+      continue;
+    }
+    if (!task.done) pending.push(task.taskId);
+  }
+
+  return {
+    mode: "contract",
+    pending,
+    needsCompletionEvent,
+    completedByEvent,
+  };
 }
 
 export function formatPendingTaskMessage(ids: string[], action: string): string {
@@ -276,12 +377,13 @@ export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
 }
 
 function planApplyNext(context: PhasePlanContext): NextStepPlan {
-  const { change, changeRoot, mode, projectRoot, snapshot } = context;
+  const { change, changeRoot, events, mode, projectRoot, snapshot } = context;
   if (snapshot.open_jobs.length > 0) {
     return requiredJobs("apply", snapshot.open_jobs, `有 ${snapshot.open_jobs.length} 个待完成工作项`);
   }
 
-  const pending = pendingTaskIds(changeRoot);
+  const pendingStatus = pendingTaskStatusForApply(changeRoot, events);
+  const pending = pendingStatus.pending;
   if (pending.length > 0) {
     const activePending = snapshot.active_task_attempts.find(attempt =>
       attempt.state === "active" && pending.includes(attempt.task_id)
@@ -324,7 +426,7 @@ function planApplyNext(context: PhasePlanContext): NextStepPlan {
 
 function planApplyDoneNext(context: PhasePlanContext): NextStepPlan {
   const { change, changeRoot, events, mode, snapshot } = context;
-  const pendingTasks = pendingTaskIds(changeRoot);
+  const pendingTasks = pendingTaskStatusForApply(changeRoot, events).pending;
   if (pendingTasks.length > 0) {
     return {
       kind: "run_transition",
@@ -444,8 +546,8 @@ function planApplyDoneNext(context: PhasePlanContext): NextStepPlan {
 }
 
 function planReviewNext(context: PhasePlanContext): NextStepPlan {
-  const { changeRoot, events, mode, snapshot } = context;
-  const pending = pendingTaskIds(changeRoot);
+  const { changeRoot, events, mode, projectRoot, snapshot } = context;
+  const pending = pendingTaskStatusForApply(changeRoot, events).pending;
   if (pending.length > 0) {
     return {
       kind: "run_transition",
@@ -474,7 +576,7 @@ function planReviewNext(context: PhasePlanContext): NextStepPlan {
 
   if (requiresFinalVerifierForCurrentReview(events) || policy.requires_verifier) {
     const currentEvidenceDigest = reviewEvidenceDigest(events);
-    const verifierAccepted = snapshot.accepted_jobs.find(job => isFreshReviewVerifier(job, changeRoot, currentEvidenceDigest));
+    const verifierAccepted = snapshot.accepted_jobs.find(job => isFreshReviewVerifier(job, changeRoot, currentEvidenceDigest, projectRoot, events));
     if (!verifierAccepted) {
       return {
         kind: "run_transition",
@@ -529,6 +631,9 @@ function planProposeReadyTransition(context: TransitionPlanContext): TransitionD
   const tasksPlanError = validateTasksPlan(changeRoot);
   if (tasksPlanError) return { kind: "skip", message: tasksPlanError };
 
+  const executionRequirementPlan = validateExecutionRequirementPlan(changeRoot);
+  if (!executionRequirementPlan.ok) return { kind: "skip", message: executionRequirementPlan.message };
+
   const openQuestions = collectProposeOpenQuestions(changeRoot);
   if (openQuestions.openCount > 0) {
     const files = openQuestions.files.map(f => `${f.path}(${f.openCount})`).join(", ");
@@ -546,7 +651,7 @@ function planProposeReadyTransition(context: TransitionPlanContext): TransitionD
 }
 
 function planStartApplyTransition(context: TransitionPlanContext): TransitionDecisionPlan {
-  const { changeRoot, events, snapshot } = context;
+  const { changeRoot, events, projectRoot, snapshot } = context;
   if (snapshot.state !== "propose_ready") return { kind: "skip", message: `当前状态 ${snapshot.state}，需要 propose_ready` };
 
   const reopenBaseline = latestReopenProposeBaseline(events);
@@ -566,14 +671,27 @@ function planStartApplyTransition(context: TransitionPlanContext): TransitionDec
     }
   }
 
-  return { kind: "advance", fromState: "propose_ready", toState: "apply", reason: "进入执行阶段" };
+  const executionRequirementPlan = validateExecutionRequirementPlan(changeRoot);
+  if (!executionRequirementPlan.ok) return { kind: "skip", message: executionRequirementPlan.message };
+  const gitHead = currentGitHead(projectRoot);
+  return {
+    kind: "advance",
+    fromState: "propose_ready",
+    toState: "apply",
+    reason: "进入执行阶段",
+    payload: {
+      apply_start_head: gitHead.head,
+      apply_start_head_reason: gitHead.reason,
+      apply_contract_mode: executionRequirementPlan.mode,
+    },
+  };
 }
 
 function planAcceptTransition(context: TransitionPlanContext): TransitionDecisionPlan {
-  const { changeRoot, events, snapshot } = context;
+  const { changeRoot, events, projectRoot, snapshot } = context;
   if (snapshot.state !== "review") return { kind: "skip", message: `当前状态 ${snapshot.state}，需要 review` };
 
-  const pending = pendingTaskIds(changeRoot);
+  const pending = pendingTaskStatusForApply(changeRoot, events).pending;
   if (pending.length > 0) {
     return { kind: "skip", message: formatPendingTaskMessage(pending, "请先 reopen --to apply 继续执行") };
   }
@@ -583,7 +701,7 @@ function planAcceptTransition(context: TransitionPlanContext): TransitionDecisio
 
   if (requiresFinalVerifierForCurrentReview(events) || policy.requires_verifier) {
     const currentEvidenceDigest = reviewEvidenceDigest(events);
-    const verifierAccepted = snapshot.accepted_jobs.find(job => isFreshReviewVerifier(job, changeRoot, currentEvidenceDigest));
+    const verifierAccepted = snapshot.accepted_jobs.find(job => isFreshReviewVerifier(job, changeRoot, currentEvidenceDigest, projectRoot, events));
     if (!verifierAccepted) return { kind: "skip", message: "缺少仍然匹配当前证据的最终验证，请先运行 review-ready" };
   }
 

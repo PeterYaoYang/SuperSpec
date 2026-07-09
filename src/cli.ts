@@ -576,7 +576,7 @@ async function main(argv: string[]): Promise<number> {
 
 transition 子命令：
   init / explore / sync / next / propose-ready / start-apply
-  task-start --task <T> / task-complete --task <T>
+  task-start --task <T> / task-complete --task <T> [--input -]
   reopen --to apply --reason <TEXT> [--review-fix <JOB#FINDING>]
   reopen --to propose --reason <TEXT> --review-finding <JOB#FINDING>
   review-ready / accept / archive
@@ -765,7 +765,23 @@ jobs 子命令：
           case "task-complete": {
             const taskId = opts.task;
             if (!taskId) { console.error("task-complete 需要 --task"); return 1; }
-            const result = taskComplete(projectRoot, change, cr, taskId);
+            let inputContent: string | null = null;
+            if (opts.input) {
+              if (opts.input !== "-") {
+                console.error("task-complete 只接受 --input -");
+                return 1;
+              }
+              try {
+                inputContent = readStdinRecordContent("--input");
+              } catch (err) {
+                if (err instanceof StdinRecordInputError) {
+                  console.error(err.message);
+                  return 1;
+                }
+                throw err;
+              }
+            }
+            const result = taskComplete(projectRoot, change, cr, taskId, inputContent);
             console.log(JSON.stringify(result, null, 2));
             return transitionExitCode(result);
           }

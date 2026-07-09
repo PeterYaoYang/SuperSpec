@@ -5,6 +5,7 @@
 
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import type { ExecutionContract } from "./types.ts";
 
 // ===== discovery.md =====
 //
@@ -63,7 +64,7 @@ const DISCOVERY_CHAIN_REQUIRED_COLUMNS = [
   "状态",
 ] as const;
 
-function splitMarkdownTableRow(line: string): string[] {
+export function splitMarkdownTableRow(line: string): string[] {
   const trimmed = line.trim();
   if (!trimmed.startsWith("|") || !trimmed.endsWith("|")) return [];
   // GFM 表格中字面竖线写作 \|，按未转义竖线切分后还原
@@ -193,6 +194,39 @@ export interface ParsedTask {
 }
 
 const TASK_LINE_RE = /^(- \[([ xX])\])\s+(\S+)/;
+// 块头独占一行（允许全角/半角冒号）；PREFIX 变体用于识别"块头带尾部内容/误加 bullet"的格式错误
+const EXECUTION_REQUIREMENT_LINE_RE = /^\s*执行依据[:：]\s*$/;
+const EXECUTION_REQUIREMENT_PREFIX_RE = /^\s*-?\s*执行依据[:：]/;
+
+const CONTRACT_FIELD_ALIASES: Record<string, keyof ExecutionContract> = {
+  "测试": "tests",
+  "Tests": "tests",
+  "设计": "design",
+  "Design": "design",
+  "来源": "source",
+  "Source": "source",
+  "原因": "reason",
+  "Reason": "reason",
+  "边界": "guard",
+  "Guard": "guard",
+};
+
+export interface ParsedExecutionRequirement {
+  taskId: string;
+  lineIdx: number;
+  contract: ExecutionContract;
+  errors: string[];
+}
+
+export interface TestContractEntry {
+  test_id: string;
+  scenario: string;
+  invariant: string;
+}
+
+export type TestContractParseResult =
+  | { ok: true; entries: TestContractEntry[] }
+  | { ok: false; entries: []; message: string };
 
 /** 解析 tasks.md 的全部任务行 */
 export function parseTasksMd(content: string): ParsedTask[] {
@@ -215,6 +249,235 @@ export function parseTasksMd(content: string): ParsedTask[] {
     });
   }
   return tasks;
+}
+
+function isTopLevelTaskLine(line: string): boolean {
+  return TASK_LINE_RE.test(line);
+}
+
+function splitSourceRefs(value: string): string[] {
+  return value
+    .split(/[；;]/)
+    .map(item => item.trim())
+    .filter(Boolean);
+}
+
+function parseTestIds(value: string): { ids: string[]; ok: boolean } {
+  const ids = value.match(/\bTEST-[A-Za-z0-9_-]+\b/g) ?? [];
+  return { ids: [...new Set(ids)].sort(), ok: ids.length > 0 || value.trim() === "" };
+}
+
+function emptyContract(): ExecutionContract {
+  return {
+    tests: [],
+    design: null,
+    source: [],
+    reason: null,
+    guard: null,
+  };
+}
+
+// 共享绑定判定：mode 判定与块解析都走这里，避免两处条件分裂。
+// 从 task 行往下最多跳过 1 个纯空行（AI 生成时的常见格式波动，意图无歧义，直接接受）；
+// 间隔更多空行或夹了其他内容的块不绑定，由孤儿检测报错。
+function executionRequirementHeaderIdx(lines: string[], task: ParsedTask): number | null {
+  let index = task.lineIdx + 1;
+  if (index < lines.length && lines[index].trim() === "") index += 1;
+  if (index < lines.length && EXECUTION_REQUIREMENT_LINE_RE.test(lines[index])) return index;
+  return null;
+}
+
+function parseExecutionRequirementBlock(lines: string[], task: ParsedTask, headerIdx: number): ParsedExecutionRequirement {
+  const contract = emptyContract();
+  const errors: string[] = [];
+  const seen = new Set<keyof ExecutionContract>();
+  let index = headerIdx + 1;
+
+  while (index < lines.length) {
+    const line = lines[index];
+    if (isTopLevelTaskLine(line) || /^#{1,6}\s+/.test(line)) break;
+    if (/^\s*-\s+\[[ xX]\]/.test(line)) {
+      errors.push(`${task.taskId} 的执行依据内不能包含复选框`);
+    }
+
+    const fieldMatch = line.match(/^\s*-\s*(测试|Tests|设计|Design|来源|Source|原因|Reason|边界|Guard)\s*[:：]\s*(.*)$/);
+    if (fieldMatch) {
+      const key = CONTRACT_FIELD_ALIASES[fieldMatch[1]];
+      const value = fieldMatch[2].trim();
+      if (seen.has(key)) {
+        errors.push(`${task.taskId} 的执行依据字段重复：${fieldMatch[1]}`);
+      }
+      seen.add(key);
+      if (key === "tests") {
+        const parsed = parseTestIds(value);
+        if (!parsed.ok) errors.push(`${task.taskId} 的测试字段没有可解析的 TEST ID`);
+        contract.tests = parsed.ids;
+      } else if (key === "source") {
+        contract.source = splitSourceRefs(value);
+      } else {
+        contract[key] = value || null;
+      }
+    }
+    index += 1;
+  }
+
+  return { taskId: task.taskId, lineIdx: task.lineIdx, contract, errors };
+}
+
+export function hasTaskBoundExecutionRequirements(content: string): boolean {
+  const lines = content.split("\n");
+  return parseTasksMd(content).some(task => executionRequirementHeaderIdx(lines, task) != null);
+}
+
+export function parseExecutionRequirements(content: string): ParsedExecutionRequirement[] {
+  const lines = content.split("\n");
+  const parsed: ParsedExecutionRequirement[] = [];
+  for (const task of parseTasksMd(content)) {
+    const headerIdx = executionRequirementHeaderIdx(lines, task);
+    if (headerIdx != null) parsed.push(parseExecutionRequirementBlock(lines, task, headerIdx));
+  }
+  return parsed;
+}
+
+// 孤儿执行依据检测：块头存在但没有绑定到任何 task（间隔过多空行、夹了其他内容、
+// 或块头带尾部文字导致整行不匹配）。这些块会被引擎静默忽略，必须显式报错阻断，
+// 否则全部悬空时契约模式静默失效（使用者是 AI，报错消息要给出可直接执行的修复动作）。
+export function orphanExecutionRequirementErrors(content: string): string[] {
+  const lines = content.split("\n");
+  const boundHeaderIdx = new Set<number>();
+  for (const task of parseTasksMd(content)) {
+    const headerIdx = executionRequirementHeaderIdx(lines, task);
+    if (headerIdx != null) boundHeaderIdx.add(headerIdx);
+  }
+  const errors: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (boundHeaderIdx.has(i)) continue;
+    if (EXECUTION_REQUIREMENT_LINE_RE.test(lines[i])) {
+      errors.push(`第 ${i + 1} 行的"执行依据:"没有绑定到任何 task（块头与 task 行之间最多允许一个空行），该块不会生效；请把它紧贴到所属 task 行下方`);
+    } else if (EXECUTION_REQUIREMENT_PREFIX_RE.test(lines[i])) {
+      errors.push(`第 ${i + 1} 行的"执行依据:"块头格式无法识别；块头必须独占一行（不带 bullet、冒号后不带内容），字段写在下方的 bullet 行`);
+    }
+  }
+  return errors;
+}
+
+export function executionRequirementForTask(content: string, taskId: string): ParsedExecutionRequirement | null {
+  return parseExecutionRequirements(content).find(item => item.taskId === taskId) ?? null;
+}
+
+// 契约"解析"与"采纳"的统一出口：contract 非 null 当且仅当本轮是契约模式且该 task 有绑定块。
+// 消费方（attempt/details/packet）一律从这里取值，禁止各自组合 parsed 与 mode——
+// 否则 legacy 轮会输出"看似契约、实按 legacy 校验"的误导态。
+export function adoptedContractForTask(
+  content: string,
+  taskId: string,
+  contractMode: boolean,
+): { parsed: ParsedExecutionRequirement | null; contract: ExecutionContract | null } {
+  const parsed = executionRequirementForTask(content, taskId);
+  return { parsed, contract: contractMode ? parsed?.contract ?? null : null };
+}
+
+export function isReviewFixTaskId(taskId: string): boolean {
+  return taskId.startsWith("REVIEW-FIX-");
+}
+
+export function isCharacterizationTask(task: ParsedTask): boolean {
+  return task.tddRequired === false && task.noTddReason === "characterization";
+}
+
+export function parseTestContractEntries(content: string): TestContractParseResult {
+  const lines = content.split("\n");
+  const entries: TestContractEntry[] = [];
+  const seen = new Set<string>();
+  let sawMatchingHeader = false;
+
+  for (let i = 0; i < lines.length - 1; i++) {
+    const header = splitMarkdownTableRow(lines[i]);
+    if (header.length === 0) continue;
+    const normalizedHeader = header.map(cell => cell.trim().toLowerCase());
+    const testIdIdx = normalizedHeader.indexOf("test_id");
+    const scenarioIdx = normalizedHeader.indexOf("scenario");
+    if (testIdIdx < 0 || scenarioIdx < 0) continue;
+    if (!isMarkdownTableSeparator(lines[i + 1])) continue;
+    sawMatchingHeader = true;
+    const invariantIdx = normalizedHeader.indexOf("invariant");
+
+    for (let rowIndex = i + 2; rowIndex < lines.length; rowIndex++) {
+      const row = splitMarkdownTableRow(lines[rowIndex]);
+      if (row.length === 0) break;
+      const testId = (row[testIdIdx] ?? "").trim();
+      if (!testId.startsWith("TEST-")) continue;
+      if (seen.has(testId)) {
+        return { ok: false, entries: [], message: `test-contract.md 中 TEST ID 重复：${testId}` };
+      }
+      seen.add(testId);
+      entries.push({
+        test_id: testId,
+        scenario: (row[scenarioIdx] ?? "").trim(),
+        invariant: invariantIdx >= 0 ? (row[invariantIdx] ?? "").trim() : "",
+      });
+    }
+  }
+
+  if (!sawMatchingHeader) return { ok: false, entries: [], message: "test-contract.md 缺少包含测试 ID（test_id）和场景（scenario）的表格" };
+  if (entries.length === 0) return { ok: false, entries: [], message: "test-contract.md 没有 TEST-* 行" };
+  return { ok: true, entries };
+}
+
+export interface ExecutionRequirementValidation {
+  ok: boolean;
+  mode: boolean;
+  contracts: ParsedExecutionRequirement[];
+  errors: string[];
+}
+
+export function validateExecutionRequirements(content: string, testContractContent: string | null): ExecutionRequirementValidation {
+  const mode = hasTaskBoundExecutionRequirements(content);
+  const contracts = parseExecutionRequirements(content);
+  // 孤儿检测必须在 mode=false 的 early return 之前：全部块都悬空时 mode=false，
+  // 恰恰是最需要报错的场景（否则契约模式静默失效）
+  const errors = [...orphanExecutionRequirementErrors(content), ...contracts.flatMap(item => item.errors)];
+  if (!mode) return { ok: errors.length === 0, mode, contracts, errors };
+
+  const tasks = parseTasksMd(content);
+  const contractsByTask = new Map(contracts.map(item => [item.taskId, item]));
+  const declaredTestIds = new Set<string>();
+  let needsTestContract = false;
+
+  for (const task of tasks) {
+    const contract = contractsByTask.get(task.taskId);
+    if (task.tddRequired && !isReviewFixTaskId(task.taskId)) {
+      if (!contract) {
+        errors.push(`${task.taskId} 缺少执行依据`);
+        continue;
+      }
+      if (contract.contract.tests.length === 0) {
+        errors.push(`${task.taskId} 是普通 TDD 任务，执行依据缺少测试`);
+      }
+    }
+    if (contract && contract.contract.tests.length > 0) {
+      needsTestContract = true;
+      for (const testId of contract.contract.tests) declaredTestIds.add(testId);
+    }
+  }
+
+  if (needsTestContract) {
+    if (testContractContent == null) {
+      errors.push("test-contract.md 不存在，无法校验执行依据测试引用");
+    } else {
+      const parsed = parseTestContractEntries(testContractContent);
+      if (!parsed.ok) {
+        errors.push(parsed.message);
+      } else {
+        const known = new Set(parsed.entries.map(entry => entry.test_id));
+        for (const testId of declaredTestIds) {
+          if (!known.has(testId)) errors.push(`执行依据引用了不存在的 TEST ID：${testId}`);
+        }
+      }
+    }
+  }
+
+  return { ok: errors.length === 0, mode, contracts, errors };
 }
 
 /** 返回未完成任务 */
@@ -240,7 +503,7 @@ export function tasksStructureDigest(content: string, sha256Text: (s: string) =>
   return sha256Text(content.replace(/- \[[xX]\]/g, "- [ ]"));
 }
 
-// ===== test-run JSON =====
+// ===== 测试运行 JSON =====
 //
 // 格式（apply skill 定义）：
 //   {
@@ -255,20 +518,8 @@ export function tasksStructureDigest(content: string, sha256Text: (s: string) =>
 //     "target_fingerprint": "sha256:..."
 //   }
 //
-// 引擎校验：test_id + task_structure_digest 必填，covers_task_ids 如存在必须是非空字符串数组，其余可选
-
-export function validateTestRunInput(tr: Record<string, unknown>): { ok: boolean; message: string } {
-  if (!tr.test_id) return { ok: false, message: "缺少 test_id" };
-  if (!tr.task_structure_digest) return { ok: false, message: "缺少 task_structure_digest" };
-  if (tr.covers_task_ids !== undefined) {
-    if (!Array.isArray(tr.covers_task_ids)) return { ok: false, message: "covers_task_ids 必须是字符串数组" };
-    if (tr.covers_task_ids.length === 0) return { ok: false, message: "covers_task_ids 不能是空数组" };
-    if (!tr.covers_task_ids.every(item => typeof item === "string" && item.trim().length > 0)) {
-      return { ok: false, message: "covers_task_ids 不能包含空字符串或非字符串" };
-    }
-  }
-  return { ok: true, message: "" };
-}
+// 引擎校验：测试 ID（test_id）+ 任务结构指纹（task_structure_digest）必填，回归覆盖任务列表（covers_task_ids）如存在必须是非空字符串数组，其余可选
+//（实际校验内联在 task.ts recordTestRunLoaded：契约模式走 validateContractTestRunInput，legacy 模式内联必填校验）
 
 // ===== user-decision JSON =====
 //
@@ -279,11 +530,11 @@ export function validateTestRunInput(tr: Record<string, unknown>): { ok: boolean
 //     "answer": "yes"
 //   }
 //
-// 引擎校验：scope + answer 必填
+// 引擎校验：决策范围（scope）+ 答复内容（answer）必填
 
 export function validateUserDecision(d: Record<string, unknown>): { ok: boolean; message: string } {
-  if (!d.scope) return { ok: false, message: "决策文件缺少 scope" };
-  if (!d.answer) return { ok: false, message: "决策文件缺少 answer" };
+  if (!d.scope) return { ok: false, message: "决策文件缺少决策范围（scope）" };
+  if (!d.answer) return { ok: false, message: "决策文件缺少答复内容（answer）" };
   return { ok: true, message: "" };
 }
 

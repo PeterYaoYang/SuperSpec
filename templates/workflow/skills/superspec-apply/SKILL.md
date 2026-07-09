@@ -27,15 +27,15 @@ metadata:
 
 每个 task 的标准循环：
 
-1. **计划核对**：执行 `task-start` 前，确认当前 task 是 `tasks.md` 顶格任务，并能对应 `design.md` 的实现方向和 `proposal.md` 的 `## Impact` 受影响原因。缺少映射、需要新增能力/验收/影响范围时先停止，交回 propose，不写 RED。
-2. **任务开始**：`superspec transition task-start --change "<change>" --task <task_id>`。
-3. **读取 attempt_id**：从 task-start 返回结果或当前活跃 task attempt 中读取。
-4. **RED**：写测试前确认测试意图能对应 `test-contract.md` 的 `test_id` 或 `business-invariants.md`；缺少对应关系时先停止，交回 propose。运行后确认失败，并用 `superspec record test-run --change "<change>" --input -` 登记。
+1. **计划核对**：执行 `task-start` 前，确认当前 task 是 `tasks.md` 顶格任务。task 带 `执行依据:` 块时，以它为主要执行上下文；没有执行依据的历史 task 对应 `design.md` 的实现方向和 `proposal.md` 的 `## Impact` 受影响原因。缺少映射、需要新增能力/验收/影响范围时先停止，交回 propose，不写 RED。
+2. **任务开始**：执行 next 下发的 task-start 命令。
+3. **读取执行依据快照**：task-start 的返回结果包含本次任务尝试 ID（`attempt_id`，登记测试时要用）和执行依据快照（五字段在启动时刻的定格版本）。返回结果带快照时，实现和验收以它为准；返回结果标明是历史任务（`legacy_contract`）时，即使 `tasks.md` 里有执行依据文本也不采纳为引擎契约，按原有方式回读 `proposal.md`、`design.md` 和 `test-contract.md`，test-run 走历史规则。
+4. **RED**：执行依据声明了测试时，测试必须对应其中的 `TEST-xxx`（登记其他 TEST 会被拒绝）；没有执行依据的历史 task 确认测试意图能对应 `test-contract.md` 的 `test_id` 或 `business-invariants.md`，缺少对应关系时先停止，交回 propose。运行后确认失败，并用 `superspec record test-run --change "<change>" --input -` 登记。
 5. **实现**：根据任务写代码，保持范围小。`design.md` 不锁死字段名、函数名、SQL 或局部写法。
-6. **GREEN**：运行测试确认通过，并登记 test-run。
-7. **完成 task**：`superspec transition task-complete --change "<change>" --task <task_id>`。
+6. **GREEN**：运行测试确认通过，并登记 test-run。执行依据声明多个测试时，每个声明 TEST 都要有 GREEN；普通 `tdd_required:true` task 还要求至少一个 TEST 形成同 TEST 先 RED 后 GREEN，其余可以只有 GREEN 作为回归覆盖。
+7. **完成 task**：执行 next 下发的 task-complete 命令。实现中发现改动明显超出 `执行依据:` 的 `边界`、`设计` 或 task 描述暗示的影响范围、但仍服务于当前 task 时，在该命令后追加 `--input -` 登记范围扩大说明（见「范围扩大说明」一节）；范围扩大改变了用户可见能力、验收标准或规范时，不要用范围扩大说明掩盖，停止实现交回 propose。
 
-no-TDD 任务（`tdd_required:false` + `no_tdd_reason`）跳过 RED/GREEN，但仍必须有清楚的完成证据。
+no-TDD 任务（`tdd_required:false` + `no_tdd_reason`）不要求 RED/GREEN 配对，但仍必须有清楚的完成证据。注意：如果该任务的 `执行依据:` 声明了 `测试`，每个声明 TEST 仍需登记一次通过证据才能完成，否则 task-complete 会被拒绝（特征化任务即 `no_tdd_reason:characterization`——为固化既有行为而写保护测试的任务——用特征化通过状态登记，其余用普通通过状态，取值见「test-run 输入」）。
 
 `tasks.md` 不写 RED/GREEN 命令、断言或预期输出。RED/GREEN 的真实证明来自 apply 阶段实际执行后登记的 `record test-run`。
 
@@ -49,7 +49,6 @@ no-TDD 任务（`tdd_required:false` + `no_tdd_reason`）跳过 RED/GREEN，但�
 {
   "test_id": "TEST-XXX",
   "attempt_id": "ATT-TASK-XXX-...",
-  "task_structure_digest": "<当前 task 结构版本>",
   "command": "npm test",
   "cwd": "<工作目录>",
   "exit_code": 1,
@@ -59,14 +58,38 @@ no-TDD 任务（`tdd_required:false` + `no_tdd_reason`）跳过 RED/GREEN，但�
 
 证据规则：
 
-- `record test-run` 入库至少需要 `test_id` 和 `task_structure_digest`；RED/GREEN 完成判定优先核对当前 `attempt_id`。
+- task 带执行依据时，示例中的六个字段全部必填，且 `test_id` 必须属于执行依据声明的测试。没有执行依据的历史 task 沿用旧规则：至少需要 `test_id` 和 `task_structure_digest`（当前 task 结构版本）。
 - `attempt_id` 来自当前 task attempt；新产生的 TDD 证据必须带当前 `attempt_id`。
-- `semantic_status` 使用 `expected_failure`（RED）/ `expected_success`（GREEN）/ `characterization_pass`。
+- `semantic_status` 使用 `expected_failure`（RED，要求 `exit_code != 0`）/ `expected_success`（GREEN，要求 `exit_code == 0`）/ `characterization_pass`（要求 `exit_code == 0`，且只有 `tdd_required:false no_tdd_reason:characterization` 的 task 可以使用）。
 - `covers_task_ids` 可选，只在回归或等价场景中填写到同一份 test-run JSON，用来说明这次测试覆盖了哪些已完成任务；省略表示不声明覆盖关系。
 - `command`、`cwd`、`exit_code` 和目标测试身份必须能说明目标测试确实运行。
 - 退出码本身不等于证明；环境错误或构建失败不算 RED 或 GREEN。
-- 缺少 `attempt_id`、只靠 `task_structure_digest` 匹配的 test-run 只能作为弱引用，不作为强证明。
+- 缺少 `attempt_id`、只靠 `task_structure_digest` 匹配的旧 test-run 只能作为弱引用，不作为强证明。
 - 其他可选字段只有在有明确来源时再填；不要为通过校验编造。
+
+## 范围扩大说明
+
+实现时发现必须扩大影响范围（本次改动明显超出执行依据的 `边界`、`设计` 或 task 描述的暗示），且仍服务于当前 task 时，在 next 下发的 task-complete 命令后追加 `--input -`，从 stdin 传入 JSON（四个字段全部必填，`verification` 为非空字符串数组，格式不合法时引擎会说明原因并拒绝完成）：
+
+```json
+{
+  "scope_note": {
+    "reason": "为什么需要超出原执行依据的边界",
+    "changed_area": "实际扩大的代码或行为范围",
+    "plan_alignment": "扩大后仍如何服务于当前 task 或原设计",
+    "verification": ["TEST-001", "覆盖该变化的其他说明引用"]
+  }
+}
+```
+
+- 这是完成 task 时的一次性说明，task 完成后不能补写；需要说明但没写的，会被代码审查作为问题提出。不要为了通过校验编造字段。
+- 范围扩大改变了用户可见能力、验收标准或 OpenSpec 规范时，不适用本机制，交回 propose。
+
+## 测试覆盖豁免
+
+进入审查前，`test-contract.md` 中每个 TEST 要么绑定到某个 task 的 `测试` 字段，要么有用户豁免决策。被阻断提示某个 TEST 未绑定时，先向用户确认原因（不要代替用户决策），再按阻断消息给出的命令和格式登记。注意：计划文档里写了不覆盖理由不等于已豁免，引擎只认已登记的用户决策。
+
+以上两种登记在向用户沟通时都用人话说明（如"这次实现比计划多改了导出列，原因和验证已记录在案"、"测试契约里的 TEST-003 没有任务实现它，请确认是否豁免及原因"），不要原样复述命令、JSON 字段或内部事件。
 
 ## Guardrails
 

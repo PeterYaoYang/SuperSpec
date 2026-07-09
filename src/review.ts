@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { docRef, sha256File, sha256Text } from "./store.ts";
 import { REVIEW_FINAL_VERIFIER_GATE } from "./review_job_gates.ts";
 import type { Event, Job, Ref, TaskAttempt } from "./types.ts";
+import { computeCodeStateCheck, effectiveCoverageExemptionRefsFromEvents } from "./code_review.ts";
 
 export type ReviewRisk = "minimal" | "normal" | "strict";
 
@@ -82,54 +83,38 @@ interface CompletedAttempt {
   task_id: string;
   attempt_id: string;
   task_structure_digest: string | null;
+  event_id: string;
   event_digest: string;
 }
 
+// 方案固定的 records 形态：只序列化方案规定的字段；
+// legacy 字段（task_structure_digest / covers_task_ids / target_fingerprint）只参与筛选，不进入 digest 本体
 interface EvidenceRecord {
-  kind: "task_completed" | "test_run_recorded";
+  kind: "task_completed" | "test_run_recorded" | "coverage_exemption" | "code_review_gate";
+  event_id?: string;
   task_id?: string;
   attempt_id?: string | null;
-  task_structure_digest?: string | null;
   test_id?: string | null;
+  decision?: string | null;
+  job_id?: string | null;
+  packet_digest?: string | null;
   semantic_status?: string | null;
-  covers_task_ids?: string[];
   command?: string;
   cwd?: string;
   exit_code?: number | null;
-  target_fingerprint?: string | null;
   event_digest: string;
 }
 
+// 方案排序键：kind → task_id → test_id → attempt_id → event_id；缺失字段按空字符串。
+// event_id 全局唯一，作为末位排序键足以保证稳定。
 function evidenceSortKey(record: EvidenceRecord): string {
-  const parts = [
+  return [
     record.kind,
     record.task_id ?? "",
-    record.attempt_id ?? "",
-    record.task_structure_digest ?? "",
     record.test_id ?? "",
-    record.semantic_status ?? "",
-  ];
-  if (record.covers_task_ids && record.covers_task_ids.length > 0) {
-    parts.push(`covers:${JSON.stringify(record.covers_task_ids)}`);
-  }
-  parts.push(
-    record.command ?? "",
-    record.cwd ?? "",
-    record.exit_code == null ? "" : String(record.exit_code),
-    record.target_fingerprint ?? "",
-    record.event_digest,
-  );
-  return parts.join("\u0000");
-}
-
-function normalizedCoveredTaskIds(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  return [...new Set(
-    value
-      .filter((item): item is string => typeof item === "string")
-      .map(item => item.trim())
-      .filter(Boolean),
-  )].sort();
+    record.attempt_id ?? "",
+    record.event_id ?? "",
+  ].join("\u0000");
 }
 
 export function reviewEvidenceDigest(events: Event[]): string {
@@ -148,6 +133,7 @@ export function reviewEvidenceDigest(events: Event[]): string {
         task_id: payload.task_id,
         attempt_id: payload.attempt_id,
         task_structure_digest: attempt?.task_structure_digest ?? null,
+        event_id: ev.event_id,
         event_digest: ev.event_digest,
       });
     }
@@ -160,11 +146,12 @@ export function reviewEvidenceDigest(events: Event[]): string {
       .filter((digest): digest is string => typeof digest === "string" && digest.length > 0),
   );
 
+  // scope_note / boundary_snapshot / checkbox_update 属于 task_completed 事件 payload，已由 event_digest 覆盖
   const records: EvidenceRecord[] = completed.map(item => ({
     kind: "task_completed",
     task_id: item.task_id,
     attempt_id: item.attempt_id,
-    task_structure_digest: item.task_structure_digest,
+    event_id: item.event_id,
     event_digest: item.event_digest,
   }));
 
@@ -187,18 +174,40 @@ export function reviewEvidenceDigest(events: Event[]): string {
     const matchesLegacyDigest = attemptId == null && structureDigest != null && completedStructureDigests.has(structureDigest);
     if (!matchesCompletedAttempt && !matchesLegacyDigest) continue;
 
-    const coversTaskIds = normalizedCoveredTaskIds(payload.covers_task_ids);
     records.push({
       kind: "test_run_recorded",
       test_id: typeof payload.test_id === "string" ? payload.test_id : null,
       attempt_id: attemptId,
-      task_structure_digest: structureDigest,
       semantic_status: typeof payload.semantic_status === "string" ? payload.semantic_status : null,
-      ...(coversTaskIds.length > 0 ? { covers_task_ids: coversTaskIds } : {}),
+      exit_code: typeof payload.exit_code === "number" ? payload.exit_code : null,
       command: typeof payload.command === "string" ? payload.command : "",
       cwd: typeof payload.cwd === "string" ? payload.cwd : "",
-      exit_code: typeof payload.exit_code === "number" ? payload.exit_code : null,
-      target_fingerprint: typeof payload.target_fingerprint === "string" ? payload.target_fingerprint : null,
+      event_id: ev.event_id,
+      event_digest: ev.event_digest,
+    });
+  }
+
+  for (const ref of effectiveCoverageExemptionRefsFromEvents(events)) {
+    records.push({
+      kind: "coverage_exemption",
+      test_id: ref.test_id,
+      event_id: ref.event_id,
+      event_digest: ref.event_digest,
+    });
+  }
+
+  for (const ev of events) {
+    if (ev.event_type !== "transition_commit") continue;
+    const payload = ev.payload as { transition?: unknown; from_state?: unknown; to_state?: unknown; code_review_gate?: unknown };
+    if (payload.transition !== "review-ready" || payload.from_state !== "apply_done" || payload.to_state !== "review") continue;
+    const gate = payload.code_review_gate as { decision?: unknown; job_id?: unknown; packet_digest?: unknown } | undefined;
+    if (!gate || (gate.decision !== "passed" && gate.decision !== "skipped")) continue;
+    records.push({
+      kind: "code_review_gate",
+      decision: gate.decision,
+      job_id: typeof gate.job_id === "string" ? gate.job_id : null,
+      packet_digest: typeof gate.packet_digest === "string" ? gate.packet_digest : null,
+      event_id: ev.event_id,
       event_digest: ev.event_digest,
     });
   }
@@ -227,10 +236,41 @@ export function reviewEvidenceStaleReason(job: Job, currentDigest: string): stri
   return null;
 }
 
-export function reviewVerifierStaleReason(job: Job, changeRoot: string, currentEvidenceDigest: string): string | null {
-  return boundFilesStaleReason(job, changeRoot) ?? reviewEvidenceStaleReason(job, currentEvidenceDigest);
+export function codeStateCheckStaleReason(
+  job: Job,
+  projectRoot: string | undefined,
+  events: Event[] | undefined,
+  ignoredCodePaths: string[] = [],
+): string | null {
+  if (!isReviewReadyVerifier(job)) return null;
+  if (!job.packet_context?.code_state_check) return null;
+  if (!projectRoot || !events) return null;
+  const current = computeCodeStateCheck(projectRoot, events, ignoredCodePaths);
+  if (JSON.stringify(current) !== JSON.stringify(job.packet_context.code_state_check)) {
+    return "最终验证工作项的代码状态事实已变化";
+  }
+  return null;
 }
 
-export function isFreshReviewVerifier(job: Job, changeRoot: string, currentEvidenceDigest: string): boolean {
-  return isReviewReadyVerifier(job) && reviewVerifierStaleReason(job, changeRoot, currentEvidenceDigest) == null;
+export function reviewVerifierStaleReason(
+  job: Job,
+  changeRoot: string,
+  currentEvidenceDigest: string,
+  projectRoot?: string,
+  events?: Event[],
+  ignoredCodePaths: string[] = [],
+): string | null {
+  return boundFilesStaleReason(job, changeRoot)
+    ?? reviewEvidenceStaleReason(job, currentEvidenceDigest)
+    ?? codeStateCheckStaleReason(job, projectRoot, events, ignoredCodePaths);
+}
+
+export function isFreshReviewVerifier(
+  job: Job,
+  changeRoot: string,
+  currentEvidenceDigest: string,
+  projectRoot?: string,
+  events?: Event[],
+): boolean {
+  return isReviewReadyVerifier(job) && reviewVerifierStaleReason(job, changeRoot, currentEvidenceDigest, projectRoot, events) == null;
 }

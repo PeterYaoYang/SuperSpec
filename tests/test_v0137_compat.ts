@@ -182,7 +182,7 @@ test("v0.1.37 half-finished changes replay and next remains executable", () => {
   }
 });
 
-test("v0.1.37 code-reviewer job without gate_id still satisfies apply_done code review", () => {
+test("v0.1.37 code-reviewer job without packet_context cannot satisfy new passed gate", () => {
   const fixturePath = new URL("./fixtures/v0.1.37/apply_done-code-reviewer.events.jsonl", import.meta.url).pathname;
   const fx = setupV0137StaticEventsFixture(fixturePath);
   try {
@@ -218,19 +218,19 @@ test("v0.1.37 code-reviewer job without gate_id still satisfies apply_done code 
     assert.equal(submitted.accepted, true);
 
     const result = reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
-    assert.equal(result.outcome, "advanced");
+    assert.equal(result.outcome, "job_created");
     assert.equal(result.from_state, "apply_done");
-    assert.equal(result.to_state, "review");
+    assert.equal(result.to_state, "apply_done");
+    assert.equal(result.created_jobs.length, 1);
+    assert.notEqual(result.created_jobs[0], jobId);
 
     const commit = readEvents(fx.projectRoot, fx.change).findLast(event =>
       event.event_type === "transition_commit" &&
-      (event.payload as { from_state?: unknown; to_state?: unknown }).from_state === "apply_done" &&
-      (event.payload as { from_state?: unknown; to_state?: unknown }).to_state === "review"
+      (event.payload as { outcome?: unknown; created_job_ids?: unknown }).outcome === "job_created"
     );
-    assert.deepEqual((commit?.payload as { code_review_gate?: unknown }).code_review_gate, {
-      decision: "passed",
-      job_id: jobId,
-    });
+    const newJobs = (commit?.payload as { new_jobs?: Job[] }).new_jobs ?? [];
+    assert.equal(newJobs[0]?.role, "code-reviewer");
+    assert.ok(newJobs[0]?.packet_context?.code_review_scope);
   } finally {
     fx.cleanup();
   }

@@ -96,11 +96,12 @@ function checkStaleJobs(
   jobs: Job[],
   projectRoot: string,
   changeRoot: string,
+  events: Event[],
   currentReviewEvidenceDigest: string,
 ): { job_id: string; reason: string }[] {
   const stale: { job_id: string; reason: string }[] = [];
   for (const job of jobs) {
-    const reason = invalidReasonForSnapshot({ job, projectRoot, changeRoot, currentReviewEvidenceDigest });
+    const reason = invalidReasonForSnapshot({ job, projectRoot, changeRoot, events, currentReviewEvidenceDigest });
     if (reason) {
       stale.push({ job_id: job.job_id, reason });
     }
@@ -137,11 +138,12 @@ export function rebuildSnapshot(
 
   // 粗粒度失效检查（只读，不写事件）：open code-reviewer job 防止提交过期报告；
   // accepted code-reviewer pass 不做持续 freshness gate，避免 apply_done 循环重审。
-  const staleOpenInfo = checkStaleJobs(openJobs, projectRoot, changeRoot, currentReviewEvidenceDigest);
+  const staleOpenInfo = checkStaleJobs(openJobs, projectRoot, changeRoot, events, currentReviewEvidenceDigest);
   const staleAcceptedInfo = checkStaleJobs(
     acceptedJobs.filter(j => j.role !== "code-reviewer"),
     projectRoot,
     changeRoot,
+    events,
     currentReviewEvidenceDigest,
   );
   const freshOpen = openJobs

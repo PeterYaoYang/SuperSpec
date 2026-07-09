@@ -4,7 +4,7 @@ import {
 } from "./review.ts";
 import {
   codeReviewJobStaleReason,
-  scanCodeChanges,
+  currentCodeReviewWorkingPaths,
 } from "./code_review.ts";
 import type { Event, Job } from "./types.ts";
 
@@ -34,14 +34,15 @@ export function invalidReasonForSnapshot(input: {
   job: Job;
   projectRoot: string;
   changeRoot: string;
+  events: Event[];
   currentReviewEvidenceDigest: string;
 }): string | null {
   if (input.job.role === "code-reviewer") {
-    return codeReviewJobStaleReason(input.projectRoot, input.job);
+    return codeReviewJobStaleReason(input.projectRoot, input.job, currentCodeReviewWorkingPaths(input.projectRoot, input.events));
   }
   const invalidReviewReadyVerifier = reviewReadyVerifierWithoutEvidenceReason(input.job);
   if (invalidReviewReadyVerifier) return invalidReviewReadyVerifier;
-  return reviewVerifierStaleReason(input.job, input.changeRoot, input.currentReviewEvidenceDigest);
+  return reviewVerifierStaleReason(input.job, input.changeRoot, input.currentReviewEvidenceDigest, input.projectRoot, input.events);
 }
 
 export function invalidReasonForSubmittedReport(
@@ -49,13 +50,16 @@ export function invalidReasonForSubmittedReport(
   context: SubmittedReportValidityContext,
 ): string | null {
   if (job.role === "code-reviewer") {
-    const ignored = new Set(context.ignoredCodePaths ?? []);
-    if (context.reportPath) ignored.add(context.reportPath);
-    const currentPaths = scanCodeChanges(context.projectRoot).paths.filter(path => !ignored.has(path));
+    const currentPaths = currentCodeReviewWorkingPaths(context.projectRoot, context.events, [
+      ...(context.ignoredCodePaths ?? []),
+      ...(context.reportPath ? [context.reportPath] : []),
+    ]);
     return codeReviewJobStaleReason(context.projectRoot, job, currentPaths);
   }
 
   const invalidReviewReadyVerifier = reviewReadyVerifierWithoutEvidenceReason(job);
   if (invalidReviewReadyVerifier) return invalidReviewReadyVerifier;
-  return reviewVerifierStaleReason(job, context.changeRoot, reviewEvidenceDigest(context.events));
+  const ignored = new Set(context.ignoredCodePaths ?? []);
+  if (context.reportPath) ignored.add(context.reportPath);
+  return reviewVerifierStaleReason(job, context.changeRoot, reviewEvidenceDigest(context.events), context.projectRoot, context.events, [...ignored]);
 }

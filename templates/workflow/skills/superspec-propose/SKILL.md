@@ -23,7 +23,7 @@ metadata:
 
 什么问题需要用户确认，判定标准见「待用户确认」一节；就绪或审查后向用户只概括任务可验证性、关键风险/证据覆盖和下一步。
 
-执行 propose-ready 前，对照 critic / architect / test-engineer 的阻塞条件快速自检（非穷尽）：Impact 与 CHAIN/IDC 对账、specs 增量与 proposal 能力变化互相对应、design 路线能推出 tasks、DEC 已有行内结论并回写、task 粒度单一行为且顺序可执行、不变量可证伪且覆盖核心行为变化、test-contract 覆盖已引用的 CHAIN。自检不替代审查工作项，只为减少驳回往返。
+执行 propose-ready 前，对照 critic / architect / test-engineer 的阻塞条件快速自检（非穷尽）：Impact 与 CHAIN/IDC 对账、specs 增量与 proposal 能力变化互相对应、design 路线能推出 tasks、DEC 已有行内结论并回写、task 粒度单一行为且顺序可执行、每个普通 TDD task 有完整可定位的 `执行依据:`（声明的 TEST 都存在于 test-contract，`边界`/`原因` 具体到该 task 而非套话）、不变量可证伪且覆盖核心行为变化、test-contract 覆盖已引用的 CHAIN、test-contract 中未绑定任何 task 的 TEST 有明确取舍（绑定到 task 或留待用户豁免决策）。自检不替代审查工作项，只为减少驳回往返。
 
 人类可读正文默认使用简体中文；OpenSpec 结构标题、规范关键字、命令、路径、JSON 字段、代码标识符保留原文。OpenSpec 生成文档语言不符合预期时，先检查 `openspec/config.yaml` 的官方 `context` 设置；不要在变更文档里添加自定义 `language` 字段。
 
@@ -74,7 +74,19 @@ OpenSpec 能力规范增量（`openspec instructions specs` 格式）。
 ## Review verifier
 
 - [ ] 1.1 检查 verifier 绑定文档 tdd_required:true
+  执行依据:
+  - 测试: test-contract.md#TEST-001
+  - 设计: design.md#verifier 绑定路线
+  - 来源: proposal.md#Impact；specs/review/spec.md#verifier 绑定
+  - 原因: 独立可验收行为，可由 TEST-001 验收
+  - 边界: 保持既有 job 提交协议不变
 - [ ] 1.2 检查 verifier 绑定执行证据 tdd_required:true
+  执行依据:
+  - 测试: test-contract.md#TEST-002,TEST-003
+  - 设计: design.md#执行证据核对路线
+  - 来源: proposal.md#Impact；discovery.md#CHAIN-001
+  - 原因: 证据核对与文档绑定是两个独立验收入口
+  - 边界: 不改变历史证据的判定语义
 
 ## Documentation
 
@@ -82,6 +94,15 @@ OpenSpec 能力规范增量（`openspec instructions specs` 格式）。
 ```
 
 规则：
+- 每个普通 TDD task（`tdd_required:true`）必须紧跟一个 `执行依据:` 块，包含五个字段：`测试`（该 task 必须兑现的 test-contract 场景，引用 `test-contract.md#TEST-xxx`，多个用逗号合并）、`设计`（执行路线在 `design.md` 的位置或短摘录）、`来源`（task 产生依据，如 `proposal.md#Impact`、spec delta、`discovery.md#CHAIN-xxx,IDC-xxx`，已有明确文件路径的补充材料用 `.superspec/artifacts/...`）、`原因`（为什么单独拆出这个 task）、`边界`（执行时需要保护的边界）
+- `执行依据:` 必须紧跟所属 task 行（中间最多允许一个空行）；字段不得重复；块内不得出现 checkbox（`- [ ]` / `- [x]`），否则会变成无人执行的暗任务并被引擎拒绝
+- 引用使用带文件前缀的可定位格式；`设计`、`来源`、`边界` 的标题或短摘录引用逐项写完整文件前缀，只有 ID 型引用（TEST/CHAIN/IDC）可以逗号合并
+- 声明的每个 `TEST-xxx` 必须存在于 `test-contract.md`，否则 `propose-ready` 和 `start-apply` 会被阻断
+- 五个字段的内容必须针对该 task 具体可核验，执行者和审查者要拿它们对照实现：`边界` 写出改动不应触碰的具体行为、模块或语义（能对着 diff 判断有没有越界），不写"不破坏现有功能"这类放在任何 task 上都成立的套话；`原因` 说明这个 task 独立存在的理由，不写"需要单独实现"；不同 task 的执行依据不应互相复制
+- 写不出可定位的 `设计` 引用时，说明 `design.md` 缺少该 task 的实现方向——先补设计，不编造引用
+- 单个 task 声明的测试超过 3 个时，`原因` 必须说明为什么不再拆分
+- `tdd_required:false` task 可以写执行依据，`测试` 字段按需填写；特征化任务（characterization task，指为固化既有行为而写保护测试、不引入新行为的任务）用 `tdd_required:false no_tdd_reason:characterization` 标记，只有这类任务可以在执行阶段以特征化通过作为测试证据
+- `REVIEW-FIX-*` task 由引擎在审查返工时追加，不需要手写执行依据
 - `<task_id>` 可以是 `1.1` 或 `TASK-001.1`，必须唯一、稳定；标题不要包含 task id token，例如不要写 `## 1.1 Review verifier`
 - task 内部步骤用普通 bullet，不用缩进 checkbox——引擎只解析顶格 checkbox 行，缩进的会变成无人执行的暗任务
 - `tdd_required:true`（默认）——改运行时代码/业务逻辑/数据迁移/权限/外部接口
