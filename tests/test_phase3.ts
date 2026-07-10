@@ -12,6 +12,7 @@ import { next } from "../src/next.ts";
 import { proposeReady, startApply, taskStart, taskComplete } from "../src/transition.ts";
 import { recordJobSubmit, recordUserDecisionContent } from "../src/record.ts";
 import { recordTestRun, tasksStructureDigestOf } from "../src/task.ts";
+import type { PhaseDecisionAction } from "../src/phase_confirmation.ts";
 import type { Job, JobRole, State } from "../src/types.ts";
 import { confirmCurrentPhase } from "./phase_confirmation_support.ts";
 
@@ -145,6 +146,14 @@ test("start-apply：未确认时直接调用被拒绝，只有精确确认才能
     const ask = next(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(ask.path, "ask_user");
     assert.match(ask.ask_user.scope, /^phase_confirmation:propose_to_apply:/);
+    const actions = ask.ask_user.actions as PhaseDecisionAction[];
+    assert.deepEqual(ask.ask_user.allowed_answers, actions.map(action => action.label));
+    const advance = actions.find(action => action.decision === "advance");
+    const stay = actions.find(action => action.decision === "stay");
+    assert.ok(advance);
+    assert.ok(stay);
+    assert.equal(stay.reason, "required");
+    assert.equal(stay.resume.kind, "continue_current_phase");
 
     const ambiguous = recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({
       scope: ask.ask_user.scope,
@@ -154,11 +163,22 @@ test("start-apply：未确认时直接调用被拒绝，只有精确确认才能
     assert.equal(ambiguous.accepted, false);
     assert.match(ambiguous.message, /必须精确/);
 
-    const confirmed = recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({
-      scope: ask.ask_user.scope,
-      question: ask.ask_user.question,
-      answer: ask.ask_user.allowed_answers[0],
-    }));
+    assert.equal(recordUserDecisionContent(
+      fx.projectRoot,
+      fx.change,
+      JSON.stringify(stay.record_input),
+    ).accepted, false);
+    assert.equal(recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({
+      ...stay.record_input,
+      reason: "继续补充回滚方案",
+    })).accepted, true);
+    assert.equal(startApply(fx.projectRoot, fx.change, fx.changeRoot).events_written, 0);
+
+    const confirmed = recordUserDecisionContent(
+      fx.projectRoot,
+      fx.change,
+      JSON.stringify(advance.record_input),
+    );
     assert.equal(confirmed.accepted, true);
 
     const advanced = startApply(fx.projectRoot, fx.change, fx.changeRoot);
@@ -221,6 +241,47 @@ test("start-apply：proposal review stale 时创建 fresh job，next 返回 requ
     const nextResult = next(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     assert.equal(nextResult.path, "required_job");
     assert.equal(nextResult.required_jobs[0].role, "critic");
+  } finally { fx.cleanup(); }
+});
+
+test("propose stay：修改绑定材料后 strict 三角色重新审查", () => {
+  const fx = setupPropose();
+  try {
+    const first = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "strict");
+    assert.equal(first.outcome, "job_created");
+    assert.equal(first.created_jobs.length, 3);
+    const firstJobs = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot).open_jobs;
+    for (const job of firstJobs) {
+      assert.ok(job.role === "critic" || job.role === "architect" || job.role === "test-engineer");
+      const reportPath = join(fx.projectRoot, `${job.role}.json`);
+      writeFileSync(reportPath, reviewerReport(job.role));
+      assert.equal(recordJobSubmit(
+        fx.projectRoot,
+        fx.change,
+        fx.changeRoot,
+        job.job_id,
+        reportPath,
+      ).accepted, true);
+    }
+    assert.equal(proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "strict").to_state, "propose_ready");
+
+    const ask = next(fx.projectRoot, fx.change, fx.changeRoot, "strict");
+    assert.equal(ask.path, "ask_user");
+    const stay = (ask.ask_user.actions as PhaseDecisionAction[]).find(action => action.decision === "stay");
+    assert.ok(stay);
+    assert.equal(recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({
+      ...stay.record_input,
+      reason: "继续补充设计边界",
+    })).accepted, true);
+
+    writeFileSync(join(fx.changeRoot, "design.md"), "# Design\n\nchanged after stay\n");
+    const recheck = startApply(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(recheck.outcome, "job_created");
+    assert.equal(recheck.to_state, "propose_ready");
+    const roles = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot).open_jobs
+      .map(job => job.role)
+      .sort();
+    assert.deepEqual(roles, ["architect", "critic", "test-engineer"]);
   } finally { fx.cleanup(); }
 });
 

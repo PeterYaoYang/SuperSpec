@@ -99,32 +99,28 @@ test("CLI：非法 risk 不会进入 profile resolver", () => {
 
 test("simulateLoop：done 路径立即停止", () => {
   const result = simulateLoop(
-    () => ({ state: "archive", path: "done", reason: "已完成" }) as NextOutput,
+    () => ({ state: "accepted", path: "done", reason: "已完成" }) as NextOutput,
     () => true,
   );
   assert.equal(result.completed, true);
   assert.equal(result.steps.length, 1);
-  assert.equal(result.finalState, "archive");
+  assert.equal(result.finalState, "accepted");
 });
 
-test("simulateLoop：accepted 归档确认会暂停", () => {
-  const outputs: NextOutput[] = [
-    {
-      state: "accepted",
-      path: "ask_user",
-      ask_user: { question: "审查已通过，确认归档时请执行 superspec transition archive", allowed_answers: ["确认归档"], scope: "phase_confirmation:accepted_to_archive:test-epoch:sha256:test" },
-      reason: "等待确认",
-    },
-  ];
+test("simulateLoop：accepted 终态不会再执行推进命令", () => {
+  let executed = false;
   const result = simulateLoop(
-    () => outputs[0],
-    () => true,
+    () => ({ state: "accepted", path: "done", reason: "审查已接受，流程完成" }),
+    () => {
+      executed = true;
+      return true;
+    },
   );
-  assert.equal(result.completed, false);
+  assert.equal(result.completed, true);
   assert.equal(result.steps.length, 1);
-  assert.equal(result.steps[0].action, "ask");
+  assert.equal(result.steps[0].action, "stop");
   assert.equal(result.finalState, "accepted");
-  assert.match(result.message, /需要用户确认/);
+  assert.equal(executed, false);
 });
 
 test("simulateLoop：真实 next 在阶段确认处暂停，登记后只推进一个边界", () => {
@@ -212,11 +208,13 @@ test("阶段确认：授权事件不改变 scope，coverage exemption 会改变 
     };
 
     const initial = currentConfirmation();
-    assert.equal(recordUserDecisionContent(projectRoot, change, JSON.stringify({
-      scope: initial.scope,
-      question: initial.ask.question,
-      answer: initial.answer,
-    })).accepted, true);
+    const advance = initial.actions.find(action => action.decision === "advance");
+    assert.ok(advance);
+    assert.equal(recordUserDecisionContent(
+      projectRoot,
+      change,
+      JSON.stringify(advance.record_input),
+    ).accepted, true);
 
     const afterConfirmation = currentConfirmation();
     assert.equal(afterConfirmation.scope, initial.scope);
@@ -252,7 +250,7 @@ test("simulateLoop：required_job → next_command → done", () => {
     },
     { state: "propose", path: "next_command", next_command: "superspec transition propose-ready", reason: "推进", missing_inputs: [] },
     { state: "propose_ready", path: "next_command", next_command: "superspec transition start-apply", reason: "执行", missing_inputs: [] },
-    { state: "archive", path: "done", reason: "完成" },
+    { state: "accepted", path: "done", reason: "完成" },
   ];
   const result = simulateLoop(
     () => outputs[callCount++],

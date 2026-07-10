@@ -8,7 +8,7 @@ import { installProject } from "./install.ts";
 import { writeSnapshot } from "./store.ts";
 import { rebuildSnapshot } from "./sync.ts";
 import { next as nextCmd } from "./next.ts";
-import { proposeReady, commitTransition, transitionInit, transitionExplore, startApply, taskStart, taskComplete, reopen, reviewReady, accept, archive } from "./transition.ts";
+import { proposeReady, commitTransition, transitionInit, transitionExplore, startApply, taskStart, taskComplete, reopen, reviewReady, accept } from "./transition.ts";
 import type { State, TransitionResult } from "./types.ts";
 import type { ReviewRisk } from "./review.ts";
 import { recordJobSubmit, recordJobSubmitContent, recordUserDecision, recordUserDecisionContent, jobsList, jobsPacket } from "./record.ts";
@@ -578,8 +578,8 @@ transition 子命令：
   init / explore / sync / next / propose-ready / start-apply
   task-start --task <T> / task-complete --task <T> [--input -]
   reopen --to apply --reason <TEXT> [--review-fix <JOB#FINDING>]
-  reopen --to propose --reason <TEXT> --review-finding <JOB#FINDING>
-  review-ready / accept / archive
+  reopen --to propose --reason <TEXT> [--review-finding <JOB#FINDING>]
+  review-ready / accept
 
 record 子命令：
   job-submit --job <J> --report <F|->
@@ -809,12 +809,6 @@ jobs 子命令：
 
           case "accept": {
             const result = accept(projectRoot, change, cr);
-            console.log(JSON.stringify(result, null, 2));
-            return transitionExitCode(result);
-          }
-
-          case "archive": {
-            const result = archive(projectRoot, change, cr);
             console.log(JSON.stringify(result, null, 2));
             return transitionExitCode(result);
           }

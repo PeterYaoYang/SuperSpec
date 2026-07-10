@@ -5,7 +5,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import {
   ensureChangeLayout, readEvents, appendEvent, makeEvent,
   writeSnapshot, snapshotDigest, withLock, idempotencyKey,
-  docRef, listMarkdownFiles, sha256File, sha256Text,
+  docRef, sha256Text,
 } from "./store.ts";
 import { rebuildSnapshot } from "./sync.ts";
 import { requiredJobActions } from "./job_action.ts";
@@ -52,14 +52,16 @@ import {
 } from "./format.ts";
 import {
   applyRequirementModeForCurrentRound,
+  blockingJobsForApplyDone,
   formatPendingTaskMessage,
+  latestAcceptedProposalBaseline,
   pendingTaskStatusForApply,
   planTransition,
   proposalDocsBaseline,
   type TransitionDecisionPlan,
 } from "./phase_plan.ts";
 import {
-  latestPhaseConfirmationDecision,
+  latestAcceptedPhaseDecision,
   phaseConfirmationCommitPayload,
   phaseConfirmationForBoundary,
   phaseConfirmationMissingMessage,
@@ -347,14 +349,17 @@ function evaluateApplyDoneCodeReviewGate(input: {
     const latest = facts.latestTerminal;
     if (latest?.state === "accepted") {
       const acceptedScope = latest.job.packet_context?.code_review_scope;
-      if (!hasFrozenCodeReviewCurrentHead(acceptedScope)) {
+      const staleReason = codeReviewJobStaleReason(input.projectRoot, latest.job, currentWorkingPaths);
+      if (staleReason || !hasFrozenCodeReviewCurrentHead(acceptedScope)) {
         const { job, scanReason } = createCodeReviewerJob(input.change, input.projectRoot, input.changeRoot, input.events);
         return {
           fromState: "apply_done",
           toState: "apply_done",
           outcome: "job_created" as const,
           newJobs: [job],
-          reason: `已接受代码审查工作项缺少冻结 current_head，重新创建代码审查工作项；${scanReason}`,
+          reason: staleReason
+            ? `已接受代码审查工作项不再匹配当前代码状态，重新创建代码审查工作项；${staleReason}；${scanReason}`
+            : `已接受代码审查工作项缺少冻结 current_head，重新创建代码审查工作项；${scanReason}`,
         };
       }
       return {
@@ -556,9 +561,9 @@ function authorizePhaseAdvance(input: {
     input.boundary,
   );
   const phaseDecision = confirmation
-    ? latestPhaseConfirmationDecision(input.events, confirmation)
+    ? latestAcceptedPhaseDecision(input.events, confirmation)
     : null;
-  if (!confirmation || !phaseDecision) {
+  if (!confirmation || phaseDecision?.decision !== "advance") {
     return {
       skip: true,
       message: confirmation
@@ -922,6 +927,35 @@ export function reopen(
         };
       }
 
+      if (to === "propose") {
+        if (snapshot.state !== "accepted") {
+          return {
+            skip: true,
+            message: `当前状态 ${snapshot.state}，主动 reopen --to propose 只允许从 accepted 发起；apply_done 的代码审查问题请使用 --review-finding`,
+          };
+        }
+        if (snapshot.open_jobs.length > 0) {
+          return {
+            blocked: true,
+            reason: `状态未推进；accepted 仍有 ${snapshot.open_jobs.length} 个待完成工作项`,
+            jobs: snapshot.open_jobs,
+          };
+        }
+        const acceptedBaseline = latestAcceptedProposalBaseline(events);
+        return {
+          fromState: "accepted",
+          toState: "propose",
+          outcome: "advanced" as const,
+          reason: reason.trim(),
+          commitPayload: {
+            reopen_target: "propose",
+            reopen_source: "accepted",
+            baseline_source: acceptedBaseline ? "accepted" : "reopen_fallback",
+            baseline_docs: acceptedBaseline ?? proposalDocsBaseline(changeRoot),
+          },
+        };
+      }
+
       if (to !== "apply") return { skip: true, message: `reopen 当前只支持 --to apply 或 --to propose，不支持 ${to}` };
       if (snapshot.state !== "apply_done" && snapshot.state !== "review") {
         return { skip: true, message: `当前状态 ${snapshot.state}，不能 reopen 到 apply` };
@@ -974,6 +1008,14 @@ export function reviewReady(projectRoot: string, change: string, changeRoot: str
         };
       }
       if (snapshot.state === "apply_done") {
+        const blockingJobs = blockingJobsForApplyDone(projectRoot, events, snapshot);
+        if (blockingJobs.length > 0) {
+          return {
+            blocked: true,
+            reason: `状态未推进；有 ${blockingJobs.length} 个待完成工作项`,
+            jobs: blockingJobs,
+          };
+        }
         const codeReviewDecision = evaluateApplyDoneCodeReviewGate({
           events,
           projectRoot,
@@ -1032,45 +1074,6 @@ export function accept(projectRoot: string, change: string, changeRoot: string):
         mode: { kind: "risk", risk: "strict" },
       });
       return transitionPlanToDecision(snapshot, changeRoot, change, plan);
-    },
-  });
-}
-
-// ===== archive =====
-
-export function archive(projectRoot: string, change: string, changeRoot: string): TransitionResult {
-  return commitTransition(projectRoot, change, changeRoot, {
-    name: "archive", idempotencyInputs: { phase: "archive" },
-    decide: (snapshot) => {
-      if (snapshot.state !== "accepted") return { skip: true, message: `当前状态 ${snapshot.state}，需要 accepted` };
-      const events = readEvents(projectRoot, change);
-      const confirmation = phaseConfirmationForBoundary(projectRoot, events, snapshot, "accepted_to_archive");
-      const phaseDecision = confirmation ? latestPhaseConfirmationDecision(events, confirmation) : null;
-      if (!confirmation || !phaseDecision) {
-        return {
-          skip: true,
-          message: confirmation
-            ? phaseConfirmationMissingMessage(confirmation)
-            : "无法建立 Archive 阶段确认范围",
-        };
-      }
-      // 构建保全清单（Phase 4 简化版：记录文档指纹 + specs/）
-      const manifest: Record<string, string> = {};
-      const docPaths = ["proposal.md", "tasks.md", "design.md", ".superspec/artifacts/discovery.md", ".superspec/artifacts/business-invariants.md", ".superspec/artifacts/test-contract.md"];
-      for (const p of docPaths) {
-        manifest[p] = sha256File(join(changeRoot, p)) ?? "sha256:missing";
-      }
-      // specs/ 目录：递归收录 .md（覆盖 specs/<capability>/spec.md 布局）
-      const specsDir = join(changeRoot, "specs");
-      for (const rel of listMarkdownFiles(specsDir)) {
-        manifest[`specs/${rel}`] = sha256File(join(specsDir, rel)) ?? "sha256:missing";
-      }
-      return {
-        fromState: "accepted", toState: "archive", outcome: "advanced" as const,
-        reason: "归档完成",
-        commitPayload: phaseConfirmationCommitPayload(confirmation, phaseDecision),
-        extraEvents: [{ type: "artifact_recorded", payload: { kind: "archive_preservation_manifest", manifest } }],
-      };
     },
   });
 }

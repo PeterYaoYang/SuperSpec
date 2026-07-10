@@ -11,7 +11,7 @@ argument-hint: "本次测试说明"
 
 ## 读写边界
 
-- 默认只读；不要修改 production code、OpenSpec artifacts、`.superspec/**`、task checkbox、review artifacts 或 archive artifacts。
+- 默认只读；不要修改 production code、OpenSpec artifacts、`.superspec/**`、task checkbox 或 review artifacts。
 - 只能执行本次任务说明中的 `allowed_test_command`，不要发明、改写或补充命令。
 - 只有 test-runner worker 运行结果可以成为正式 RED/characterization/GREEN candidate；不要让主线程代跑或伪造正式 evidence。
 - 如果本次任务说明没有 `allowed_test_command`、`worker_state` 不是 `ready`、命令上下文不足或测试产生未声明副作用，停止并报告 blocker。

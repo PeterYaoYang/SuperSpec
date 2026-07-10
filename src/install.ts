@@ -7,8 +7,9 @@ export const WORKFLOW_SKILLS = [
   "superspec-propose",
   "superspec-apply",
   "superspec-review",
-  "superspec-archive",
 ] as const;
+
+const DEPRECATED_WORKFLOW_SKILLS = ["superspec-archive"] as const;
 
 export const WORKFLOW_PROMPTS = [
   "architect.md",
@@ -101,6 +102,9 @@ function writeBundledFile(src: string, dest: string): void {
 
 function copySkills(templateRoot: string, projectRoot: string): string[] {
   const skillsDest = join(projectRoot, ".codex", "skills");
+  for (const skill of DEPRECATED_WORKFLOW_SKILLS) {
+    rmSync(join(skillsDest, skill), { recursive: true, force: true });
+  }
   const installedSkills: string[] = [];
   for (const skill of WORKFLOW_SKILLS) {
     const src = join(templateRoot, "skills", skill, "SKILL.md");
@@ -332,7 +336,7 @@ export function installProject(projectRoot: string, options: InstallOptions = {}
     throw new Error(
       "检测到老版 SuperSpec (0.x) 的状态文件。\n" +
       `SuperSpec ${SUPERSPEC_VERSION} 是全新引擎，不兼容 0.x 的状态格式。\n` +
-      `请先用老版（0.1.x）完成或归档现有 change，再安装 ${SUPERSPEC_VERSION}。\n` +
+      `请先用老版（0.1.x）完成现有 change，再安装 ${SUPERSPEC_VERSION}。\n` +
       "或在全新项目目录中安装。",
     );
   }

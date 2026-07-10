@@ -14,10 +14,10 @@ metadata:
 
 所有状态由工作流引擎管理，按这个循环执行：
 
-1. `superspec transition next --change "<change>"`
-2. 执行返回的命令、工作项或用户确认
-3. 用户确认用 `superspec record user-decision --change "<change>" --input -`；工作项审查报告用 `superspec record job-submit --change "<change>" --job <JOB> --report -`
-4. 回到第 1 步
+1. `superspec transition next --change "<change>"` 获取下一步。
+2. 执行返回的命令。
+3. 登记结果。
+4. 回到第 1 步。
 
 如果 next 返回用户确认、审查或验证事项，停止当前 apply 推进，并按 next 交给对应工作项或用户确认处理。处理完成前不要继续下一个 task，也不要进入下一阶段；任务完成时说明改动、RED/GREEN 或 no-TDD 证据和下一步；发现范围、验收或用户可见行为变化时，停止实现并说明要回 propose。
 

@@ -23,7 +23,7 @@ argument-hint: "本次代码审查说明"
 
 - 只读，不修改文件。
 - 不创建 task，不修改 proposal/design/tasks/test-contract。
-- 不执行 reopen、accept、archive 或其他状态推进命令。
+- 不执行 reopen、accept 或其他状态推进命令。
 - 不把主流程没有提供、自己也没读过的材料当作已审查范围。
 - 上下文不足时，明确写出缺口和需要主流程补充的来源，不猜测。
 

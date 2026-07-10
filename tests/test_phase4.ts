@@ -1,4 +1,4 @@
-// SuperSpec 流程引擎 — Phase 4 测试：review + archive
+// SuperSpec 流程引擎 — Phase 4 测试：review + accepted terminal
 
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -7,14 +7,15 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, symlinkSyn
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { ensureChangeLayout, appendEvent, makeEvent, readEvents, rawFile, sha256Text } from "../src/store.ts";
+import { ensureChangeLayout, appendEvent, docRef, makeEvent, readEvents, rawFile, sha256Text } from "../src/store.ts";
 import { rebuildSnapshot } from "../src/sync.ts";
 import { next } from "../src/next.ts";
-import { reviewReady, taskStart, taskComplete, reopen, accept, archive } from "../src/transition.ts";
+import { proposeReady, reviewReady, startApply, taskStart, taskComplete, reopen, accept } from "../src/transition.ts";
 import { jobsPacket, recordJobSubmit, recordUserDecisionContent } from "../src/record.ts";
 import { reviewEvidenceDigest } from "../src/review.ts";
 import { codeFileContentSha, dirtyCodeFiles } from "../src/git_state.ts";
-import { phaseConfirmationForCurrentState } from "../src/phase_confirmation.ts";
+import { phaseConfirmationForCurrentState, type PhaseDecisionAction } from "../src/phase_confirmation.ts";
+import { latestAcceptedProposalBaseline } from "../src/phase_plan.ts";
 import type { Job, JobRole, State } from "../src/types.ts";
 import { confirmCurrentPhase } from "./phase_confirmation_support.ts";
 
@@ -268,6 +269,14 @@ test("apply_done → review：阶段确认必须精确且 direct transition 受�
     const ask = next(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
     assert.equal(ask.path, "ask_user");
     assert.match(ask.ask_user.scope, /^phase_confirmation:apply_to_review:/);
+    const actions = ask.ask_user.actions as PhaseDecisionAction[];
+    assert.deepEqual(ask.ask_user.allowed_answers, actions.map(action => action.label));
+    const advance = actions.find(action => action.decision === "advance");
+    const stay = actions.find(action => action.decision === "stay");
+    assert.ok(advance);
+    assert.ok(stay);
+    assert.equal(stay.reason, "optional");
+    assert.equal(stay.resume.kind, "stop");
 
     const ambiguous = recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({
       scope: ask.ask_user.scope,
@@ -280,11 +289,21 @@ test("apply_done → review：阶段确认必须精确且 direct transition 受�
     assert.equal(blocked.events_written, 0);
     assert.match(blocked.message, /用户确认/);
 
-    assert.equal(recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({
-      scope: ask.ask_user.scope,
-      question: ask.ask_user.question,
-      answer: ask.ask_user.allowed_answers[0],
-    })).accepted, true);
+    assert.equal(recordUserDecisionContent(
+      fx.projectRoot,
+      fx.change,
+      JSON.stringify(stay.record_input),
+    ).accepted, true);
+    assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal").events_written, 0);
+    const afterStay = next(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    assert.equal(afterStay.path, "ask_user");
+    assert.equal(afterStay.ask_user.scope, ask.ask_user.scope);
+
+    assert.equal(recordUserDecisionContent(
+      fx.projectRoot,
+      fx.change,
+      JSON.stringify(advance.record_input),
+    ).accepted, true);
     assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal").to_state, "review");
   } finally { fx.cleanup(); }
 });
@@ -399,11 +418,9 @@ test("apply reopen 后材料恢复相同：旧确认不能跨新 epoch 重放", 
       rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot),
     );
     assert.ok(initial);
-    const oldDecision = JSON.stringify({
-      scope: initial.scope,
-      question: initial.ask.question,
-      answer: initial.answer,
-    });
+    const initialAdvance = initial.actions.find(action => action.decision === "advance");
+    assert.ok(initialAdvance);
+    const oldDecision = JSON.stringify(initialAdvance.record_input);
     assert.equal(recordUserDecisionContent(fx.projectRoot, fx.change, oldDecision).accepted, true);
 
     writeFileSync(join(fx.changeRoot, "tasks.md"), "# Tasks\n\n- [ ] TASK-001 Done\n");
@@ -428,21 +445,27 @@ test("apply reopen 后材料恢复相同：旧确认不能跨新 epoch 重放", 
     assert.notEqual(blocked.to_state, "review");
     assert.equal(rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot).state, "apply_done");
 
-    assert.equal(recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({
-      scope: reentered.scope,
-      question: reentered.ask.question,
-      answer: reentered.answer,
-    })).accepted, true);
+    const reenteredAdvance = reentered.actions.find(action => action.decision === "advance");
+    assert.ok(reenteredAdvance);
+    assert.equal(recordUserDecisionContent(
+      fx.projectRoot,
+      fx.change,
+      JSON.stringify(reenteredAdvance.record_input),
+    ).accepted, true);
   } finally { fx.cleanup(); }
 });
 
-test("reopen：无 pending task 或终态来源时拒绝", () => {
+test("reopen：无 pending task、accepted 直回 apply 或 legacy archive 来源时拒绝", () => {
   const fx = setupApplyWithDoneTask();
   try {
     reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
     const noPending = reopen(fx.projectRoot, fx.change, fx.changeRoot, "apply", "no pending");
     assert.equal(noPending.events_written, 0);
     assert.match(noPending.message, /没有未完成任务/);
+
+    const noFinding = reopen(fx.projectRoot, fx.change, fx.changeRoot, "propose", "不能绕过代码审查 finding");
+    assert.equal(noFinding.events_written, 0);
+    assert.match(noFinding.message, /--review-finding/);
   } finally { fx.cleanup(); }
 
   const acceptedFx = setupApplyWithDoneTask();
@@ -460,8 +483,14 @@ test("reopen：无 pending task 或终态来源时拒绝", () => {
   try {
     advanceApplyToReview(archiveFx.projectRoot, archiveFx.change, archiveFx.changeRoot, "minimal");
     acceptAfterFinalVerifier(archiveFx.projectRoot, archiveFx.change, archiveFx.changeRoot, "minimal");
-    confirmCurrentPhase(archiveFx.projectRoot, archiveFx.change, archiveFx.changeRoot);
-    archive(archiveFx.projectRoot, archiveFx.change, archiveFx.changeRoot);
+    appendEvent(archiveFx.projectRoot, archiveFx.change, makeEvent(archiveFx.change, "transition_commit", {
+      transition: "archive",
+      from_state: "accepted",
+      to_state: "archive",
+      outcome: "advanced",
+      created_job_ids: [],
+      reason: "legacy archive fixture",
+    }, { transitionId: "T-legacy-archive", idempotencyKey: "legacy-archive-key" }));
     writeFileSync(join(archiveFx.changeRoot, "tasks.md"), "# Tasks\n\n- [ ] TASK-025 Too late\n");
 
     const fromArchive = reopen(archiveFx.projectRoot, archiveFx.change, archiveFx.changeRoot, "apply", "pending tasks: TASK-025");
@@ -1130,7 +1159,7 @@ test("code-reviewer：历史报告路径变成真实代码后必须重新进入 
   } finally { fx.cleanup(); }
 });
 
-test("code-reviewer：accepted pass 后绑定文件变化仍进入 review", () => {
+test("code-reviewer：accepted pass 后绑定文件变化必须重新审查", () => {
   const fx = setupApplyWithDoneTask();
   try {
     initGitRepo(fx.projectRoot);
@@ -1150,21 +1179,26 @@ test("code-reviewer：accepted pass 后绑定文件变化仍进入 review", () =
     assert.equal(submitted.accepted, true);
 
     writeFileSync(join(fx.projectRoot, "src", "example.ts"), "export const value = 2;\n");
-    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot);
+    const planned = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(planned.path, "next_command");
+    assert.match(planned.next_command, /transition review-ready/);
     const retry = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
-    assert.equal(retry.outcome, "advanced");
-    assert.equal(retry.to_state, "review");
-    const event = readEvents(fx.projectRoot, fx.change).findLast(e => e.event_type === "transition_commit");
-    const gate = (event?.payload as { code_review_gate?: { decision?: string; job_id?: string } }).code_review_gate;
-    assert.equal(gate?.decision, "passed");
-    assert.equal(gate?.job_id, first.created_jobs[0]);
-    const snap = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot);
-    assert.equal(snap.state, "review");
-    assert.equal(snap.accepted_jobs.some(job => job.job_id === first.created_jobs[0]), true);
+    assert.equal(retry.outcome, "job_created");
+    assert.equal(retry.to_state, "apply_done");
+    assert.notEqual(retry.created_jobs[0], first.created_jobs[0]);
+    assert.equal(submitCodeReviewerReport(
+      fx.projectRoot,
+      fx.change,
+      fx.changeRoot,
+      retry.created_jobs[0],
+      codeReviewerReport(fx.projectRoot, fx.change, retry.created_jobs[0], "pass", [], ["src/example.ts"]),
+    ).accepted, true);
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot).to_state, "review");
   } finally { fx.cleanup(); }
 });
 
-test("code-reviewer：accepted pass 后新增代码文件仍进入 review", () => {
+test("code-reviewer：accepted pass 后新增代码文件必须重新审查", () => {
   const fx = setupApplyWithDoneTask();
   try {
     initGitRepo(fx.projectRoot);
@@ -1183,14 +1217,22 @@ test("code-reviewer：accepted pass 后新增代码文件仍进入 review", () =
     ).accepted, true);
 
     writeFileSync(join(fx.projectRoot, "src", "b.ts"), "export const b = 2;\n");
-    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot);
+    const planned = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(planned.path, "next_command");
+    assert.match(planned.next_command, /transition review-ready/);
     const retry = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
-    assert.equal(retry.outcome, "advanced");
-    assert.equal(retry.to_state, "review");
-    const event = readEvents(fx.projectRoot, fx.change).findLast(e => e.event_type === "transition_commit");
-    const gate = (event?.payload as { code_review_gate?: { decision?: string; job_id?: string } }).code_review_gate;
-    assert.equal(gate?.decision, "passed");
-    assert.equal(gate?.job_id, first.created_jobs[0]);
+    assert.equal(retry.outcome, "job_created");
+    assert.equal(retry.to_state, "apply_done");
+    assert.notEqual(retry.created_jobs[0], first.created_jobs[0]);
+    assert.equal(submitCodeReviewerReport(
+      fx.projectRoot,
+      fx.change,
+      fx.changeRoot,
+      retry.created_jobs[0],
+      codeReviewerReport(fx.projectRoot, fx.change, retry.created_jobs[0], "pass", [], ["src/a.ts", "src/b.ts"]),
+    ).accepted, true);
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot).to_state, "review");
   } finally { fx.cleanup(); }
 });
 
@@ -2061,7 +2103,7 @@ test("next：review 非阶段 open job 不抢占 pending task reopen", () => {
   } finally { fx.cleanup(); }
 });
 
-test("next：accepted 和 archive 有 open job 时不走普通完成路径", () => {
+test("next：accepted 和 legacy archive 有 open job 时不走普通完成路径", () => {
   const acceptedFx = setupApplyWithDoneTask();
   try {
     advanceApplyToReview(acceptedFx.projectRoot, acceptedFx.change, acceptedFx.changeRoot, "minimal");
@@ -2081,7 +2123,14 @@ test("next：accepted 和 archive 有 open job 时不走普通完成路径", () 
   try {
     advanceApplyToReview(archiveFx.projectRoot, archiveFx.change, archiveFx.changeRoot, "minimal");
     acceptAfterFinalVerifier(archiveFx.projectRoot, archiveFx.change, archiveFx.changeRoot, "minimal");
-    archive(archiveFx.projectRoot, archiveFx.change, archiveFx.changeRoot);
+    appendEvent(archiveFx.projectRoot, archiveFx.change, makeEvent(archiveFx.change, "transition_commit", {
+      transition: "archive",
+      from_state: "accepted",
+      to_state: "archive",
+      outcome: "advanced",
+      created_job_ids: [],
+      reason: "legacy archive fixture",
+    }, { transitionId: "T-legacy-archive-open", idempotencyKey: "legacy-archive-open-key" }));
     const job = appendOpenJob(archiveFx.projectRoot, archiveFx.change, "archive", {
       job_id: "JOB-archive-open",
       role: "executor",
@@ -2094,18 +2143,92 @@ test("next：accepted 和 archive 有 open job 时不走普通完成路径", () 
   } finally { archiveFx.cleanup(); }
 });
 
-test("next：accepted 无 open job 时等待用户确认归档", () => {
+test("apply_done：确认后新增普通 open job 时 next 与 direct review-ready 都阻断", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal").to_state, "apply_done");
+    const codeReview = reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    assert.equal(codeReview.outcome, "job_created");
+    assert.equal(submitCodeReviewerPass(
+      fx.projectRoot,
+      fx.change,
+      fx.changeRoot,
+      codeReview.created_jobs[0],
+    ).accepted, true);
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    const job = appendOpenJob(fx.projectRoot, fx.change, "apply_done", {
+      job_id: "JOB-apply-done-open",
+      role: "executor",
+      created_from_transition: "apply",
+    });
+
+    const planned = next(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    assert.equal(planned.path, "required_job");
+    assert.equal(planned.required_jobs[0].job_id, job.job_id);
+    const direct = reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    assert.equal(direct.outcome, "blocked");
+    assert.equal(direct.events_written, 0);
+    assert.equal(direct.to_state, "apply_done");
+  } finally { fx.cleanup(); }
+});
+
+test("accepted：存在 open job 时 next 与 reopen --to propose 都阻断", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    advanceApplyToReview(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    acceptAfterFinalVerifier(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    const job = appendOpenJob(fx.projectRoot, fx.change, "accepted", {
+      job_id: "JOB-accepted-before-reopen",
+      role: "executor",
+      created_from_transition: "apply",
+    });
+
+    const planned = next(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    assert.equal(planned.path, "required_job");
+    assert.equal(planned.required_jobs[0].job_id, job.job_id);
+    const direct = reopen(fx.projectRoot, fx.change, fx.changeRoot, "propose", "补充新的验收要求");
+    assert.equal(direct.outcome, "blocked");
+    assert.equal(direct.events_written, 0);
+    assert.equal(direct.to_state, "accepted");
+  } finally { fx.cleanup(); }
+});
+
+test("next：accepted 无 open job 时直接完成，不再返回归档确认或命令", () => {
   const fx = setupApplyWithDoneTask();
   try {
     advanceApplyToReview(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
     acceptAfterFinalVerifier(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
 
     const result = next(fx.projectRoot, fx.change, fx.changeRoot);
-    assert.equal(result.path, "ask_user");
+    assert.equal(result.path, "done");
     assert.equal(result.state, "accepted");
-    assert.match(result.ask_user.scope, /^phase_confirmation:accepted_to_archive:/);
-    assert.match(result.ask_user.question, /确认归档/);
-    assert.match(result.reason, /等待用户确认归档/);
+    assert.match(result.reason, /流程完成/);
+    assert.match(result.reason, /按 continuation 自动回到 propose/);
+    assert.match(result.reason, /不得要求使用者执行工作流命令/);
+    assert.doesNotMatch(result.reason, /superspec transition reopen|请显式执行/);
+    assert.equal("ask_user" in result, false);
+    assert.equal("next_command" in result, false);
+    assert.deepEqual(result.continuation, {
+      kind: "accepted_material_followup",
+      trigger: "material_user_followup",
+      reason_source: "summarize_user_input",
+      reopen_argv_template: [
+        "superspec", "transition", "reopen", "--change", fx.change,
+        "--to", "propose", "--reason", "{{reason}}",
+      ],
+      resume: {
+        kind: "continue_current_phase",
+        instruction: "根据用户补充更新 proposal/specs/design/tasks/test-contract；完成后重新执行 next。",
+        next_argv_after_completion: ["superspec", "transition", "next", "--change", fx.change],
+      },
+      plan_docs_changed_since_accept: false,
+    });
+
+    const normal = next(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.equal(normal.path, "done");
+    assert.deepEqual(normal.continuation?.resume.next_argv_after_completion, [
+      "superspec", "transition", "next", "--change", fx.change, "--risk", "normal",
+    ]);
   } finally { fx.cleanup(); }
 });
 
@@ -2475,59 +2598,240 @@ test("accept：review → accepted", () => {
   } finally { fx.cleanup(); }
 });
 
-test("archive：accepted → archive + 保全清单", () => {
-  const projectRoot = mkdtempSync(join(tmpdir(), "superspec-p4ar-"));
-  const change = "test-change";
-  const changeRoot = join(projectRoot, "openspec", "changes", change);
-  mkdirSync(join(changeRoot, ".superspec", "artifacts"), { recursive: true });
-  writeFileSync(join(changeRoot, "tasks.md"), "# Tasks\n");
-  writeFileSync(join(changeRoot, "proposal.md"), "# P\n");
-  ensureChangeLayout(projectRoot, change);
-  for (const [t, f, to] of [
-    ["init","init","init"],["explore","init","explore"],["propose","explore","propose"],
-    ["propose-ready","propose","propose_ready"],["start-apply","propose_ready","apply"],
-    ["review-ready","apply","apply_done"],["review-ready2","apply_done","review"],
-    ["accept","review","accepted"],
-  ] as const) {
-    appendEvent(projectRoot, change, makeEvent(change, "transition_commit", {
-      transition: t, from_state: f, to_state: to,
-      outcome: "advanced", created_job_ids: [], reason: t,
-    }, { transitionId: `T-${t}`, idempotencyKey: `${t}-key` }));
-  }
+test("accepted：受控 reopen 只能回到 propose，并记录计划材料基线", () => {
+  const fx = setupApplyWithDoneTask();
   try {
-    const blocked = archive(projectRoot, change, changeRoot);
-    assert.equal(blocked.events_written, 0);
-    assert.match(blocked.message, /用户确认/);
+    advanceApplyToReview(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    acceptAfterFinalVerifier(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    const acceptCommit = readEvents(fx.projectRoot, fx.change).findLast(event =>
+      event.event_type === "transition_commit" &&
+      (event.payload as { transition?: unknown }).transition === "accept"
+    );
+    const acceptedBaseline = (acceptCommit?.payload as { accepted_baseline_docs?: unknown })
+      .accepted_baseline_docs;
+    assert.equal(typeof acceptedBaseline, "object");
 
-    const ask = next(projectRoot, change, changeRoot);
-    assert.equal(ask.path, "ask_user");
-    assert.match(ask.ask_user.scope, /^phase_confirmation:accepted_to_archive:/);
-    assert.equal(recordUserDecisionContent(projectRoot, change, JSON.stringify({
-      scope: ask.ask_user.scope,
-      question: ask.ask_user.question,
-      answer: ask.ask_user.allowed_answers[0],
-    })).accepted, true);
+    const toApply = reopen(fx.projectRoot, fx.change, fx.changeRoot, "apply", "不能跳过计划阶段");
+    assert.equal(toApply.events_written, 0);
+    assert.match(toApply.message, /不能 reopen 到 apply/);
 
-    const afterDecision = next(projectRoot, change, changeRoot);
-    assert.equal(afterDecision.path, "next_command");
-    assert.match(afterDecision.next_command, /transition archive/);
+    const blankReason = reopen(fx.projectRoot, fx.change, fx.changeRoot, "propose", "   ");
+    assert.equal(blankReason.events_written, 0);
+    assert.match(blankReason.message, /非空 --reason/);
 
-    const result = archive(projectRoot, change, changeRoot);
-    assert.equal(result.to_state, "archive");
-    assert.ok(result.events_written >= 1);
+    const reopened = reopen(fx.projectRoot, fx.change, fx.changeRoot, "propose", "补充新的验收要求");
+    assert.equal(reopened.outcome, "advanced");
+    assert.equal(reopened.from_state, "accepted");
+    assert.equal(reopened.to_state, "propose");
 
-    // 验证 events 含保全清单
-    const events = readEvents(projectRoot, change);
-    const hasManifest = events.some(e => e.event_type === "artifact_recorded");
-    assert.ok(hasManifest, "应有保全清单事件");
+    const commit = readEvents(fx.projectRoot, fx.change).findLast(event =>
+      event.event_type === "transition_commit" &&
+      (event.payload as { transition?: unknown }).transition === "reopen"
+    );
+    const payload = commit?.payload as {
+      reopen_source?: unknown;
+      reopen_target?: unknown;
+      baseline_source?: unknown;
+      baseline_docs?: unknown;
+    };
+    assert.equal(payload.reopen_source, "accepted");
+    assert.equal(payload.reopen_target, "propose");
+    assert.equal(payload.baseline_source, "accepted");
+    assert.deepEqual(payload.baseline_docs, acceptedBaseline);
 
-    // H3 修复：验证 manifest 内容（文档键 + 指纹正确）
-    const manifestEv = events.find(e => e.event_type === "artifact_recorded");
-    const manifest = manifestEv?.payload as { manifest?: Record<string,string> };
-    assert.ok(manifest?.manifest?.["proposal.md"], "manifest 应含 proposal.md");
-    assert.ok(manifest?.manifest?.["tasks.md"], "manifest 应含 tasks.md");
-    assert.ok(manifest?.manifest?.["proposal.md"]?.startsWith("sha256:"), "指纹应以 sha256: 开头");
-  } finally { rmSync(projectRoot, { recursive: true, force: true }); }
+    assert.equal(proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal").to_state, "propose_ready");
+    const unchanged = startApply(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(unchanged.events_written, 0);
+    assert.match(unchanged.message, /至少一个计划文档必须变化/);
+
+    writeFileSync(join(fx.changeRoot, "design.md"), "# D\n\n新增验收设计\n");
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    assert.equal(startApply(fx.projectRoot, fx.change, fx.changeRoot).to_state, "apply");
+  } finally { fx.cleanup(); }
+});
+
+test("accepted baseline：最新 accept 缺 baseline 时不复用更早轮次", () => {
+  const change = "mixed-accepted-history";
+  const older = makeEvent(change, "transition_commit", {
+    transition: "accept",
+    from_state: "review",
+    to_state: "accepted",
+    outcome: "advanced",
+    created_job_ids: [],
+    reason: "older accept",
+    accepted_baseline_docs: { "proposal.md": "sha256:older" },
+  });
+  const latest = makeEvent(change, "transition_commit", {
+    transition: "accept",
+    from_state: "review",
+    to_state: "accepted",
+    outcome: "advanced",
+    created_job_ids: [],
+    reason: "latest legacy accept",
+  });
+
+  assert.equal(latestAcceptedProposalBaseline([older, latest]), null);
+});
+
+test("accepted baseline：缺 baseline 的最新 accept 使用显式保守 fallback", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    for (const [transition, fromState, toState] of [
+      ["review-ready", "apply", "apply_done"],
+      ["review-ready", "apply_done", "review"],
+      ["accept", "review", "accepted"],
+    ] as const) {
+      appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "transition_commit", {
+        transition,
+        from_state: fromState,
+        to_state: toState,
+        outcome: "advanced",
+        created_job_ids: [],
+        reason: "legacy fixture",
+      }));
+    }
+
+    assert.equal(reopen(
+      fx.projectRoot,
+      fx.change,
+      fx.changeRoot,
+      "propose",
+      "补充 legacy accepted 方案",
+    ).to_state, "propose");
+    const commit = readEvents(fx.projectRoot, fx.change).findLast(event =>
+      event.event_type === "transition_commit" &&
+      (event.payload as { transition?: unknown }).transition === "reopen"
+    );
+    assert.equal((commit?.payload as { baseline_source?: unknown }).baseline_source, "reopen_fallback");
+    assert.equal(typeof (commit?.payload as { baseline_docs?: unknown }).baseline_docs, "object");
+  } finally { fx.cleanup(); }
+});
+
+test("accepted reopen：reopen 前已有计划材料变化时复用 accept baseline", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    advanceApplyToReview(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    acceptAfterFinalVerifier(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    writeFileSync(join(fx.changeRoot, "design.md"), "# D\n\naccepted 后已补充设计约束\n");
+
+    const done = next(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    assert.equal(done.path, "done");
+    assert.equal(done.continuation?.plan_docs_changed_since_accept, true);
+    assert.deepEqual(done.continuation?.resume.next_argv_after_completion, [
+      "superspec", "transition", "next", "--change", fx.change, "--risk", "minimal",
+    ]);
+    assert.match(done.reason, /计划材料已变化/);
+
+    const reopened = reopen(fx.projectRoot, fx.change, fx.changeRoot, "propose", "补充设计约束");
+    assert.equal(reopened.to_state, "propose");
+    assert.equal(proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal").to_state, "propose_ready");
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+
+    const applied = startApply(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(applied.to_state, "apply");
+  } finally { fx.cleanup(); }
+});
+
+test("accepted reopen：计划材料变化后重新创建历史 proposal 审查角色", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    advanceApplyToReview(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    acceptAfterFinalVerifier(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+
+    const historical = appendOpenJob(fx.projectRoot, fx.change, "accepted", {
+      job_id: "JOB-historical-proposal-critic",
+      role: "critic",
+      gate_id: "propose.final_review",
+      created_from_transition: "propose-ready",
+      boundFiles: [docRef(fx.changeRoot, "design.md")],
+    });
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "job_accepted", {
+      job_id: historical.job_id,
+      role: historical.role,
+      report_digest: "sha256:historical-proposal-critic",
+      accepted_at: new Date().toISOString(),
+    }));
+
+    assert.equal(
+      reopen(fx.projectRoot, fx.change, fx.changeRoot, "propose", "修改计划边界").to_state,
+      "propose",
+    );
+    writeFileSync(join(fx.changeRoot, "design.md"), "# D\n\nchanged after accepted reopen\n");
+
+    assert.equal(proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal").to_state, "propose_ready");
+    const recheck = startApply(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(recheck.outcome, "job_created");
+    assert.equal(recheck.to_state, "propose_ready");
+    const openRoles = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot).open_jobs.map(job => job.role);
+    assert.deepEqual(openRoles, ["critic"]);
+    assert.notEqual(recheck.created_jobs[0], historical.job_id);
+  } finally { fx.cleanup(); }
+});
+
+test("CLI：accepted 可以显式 reopen --to propose", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    advanceApplyToReview(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    acceptAfterFinalVerifier(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+
+    const cli = new URL("../src/cli.ts", import.meta.url).pathname;
+    const output = execFileSync(process.execPath, [
+      cli,
+      "transition",
+      "reopen",
+      "--change",
+      fx.change,
+      "--to",
+      "propose",
+      "--reason",
+      "补充新的方案约束",
+    ], { cwd: fx.projectRoot, encoding: "utf8" });
+    const result = JSON.parse(output);
+
+    assert.equal(result.outcome, "advanced");
+    assert.equal(result.from_state, "accepted");
+    assert.equal(result.to_state, "propose");
+  } finally { fx.cleanup(); }
+});
+
+test("legacy archive snapshot：只读 replay 后 next 仍返回 done", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    advanceApplyToReview(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    acceptAfterFinalVerifier(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "transition_commit", {
+      transition: "archive",
+      from_state: "accepted",
+      to_state: "archive",
+      outcome: "advanced",
+      created_job_ids: [],
+      reason: "legacy archive fixture",
+    }, { transitionId: "T-legacy-archive-done", idempotencyKey: "legacy-archive-done-key" }));
+
+    const result = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(result.path, "done");
+    assert.equal(result.state, "archive");
+    assert.match(result.reason, /历史 archive/);
+  } finally { fx.cleanup(); }
+});
+
+test("CLI：archive transition 已下线且不写事件", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    const before = readEvents(fx.projectRoot, fx.change).length;
+    const cli = new URL("../src/cli.ts", import.meta.url).pathname;
+    const result = spawnSync(process.execPath, [
+      cli,
+      "transition",
+      "archive",
+      "--change",
+      fx.change,
+    ], { cwd: fx.projectRoot, encoding: "utf8" });
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /未知的 transition 子命令：archive/);
+    assert.equal(readEvents(fx.projectRoot, fx.change).length, before);
+  } finally { fx.cleanup(); }
 });
 
 test("H3：verifier final gate accepted 后改文档 → stale → review-ready 创建新 job", () => {

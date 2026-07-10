@@ -3,7 +3,9 @@
 // ===== 状态 =====
 export type State =
   | "init" | "explore" | "propose" | "propose_ready"
-  | "apply" | "apply_done" | "review" | "accepted" | "archive" | "abandoned";
+  | "apply" | "apply_done" | "review" | "accepted"
+  | "archive" // legacy replay-only：新工作流不再提供进入此状态的 transition
+  | "abandoned";
 
 // Phase 1 只实现前 4 个
 export const PHASE1_STATES: ReadonlySet<State> = new Set(["init", "explore", "propose", "propose_ready"]);
@@ -201,12 +203,15 @@ export interface TransitionCommitPayload {
     reason?: "no_code_changes";
   };
   phase_confirmation?: {
+    // accepted_to_archive 仅用于读取升级前已经写入的历史 transition commit。
     boundary: "explore_to_propose" | "propose_to_apply" | "apply_to_review" | "accepted_to_archive";
+    decision: "advance";
     epoch_event_id: string;
     material_digest: string;
     scope: string;
     decision_event_id: string;
   };
+  accepted_baseline_docs?: Record<string, string>;
 }
 
 // ===== Snapshot =====
@@ -269,10 +274,48 @@ export interface MissingInput {
   command_to_fix: string;
 }
 
+export type AskUserActionResume =
+  | { kind: "next"; argv: string[] }
+  | {
+      kind: "continue_current_phase";
+      instruction: string;
+      next_argv_after_completion: string[];
+    }
+  | { kind: "stop" };
+
+export interface AskUserAction {
+  label: string;
+  selection: "exact_label";
+  reason: "none" | "required" | "optional";
+  reason_prompt?: string;
+  record_argv: string[];
+  record_input: {
+    scope: string;
+    question: string;
+    answer: string;
+    reason?: string;
+  };
+  resume: AskUserActionResume;
+}
+
 export interface AskUser {
   question: string;
   allowed_answers: string[];
   scope: string;
+  actions?: AskUserAction[];
+}
+
+export interface AcceptedMaterialFollowupContinuation {
+  kind: "accepted_material_followup";
+  trigger: "material_user_followup";
+  reason_source: "summarize_user_input";
+  reopen_argv_template: string[];
+  resume: {
+    kind: "continue_current_phase";
+    instruction: string;
+    next_argv_after_completion: string[];
+  };
+  plan_docs_changed_since_accept: boolean | null;
 }
 
 export type NextOutput = {
@@ -281,7 +324,7 @@ export type NextOutput = {
   | { path: "next_command"; next_command: string; reason: string; missing_inputs: MissingInput[] }
   | { path: "required_job"; required_jobs: RequiredJobAction[]; reason: string }
   | { path: "ask_user"; ask_user: AskUser; reason: string }
-  | { path: "done"; reason: string }
+  | { path: "done"; reason: string; continuation?: AcceptedMaterialFollowupContinuation }
 );
 
 // ===== Transition 结果 =====

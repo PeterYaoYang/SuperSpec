@@ -30,14 +30,15 @@ import {
   scanCodeChangesForReview,
 } from "./code_review.ts";
 import {
-  latestPhaseConfirmationDecision,
+  isPhaseAdvanceAuthorized,
+  latestAcceptedPhaseDecision,
   phaseConfirmationCommitPayload,
   phaseConfirmationForBoundary,
   phaseConfirmationMissingMessage,
   type PhaseBoundary,
 } from "./phase_confirmation.ts";
 import { taskEvidenceReadiness } from "./task_evidence.ts";
-import type { AskUser, Event, Job, JobRole, State } from "./types.ts";
+import type { AcceptedMaterialFollowupContinuation, AskUser, Event, Job, JobRole, State } from "./types.ts";
 import type { Snapshot } from "./types.ts";
 import type { ReviewRisk } from "./review.ts";
 
@@ -49,8 +50,7 @@ export type TransitionName =
   | "task-complete"
   | "review-ready"
   | "reopen"
-  | "accept"
-  | "archive";
+  | "accept";
 
 export type WorkflowMode = { kind: "risk"; risk: ReviewRisk };
 
@@ -74,7 +74,12 @@ export type NextStepPlan =
   | { kind: "required_jobs"; state: State; jobs: Job[]; reason: string }
   | { kind: "ask_user"; state: State; ask: AskUser; reason: string }
   | { kind: "run_transition"; state: State; transition: TransitionName; reason: string; risk?: ReviewRisk; taskId?: string; reopen?: ReopenNextStep }
-  | { kind: "done"; state: State; reason: string };
+  | {
+      kind: "done";
+      state: State;
+      reason: string;
+      continuation?: AcceptedMaterialFollowupContinuation;
+    };
 
 export type TransitionDecisionPlan =
   | { kind: "skip"; message: string }
@@ -105,8 +110,9 @@ function phaseConfirmationStep(
     context.events,
     context.snapshot,
     boundary,
+    context.mode.risk,
   );
-  if (!confirmation || latestPhaseConfirmationDecision(context.events, confirmation)) return null;
+  if (!confirmation || isPhaseAdvanceAuthorized(context.events, confirmation)) return null;
   return {
     kind: "ask_user",
     state: context.snapshot.state,
@@ -179,6 +185,34 @@ export function proposalDocsBaseline(changeRoot: string): Record<string, string>
     baseline[doc] = docRef(changeRoot, doc).sha;
   }
   return baseline;
+}
+
+function isDigestMap(value: unknown): value is Record<string, string> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const entries = Object.entries(value as Record<string, unknown>);
+  return entries.length > 0 && entries.every(([, digest]) => typeof digest === "string");
+}
+
+export function latestAcceptedProposalBaseline(events: Event[]): Record<string, string> | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i];
+    if (ev.event_type !== "transition_commit") continue;
+    const payload = ev.payload as {
+      transition?: unknown;
+      from_state?: unknown;
+      to_state?: unknown;
+      accepted_baseline_docs?: unknown;
+    };
+    if (
+      payload.transition !== "accept" ||
+      payload.from_state !== "review" ||
+      payload.to_state !== "accepted"
+    ) continue;
+    return isDigestMap(payload.accepted_baseline_docs)
+      ? payload.accepted_baseline_docs
+      : null;
+  }
+  return null;
 }
 
 export function latestReopenProposeBaseline(events: Event[]): Record<string, string> | null {
@@ -296,8 +330,48 @@ export function formatPendingTaskMessage(ids: string[], action: string): string 
   return `尚有未完成任务：${ids.join(", ")}；${action}`;
 }
 
+function nextArgv(change: string, risk: ReviewRisk): string[] {
+  return [
+    "superspec",
+    "transition",
+    "next",
+    "--change",
+    change,
+    ...(risk === "strict" ? [] : ["--risk", risk]),
+  ];
+}
+
+function acceptedMaterialFollowup(
+  change: string,
+  risk: ReviewRisk,
+  planDocsChangedSinceAccept: boolean | null,
+): AcceptedMaterialFollowupContinuation {
+  return {
+    kind: "accepted_material_followup",
+    trigger: "material_user_followup",
+    reason_source: "summarize_user_input",
+    reopen_argv_template: [
+      "superspec",
+      "transition",
+      "reopen",
+      "--change",
+      change,
+      "--to",
+      "propose",
+      "--reason",
+      "{{reason}}",
+    ],
+    resume: {
+      kind: "continue_current_phase",
+      instruction: "根据用户补充更新 proposal/specs/design/tasks/test-contract；完成后重新执行 next。",
+      next_argv_after_completion: nextArgv(change, risk),
+    },
+    plan_docs_changed_since_accept: planDocsChangedSinceAccept,
+  };
+}
+
 export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
-  const { changeRoot, mode, snapshot } = context;
+  const { change, changeRoot, events, mode, snapshot } = context;
 
   switch (snapshot.state) {
     case "init":
@@ -398,16 +472,29 @@ export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
 
     case "accepted":
       if (snapshot.open_jobs.length > 0) {
-        return requiredJobs("accepted", snapshot.open_jobs, `有 ${snapshot.open_jobs.length} 个待完成工作项，暂不归档`);
+        return requiredJobs("accepted", snapshot.open_jobs, `有 ${snapshot.open_jobs.length} 个待完成工作项，暂不结束流程`);
       }
-      return phaseConfirmationStep(context, "accepted_to_archive", "审查通过，等待用户确认归档")
-        ?? { kind: "run_transition", state: "accepted", transition: "archive", reason: "用户已确认归档" };
+      {
+        const acceptedBaseline = latestAcceptedProposalBaseline(events);
+        const planDocsChanged = acceptedBaseline
+          ? proposalDocsChangedSinceBaseline(changeRoot, acceptedBaseline)
+          : null;
+        const driftNote = planDocsChanged === true
+          ? "检测到 accepted 后计划材料已变化；当前完成结论仍对应 accepted 时冻结的版本。"
+          : "";
+        return {
+          kind: "done",
+          state: "accepted",
+          reason: `${driftNote}审查已接受，流程完成；后续若使用者补充或修改需求、方案、验收或实现约束，按 continuation 自动回到 propose 后继续，不得要求使用者执行工作流命令`,
+          continuation: acceptedMaterialFollowup(change, mode.risk, planDocsChanged),
+        };
+      }
 
     case "archive":
       if (snapshot.open_jobs.length > 0) {
-        return requiredJobs("archive", snapshot.open_jobs, `有 ${snapshot.open_jobs.length} 个待完成工作项，暂不结束`);
+        return requiredJobs("archive", snapshot.open_jobs, `历史 archive 状态仍有 ${snapshot.open_jobs.length} 个待完成工作项`);
       }
-      return { kind: "done", state: "archive", reason: "已归档，流程完成。" };
+      return { kind: "done", state: "archive", reason: "历史 archive 状态，流程已结束。" };
 
     case "abandoned":
       return { kind: "done", state: "abandoned", reason: "变更已放弃，流程终止。" };
@@ -465,6 +552,23 @@ function planApplyNext(context: PhasePlanContext): NextStepPlan {
   };
 }
 
+export function blockingJobsForApplyDone(
+  projectRoot: string,
+  events: Event[],
+  snapshot: Snapshot,
+): Job[] {
+  const facts = collectCodeReviewGateFacts(events);
+  const currentWorkingPaths = currentCodeReviewWorkingPaths(projectRoot, events);
+  const freshCodeReviewJobIds = new Set(
+    facts.openJobs
+      .filter(job => codeReviewJobStaleReason(projectRoot, job, currentWorkingPaths) == null)
+      .map(job => job.job_id),
+  );
+  return snapshot.open_jobs.filter(job =>
+    job.role !== "code-reviewer" || freshCodeReviewJobIds.has(job.job_id)
+  );
+}
+
 function planApplyDoneNext(context: PhasePlanContext): NextStepPlan {
   const { change, changeRoot, events, mode, snapshot } = context;
   const pendingTasks = pendingTaskStatusForApply(changeRoot, events).pending;
@@ -480,14 +584,7 @@ function planApplyDoneNext(context: PhasePlanContext): NextStepPlan {
 
   const facts = collectCodeReviewGateFacts(events);
   const currentWorkingPaths = currentCodeReviewWorkingPaths(context.projectRoot, events);
-  const freshCodeReviewJobIds = new Set(
-    facts.openJobs
-      .filter(job => codeReviewJobStaleReason(context.projectRoot, job, currentWorkingPaths) == null)
-      .map(job => job.job_id),
-  );
-  const relevantOpenJobs = snapshot.open_jobs.filter(job =>
-    job.role !== "code-reviewer" || freshCodeReviewJobIds.has(job.job_id)
-  );
+  const relevantOpenJobs = blockingJobsForApplyDone(context.projectRoot, events, snapshot);
   if (relevantOpenJobs.length > 0) {
     return requiredJobs("apply_done", relevantOpenJobs, `有 ${relevantOpenJobs.length} 个待完成工作项`);
   }
@@ -591,7 +688,8 @@ function planApplyDoneNext(context: PhasePlanContext): NextStepPlan {
     ? latest.job.packet_context?.code_review_scope
     : undefined;
   const acceptedCurrentHead = acceptedScope?.current_head;
-  const acceptedReviewReady = latest?.state === "accepted" && (
+  const acceptedReviewReady = latest?.state === "accepted" &&
+    codeReviewJobStaleReason(context.projectRoot, latest.job, currentWorkingPaths) == null && (
     acceptedCurrentHead === null ||
     (typeof acceptedCurrentHead === "string" && acceptedCurrentHead.trim() !== "")
   );
@@ -685,8 +783,8 @@ function planExploreTransition(context: TransitionPlanContext): TransitionDecisi
   if (gatePlan) return gatePlan;
 
   const confirmation = phaseConfirmationForBoundary(projectRoot, events, snapshot, "explore_to_propose");
-  const decision = confirmation ? latestPhaseConfirmationDecision(events, confirmation) : null;
-  if (!confirmation || !decision) {
+  const decision = confirmation ? latestAcceptedPhaseDecision(events, confirmation) : null;
+  if (!confirmation || decision?.decision !== "advance") {
     return { kind: "skip", message: confirmation ? phaseConfirmationMissingMessage(confirmation) : "无法建立 Explore 阶段确认范围" };
   }
   return {
@@ -752,8 +850,8 @@ function planStartApplyTransition(
   const executionRequirementPlan = validateExecutionRequirementPlan(changeRoot);
   if (!executionRequirementPlan.ok) return { kind: "skip", message: executionRequirementPlan.message };
   const confirmation = phaseConfirmationForBoundary(projectRoot, events, snapshot, "propose_to_apply");
-  const decision = confirmation ? latestPhaseConfirmationDecision(events, confirmation) : null;
-  if (enforceConfirmation && (!confirmation || !decision)) {
+  const decision = confirmation ? latestAcceptedPhaseDecision(events, confirmation) : null;
+  if (enforceConfirmation && (!confirmation || decision?.decision !== "advance")) {
     return { kind: "skip", message: confirmation ? phaseConfirmationMissingMessage(confirmation) : "无法建立 Propose 阶段确认范围" };
   }
   const gitHead = currentGitHead(projectRoot);
@@ -766,7 +864,7 @@ function planStartApplyTransition(
       apply_start_head: gitHead.head,
       apply_start_head_reason: gitHead.reason,
       apply_contract_mode: executionRequirementPlan.mode,
-      ...(confirmation && decision ? phaseConfirmationCommitPayload(confirmation, decision) : {}),
+      ...(confirmation && decision?.decision === "advance" ? phaseConfirmationCommitPayload(confirmation, decision) : {}),
     },
   };
 }
@@ -789,5 +887,11 @@ function planAcceptTransition(context: TransitionPlanContext): TransitionDecisio
     if (!verifierAccepted) return { kind: "skip", message: "缺少仍然匹配当前证据的最终验证，请先运行 review-ready" };
   }
 
-  return { kind: "advance", fromState: "review", toState: "accepted", reason: "审查通过" };
+  return {
+    kind: "advance",
+    fromState: "review",
+    toState: "accepted",
+    reason: "审查通过",
+    payload: { accepted_baseline_docs: proposalDocsBaseline(changeRoot) },
+  };
 }

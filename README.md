@@ -8,10 +8,10 @@
 
 它解决的是一个很常见的问题：AI 编程工具写代码很快，但有时候还没搞清楚需求、现有代码和测试边界，就已经开始改文件了。
 
-SuperSpec 会把一次需求变更拆成 5 步：
+SuperSpec 会把一次需求变更拆成 4 个阶段：
 
 ```text
-探索需求 -> 写方案 -> 做实现 -> 代码审查与最终验证 -> 归档收尾
+探索需求 -> 写方案 -> 做实现 -> 代码审查与最终验证 -> accepted
 ```
 
 这样做的目的很简单：
@@ -20,7 +20,7 @@ SuperSpec 会把一次需求变更拆成 5 步：
 - 写实现前先有方案和任务
 - 任务完成前先有测试或验证记录
 - 宣布完成前先经过审查
-- 归档时保留关键过程记录
+- 进入 accepted 时保留关键过程记录
 
 ## 适合谁
 
@@ -53,12 +53,12 @@ SuperSpec 管“AI 应该怎样把这次改动做稳”。
 | 方案怎么写 | 提供标准的变更文档结构 | 要求方案前后有范围、风险、业务约束和测试思路 |
 | 代码怎么做 | 记录任务清单和完成状态 | 要求按任务实现，并留下测试或验证记录 |
 | 做完怎么算稳 | 可以校验规格和归档 | 增加代码审查、架构审查、反方审查和最终验证 |
-| 以后怎么追溯 | 保留 OpenSpec 的变更文档 | 额外保留探索、测试、审查和收尾记录 |
+| 以后怎么追溯 | 保留 OpenSpec 的变更文档 | 额外保留探索、测试和审查记录 |
 
 举个例子：
 
 OpenSpec 会帮你记录“要增加登录功能、需要哪些规格、设计和任务”。
-SuperSpec 会进一步要求 AI 先看看现有登录/权限代码在哪里、哪些业务规则不能破坏、哪些场景必须测试、实现后要经过哪些审查，最后再归档。
+SuperSpec 会进一步要求 AI 先看看现有登录/权限代码在哪里、哪些业务规则不能破坏、哪些场景必须测试、实现后要经过哪些审查，最终进入 accepted 完成本轮流程。
 
 所以 SuperSpec 不是 OpenSpec 的替代品。它更像是 OpenSpec 外面的一层执行纪律，专门约束 AI 编程工具不要跳过关键步骤。
 
@@ -118,13 +118,9 @@ superspec.cmd install
 使用 superspec-review，完成代码审查、问题处理和最终验证。
 ```
 
-审查通过后，归档：
+审查通过并进入 `accepted` 后，本轮工作流完成。如果之后需要补充或修改需求、方案或验收内容，直接用自然语言告诉 Agent；Agent 会按引擎返回的内部 continuation 自动回到计划阶段并重新完成后续审查。
 
-```text
-使用 superspec-archive，归档这个变更。
-```
-
-## 五个入口分别做什么
+## 四个入口分别做什么
 
 | 入口 | 什么时候用 | 它会要求做什么 |
 |---|---|---|
@@ -132,9 +128,8 @@ superspec.cmd install
 | `superspec-propose` | 需求已经清楚后 | 写正式方案、规格、设计和任务，并提前规划测试 |
 | `superspec-apply` | 方案通过后 | 按任务实现代码，记录测试或验证结果 |
 | `superspec-review` | 实现完成后 | 检查代码实现是否符合方案，处理审查问题，并完成最终验证 |
-| `superspec-archive` | 审查通过后 | 用 OpenSpec 完成归档，并检查关键记录是否保留 |
 
-你日常主要记住这五个入口就够了。
+你日常主要记住这四个入口就够了。
 
 CLI 不带 `--risk` 时默认走完整审查路径；需要轻量路径时显式传 `--risk normal` 或 `--risk minimal`。探索阶段会创建 `critic` 工作项审查需求澄清记录；计划阶段会创建 `critic`、`architect` 和 `test-engineer` 工作项后再进入实现准备。
 
@@ -226,7 +221,6 @@ superspec update
   skills/superspec-propose/
   skills/superspec-apply/
   skills/superspec-review/
-  skills/superspec-archive/
   prompts/architect.md
   prompts/code-reviewer.md
   prompts/critic.md

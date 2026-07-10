@@ -10,7 +10,10 @@ import { rebuildSnapshot } from "./sync.ts";
 import { changeRoot as openspecChangeRoot } from "./openspec.ts";
 import {
   isPhaseConfirmationScope,
+  phaseActionForAnswer,
   phaseConfirmationForCurrentState,
+  type PhaseConfirmation,
+  type PhaseDecisionAction,
 } from "./phase_confirmation.ts";
 import {
   CODE_REVIEW_DECISION_ANSWER_LABELS,
@@ -600,16 +603,45 @@ function recordUserDecisionLoaded(
     return { event_type: "user_decision_recorded" as const, accepted: false, message: "决策文件缺少决策范围（scope）或答复内容（answer）" };
   }
 
+  let phaseConfirmation: PhaseConfirmation | null = null;
+  let phaseAction: PhaseDecisionAction | null = null;
   if (isPhaseConfirmationScope(decision.scope)) {
+    const existingAccepted = existing &&
+      (existing.payload as { accepted?: unknown }).accepted !== false;
+    const latestAcceptedForScope = [...events].reverse().find(event => {
+      if (event.event_type !== "user_decision_recorded") return false;
+      const payload = event.payload as {
+        scope?: unknown;
+        accepted?: unknown;
+        phase_confirmation?: unknown;
+      };
+      return payload.accepted !== false &&
+        payload.scope === decision.scope &&
+        payload.phase_confirmation != null;
+    });
     const changeRoot = openspecChangeRoot(projectRoot, change);
     const snapshot = rebuildSnapshot(projectRoot, change, changeRoot);
     const current = phaseConfirmationForCurrentState(projectRoot, events, snapshot);
+    if (
+      existingAccepted &&
+      current?.scope === decision.scope &&
+      latestAcceptedForScope?.event_id === existing.event_id
+    ) {
+      return {
+        event_type: "user_decision_recorded" as const,
+        accepted: true,
+        message: "幂等返回：同一用户决策已登记",
+      };
+    }
+    const action = current ? phaseActionForAnswer(current, decision.answer) : null;
     const rejectionReason = !current
       ? "phase_confirmation_not_pending"
       : decision.scope !== current.scope
         ? "stale_phase_confirmation_scope"
-        : decision.answer !== current.answer
+        : !action
           ? "invalid_phase_confirmation_answer"
+          : action.reason === "required" && !nonEmptyString(decision.reason)
+            ? "missing_phase_confirmation_reason"
           : null;
     if (rejectionReason) {
       if (
@@ -631,13 +663,17 @@ function recordUserDecisionLoaded(
         input_digest: inputDigest,
       }));
       const message = rejectionReason === "invalid_phase_confirmation_answer" && current
-        ? `阶段确认答复必须精确为：${current.answer}`
-        : "阶段确认已失效或当前没有待确认的阶段边界，请重新执行 next";
+        ? `阶段确认答复必须精确为：${current.ask.allowed_answers.join("、")}`
+        : rejectionReason === "missing_phase_confirmation_reason" && action
+          ? action.reason_prompt ?? "当前选择必须写明原因"
+          : "阶段确认已失效或当前没有待确认的阶段边界，请重新执行 next";
       return { event_type: "user_decision_recorded" as const, accepted: false, message };
     }
+    phaseConfirmation = current;
+    phaseAction = action;
   }
 
-  if (existing) {
+  if (existing && !phaseAction) {
     const accepted = (existing.payload as { accepted?: unknown }).accepted !== false;
     return {
       event_type: "user_decision_recorded" as const,
@@ -683,9 +719,19 @@ function recordUserDecisionLoaded(
     : null;
   const normalizedDecision = {
     scope: decision.scope,
-    question: typeof decision.question === "string" ? decision.question : "",
-    answer: normalizedAnswer ? codeReviewDecisionAnswerLabel(normalizedAnswer) : decision.answer,
+    question: phaseConfirmation
+      ? phaseConfirmation.ask.question
+      : typeof decision.question === "string" ? decision.question : "",
+    answer: phaseAction
+      ? phaseAction.label
+      : normalizedAnswer ? codeReviewDecisionAnswerLabel(normalizedAnswer) : decision.answer,
     ...(typeof decision.reason === "string" ? { reason: decision.reason.trim() } : {}),
+    ...(phaseAction ? {
+      phase_confirmation: {
+        boundary: phaseAction.boundary,
+        decision: phaseAction.decision,
+      },
+    } : {}),
   };
   const rawRef = appendRawRecord(projectRoot, change, "user-decisions", normalizedDecision);
   const event = makeEvent(change, "user_decision_recorded", {

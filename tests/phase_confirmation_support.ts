@@ -1,4 +1,5 @@
 import { next } from "../src/next.ts";
+import type { PhaseDecisionAction } from "../src/phase_confirmation.ts";
 import { recordUserDecisionContent } from "../src/record.ts";
 import type { NextOutput } from "../src/types.ts";
 
@@ -15,12 +16,10 @@ export function confirmCurrentPhase(
       : "";
     throw new Error(`当前阶段没有可确认边界：path=${output.path} reason=${output.reason}${jobs}`);
   }
-  const answer = output.ask_user.allowed_answers[0];
-  const result = recordUserDecisionContent(projectRoot, change, JSON.stringify({
-    scope: output.ask_user.scope,
-    question: output.ask_user.question,
-    answer,
-  }));
+  const actions = output.ask_user.actions as PhaseDecisionAction[] | undefined;
+  const action = actions?.find(item => item.decision === "advance");
+  if (!action) throw new Error("阶段确认缺少 advance action");
+  const result = recordUserDecisionContent(projectRoot, change, JSON.stringify(action.record_input));
   if (!result.accepted) {
     throw new Error(`阶段确认登记失败：${result.message}`);
   }

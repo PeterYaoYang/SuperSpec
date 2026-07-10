@@ -8,18 +8,18 @@ metadata:
 
 # SuperSpec Review
 
-你是审查阶段。目标是按工作流引擎返回的下一步，完成代码审查、最终验证、accept 和归档确认。这个阶段用来提高实现质量，不用来增加额外审批负担。
+你是审查阶段。目标是按工作流引擎返回的下一步，完成代码审查、最终验证和 accept。这个阶段用来提高实现质量，不用来增加额外审批负担。
 
 ## 驱动方式
 
 所有状态由工作流引擎管理，按这个循环执行：
 
-1. `superspec transition next --change "<change>"`
-2. 执行返回的命令、工作项或用户确认
-3. 用户确认用 `superspec record user-decision --change "<change>" --input -`；工作项审查报告用 `superspec record job-submit --change "<change>" --job <JOB> --report -`
-4. 回到第 1 步
+1. `superspec transition next --change "<change>"` 获取下一步。
+2. 执行返回的命令，或处理返回的工作项/用户确认。
+3. 登记结果。
+4. 回到第 1 步。
 
-如果 next 返回待完成工作项，先完成工作项；如果 next 返回用户确认，先让使用者决策；完成前不要 accept 或 archive。审查/验证只说明通过与否、阻塞摘要、缺失证据、下一步，以及应回 apply 还是 propose；验收通过时说明等待用户明确确认后再归档。
+如果 next 返回待完成工作项，先完成工作项；如果 next 返回用户确认，先让使用者决策；完成前不要 accept。审查/验证只说明通过与否、阻塞摘要、缺失证据、下一步，以及应回 apply 还是 propose；验收通过并进入 accepted 时，说明本轮流程已经完成。
 
 ## review-ready 语义
 
@@ -36,7 +36,7 @@ metadata:
 - 有代码类改动时，`review-ready` 创建或等待代码审查工作项。
 - 没有代码类改动时，`review-ready` 直接进入 `review`，不启动子代理；内部会记录跳过原因。
 - 代码审查通过后，再次执行 `review-ready` 进入 `review`。
-- 代码审查通过后不要再增加持续代码变化拦截；流程内如果需要改代码，必须回 apply，修完后重新走代码审查。
+- 代码审查通过后若代码状态再次变化，旧审查失效；流程内如果需要改代码，必须先回 apply，修完后重新走代码审查。
 
 在 `review`：
 
@@ -72,10 +72,13 @@ superspec record job-submit --change "<change>" --job <JOB> --report -
 - 最终验证通过：执行 next 下发的 accept 命令。
 - 最终验证未通过：报告会保全原始报告引用和问题列表。按报告中的问题修复或回退；不要直接 accept。
 
-## accept 和 archive
+## accept 和 accepted 后返工
 
 - 只有状态为 `review`，且 `next` / `review-ready` 要求的审查或验证已满足时，才执行 accept。
-- accepted 后不要自动 archive，等待用户明确确认。
+- `accepted` 是正常完成终态，next 不再继续推进。
+- 使用者补充、修正或扩展方案、需求、验收或实现约束时，主流程先确定唯一对应的 change 并读取真实状态；只有该 change 当前为 accepted，才按 next 返回的内部 continuation 自动把用户内容概括为 reason 并回到 propose。无法唯一确定 change 时只询问补充属于哪个 change；不要让使用者选择工作流动作，也不要要求使用者执行命令。
+- 如果只是问答、致谢或不改变方案含义的说明，保持 accepted，不触发状态变化。
+- 不从 accepted 直接回 apply；回到 propose 后先修改计划材料，再按 next 重新完成计划审查、实现、代码审查和最终验证。
 
 ## Guardrails
 
@@ -83,6 +86,6 @@ superspec record job-submit --change "<change>" --job <JOB> --report -
 - 不绕过 `next` / `review-ready` 要求的代码审查或最终验证。
 - 主流程不重审代码，只复核代码审查报告是否可登记、问题是否可分流、回退和闭环证据是否存在。
 - 涉及代码审查问题回退时，以 next 当前返回为准，不手动套用旧 job 或旧问题编号。
-- 不在 accepted 后自动 archive。
+- 不把 accepted 后的新需求直接当作 apply 授权，必须先 reopen 到 propose。
 - 审查和验证报告必须引用真实文件、事件或测试证据，不编造。
 - 不跳过 transition。

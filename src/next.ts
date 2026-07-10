@@ -56,7 +56,12 @@ function toNextOutput(change: string, plan: NextStepPlan): NextOutput {
         missing_inputs: [],
       };
     case "done":
-      return { state: plan.state, path: "done", reason: plan.reason };
+      return {
+        state: plan.state,
+        path: "done",
+        reason: plan.reason,
+        ...(plan.continuation ? { continuation: plan.continuation } : {}),
+      };
   }
 }
 

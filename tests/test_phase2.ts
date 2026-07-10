@@ -13,6 +13,7 @@ import { next } from "../src/next.ts";
 import { proposeReady, transitionExplore } from "../src/transition.ts";
 import { recordUserDecision, recordUserDecisionContent, recordJobSubmit, jobsPacket } from "../src/record.ts";
 import { countDiscoveryOpenQuestions, countProposeOpenQuestionsInContent, validateDiscovery, validateDiscoveryChainCoverage } from "../src/format.ts";
+import type { PhaseDecisionAction } from "../src/phase_confirmation.ts";
 import type { Job, JobRole, State } from "../src/types.ts";
 import { confirmCurrentPhase } from "./phase_confirmation_support.ts";
 
@@ -396,7 +397,51 @@ test("next 在 explore 显式 normal 风险时返回阶段确认", () => {
     const result = next(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     assert.equal(result.path, "ask_user");
     assert.match(result.ask_user.scope, /^phase_confirmation:explore_to_propose:/);
-    assert.deepEqual(result.ask_user.allowed_answers, ["确认进入计划阶段"]);
+    const actions = result.ask_user.actions as PhaseDecisionAction[];
+    assert.deepEqual(result.ask_user.allowed_answers, actions.map(action => action.label));
+    assert.deepEqual(actions.map(action => [action.decision, action.label]), [
+      ["advance", "确认进入计划阶段"],
+      ["stay", "留在探索阶段继续完善"],
+    ]);
+    const [advance, stay] = actions;
+    assert.deepEqual(advance.record_argv, [
+      "superspec", "record", "user-decision", "--change", fx.change, "--input", "-",
+    ]);
+    assert.deepEqual(advance.record_input, {
+      scope: result.ask_user.scope,
+      question: result.ask_user.question,
+      answer: advance.label,
+    });
+    assert.equal(advance.resume.kind, "next");
+    assert.deepEqual(advance.resume.argv, [
+      "superspec", "transition", "next", "--change", fx.change, "--risk", "normal",
+    ]);
+    assert.equal(stay.reason, "required");
+    assert.equal(stay.resume.kind, "continue_current_phase");
+    assert.deepEqual(stay.resume.next_argv_after_completion, [
+      "superspec", "transition", "next", "--change", fx.change, "--risk", "normal",
+    ]);
+  } finally { fx.cleanup(); }
+});
+
+test("阶段确认 action resume 保留 minimal risk", () => {
+  const fx = setupPropose();
+  try {
+    const result = next(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    assert.equal(result.path, "ask_user");
+    const actions = result.ask_user.actions as PhaseDecisionAction[];
+    const advance = actions.find(action => action.decision === "advance");
+    const stay = actions.find(action => action.decision === "stay");
+    assert.ok(advance);
+    assert.ok(stay);
+    assert.equal(advance.resume.kind, "next");
+    assert.deepEqual(advance.resume.argv, [
+      "superspec", "transition", "next", "--change", fx.change, "--risk", "minimal",
+    ]);
+    assert.equal(stay.resume.kind, "continue_current_phase");
+    assert.deepEqual(stay.resume.next_argv_after_completion, [
+      "superspec", "transition", "next", "--change", fx.change, "--risk", "minimal",
+    ]);
   } finally { fx.cleanup(); }
 });
 
@@ -405,11 +450,12 @@ test("阶段确认：仅接受精确答复，材料变化后旧 scope 失效", (
   try {
     const ask = next(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     assert.equal(ask.path, "ask_user");
-    const acceptedInput = JSON.stringify({
-      scope: ask.ask_user.scope,
-      question: ask.ask_user.question,
-      answer: ask.ask_user.allowed_answers[0],
-    });
+    const actions = ask.ask_user.actions as PhaseDecisionAction[];
+    const advance = actions.find(action => action.decision === "advance");
+    const stay = actions.find(action => action.decision === "stay");
+    assert.ok(advance);
+    assert.ok(stay);
+    const acceptedInput = JSON.stringify(advance.record_input);
 
     const ambiguous = recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({
       scope: ask.ask_user.scope,
@@ -418,6 +464,14 @@ test("阶段确认：仅接受精确答复，材料变化后旧 scope 失效", (
     }));
     assert.equal(ambiguous.accepted, false);
     assert.match(ambiguous.message, /必须精确/);
+
+    const missingReason = recordUserDecisionContent(
+      fx.projectRoot,
+      fx.change,
+      JSON.stringify(stay.record_input),
+    );
+    assert.equal(missingReason.accepted, false);
+    assert.match(missingReason.message, /补充|核对|原因/);
 
     const blocked = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     assert.equal(blocked.events_written, 0);
@@ -428,6 +482,31 @@ test("阶段确认：仅接受精确答复，材料变化后旧 scope 失效", (
     const repeated = recordUserDecisionContent(fx.projectRoot, fx.change, acceptedInput);
     assert.equal(repeated.accepted, true);
     assert.match(repeated.message, /幂等/);
+
+    const stayInput = JSON.stringify({ ...stay.record_input, reason: "继续核对调用链" });
+    assert.equal(recordUserDecisionContent(fx.projectRoot, fx.change, stayInput).accepted, true);
+    const stayEvent = readEvents(fx.projectRoot, fx.change).findLast(event =>
+      event.event_type === "user_decision_recorded" &&
+      (event.payload as { accepted?: unknown }).accepted === true
+    );
+    assert.deepEqual(stayEvent?.payload.phase_confirmation, {
+      boundary: "explore_to_propose",
+      decision: "stay",
+    });
+    assert.equal(stayEvent?.payload.reason, "继续核对调用链");
+    assert.equal(transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal").events_written, 0);
+
+    const changedMind = recordUserDecisionContent(fx.projectRoot, fx.change, acceptedInput);
+    assert.equal(changedMind.accepted, true);
+    assert.doesNotMatch(changedMind.message, /幂等/);
+    const acceptedPhaseDecisions = readEvents(fx.projectRoot, fx.change).filter(event =>
+      event.event_type === "user_decision_recorded" &&
+      (event.payload as { accepted?: unknown; phase_confirmation?: unknown }).accepted === true &&
+      (event.payload as { phase_confirmation?: unknown }).phase_confirmation != null
+    );
+    assert.deepEqual(acceptedPhaseDecisions.map(event =>
+      (event.payload.phase_confirmation as { decision: string }).decision
+    ), ["advance", "stay", "advance"]);
 
     writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "discovery.md"), "# Discovery\n\nChanged after confirmation.\n");
     const stale = recordUserDecisionContent(fx.projectRoot, fx.change, acceptedInput);
@@ -600,6 +679,41 @@ test("explore→propose 默认完整审查：创建 critic，接受 JSON 报告�
 
     snapshot = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(snapshot.state, "propose");
+  } finally { fx.cleanup(); }
+});
+
+test("explore stay：修改 discovery 后 strict critic 重新审查", () => {
+  const fx = setupPropose();
+  try {
+    const first = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "strict");
+    assert.equal(first.outcome, "job_created");
+    const reportPath = join(fx.projectRoot, "critic-stay.json");
+    writeFileSync(reportPath, reviewerReport("critic"));
+    assert.equal(recordJobSubmit(
+      fx.projectRoot,
+      fx.change,
+      fx.changeRoot,
+      first.created_jobs[0],
+      reportPath,
+    ).accepted, true);
+
+    const ask = next(fx.projectRoot, fx.change, fx.changeRoot, "strict");
+    assert.equal(ask.path, "ask_user");
+    const stay = (ask.ask_user.actions as PhaseDecisionAction[]).find(action => action.decision === "stay");
+    assert.ok(stay);
+    assert.equal(recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({
+      ...stay.record_input,
+      reason: "继续补充反向调用证据",
+    })).accepted, true);
+
+    writeFileSync(
+      join(fx.changeRoot, ".superspec", "artifacts", "discovery.md"),
+      "# Discovery\n\nupdated after stay\n",
+    );
+    const recheck = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "strict");
+    assert.equal(recheck.outcome, "job_created");
+    assert.equal(recheck.to_state, "explore");
+    assert.notEqual(recheck.created_jobs[0], first.created_jobs[0]);
   } finally { fx.cleanup(); }
 });
 

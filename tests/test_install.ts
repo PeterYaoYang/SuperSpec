@@ -86,6 +86,7 @@ test("installProject installs engine, workflow skills, role prompts, and agents"
       assert.equal(existsSync(skillPath), true, skill);
       assert.match(readFileSync(skillPath, "utf8"), /^---\n[\s\S]*?\n---\n/, `${skill} should keep YAML frontmatter`);
     }
+    assert.equal(existsSync(join(projectRoot, ".codex", "skills", "superspec-archive")), false);
     for (const prompt of WORKFLOW_PROMPTS) {
       assert.equal(existsSync(join(projectRoot, ".codex", "prompts", prompt)), true, prompt);
     }
@@ -103,6 +104,9 @@ test("installProject installs engine, workflow skills, role prompts, and agents"
 
     const agentsMd = readFileSync(join(projectRoot, "AGENTS.md"), "utf8");
     assert.equal(agentsMd.trimEnd(), AGENTS_TEMPLATE);
+    assert.match(agentsMd, /用户补充 SuperSpec 相关内容时，先确定对应 change，再按 next 返回处理/);
+    assert.match(agentsMd, /无法确定时只询问归属，不执行流转/);
+    assert.match(agentsMd, /内部命令由主流程完成，不交给用户/);
     assert.match(agentsMd, /SUPERSPEC:AGENTS:START/);
     assert.match(agentsMd, /superspec transition next --change "<change>"/);
     assert.match(agentsMd, /\*_argv/);
@@ -433,9 +437,12 @@ test("CLI update refreshes installed workflow templates without backups", () => 
   withTempProject(projectRoot => {
     installProject(projectRoot);
     const skillPath = join(projectRoot, ".codex", "skills", "superspec-explore", "SKILL.md");
+    const deprecatedSkillPath = join(projectRoot, ".codex", "skills", "superspec-archive", "SKILL.md");
     const promptPath = join(projectRoot, ".codex", "prompts", "explore.md");
     const agentPath = join(projectRoot, ".codex", "agents", "explore.toml");
     writeFileSync(skillPath, "stale skill template\n");
+    mkdirSync(join(projectRoot, ".codex", "skills", "superspec-archive"), { recursive: true });
+    writeFileSync(deprecatedSkillPath, "stale archive skill\n");
     writeFileSync(promptPath, "stale prompt template\n");
     writeFileSync(agentPath, "stale agent template\n");
 
@@ -463,6 +470,7 @@ test("CLI update refreshes installed workflow templates without backups", () => 
       readFileSync(new URL("../templates/workflow/agents/explore.toml", import.meta.url), "utf8"),
     );
     assert.equal(existsSync(`${skillPath}.bak`), false);
+    assert.equal(existsSync(deprecatedSkillPath), false);
     assert.equal(existsSync(`${promptPath}.bak`), false);
     assert.equal(existsSync(`${agentPath}.bak`), false);
   });
@@ -835,10 +843,11 @@ test("CLI update allows legacy state while install still blocks it", () => {
     mkdirSync(join(projectRoot, "openspec", "changes", "old-change", ".superspec"), { recursive: true });
     writeFileSync(join(projectRoot, "openspec", "changes", "old-change", ".superspec", "ledger.jsonl"), "{}\n");
 
-    assert.throws(
-      () => installProject(projectRoot),
-      /检测到老版 SuperSpec/,
-    );
+    assert.throws(() => installProject(projectRoot), error => {
+      assert.match(String(error), /检测到老版 SuperSpec/);
+      assert.doesNotMatch(String(error), /归档/);
+      return true;
+    });
 
     const output = execFileSync(process.execPath, [cliPath(), "update", "--skip-self-update"], {
       cwd: projectRoot,
