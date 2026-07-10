@@ -94,6 +94,16 @@ test("installProject installs engine, workflow skills, role prompts, and agents"
       assert.equal(existsSync(join(projectRoot, ".codex", "agents", agent)), true, agent);
     }
 
+    const proposeSkill = readFileSync(join(projectRoot, ".codex", "skills", "superspec-propose", "SKILL.md"), "utf8");
+    assert.doesNotMatch(proposeSkill, /上游产物边界/);
+    assert.doesNotMatch(proposeSkill, /Discovery blocker/);
+
+    for (const prompt of ["critic.md", "architect.md", "test-engineer.md"]) {
+      const content = readFileSync(join(projectRoot, ".codex", "prompts", prompt), "utf8");
+      assert.doesNotMatch(content, /previous_rejection\.findings/, prompt);
+      assert.doesNotMatch(content, /每个新 finding 必须分配稳定 ID/, prompt);
+    }
+
     const config = readFileSync(join(projectRoot, ".codex", "config.toml"), "utf8");
     assert.match(config, /\[features\]/);
     assert.match(config, /multi_agent = true/);

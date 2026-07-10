@@ -15,7 +15,7 @@ import {
   walkCodeFiles,
 } from "./git_state.ts";
 import { parseExecutionRequirements, parseTestContractEntries } from "./format.ts";
-import type { BoundarySnapshot, CodeReviewResultKind, CodeReviewScope, CodeStateCheck, CoverageExemptionRef, DirtyFileFingerprint, Event, Job, JobPacketContext, Ref, TaskAttempt, TaskExecutionIndexEntry } from "./types.ts";
+import type { BoundarySnapshot, CodeReviewResultKind, CodeReviewScope, CodeStateCheck, CoverageExemptionRef, DirtyFileFingerprint, Event, Job, JobPacketContext, Ref, ReviewPreviousRejection, TaskAttempt, TaskExecutionIndexEntry } from "./types.ts";
 
 export const CODE_REVIEW_REPAIR_SCOPE_PREFIX = "code_reviewer_report_repair:";
 export const CODE_REVIEW_DECISION_SCOPE_PREFIX = "code_review_decision:";
@@ -309,7 +309,7 @@ export function codeReviewPacketDigest(input: {
   checkedDocs: string[];
   created_from_transition: string;
   packet_context?: JobPacketContext;
-  previous_rejection?: { result_kind: CodeReviewResultKind; reason: string; job_id: string };
+  previous_rejection?: ReviewPreviousRejection;
 }): string {
   return sha256Text(JSON.stringify(input));
 }

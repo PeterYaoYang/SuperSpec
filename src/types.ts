@@ -28,11 +28,15 @@ export type ReviewJobGateId =
 
 export type CodeReviewResultKind = "invalid_report" | "non_actionable_report" | "review_failed";
 
-export interface CodeReviewPreviousRejection {
+export interface ReviewPreviousRejection {
   result_kind: CodeReviewResultKind;
   reason: string;
   job_id: string;
+  findings?: unknown[];
+  findings_job_id?: string;
 }
+
+export type CodeReviewPreviousRejection = ReviewPreviousRejection;
 
 export interface Job {
   job_id: string;
@@ -40,12 +44,14 @@ export interface Job {
   state: JobState;
   gate_id?: ReviewJobGateId;
   boundFiles: Ref[];
+  review_targets?: string[];
+  read_only_refs?: string[];
   review_evidence_digest?: string;
   packet_digest: string;
   packet_context?: JobPacketContext;
   created_from_transition: string;
   created_at: string;
-  previous_rejection?: CodeReviewPreviousRejection;
+  previous_rejection?: ReviewPreviousRejection;
 }
 
 export interface ExecutionContract {
@@ -123,8 +129,10 @@ export interface JobPacket {
   gate_id?: ReviewJobGateId;
   recommended_agent?: string;
   boundFiles: Ref[];
+  review_targets?: string[];
+  read_only_refs?: string[];
   review_evidence_digest?: string;
-  previous_rejection?: CodeReviewPreviousRejection;
+  previous_rejection?: ReviewPreviousRejection;
   packet_context?: JobPacketContext;
   code_review_scope?: CodeReviewScope;
   coverage_exemption_refs?: CoverageExemptionRef[];

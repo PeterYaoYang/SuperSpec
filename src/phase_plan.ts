@@ -178,8 +178,8 @@ function missingBaseArtifact(changeRoot: string, risk: ReviewRisk): string | nul
 }
 
 export function proposalDocsBaseline(changeRoot: string): Record<string, string> {
-  // specs/ 用目录聚合指纹：审查可能只对 specs 提出修复，reopen 后仅改 specs 也算文档变化
-  const docs = ["proposal.md", "design.md", "tasks.md", "specs/", ".superspec/artifacts/test-contract.md"];
+  // 与 Propose gate 的可修改审查目标保持同一来源：specs/ 用目录聚合指纹，避免 reopen 基线漏掉任一个可修改的计划材料。
+  const docs = PROPOSE_FINAL_REVIEW_GATE.reviewTargets;
   const baseline: Record<string, string> = {};
   for (const doc of docs) {
     baseline[doc] = docRef(changeRoot, doc).sha;

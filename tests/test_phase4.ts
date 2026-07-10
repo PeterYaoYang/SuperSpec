@@ -11,8 +11,9 @@ import { ensureChangeLayout, appendEvent, docRef, makeEvent, readEvents, rawFile
 import { rebuildSnapshot } from "../src/sync.ts";
 import { next } from "../src/next.ts";
 import { proposeReady, reviewReady, startApply, taskStart, taskComplete, reopen, accept } from "../src/transition.ts";
-import { jobsPacket, recordJobSubmit, recordUserDecisionContent } from "../src/record.ts";
-import { reviewEvidenceDigest } from "../src/review.ts";
+import { jobsPacket, recordJobSubmit, recordJobSubmitContent, recordUserDecisionContent } from "../src/record.ts";
+import { latestReviewHistoryForGateRole, reviewEvidenceDigest } from "../src/review.ts";
+import { REVIEW_FINAL_VERIFIER_GATE } from "../src/review_job_gates.ts";
 import { codeFileContentSha, dirtyCodeFiles } from "../src/git_state.ts";
 import { phaseConfirmationForCurrentState, type PhaseDecisionAction } from "../src/phase_confirmation.ts";
 import { latestAcceptedProposalBaseline } from "../src/phase_plan.ts";
@@ -109,6 +110,10 @@ function packetDigestFor(projectRoot: string, change: string, jobId: string): st
   assert.equal(typeof packetObj.packet_digest, "string");
   return packetObj.packet_digest as string;
 }
+
+test("普通审查历史：不支持历史的 verifier gate 返回空而不是抛错", () => {
+  assert.equal(latestReviewHistoryForGateRole([], REVIEW_FINAL_VERIFIER_GATE, "verifier"), null);
+});
 
 function submitCodeReviewerPass(projectRoot: string, change: string, changeRoot: string, jobId: string) {
   const packet = jobsPacket(projectRoot, change, jobId);
@@ -2650,6 +2655,60 @@ test("accepted：受控 reopen 只能回到 propose，并记录计划材料基�
   } finally { fx.cleanup(); }
 });
 
+test("accepted reopen：仅修改 business-invariants 也满足计划材料变更门禁", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    advanceApplyToReview(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    acceptAfterFinalVerifier(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+
+    assert.equal(reopen(fx.projectRoot, fx.change, fx.changeRoot, "propose", "补充业务不变量").to_state, "propose");
+    writeFileSync(
+      join(fx.changeRoot, ".superspec", "artifacts", "business-invariants.md"),
+      "# BI\n\n新增验收不变量\n",
+    );
+    assert.equal(proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal").to_state, "propose_ready");
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    assert.equal(startApply(fx.projectRoot, fx.change, fx.changeRoot).to_state, "apply");
+  } finally { fx.cleanup(); }
+});
+
+test("legacy accepted baseline：补齐遗漏的不变量后仅修改不变量可推进", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    advanceApplyToReview(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    createAndPassFinalVerifier(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    const legacyPaths = ["proposal.md", "tasks.md", "design.md", "specs/", ".superspec/artifacts/test-contract.md"];
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "transition_commit", {
+      transition: "accept",
+      from_state: "review",
+      to_state: "accepted",
+      outcome: "advanced",
+      created_job_ids: [],
+      reason: "legacy accepted baseline without business invariants",
+      accepted_baseline_docs: Object.fromEntries(legacyPaths.map(path => [path, docRef(fx.changeRoot, path).sha])),
+    }));
+
+    assert.equal(reopen(fx.projectRoot, fx.change, fx.changeRoot, "propose", "补充历史业务不变量").to_state, "propose");
+    const reopenCommit = readEvents(fx.projectRoot, fx.change).findLast(event =>
+      event.event_type === "transition_commit" && (event.payload as { transition?: unknown }).transition === "reopen"
+    );
+    const payload = reopenCommit?.payload as { baseline_source?: unknown; baseline_docs?: Record<string, string> };
+    assert.equal(payload.baseline_source, "accepted_backfill");
+    assert.equal(payload.baseline_docs?.[".superspec/artifacts/business-invariants.md"], docRef(
+      fx.changeRoot,
+      ".superspec/artifacts/business-invariants.md",
+    ).sha);
+
+    writeFileSync(
+      join(fx.changeRoot, ".superspec", "artifacts", "business-invariants.md"),
+      "# BI\n\n补齐历史验收不变量\n",
+    );
+    assert.equal(proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal").to_state, "propose_ready");
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    assert.equal(startApply(fx.projectRoot, fx.change, fx.changeRoot).to_state, "apply");
+  } finally { fx.cleanup(); }
+});
+
 test("accepted baseline：最新 accept 缺 baseline 时不复用更早轮次", () => {
   const change = "mixed-accepted-history";
   const older = makeEvent(change, "transition_commit", {
@@ -2745,11 +2804,13 @@ test("accepted reopen：计划材料变化后重新创建历史 proposal 审查�
       created_from_transition: "propose-ready",
       boundFiles: [docRef(fx.changeRoot, "design.md")],
     });
-    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "job_accepted", {
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "job_rejected", {
       job_id: historical.job_id,
       role: historical.role,
       report_digest: "sha256:historical-proposal-critic",
-      accepted_at: new Date().toISOString(),
+      result_kind: "review_failed",
+      reason: "旧周期计划审查失败",
+      findings: [{ id: "OLD-CYCLE-001", evidence: "old cycle evidence" }],
     }));
 
     assert.equal(
@@ -2765,6 +2826,22 @@ test("accepted reopen：计划材料变化后重新创建历史 proposal 审查�
     const openRoles = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot).open_jobs.map(job => job.role);
     assert.deepEqual(openRoles, ["critic"]);
     assert.notEqual(recheck.created_jobs[0], historical.job_id);
+    const recheckPacket = jobsPacket(fx.projectRoot, fx.change, recheck.created_jobs[0]).packet;
+    assert.equal(recheckPacket?.previous_rejection, undefined);
+
+    const currentFinding = { id: "CURRENT-CYCLE-001", evidence: "current cycle evidence" };
+    assert.equal(recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, recheck.created_jobs[0], JSON.stringify({
+      role: "critic",
+      verdict: "fail",
+      findings: [currentFinding],
+      reviewer: { kind: "codex-subagent", id: "current-cycle-critic" },
+    })).accepted, false);
+    const retry = startApply(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(retry.outcome, "job_created");
+    assert.equal(retry.to_state, "propose_ready");
+    const retryPacket = jobsPacket(fx.projectRoot, fx.change, retry.created_jobs[0]).packet;
+    assert.equal(retryPacket?.previous_rejection?.job_id, recheck.created_jobs[0]);
+    assert.deepEqual(retryPacket?.previous_rejection?.findings, [currentFinding]);
   } finally { fx.cleanup(); }
 });
 

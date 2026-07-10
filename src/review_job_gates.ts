@@ -6,7 +6,8 @@ export interface ReviewGateRule {
   gate_id: ReviewJobGateId;
   created_from_transition: "explore" | "propose-ready" | "review-ready";
   allowedRoles: JobRole[];
-  reviewedDocPaths: string[];
+  reviewTargets: string[];
+  readOnlyRefs: string[];
   requiredRolesForRisk(risk: ReviewRisk): JobRole[];
   matchesOldJob(job: Job): boolean;
   isJobForGate(job: Job): boolean;
@@ -43,7 +44,8 @@ export const EXPLORE_DISCOVERY_REVIEW_GATE = makeReviewGateRule({
   gate_id: EXPLORE_DISCOVERY_REVIEW_GATE_ID,
   created_from_transition: "explore",
   allowedRoles: EXPLORE_DISCOVERY_REVIEW_ROLES,
-  reviewedDocPaths: [".superspec/artifacts/discovery.md"],
+  reviewTargets: [".superspec/artifacts/discovery.md"],
+  readOnlyRefs: [],
   requiredRolesForRisk(risk: ReviewRisk): JobRole[] {
     return reviewRolesForGate(EXPLORE_DISCOVERY_REVIEW_GATE_ID, risk);
   },
@@ -56,15 +58,15 @@ export const PROPOSE_FINAL_REVIEW_GATE = makeReviewGateRule({
   gate_id: PROPOSE_FINAL_REVIEW_GATE_ID,
   created_from_transition: "propose-ready",
   allowedRoles: PROPOSAL_REVIEW_ROLES,
-  reviewedDocPaths: [
+  reviewTargets: [
     "proposal.md",
     "tasks.md",
     "design.md",
     "specs/",
-    ".superspec/artifacts/discovery.md",
     ".superspec/artifacts/business-invariants.md",
     ".superspec/artifacts/test-contract.md",
   ],
+  readOnlyRefs: [".superspec/artifacts/discovery.md"],
   requiredRolesForRisk(risk: ReviewRisk): JobRole[] {
     return reviewRolesForGate(PROPOSE_FINAL_REVIEW_GATE_ID, risk);
   },
@@ -77,7 +79,8 @@ export const REVIEW_CODE_REVIEW_GATE = makeReviewGateRule({
   gate_id: REVIEW_CODE_REVIEW_GATE_ID,
   created_from_transition: "review-ready",
   allowedRoles: REVIEW_CODE_REVIEW_ROLES,
-  reviewedDocPaths: [],
+  reviewTargets: [],
+  readOnlyRefs: [],
   requiredRolesForRisk(risk: ReviewRisk): JobRole[] {
     return reviewRolesForGate(REVIEW_CODE_REVIEW_GATE_ID, risk);
   },
@@ -90,7 +93,8 @@ export const REVIEW_FINAL_VERIFIER_GATE = makeReviewGateRule({
   gate_id: REVIEW_FINAL_VERIFIER_GATE_ID,
   created_from_transition: "review-ready",
   allowedRoles: REVIEW_FINAL_VERIFIER_ROLES,
-  reviewedDocPaths: [],
+  reviewTargets: [],
+  readOnlyRefs: [],
   requiredRolesForRisk(risk: ReviewRisk): JobRole[] {
     return reviewRolesForGate(REVIEW_FINAL_VERIFIER_GATE_ID, risk);
   },

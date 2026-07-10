@@ -3,8 +3,13 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { docRef, sha256File, sha256Text } from "./store.ts";
-import { REVIEW_FINAL_VERIFIER_GATE } from "./review_job_gates.ts";
-import type { Event, Job, Ref, TaskAttempt } from "./types.ts";
+import {
+  EXPLORE_DISCOVERY_REVIEW_GATE_ID,
+  PROPOSE_FINAL_REVIEW_GATE_ID,
+  REVIEW_FINAL_VERIFIER_GATE,
+  type ReviewGateRule,
+} from "./review_job_gates.ts";
+import type { CodeReviewResultKind, Event, Job, JobRole, Ref, ReviewPreviousRejection, State, TaskAttempt } from "./types.ts";
 import { computeCodeStateCheck, effectiveCoverageExemptionRefsFromEvents } from "./code_review.ts";
 
 export type ReviewRisk = "minimal" | "normal" | "strict";
@@ -66,6 +71,122 @@ export function readReviewPolicyFromEvents(events: Event[]): ReviewPolicy | null
     if (isReviewPolicy(payload.review_policy)) return payload.review_policy;
   }
   return null;
+}
+
+function reviewResultKind(value: unknown): CodeReviewResultKind | null {
+  return value === "invalid_report" || value === "non_actionable_report" || value === "review_failed"
+    ? value
+    : null;
+}
+
+function reviewCycleState(gate: ReviewGateRule): State | null {
+  if (gate.gate_id === EXPLORE_DISCOVERY_REVIEW_GATE_ID) return "explore";
+  if (gate.gate_id === PROPOSE_FINAL_REVIEW_GATE_ID) return "propose";
+  return null;
+}
+
+function currentReviewGateCycleStart(events: Event[], gate: ReviewGateRule): number | null {
+  const state = reviewCycleState(gate);
+  if (!state) return null;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i];
+    if (event.event_type !== "transition_commit") continue;
+    const payload = event.payload as { from_state?: unknown; to_state?: unknown };
+    if (payload.to_state === state && payload.from_state !== state) return i;
+  }
+  return 0;
+}
+
+interface ReviewTerminalResult {
+  job: Job;
+  state: "accepted" | "rejected";
+  result_kind?: CodeReviewResultKind;
+  reason?: string;
+  findings?: unknown[];
+}
+
+function reviewTerminalResultsForGateRole(
+  events: Event[],
+  gate: ReviewGateRule,
+  role: JobRole,
+): ReviewTerminalResult[] {
+  const cycleStartIndex = currentReviewGateCycleStart(events, gate);
+  if (cycleStartIndex == null) return [];
+  const jobsById = new Map<string, Job>();
+
+  for (let i = cycleStartIndex; i < events.length; i++) {
+    const event = events[i];
+    if (event.event_type !== "transition_commit") continue;
+    const jobs = (event.payload as { new_jobs?: Job[] }).new_jobs ?? [];
+    for (const job of jobs) {
+      if (job.role === role && gate.isJobForGate(job)) jobsById.set(job.job_id, job);
+    }
+  }
+
+  const results: ReviewTerminalResult[] = [];
+  for (let i = cycleStartIndex; i < events.length; i++) {
+    const event = events[i];
+    if (event.event_type !== "job_accepted" && event.event_type !== "job_rejected") continue;
+    const payload = event.payload as { job_id?: unknown; result_kind?: unknown; reason?: unknown; findings?: unknown };
+    if (typeof payload.job_id !== "string") continue;
+    const job = jobsById.get(payload.job_id);
+    if (!job) continue;
+    const findings = Array.isArray(payload.findings) ? payload.findings : undefined;
+    results.push({
+      job,
+      state: event.event_type === "job_accepted" ? "accepted" : "rejected",
+      ...(event.event_type === "job_rejected"
+        ? { result_kind: reviewResultKind(payload.result_kind) ?? (findings ? "review_failed" : "invalid_report") }
+        : {}),
+      ...(typeof payload.reason === "string" && payload.reason.trim() !== "" ? { reason: payload.reason } : {}),
+      ...(findings ? { findings } : {}),
+    });
+  }
+  return results;
+}
+
+export function latestReviewHistoryForGateRole(
+  events: Event[],
+  gate: ReviewGateRule,
+  role: JobRole,
+): ReviewPreviousRejection | null {
+  const terminalResults = reviewTerminalResultsForGateRole(events, gate, role);
+  const latest = terminalResults.at(-1);
+  if (!latest || latest.state === "accepted") return null;
+
+  const resultKind = latest.result_kind ?? "invalid_report";
+  const reason = latest.reason ?? (
+    resultKind === "review_failed"
+      ? "报告结论为 fail，工作项未通过"
+      : "审查报告无效，工作项未通过"
+  );
+  if (resultKind === "review_failed" && latest.findings && latest.findings.length > 0) {
+    return {
+      result_kind: resultKind,
+      reason,
+      job_id: latest.job.job_id,
+      ...(latest.findings ? { findings: latest.findings } : {}),
+    };
+  }
+
+  for (let i = terminalResults.length - 2; i >= 0; i--) {
+    const previous = terminalResults[i];
+    if (previous.state === "accepted") break;
+    if (previous.result_kind !== "review_failed" || !previous.findings || previous.findings.length === 0) continue;
+    return {
+      result_kind: resultKind,
+      reason,
+      job_id: latest.job.job_id,
+      ...(previous.findings ? { findings: previous.findings } : {}),
+      findings_job_id: previous.job.job_id,
+    };
+  }
+
+  return {
+    result_kind: resultKind,
+    reason,
+    job_id: latest.job.job_id,
+  };
 }
 
 export function isReviewReadyVerifier(job: Job): boolean {

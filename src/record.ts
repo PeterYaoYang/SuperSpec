@@ -24,6 +24,7 @@ import {
 import { invalidReasonForSubmittedReport } from "./job_validity.ts";
 import { jobSubmitArgv } from "./job_action.ts";
 import { REVIEW_DOC_PATHS } from "./review.ts";
+import { EXPLORE_DISCOVERY_REVIEW_GATE, PROPOSE_FINAL_REVIEW_GATE } from "./review_job_gates.ts";
 import type { CodeReviewResultKind, Event, RecordResult, Job, JobPacket, JobRole, JobState } from "./types.ts";
 
 const REVIEW_REPORT_REQUIRED_FIELDS = ["role", "verdict", "findings"] as const;
@@ -33,6 +34,10 @@ const CODE_REVIEW_FINDING_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 
 function requiresReviewer(role: JobRole): boolean {
   return role === "critic" || role === "architect" || role === "test-engineer" || role === "code-reviewer";
+}
+
+function isOrdinaryReviewer(role: JobRole): boolean {
+  return role === "critic" || role === "architect" || role === "test-engineer";
 }
 
 function recommendedAgentForRole(role: JobRole): string {
@@ -64,6 +69,44 @@ function roleDescription(role: JobRole): string {
     case "test-run":
       return "执行受限测试工作项";
   }
+}
+
+function previousRejectionInstruction(job: Job): string {
+  const previous = job.previous_rejection;
+  if (!previous) return "";
+  const reason = `上一次同角色审查没有形成可推进结论，原因：${previous.reason}。`;
+  if (!previous.findings || previous.findings.length === 0) return `${reason}本次请先针对该原因重新审查，`;
+  return `${reason}本工作项附带上一次同角色审查尚未闭环的问题列表；请优先逐项复核：同一问题仍存在时复用原 finding ID；legacy finding 没有 ID 时沿用其原始语义并补一个稳定 ID；已解决的问题不要重复报告，不得通过更换 ID、标题或措辞重复同一问题；新增问题必须提供与历史问题不同的具体证据。`;
+}
+
+function ordinaryReviewerFindingInstruction(job: Job): string {
+  if (!isOrdinaryReviewer(job.role)) return "";
+  return "问题列表中的每个新 finding 必须分配稳定 ID，后续同一问题沿用该 ID，";
+}
+
+function reviewScopeForJob(job: Job): { reviewTargets: string[]; readOnlyRefs: string[] } {
+  if (job.review_targets !== undefined || job.read_only_refs !== undefined) {
+    return {
+      reviewTargets: job.review_targets ?? [],
+      readOnlyRefs: job.read_only_refs ?? [],
+    };
+  }
+  const gate = [EXPLORE_DISCOVERY_REVIEW_GATE, PROPOSE_FINAL_REVIEW_GATE]
+    .find(candidate => candidate.isJobForGate(job));
+  return gate
+    ? { reviewTargets: [...gate.reviewTargets], readOnlyRefs: [...gate.readOnlyRefs] }
+    : { reviewTargets: [], readOnlyRefs: [] };
+}
+
+function reviewScopeInstruction(job: Job, reviewTargets: string[], readOnlyRefs: string[]): string {
+  if (reviewTargets.length === 0 && readOnlyRefs.length === 0) {
+    return `请审查 ${job.boundFiles.map(file => file.path).join(", ")}，`;
+  }
+  const targets = reviewTargets.length > 0 ? `本 gate 可提出修改建议的审查目标为 ${reviewTargets.join(", ")}。` : "";
+  const refs = readOnlyRefs.length > 0
+    ? `只读上游引用为 ${readOnlyRefs.join(", ")}；只允许读取和核对一致性，不得要求在当前阶段修改、追加、删除、重排或格式化这些文件，不得把修改只读引用列为本阶段 required fix。只读引用自身的缺失、错误或矛盾可在 risks 或 open_questions 中上报给主流程，但不得单独作为本 gate 的 fail。只有能定位到审查目标的不一致，才能作为 fail 并指向该审查目标的修复。`
+    : "";
+  return targets + refs;
 }
 
 function asObject(value: unknown): Record<string, unknown> | null {
@@ -252,6 +295,7 @@ function failedReviewReportRejectEventPayload(input: {
     job_id: input.jobId,
     role: input.job.role,
     report_digest: input.reportDigest,
+    result_kind: "review_failed",
     reason: "报告结论为 fail，工作项未通过",
     findings: Array.isArray(input.parsedReport.findings) ? input.parsedReport.findings : [],
     ...input.rawRef,
@@ -348,6 +392,8 @@ function recordJobSubmitLoaded(
       }
       if (!Array.isArray(obj.findings)) {
         checks.push("报告问题列表 findings 必须是数组");
+      } else if (isOrdinaryReviewer(job.role) && obj.verdict === "fail" && obj.findings.length === 0) {
+        checks.push("普通审查报告结论为 fail 时 findings 至少包含一个问题");
       }
       if (requiresReviewer(job.role)) {
         validateReviewer(obj, checks);
@@ -376,29 +422,21 @@ function recordJobSubmitLoaded(
   }
 
   if (checks.length > 0) {
-    const resultKind: CodeReviewResultKind | undefined = job.role === "code-reviewer" ? "invalid_report" : undefined;
-    const rawRef = resultKind && parsedReport
+    const resultKind: CodeReviewResultKind = "invalid_report";
+    const rawRef = job.role === "code-reviewer" && parsedReport
       ? appendRawRecord(projectRoot, change, "review-reports", parsedReport)
       : null;
     const rejectEvent = makeEvent(change, "job_rejected", {
-      ...(resultKind
-        ? codeReviewRejectEventPayload({
-          jobId,
-          job,
-          reportDigest,
-          resultKind,
-          reason: checks.join("; "),
-          parsedReport,
-          rawRef,
-          reportPath,
-        })
-        : {
-          job_id: jobId,
-          role: job.role,
-          report_digest: reportDigest,
-          ...(reportPath ? { report_path: reportPath } : {}),
-          reason: checks.join("; "),
-        }),
+      ...codeReviewRejectEventPayload({
+        jobId,
+        job,
+        reportDigest,
+        resultKind,
+        reason: checks.join("; "),
+        parsedReport,
+        rawRef,
+        reportPath,
+      }),
     });
     appendEvent(projectRoot, change, rejectEvent);
     return {
@@ -859,6 +897,7 @@ export function jobsPacket(
   }
   const isCodeReviewer = job.role === "code-reviewer";
   const packetContext = job.packet_context;
+  const { reviewTargets, readOnlyRefs } = reviewScopeForJob(job);
   return {
     found: true,
       packet: {
@@ -867,6 +906,8 @@ export function jobsPacket(
         ...(job.gate_id ? { gate_id: job.gate_id } : {}),
         recommended_agent: recommendedAgentForRole(job.role),
         boundFiles: job.boundFiles,
+        ...(reviewTargets.length > 0 ? { review_targets: reviewTargets } : {}),
+        ...(readOnlyRefs.length > 0 ? { read_only_refs: readOnlyRefs } : {}),
         ...(job.review_evidence_digest ? { review_evidence_digest: job.review_evidence_digest } : {}),
         ...(job.previous_rejection ? { previous_rejection: job.previous_rejection } : {}),
         ...(packetContext ? { packet_context: packetContext } : {}),
@@ -888,10 +929,12 @@ export function jobsPacket(
         output_contract_optional_fields: [...REVIEW_REPORT_OPTIONAL_FIELDS],
         字段说明: packetFieldDescriptions(),
         output_instructions:
-          `${roleDescription(job.role)}。请审查 ${job.boundFiles.map(f => f.path).join(", ")}，` +
+          `${roleDescription(job.role)}。` +
+          reviewScopeInstruction(job, reviewTargets, readOnlyRefs) +
           (job.review_evidence_digest ? `本工作项对应的执行证据版本为 ${job.review_evidence_digest}，` : "") +
-          (job.previous_rejection ? `上一次代码审查没有形成可推进结论，原因：${job.previous_rejection.reason}。本次请根据该原因重新审查，` : "") +
+          previousRejectionInstruction(job) +
           (requiresReviewer(job.role) ? `必须由独立 ${recommendedAgentForRole(job.role)} 审查角色执行，并在审查者来源字段（reviewer.kind/id）中记录来源，` : "") +
+          ordinaryReviewerFindingInstruction(job) +
           `产出 JSON 报告内容并优先通过 --report - 从 stdin 登记；文件路径模式仅作备用。协议字段含义见 packet 顶层“字段说明”，普通对话不要原样复述 JSON。` +
           (isCodeReviewer
             ? `最小格式：{"role":"code-reviewer","verdict":"pass|fail","review_scope":{"job_id":"${job.job_id}","packet_digest":"${job.packet_digest}","checked_paths":${JSON.stringify(job.boundFiles.map(f => f.path))},"checked_docs":${JSON.stringify(REVIEW_DOC_PATHS)},"unchecked":[]},"findings":[],"reviewer":{"kind":"codex-subagent","id":"<thread-or-agent-id>"}}；审查覆盖范围（review_scope）用来说明本次审查覆盖了哪些文件和文档，已检查路径（checked_paths）与未检查项（unchecked）必须合起来覆盖全部绑定文件（boundFiles），unchecked 条目格式为 {"path":"<path>","reason":"<reason>"}。`

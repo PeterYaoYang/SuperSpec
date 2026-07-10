@@ -13,6 +13,7 @@ import {
   assertCommitPayloadExtension,
   isFreshReviewVerifier,
   isReviewReadyVerifier,
+  latestReviewHistoryForGateRole,
   readReviewPolicyFromEvents,
   reviewBoundFiles,
   reviewEvidenceDigest,
@@ -82,26 +83,34 @@ function createReviewJobsForGate(
   changeRoot: string,
   change: string,
   reason: string,
+  events: Event[],
 ): Decision {
   const newJobs: Job[] = roles.map(role => {
-    // 目录路径（以 / 结尾）始终绑定聚合指纹：审查时不存在、审查后新建同样视为变化
-    const boundFiles: Ref[] = gate.reviewedDocPaths
-      .filter(p => p.endsWith("/") || existsSync(join(changeRoot, p)))
+    const boundPaths = [...new Set([...gate.reviewTargets, ...gate.readOnlyRefs])];
+    // 所有审查目标和只读引用都绑定时点指纹：单文件缺失使用 sha256:missing，目录缺失使用稳定空指纹。
+    const boundFiles: Ref[] = boundPaths
       .map(p => docRef(changeRoot, p));
+    const previousRejection = latestReviewHistoryForGateRole(events, gate, role);
     return {
       job_id: newJobId(change, role),
       role,
       state: "requested" as const,
       gate_id: gate.gate_id,
       boundFiles,
+      ...(gate.reviewTargets.length > 0 ? { review_targets: [...gate.reviewTargets] } : {}),
+      ...(gate.readOnlyRefs.length > 0 ? { read_only_refs: [...gate.readOnlyRefs] } : {}),
       packet_digest: sha256Text(JSON.stringify({
         role,
         gate_id: gate.gate_id,
         boundFiles,
+        review_targets: gate.reviewTargets,
+        read_only_refs: gate.readOnlyRefs,
         created_from_transition: gate.created_from_transition,
+        ...(previousRejection ? { previous_rejection: previousRejection } : {}),
       })),
       created_from_transition: gate.created_from_transition,
       created_at: new Date().toISOString(),
+      ...(previousRejection ? { previous_rejection: previousRejection } : {}),
     };
   });
   return {
@@ -585,6 +594,7 @@ function transitionPlanToDecision(
   changeRoot: string,
   change: string,
   plan: TransitionDecisionPlan,
+  events: Event[],
 ): Decision | SkipDecision | BlockedDecision {
   switch (plan.kind) {
     case "skip":
@@ -592,7 +602,7 @@ function transitionPlanToDecision(
     case "blocked":
       return { blocked: true, reason: plan.reason, jobs: plan.jobs };
     case "create_gate_jobs":
-      return createReviewJobsForGate(snapshot.state, plan.gate, plan.roles, changeRoot, change, plan.reason);
+      return createReviewJobsForGate(snapshot.state, plan.gate, plan.roles, changeRoot, change, plan.reason, events);
     case "advance":
       return {
         fromState: plan.fromState,
@@ -724,7 +734,7 @@ export function proposeReady(projectRoot: string, change: string, changeRoot: st
         snapshot,
         mode: { kind: "risk", risk },
       });
-      return transitionPlanToDecision(snapshot, changeRoot, change, plan);
+      return transitionPlanToDecision(snapshot, changeRoot, change, plan, events);
     },
   });
 }
@@ -757,7 +767,7 @@ export function transitionExplore(projectRoot: string, change: string, changeRoo
         snapshot,
         mode: { kind: "risk", risk },
       });
-      return transitionPlanToDecision(snapshot, changeRoot, change, plan);
+      return transitionPlanToDecision(snapshot, changeRoot, change, plan, events);
     },
   });
 }
@@ -777,7 +787,7 @@ export function startApply(projectRoot: string, change: string, changeRoot: stri
         snapshot,
         mode: { kind: "risk", risk: "strict" },
       });
-      return transitionPlanToDecision(snapshot, changeRoot, change, plan);
+      return transitionPlanToDecision(snapshot, changeRoot, change, plan, events);
     },
   });
 }
@@ -942,6 +952,17 @@ export function reopen(
           };
         }
         const acceptedBaseline = latestAcceptedProposalBaseline(events);
+        const currentBaseline = proposalDocsBaseline(changeRoot);
+        // 旧版 accepted 事件的基线可能缺少后来纳入 Propose gate 的材料。保留其已冻结
+        // 的摘要，并用 reopen 当刻的摘要补齐缺项，确保本轮之后对任一审查目标的修改都能被检测。
+        const baselineNeedsBackfill = acceptedBaseline !== null && Object.keys(currentBaseline)
+          .some(path => !Object.prototype.hasOwnProperty.call(acceptedBaseline, path));
+        const baselineDocs = acceptedBaseline
+          ? Object.fromEntries(Object.entries(currentBaseline).map(([path, digest]) => [
+            path,
+            Object.prototype.hasOwnProperty.call(acceptedBaseline, path) ? acceptedBaseline[path] : digest,
+          ]))
+          : currentBaseline;
         return {
           fromState: "accepted",
           toState: "propose",
@@ -950,8 +971,8 @@ export function reopen(
           commitPayload: {
             reopen_target: "propose",
             reopen_source: "accepted",
-            baseline_source: acceptedBaseline ? "accepted" : "reopen_fallback",
-            baseline_docs: acceptedBaseline ?? proposalDocsBaseline(changeRoot),
+            baseline_source: acceptedBaseline ? (baselineNeedsBackfill ? "accepted_backfill" : "accepted") : "reopen_fallback",
+            baseline_docs: baselineDocs,
           },
         };
       }
@@ -1073,7 +1094,7 @@ export function accept(projectRoot: string, change: string, changeRoot: string):
         snapshot,
         mode: { kind: "risk", risk: "strict" },
       });
-      return transitionPlanToDecision(snapshot, changeRoot, change, plan);
+      return transitionPlanToDecision(snapshot, changeRoot, change, plan, events);
     },
   });
 }
