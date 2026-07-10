@@ -6,6 +6,12 @@ import {
   ensureChangeLayout, readEvents, appendEvent, makeEvent,
   sha256File, sha256Text, withLock, appendRawRecord, type RawRecordRef,
 } from "./store.ts";
+import { rebuildSnapshot } from "./sync.ts";
+import { changeRoot as openspecChangeRoot } from "./openspec.ts";
+import {
+  isPhaseConfirmationScope,
+  phaseConfirmationForCurrentState,
+} from "./phase_confirmation.ts";
 import {
   CODE_REVIEW_DECISION_ANSWER_LABELS,
   CODE_REVIEW_DECISION_SCOPE_PREFIX,
@@ -560,23 +566,23 @@ function recordUserDecisionLoaded(
   content: string,
   inputDigest: string,
 ): RecordResult {
-  const existing = events.find(
+  const existing = [...events].reverse().find(
     e => e.event_type === "user_decision_recorded"
       && (e.payload as { input_digest?: string }).input_digest === inputDigest
   );
-  if (existing) {
-    const accepted = (existing.payload as { accepted?: unknown }).accepted !== false;
-    return {
-      event_type: "user_decision_recorded" as const,
-      accepted,
-      message: accepted ? "幂等返回：同一用户决策已登记" : "幂等返回：同一无效用户决策已登记",
-    };
-  }
 
   let decision: { scope?: unknown; question?: unknown; answer?: unknown; reason?: unknown };
   try {
     decision = JSON.parse(content);
   } catch {
+    if (existing) {
+      const accepted = (existing.payload as { accepted?: unknown }).accepted !== false;
+      return {
+        event_type: "user_decision_recorded" as const,
+        accepted,
+        message: accepted ? "幂等返回：同一用户决策已登记" : "幂等返回：同一无效用户决策已登记",
+      };
+    }
     appendEvent(projectRoot, change, makeEvent(change, "user_decision_recorded", {
       accepted: false,
       reason: "invalid_json",
@@ -592,6 +598,52 @@ function recordUserDecisionLoaded(
       input_digest: inputDigest,
     }));
     return { event_type: "user_decision_recorded" as const, accepted: false, message: "决策文件缺少决策范围（scope）或答复内容（answer）" };
+  }
+
+  if (isPhaseConfirmationScope(decision.scope)) {
+    const changeRoot = openspecChangeRoot(projectRoot, change);
+    const snapshot = rebuildSnapshot(projectRoot, change, changeRoot);
+    const current = phaseConfirmationForCurrentState(projectRoot, events, snapshot);
+    const rejectionReason = !current
+      ? "phase_confirmation_not_pending"
+      : decision.scope !== current.scope
+        ? "stale_phase_confirmation_scope"
+        : decision.answer !== current.answer
+          ? "invalid_phase_confirmation_answer"
+          : null;
+    if (rejectionReason) {
+      if (
+        existing &&
+        (existing.payload as { accepted?: unknown; reason?: unknown }).accepted === false &&
+        (existing.payload as { reason?: unknown }).reason === rejectionReason
+      ) {
+        return {
+          event_type: "user_decision_recorded" as const,
+          accepted: false,
+          message: "幂等返回：同一无效阶段确认已登记",
+        };
+      }
+      appendEvent(projectRoot, change, makeEvent(change, "user_decision_recorded", {
+        accepted: false,
+        scope: decision.scope,
+        answer: decision.answer,
+        reason: rejectionReason,
+        input_digest: inputDigest,
+      }));
+      const message = rejectionReason === "invalid_phase_confirmation_answer" && current
+        ? `阶段确认答复必须精确为：${current.answer}`
+        : "阶段确认已失效或当前没有待确认的阶段边界，请重新执行 next";
+      return { event_type: "user_decision_recorded" as const, accepted: false, message };
+    }
+  }
+
+  if (existing) {
+    const accepted = (existing.payload as { accepted?: unknown }).accepted !== false;
+    return {
+      event_type: "user_decision_recorded" as const,
+      accepted,
+      message: accepted ? "幂等返回：同一用户决策已登记" : "幂等返回：同一无效用户决策已登记",
+    };
   }
 
   if (decision.scope.startsWith(CODE_REVIEW_DECISION_SCOPE_PREFIX)) {

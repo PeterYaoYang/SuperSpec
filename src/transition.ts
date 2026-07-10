@@ -58,6 +58,13 @@ import {
   proposalDocsBaseline,
   type TransitionDecisionPlan,
 } from "./phase_plan.ts";
+import {
+  latestPhaseConfirmationDecision,
+  phaseConfirmationCommitPayload,
+  phaseConfirmationForBoundary,
+  phaseConfirmationMissingMessage,
+  type PhaseBoundary,
+} from "./phase_confirmation.ts";
 import { currentGitHead, dirtyCodeFiles } from "./git_state.ts";
 import type { CodeReviewScope, Event, Snapshot, State, Job, JobRole, TransitionResult, Ref, TaskAttempt, BoundarySnapshot } from "./types.ts";
 
@@ -535,6 +542,39 @@ interface BlockedDecision {
   details?: Record<string, unknown>;
 }
 
+function authorizePhaseAdvance(input: {
+  projectRoot: string;
+  events: Event[];
+  snapshot: Snapshot;
+  boundary: PhaseBoundary;
+  decision: Decision;
+}): Decision | SkipDecision {
+  const confirmation = phaseConfirmationForBoundary(
+    input.projectRoot,
+    input.events,
+    input.snapshot,
+    input.boundary,
+  );
+  const phaseDecision = confirmation
+    ? latestPhaseConfirmationDecision(input.events, confirmation)
+    : null;
+  if (!confirmation || !phaseDecision) {
+    return {
+      skip: true,
+      message: confirmation
+        ? phaseConfirmationMissingMessage(confirmation)
+        : `无法建立 ${input.boundary} 阶段确认范围`,
+    };
+  }
+  return {
+    ...input.decision,
+    commitPayload: {
+      ...(input.decision.commitPayload ?? {}),
+      ...phaseConfirmationCommitPayload(confirmation, phaseDecision),
+    },
+  };
+}
+
 function transitionPlanToDecision(
   snapshot: Snapshot,
   changeRoot: string,
@@ -934,13 +974,28 @@ export function reviewReady(projectRoot: string, change: string, changeRoot: str
         };
       }
       if (snapshot.state === "apply_done") {
-        return evaluateApplyDoneCodeReviewGate({
+        const codeReviewDecision = evaluateApplyDoneCodeReviewGate({
           events,
           projectRoot,
           changeRoot,
           change,
           policyPayload,
         });
+        if (
+          !("skip" in codeReviewDecision) &&
+          !("blocked" in codeReviewDecision) &&
+          codeReviewDecision.fromState === "apply_done" &&
+          codeReviewDecision.toState === "review"
+        ) {
+          return authorizePhaseAdvance({
+            projectRoot,
+            events,
+            snapshot,
+            boundary: "apply_to_review",
+            decision: codeReviewDecision,
+          });
+        }
+        return codeReviewDecision;
       }
 
       if (snapshot.state === "review") {
@@ -988,6 +1043,17 @@ export function archive(projectRoot: string, change: string, changeRoot: string)
     name: "archive", idempotencyInputs: { phase: "archive" },
     decide: (snapshot) => {
       if (snapshot.state !== "accepted") return { skip: true, message: `当前状态 ${snapshot.state}，需要 accepted` };
+      const events = readEvents(projectRoot, change);
+      const confirmation = phaseConfirmationForBoundary(projectRoot, events, snapshot, "accepted_to_archive");
+      const phaseDecision = confirmation ? latestPhaseConfirmationDecision(events, confirmation) : null;
+      if (!confirmation || !phaseDecision) {
+        return {
+          skip: true,
+          message: confirmation
+            ? phaseConfirmationMissingMessage(confirmation)
+            : "无法建立 Archive 阶段确认范围",
+        };
+      }
       // 构建保全清单（Phase 4 简化版：记录文档指纹 + specs/）
       const manifest: Record<string, string> = {};
       const docPaths = ["proposal.md", "tasks.md", "design.md", ".superspec/artifacts/discovery.md", ".superspec/artifacts/business-invariants.md", ".superspec/artifacts/test-contract.md"];
@@ -1002,6 +1068,7 @@ export function archive(projectRoot: string, change: string, changeRoot: string)
       return {
         fromState: "accepted", toState: "archive", outcome: "advanced" as const,
         reason: "归档完成",
+        commitPayload: phaseConfirmationCommitPayload(confirmation, phaseDecision),
         extraEvents: [{ type: "artifact_recorded", payload: { kind: "archive_preservation_manifest", manifest } }],
       };
     },

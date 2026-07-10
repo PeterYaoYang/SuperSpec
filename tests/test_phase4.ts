@@ -14,7 +14,9 @@ import { reviewReady, taskStart, taskComplete, reopen, accept, archive } from ".
 import { jobsPacket, recordJobSubmit, recordUserDecisionContent } from "../src/record.ts";
 import { reviewEvidenceDigest } from "../src/review.ts";
 import { codeFileContentSha, dirtyCodeFiles } from "../src/git_state.ts";
+import { phaseConfirmationForCurrentState } from "../src/phase_confirmation.ts";
 import type { Job, JobRole, State } from "../src/types.ts";
+import { confirmCurrentPhase } from "./phase_confirmation_support.ts";
 
 function setupApplyWithDoneTask(): { projectRoot: string; change: string; changeRoot: string; cleanup: () => void } {
   const projectRoot = mkdtempSync(join(tmpdir(), "superspec-p4-"));
@@ -192,6 +194,7 @@ function advanceApplyDoneToReview(
   assert.equal(job?.role, "code-reviewer");
   const submitted = submitCodeReviewerPass(projectRoot, change, changeRoot, created.created_jobs[0]);
   assert.equal(submitted.accepted, true);
+  confirmCurrentPhase(projectRoot, change, changeRoot, risk);
   const advanced = reviewReady(projectRoot, change, changeRoot, risk);
   assert.equal(advanced.outcome, "advanced");
   assert.equal(advanced.to_state, "review");
@@ -251,6 +254,38 @@ test("review-ready：apply → apply_done（所有任务完成）", () => {
       review_risk: "strict",
       requires_verifier: true,
     });
+  } finally { fx.cleanup(); }
+});
+
+test("apply_done → review：阶段确认必须精确且 direct transition 受门禁", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal").to_state, "apply_done");
+    const codeReview = reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    assert.equal(codeReview.outcome, "job_created");
+    assert.equal(submitCodeReviewerPass(fx.projectRoot, fx.change, fx.changeRoot, codeReview.created_jobs[0]).accepted, true);
+
+    const ask = next(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    assert.equal(ask.path, "ask_user");
+    assert.match(ask.ask_user.scope, /^phase_confirmation:apply_to_review:/);
+
+    const ambiguous = recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({
+      scope: ask.ask_user.scope,
+      question: ask.ask_user.question,
+      answer: "好的",
+    }));
+    assert.equal(ambiguous.accepted, false);
+
+    const blocked = reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    assert.equal(blocked.events_written, 0);
+    assert.match(blocked.message, /用户确认/);
+
+    assert.equal(recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({
+      scope: ask.ask_user.scope,
+      question: ask.ask_user.question,
+      answer: ask.ask_user.allowed_answers[0],
+    })).accepted, true);
+    assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal").to_state, "review");
   } finally { fx.cleanup(); }
 });
 
@@ -318,6 +353,7 @@ test("apply_done 后补任务：reopen 复开执行并创建 fresh code-reviewer
     assert.notEqual(freshCodeReview.created_jobs[0], staleCodeReviewJobId);
     assert.equal(submitCodeReviewerPass(fx.projectRoot, fx.change, fx.changeRoot, freshCodeReview.created_jobs[0]).accepted, true);
 
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot);
     const advanced = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(advanced.to_state, "review");
     createAndPassFinalVerifier(fx.projectRoot, fx.change, fx.changeRoot);
@@ -349,6 +385,57 @@ test("next：active attempt 证据不足时不重复 task-start", () => {
   } finally { fx.cleanup(); }
 });
 
+test("apply reopen 后材料恢复相同：旧确认不能跨新 epoch 重放", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal").to_state, "apply_done");
+    const gate = reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    assert.equal(gate.outcome, "job_created");
+    assert.equal(submitCodeReviewerPass(fx.projectRoot, fx.change, fx.changeRoot, gate.created_jobs[0]).accepted, true);
+
+    const initial = phaseConfirmationForCurrentState(
+      fx.projectRoot,
+      readEvents(fx.projectRoot, fx.change),
+      rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot),
+    );
+    assert.ok(initial);
+    const oldDecision = JSON.stringify({
+      scope: initial.scope,
+      question: initial.ask.question,
+      answer: initial.answer,
+    });
+    assert.equal(recordUserDecisionContent(fx.projectRoot, fx.change, oldDecision).accepted, true);
+
+    writeFileSync(join(fx.changeRoot, "tasks.md"), "# Tasks\n\n- [ ] TASK-001 Done\n");
+    assert.equal(reopen(fx.projectRoot, fx.change, fx.changeRoot, "apply", "retry task").to_state, "apply");
+    writeFileSync(join(fx.changeRoot, "tasks.md"), "# Tasks\n\n- [x] TASK-001 Done\n");
+    assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal").to_state, "apply_done");
+
+    const reentered = phaseConfirmationForCurrentState(
+      fx.projectRoot,
+      readEvents(fx.projectRoot, fx.change),
+      rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot),
+    );
+    assert.ok(reentered);
+    assert.equal(reentered.material_digest, initial.material_digest);
+    assert.notEqual(reentered.epoch_event_id, initial.epoch_event_id);
+    assert.notEqual(reentered.scope, initial.scope);
+
+    const stale = recordUserDecisionContent(fx.projectRoot, fx.change, oldDecision);
+    assert.equal(stale.accepted, false);
+    assert.match(stale.message, /已失效|重新执行 next/);
+    const blocked = reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    assert.notEqual(blocked.to_state, "review");
+    assert.equal(rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot).state, "apply_done");
+
+    assert.equal(recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({
+      scope: reentered.scope,
+      question: reentered.ask.question,
+      answer: reentered.answer,
+    })).accepted, true);
+  } finally { fx.cleanup(); }
+});
+
 test("reopen：无 pending task 或终态来源时拒绝", () => {
   const fx = setupApplyWithDoneTask();
   try {
@@ -373,6 +460,7 @@ test("reopen：无 pending task 或终态来源时拒绝", () => {
   try {
     advanceApplyToReview(archiveFx.projectRoot, archiveFx.change, archiveFx.changeRoot, "minimal");
     acceptAfterFinalVerifier(archiveFx.projectRoot, archiveFx.change, archiveFx.changeRoot, "minimal");
+    confirmCurrentPhase(archiveFx.projectRoot, archiveFx.change, archiveFx.changeRoot);
     archive(archiveFx.projectRoot, archiveFx.change, archiveFx.changeRoot);
     writeFileSync(join(archiveFx.changeRoot, "tasks.md"), "# Tasks\n\n- [ ] TASK-025 Too late\n");
 
@@ -462,6 +550,7 @@ test("review policy：首次 risk 生效，后续 risk 不覆盖", () => {
     const codeReview = reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "strict");
     assert.equal(codeReview.outcome, "job_created");
     assert.equal(submitCodeReviewerPass(fx.projectRoot, fx.change, fx.changeRoot, codeReview.created_jobs[0]).accepted, true);
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "strict");
     const toReview = reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "strict");
     assert.equal(toReview.to_state, "review");
 
@@ -559,6 +648,7 @@ test("review-ready：apply_done → 创建 code-reviewer，review → 创建 ver
     const recorded = submitCodeReviewerPass(projectRoot, change, changeRoot, result.created_jobs[0]);
     assert.equal(recorded.accepted, true);
 
+    confirmCurrentPhase(projectRoot, change, changeRoot);
     const advanced = reviewReady(projectRoot, change, changeRoot);
     assert.equal(advanced.outcome, "advanced");
     assert.equal(advanced.to_state, "review");
@@ -604,6 +694,7 @@ test("code_state_check：已审 dirty 文件未变化不算差异，后续修改
     assert.deepEqual((codeReviewPacket.packet?.boundFiles as { path: string }[]).map(file => file.path), ["src/a.ts"]);
 
     assert.equal(submitCodeReviewerPass(fx.projectRoot, fx.change, fx.changeRoot, codeReview.created_jobs[0]).accepted, true);
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot).to_state, "review");
 
     const verifier = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
@@ -674,6 +765,7 @@ test("code_state_check：verifier 创建后的干净代码提交会列入差异�
     assert.equal(codeReview.outcome, "job_created");
     assert.deepEqual(jobsPacket(projectRoot, change, codeReview.created_jobs[0]).packet?.code_review_scope?.committed_paths, ["src/a.ts"]);
     assert.equal(submitCodeReviewerPass(projectRoot, change, changeRoot, codeReview.created_jobs[0]).accepted, true);
+    confirmCurrentPhase(projectRoot, change, changeRoot);
     assert.equal(reviewReady(projectRoot, change, changeRoot).to_state, "review");
 
     const verifier = reviewReady(projectRoot, change, changeRoot);
@@ -837,6 +929,7 @@ test("review-ready：无代码类 diff 时跳过 code-reviewer，但 review 仍�
     const toApplyDone = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(toApplyDone.to_state, "apply_done");
 
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot);
     const toReview = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(toReview.outcome, "advanced");
     assert.equal(toReview.to_state, "review");
@@ -1057,6 +1150,7 @@ test("code-reviewer：accepted pass 后绑定文件变化仍进入 review", () =
     assert.equal(submitted.accepted, true);
 
     writeFileSync(join(fx.projectRoot, "src", "example.ts"), "export const value = 2;\n");
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot);
     const retry = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(retry.outcome, "advanced");
     assert.equal(retry.to_state, "review");
@@ -1089,6 +1183,7 @@ test("code-reviewer：accepted pass 后新增代码文件仍进入 review", () =
     ).accepted, true);
 
     writeFileSync(join(fx.projectRoot, "src", "b.ts"), "export const b = 2;\n");
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot);
     const retry = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(retry.outcome, "advanced");
     assert.equal(retry.to_state, "review");
@@ -2008,7 +2103,7 @@ test("next：accepted 无 open job 时等待用户确认归档", () => {
     const result = next(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(result.path, "ask_user");
     assert.equal(result.state, "accepted");
-    assert.equal(result.ask_user.scope, "archive_confirmation");
+    assert.match(result.ask_user.scope, /^phase_confirmation:accepted_to_archive:/);
     assert.match(result.ask_user.question, /确认归档/);
     assert.match(result.reason, /等待用户确认归档/);
   } finally { fx.cleanup(); }
@@ -2400,6 +2495,23 @@ test("archive：accepted → archive + 保全清单", () => {
     }, { transitionId: `T-${t}`, idempotencyKey: `${t}-key` }));
   }
   try {
+    const blocked = archive(projectRoot, change, changeRoot);
+    assert.equal(blocked.events_written, 0);
+    assert.match(blocked.message, /用户确认/);
+
+    const ask = next(projectRoot, change, changeRoot);
+    assert.equal(ask.path, "ask_user");
+    assert.match(ask.ask_user.scope, /^phase_confirmation:accepted_to_archive:/);
+    assert.equal(recordUserDecisionContent(projectRoot, change, JSON.stringify({
+      scope: ask.ask_user.scope,
+      question: ask.ask_user.question,
+      answer: ask.ask_user.allowed_answers[0],
+    })).accepted, true);
+
+    const afterDecision = next(projectRoot, change, changeRoot);
+    assert.equal(afterDecision.path, "next_command");
+    assert.match(afterDecision.next_command, /transition archive/);
+
     const result = archive(projectRoot, change, changeRoot);
     assert.equal(result.to_state, "archive");
     assert.ok(result.events_written >= 1);
@@ -2446,6 +2558,7 @@ test("H3：verifier final gate accepted 后改文档 → stale → review-ready 
     const codeReview = reviewReady(projectRoot, change, changeRoot);
     assert.equal(codeReview.outcome, "job_created");
     assert.equal(submitCodeReviewerPass(projectRoot, change, changeRoot, codeReview.created_jobs[0]).accepted, true);
+    confirmCurrentPhase(projectRoot, change, changeRoot);
     const toReview = reviewReady(projectRoot, change, changeRoot);
     assert.equal(toReview.to_state, "review");
 

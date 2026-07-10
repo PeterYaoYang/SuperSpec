@@ -11,9 +11,10 @@ import { ensureChangeLayout, readEvents, appendEvent, makeEvent, rawFile, sha256
 import { rebuildSnapshot } from "../src/sync.ts";
 import { next } from "../src/next.ts";
 import { proposeReady, transitionExplore } from "../src/transition.ts";
-import { recordUserDecision, recordJobSubmit, jobsPacket } from "../src/record.ts";
+import { recordUserDecision, recordUserDecisionContent, recordJobSubmit, jobsPacket } from "../src/record.ts";
 import { countDiscoveryOpenQuestions, countProposeOpenQuestionsInContent, validateDiscovery, validateDiscoveryChainCoverage } from "../src/format.ts";
 import type { Job, JobRole, State } from "../src/types.ts";
+import { confirmCurrentPhase } from "./phase_confirmation_support.ts";
 
 // ===== 夹具 =====
 
@@ -354,9 +355,13 @@ test("explore→propose：discovery.md 有未确认问题时不推进", () => {
   } finally { fx.cleanup(); }
 });
 
-test("explore→propose normal：discovery.md 无未确认问题时推进", () => {
+test("explore→propose normal：完成后须确认才推进", () => {
   const fx = setupPropose();
   try {
+    const blocked = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.equal(blocked.events_written, 0);
+    assert.match(blocked.message, /用户确认/);
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     const result = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     assert.equal(result.outcome, "advanced");
     assert.equal(result.to_state, "propose");
@@ -385,18 +390,60 @@ test("next 在 explore 有 discovery 无问题时返回 transition 命令", () =
   } finally { fx.cleanup(); }
 });
 
-test("next 在 explore 显式 normal 风险时返回带 risk 的 transition 命令", () => {
+test("next 在 explore 显式 normal 风险时返回阶段确认", () => {
   const fx = setupPropose();
   try {
     const result = next(fx.projectRoot, fx.change, fx.changeRoot, "normal");
-    assert.equal(result.path, "next_command");
-    assert.ok(result.next_command.includes('transition explore --change "test-change" --risk normal'));
+    assert.equal(result.path, "ask_user");
+    assert.match(result.ask_user.scope, /^phase_confirmation:explore_to_propose:/);
+    assert.deepEqual(result.ask_user.allowed_answers, ["确认进入计划阶段"]);
+  } finally { fx.cleanup(); }
+});
+
+test("阶段确认：仅接受精确答复，材料变化后旧 scope 失效", () => {
+  const fx = setupPropose();
+  try {
+    const ask = next(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.equal(ask.path, "ask_user");
+    const acceptedInput = JSON.stringify({
+      scope: ask.ask_user.scope,
+      question: ask.ask_user.question,
+      answer: ask.ask_user.allowed_answers[0],
+    });
+
+    const ambiguous = recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({
+      scope: ask.ask_user.scope,
+      question: ask.ask_user.question,
+      answer: "继续",
+    }));
+    assert.equal(ambiguous.accepted, false);
+    assert.match(ambiguous.message, /必须精确/);
+
+    const blocked = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.equal(blocked.events_written, 0);
+    assert.match(blocked.message, /用户确认/);
+
+    const recorded = recordUserDecisionContent(fx.projectRoot, fx.change, acceptedInput);
+    assert.equal(recorded.accepted, true);
+    const repeated = recordUserDecisionContent(fx.projectRoot, fx.change, acceptedInput);
+    assert.equal(repeated.accepted, true);
+    assert.match(repeated.message, /幂等/);
+
+    writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "discovery.md"), "# Discovery\n\nChanged after confirmation.\n");
+    const stale = recordUserDecisionContent(fx.projectRoot, fx.change, acceptedInput);
+    assert.equal(stale.accepted, false);
+    assert.match(stale.message, /已失效|重新执行 next/);
+
+    const refreshed = next(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.equal(refreshed.path, "ask_user");
+    assert.notEqual(refreshed.ask_user.scope, ask.ask_user.scope);
   } finally { fx.cleanup(); }
 });
 
 test("next 在 propose 待用户确认问题优先于审查 job", () => {
   const fx = setupPropose();
   try {
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     const entered = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     assert.equal(entered.to_state, "propose");
     writeFileSync(join(fx.changeRoot, "proposal.md"), [
@@ -481,6 +528,7 @@ test("next 在 explore 不让非阶段 open job 抢占 discovery 校验", () => 
 test("next 在 propose 不让非阶段 open job 抢占正常推进", () => {
   const fx = setupPropose();
   try {
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     const entered = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     assert.equal(entered.to_state, "propose");
     appendOpenJob(fx.projectRoot, fx.change, "propose", {
@@ -498,6 +546,7 @@ test("next 在 propose 不让非阶段 open job 抢占正常推进", () => {
 test("next 在 propose 不把 tasks 普通 checklist 当成待用户确认", () => {
   const fx = setupPropose();
   try {
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     const entered = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     assert.equal(entered.to_state, "propose");
     writeFileSync(join(fx.changeRoot, "tasks.md"), "# Tasks\n\n- [ ] TASK-001 tdd_required:true\n");
@@ -544,6 +593,7 @@ test("explore→propose 默认完整审查：创建 critic，接受 JSON 报告�
     const record = recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, first.created_jobs[0], reportPath);
     assert.equal(record.accepted, true);
 
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot);
     const second = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(second.outcome, "advanced");
     assert.equal(second.to_state, "propose");
@@ -572,6 +622,7 @@ test("explore→propose strict：旧 accepted critic job 无 gate_id 仍可满�
       accepted_at: new Date().toISOString(),
     }));
 
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot);
     const result = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "strict");
     assert.equal(result.outcome, "advanced");
     assert.equal(result.to_state, "propose");
@@ -954,6 +1005,7 @@ test("propose-ready 默认完整审查：创建 critic + architect + test 审核
 test("propose-ready strict：同一 gate 下 critic 不能满足 architect 或 test-engineer", () => {
   const fx = setupPropose();
   try {
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     writeFileSync(join(fx.changeRoot, "design.md"), "# Design\n");
     writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "business-invariants.md"), "# BI\n");
@@ -976,6 +1028,7 @@ test("propose-ready strict：同一 gate 下 critic 不能满足 architect 或 t
 test("propose-ready normal：旧 accepted critic job 无 gate_id 仍可满足最终计划审查", () => {
   const fx = setupPropose();
   try {
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     writeFileSync(join(fx.changeRoot, "design.md"), "# Design\n");
     writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "business-invariants.md"), "# BI\n");
@@ -1012,6 +1065,7 @@ test("propose-ready strict：explore 阶段 critic accepted 不能满足 proposa
     const record = recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, first.created_jobs[0], reportPath);
     assert.equal(record.accepted, true);
 
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot);
     const second = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "strict");
     assert.equal(second.to_state, "propose");
 
@@ -1054,6 +1108,7 @@ test("完整 e2e（Phase 2）：init→explore→写 discovery→propose→propo
     writeFileSync(join(changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");
 
     // explore→propose
+    confirmCurrentPhase(projectRoot, change, changeRoot, "normal");
     const exploreResult = transitionExplore(projectRoot, change, changeRoot, "normal");
     assert.equal(exploreResult.to_state, "propose");
 
@@ -1192,6 +1247,7 @@ function acceptAllProposeJobs(fx: { projectRoot: string; change: string; changeR
 test("specs 绑定：propose-ready job 的 boundFiles 含 specs/ 目录聚合指纹", () => {
   const fx = setupProposeWithSpecs();
   try {
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     const result = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     assert.equal(result.outcome, "job_created");
@@ -1205,6 +1261,7 @@ test("specs 绑定：propose-ready job 的 boundFiles 含 specs/ 目录聚合指
 test("specs freshness：审查通过后修改 specs 文件，accepted job 变 stale", () => {
   const fx = setupProposeWithSpecs();
   try {
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     acceptAllProposeJobs(fx);
@@ -1219,6 +1276,7 @@ test("specs freshness：审查通过后修改 specs 文件，accepted job 变 st
 test("specs freshness：审查通过后新增 specs 文件同样作废审查", () => {
   const fx = setupProposeWithSpecs();
   try {
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     acceptAllProposeJobs(fx);
@@ -1233,6 +1291,7 @@ test("specs freshness：审查通过后新增 specs 文件同样作废审查", (
 test("specs freshness：删除 specs 文件同样作废审查", () => {
   const fx = setupProposeWithSpecs();
   try {
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     acceptAllProposeJobs(fx);
@@ -1249,6 +1308,7 @@ test("specs freshness：审查时无 specs 目录、通过后新建 specs 同样
     writeFileSync(join(fx.changeRoot, "design.md"), "# Design\n");
     writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "business-invariants.md"), "# BI\n");
     writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     const openSnap = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot);
@@ -1265,6 +1325,7 @@ test("specs freshness：审查时无 specs 目录、通过后新建 specs 同样
 test("specs freshness：specs 未变化时审查保持 accepted 不误伤", () => {
   const fx = setupProposeWithSpecs();
   try {
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     acceptAllProposeJobs(fx);

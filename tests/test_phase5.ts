@@ -2,11 +2,17 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { simulateLoop } from "../src/skill_loop.ts";
+import { next } from "../src/next.ts";
+import { transitionExplore } from "../src/transition.ts";
+import { recordUserDecisionContent } from "../src/record.ts";
+import { appendEvent, ensureChangeLayout, makeEvent, readEvents } from "../src/store.ts";
+import { rebuildSnapshot } from "../src/sync.ts";
+import { phaseConfirmationForCurrentState } from "../src/phase_confirmation.ts";
 import { reviewRolesForGate, resolveWorkflowProfile, workflowProfileForRisk } from "../src/workflow_profile.ts";
 import { PROPOSE_FINAL_REVIEW_GATE } from "../src/review_job_gates.ts";
 import type { Job, NextOutput, Snapshot } from "../src/types.ts";
@@ -106,7 +112,7 @@ test("simulateLoop：accepted 归档确认会暂停", () => {
     {
       state: "accepted",
       path: "ask_user",
-      ask_user: { question: "审查已通过，确认归档时请执行 superspec transition archive", allowed_answers: ["确认归档"], scope: "archive_confirmation" },
+      ask_user: { question: "审查已通过，确认归档时请执行 superspec transition archive", allowed_answers: ["确认归档"], scope: "phase_confirmation:accepted_to_archive:test-epoch:sha256:test" },
       reason: "等待确认",
     },
   ];
@@ -119,6 +125,115 @@ test("simulateLoop：accepted 归档确认会暂停", () => {
   assert.equal(result.steps[0].action, "ask");
   assert.equal(result.finalState, "accepted");
   assert.match(result.message, /需要用户确认/);
+});
+
+test("simulateLoop：真实 next 在阶段确认处暂停，登记后只推进一个边界", () => {
+  const projectRoot = mkdtempSync(join(tmpdir(), "superspec-phase-confirmation-loop-"));
+  const change = "phase-confirmation-loop";
+  const changeRoot = join(projectRoot, "openspec", "changes", change);
+  mkdirSync(join(changeRoot, ".superspec", "artifacts"), { recursive: true });
+  writeFileSync(join(changeRoot, "proposal.md"), "# Proposal\n");
+  writeFileSync(join(changeRoot, "tasks.md"), "# Tasks\n");
+  writeFileSync(join(changeRoot, ".superspec", "artifacts", "discovery.md"), "# Discovery\n");
+  ensureChangeLayout(projectRoot, change);
+  for (const [transition, from, to] of [
+    ["init", "init", "init"],
+    ["explore", "init", "explore"],
+  ] as const) {
+    appendEvent(projectRoot, change, makeEvent(change, "transition_commit", {
+      transition,
+      from_state: from,
+      to_state: to,
+      outcome: "advanced",
+      created_job_ids: [],
+      reason: transition,
+    }, { transitionId: `T-${transition}`, idempotencyKey: `K-${transition}` }));
+  }
+
+  try {
+    const paused = simulateLoop(
+      () => next(projectRoot, change, changeRoot, "minimal"),
+      () => { throw new Error("ask_user 不应执行命令"); },
+    );
+    assert.equal(paused.completed, false);
+    assert.equal(paused.steps.length, 1);
+    assert.equal(paused.steps[0].action, "ask");
+
+    const ask = next(projectRoot, change, changeRoot, "minimal");
+    assert.equal(ask.path, "ask_user");
+    assert.equal(recordUserDecisionContent(projectRoot, change, JSON.stringify({
+      scope: ask.ask_user.scope,
+      question: ask.ask_user.question,
+      answer: ask.ask_user.allowed_answers[0],
+    })).accepted, true);
+
+    const afterDecision = next(projectRoot, change, changeRoot, "minimal");
+    assert.equal(afterDecision.path, "next_command");
+    assert.match(afterDecision.next_command, /transition explore/);
+    assert.equal(transitionExplore(projectRoot, change, changeRoot, "minimal").to_state, "propose");
+    assert.equal(next(projectRoot, change, changeRoot, "minimal").state, "propose");
+  } finally {
+    rmSync(projectRoot, { recursive: true, force: true });
+  }
+});
+
+test("阶段确认：授权事件不改变 scope，coverage exemption 会改变 scope", () => {
+  const projectRoot = mkdtempSync(join(tmpdir(), "superspec-phase-confirmation-digest-"));
+  const change = "phase-confirmation-digest";
+  const changeRoot = join(projectRoot, "openspec", "changes", change);
+  mkdirSync(join(changeRoot, ".superspec", "artifacts"), { recursive: true });
+  writeFileSync(join(changeRoot, "proposal.md"), "# Proposal\n");
+  writeFileSync(join(changeRoot, "tasks.md"), "# Tasks\n");
+  writeFileSync(join(changeRoot, ".superspec", "artifacts", "discovery.md"), "# Discovery\n");
+  ensureChangeLayout(projectRoot, change);
+  for (const [transition, from, to] of [
+    ["init", "init", "init"],
+    ["explore", "init", "explore"],
+  ] as const) {
+    appendEvent(projectRoot, change, makeEvent(change, "transition_commit", {
+      transition,
+      from_state: from,
+      to_state: to,
+      outcome: "advanced",
+      created_job_ids: [],
+      reason: transition,
+    }, { transitionId: `T-${transition}`, idempotencyKey: `K-${transition}` }));
+  }
+
+  try {
+    const currentConfirmation = () => {
+      const confirmation = phaseConfirmationForCurrentState(
+        projectRoot,
+        readEvents(projectRoot, change),
+        rebuildSnapshot(projectRoot, change, changeRoot),
+      );
+      assert.ok(confirmation);
+      return confirmation;
+    };
+
+    const initial = currentConfirmation();
+    assert.equal(recordUserDecisionContent(projectRoot, change, JSON.stringify({
+      scope: initial.scope,
+      question: initial.ask.question,
+      answer: initial.answer,
+    })).accepted, true);
+
+    const afterConfirmation = currentConfirmation();
+    assert.equal(afterConfirmation.scope, initial.scope);
+    assert.equal(afterConfirmation.material_digest, initial.material_digest);
+
+    assert.equal(recordUserDecisionContent(projectRoot, change, JSON.stringify({
+      scope: "test_coverage_exemption:TEST-001",
+      question: "为什么不为 TEST-001 单独绑定任务？",
+      answer: "已有等价覆盖，无需重复实现",
+    })).accepted, true);
+
+    const afterExemption = currentConfirmation();
+    assert.notEqual(afterExemption.scope, initial.scope);
+    assert.notEqual(afterExemption.material_digest, initial.material_digest);
+  } finally {
+    rmSync(projectRoot, { recursive: true, force: true });
+  }
 });
 
 test("simulateLoop：required_job → next_command → done", () => {

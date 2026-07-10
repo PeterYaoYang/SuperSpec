@@ -345,10 +345,10 @@ test("完整 e2e：propose → job → accept → propose_ready", () => {
     assert.equal(step5.outcome, "advanced");
     assert.equal(step5.to_state, "propose_ready");
 
-    // 6. next → next_command（propose_ready 不再是终态，指向 start-apply）
+    // 6. next → ask_user（计划完成后须明确确认才开始实现）
     const step6 = next(fx.projectRoot, fx.change, fx.changeRoot, "normal");
-    assert.equal(step6.path, "next_command");
-    assert.ok(step6.next_command.includes("start-apply"));
+    assert.equal(step6.path, "ask_user");
+    assert.match(step6.ask_user.scope, /^phase_confirmation:propose_to_apply:/);
   } finally { fx.cleanup(); }
 });
 

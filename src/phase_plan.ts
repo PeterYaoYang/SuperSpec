@@ -22,10 +22,20 @@ import {
   CODE_REVIEW_DECISION_ANSWER_LABELS,
   CODE_REVIEW_REPAIR_SCOPE_PREFIX,
   codeReviewDecisionScope,
+  codeReviewJobStaleReason,
   collectCodeReviewGateFacts,
+  currentCodeReviewWorkingPaths,
   latestCodeReviewFailedStatus,
   requiresFinalVerifierForCurrentReview,
+  scanCodeChangesForReview,
 } from "./code_review.ts";
+import {
+  latestPhaseConfirmationDecision,
+  phaseConfirmationCommitPayload,
+  phaseConfirmationForBoundary,
+  phaseConfirmationMissingMessage,
+  type PhaseBoundary,
+} from "./phase_confirmation.ts";
 import { taskEvidenceReadiness } from "./task_evidence.ts";
 import type { AskUser, Event, Job, JobRole, State } from "./types.ts";
 import type { Snapshot } from "./types.ts";
@@ -63,7 +73,6 @@ export type ReopenNextStep =
 export type NextStepPlan =
   | { kind: "required_jobs"; state: State; jobs: Job[]; reason: string }
   | { kind: "ask_user"; state: State; ask: AskUser; reason: string }
-  | { kind: "ask_archive_confirmation"; state: "accepted"; reason: string }
   | { kind: "run_transition"; state: State; transition: TransitionName; reason: string; risk?: ReviewRisk; taskId?: string; reopen?: ReopenNextStep }
   | { kind: "done"; state: State; reason: string };
 
@@ -84,6 +93,26 @@ type ReviewGatePlanResult = Extract<TransitionDecisionPlan, { kind: "blocked" | 
 
 function requiredJobs(state: State, jobs: Job[], reason: string): NextStepPlan {
   return { kind: "required_jobs", state, jobs, reason };
+}
+
+function phaseConfirmationStep(
+  context: PhasePlanContext,
+  boundary: PhaseBoundary,
+  reason: string,
+): NextStepPlan | null {
+  const confirmation = phaseConfirmationForBoundary(
+    context.projectRoot,
+    context.events,
+    context.snapshot,
+    boundary,
+  );
+  if (!confirmation || latestPhaseConfirmationDecision(context.events, confirmation)) return null;
+  return {
+    kind: "ask_user",
+    state: context.snapshot.state,
+    ask: confirmation.ask,
+    reason,
+  };
 }
 
 function reviewGatePlan(
@@ -304,6 +333,12 @@ export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
         return { kind: "ask_user", state: "explore", ask, reason: `有 ${openQs} 个未确认问题` };
       }
 
+      const requiredRoles = EXPLORE_DISCOVERY_REVIEW_GATE.requiredRolesForRisk(mode.risk);
+      if (!reviewGatePlan(snapshot, EXPLORE_DISCOVERY_REVIEW_GATE, requiredRoles)) {
+        const confirmation = phaseConfirmationStep(context, "explore_to_propose", "探索完成，等待用户确认进入计划阶段");
+        if (confirmation) return confirmation;
+      }
+
       return {
         kind: "run_transition",
         state: "explore",
@@ -344,6 +379,11 @@ export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
       if (proposalReviewJobs.length > 0) {
         return requiredJobs("propose_ready", proposalReviewJobs, `有 ${proposalReviewJobs.length} 个待完成 proposal 审查工作项`);
       }
+      const startApplyPlan = planStartApplyTransition(context, false);
+      if (startApplyPlan.kind === "advance") {
+        const confirmation = phaseConfirmationStep(context, "propose_to_apply", "计划阶段完成，等待用户确认开始实现");
+        if (confirmation) return confirmation;
+      }
       return { kind: "run_transition", state: "propose_ready", transition: "start-apply", reason: "计划就绪，开始执行" };
     }
 
@@ -360,7 +400,8 @@ export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
       if (snapshot.open_jobs.length > 0) {
         return requiredJobs("accepted", snapshot.open_jobs, `有 ${snapshot.open_jobs.length} 个待完成工作项，暂不归档`);
       }
-      return { kind: "ask_archive_confirmation", state: "accepted", reason: "审查通过，等待用户确认归档" };
+      return phaseConfirmationStep(context, "accepted_to_archive", "审查通过，等待用户确认归档")
+        ?? { kind: "run_transition", state: "accepted", transition: "archive", reason: "用户已确认归档" };
 
     case "archive":
       if (snapshot.open_jobs.length > 0) {
@@ -437,11 +478,20 @@ function planApplyDoneNext(context: PhasePlanContext): NextStepPlan {
     };
   }
 
-  if (snapshot.open_jobs.length > 0) {
-    return requiredJobs("apply_done", snapshot.open_jobs, `有 ${snapshot.open_jobs.length} 个待完成工作项`);
+  const facts = collectCodeReviewGateFacts(events);
+  const currentWorkingPaths = currentCodeReviewWorkingPaths(context.projectRoot, events);
+  const freshCodeReviewJobIds = new Set(
+    facts.openJobs
+      .filter(job => codeReviewJobStaleReason(context.projectRoot, job, currentWorkingPaths) == null)
+      .map(job => job.job_id),
+  );
+  const relevantOpenJobs = snapshot.open_jobs.filter(job =>
+    job.role !== "code-reviewer" || freshCodeReviewJobIds.has(job.job_id)
+  );
+  if (relevantOpenJobs.length > 0) {
+    return requiredJobs("apply_done", relevantOpenJobs, `有 ${relevantOpenJobs.length} 个待完成工作项`);
   }
 
-  const facts = collectCodeReviewGateFacts(events);
   const latest = facts.latestTerminal;
   if (latest?.state === "rejected" && latest.result_kind === "review_failed") {
     const status = latestCodeReviewFailedStatus(events);
@@ -536,6 +586,20 @@ function planApplyDoneNext(context: PhasePlanContext): NextStepPlan {
     return { kind: "ask_user", state: "apply_done", ask, reason: "代码审查报告连续不符合要求或没有可处理问题" };
   }
 
+  const codeScan = scanCodeChangesForReview(context.projectRoot, events);
+  const acceptedScope = latest?.state === "accepted"
+    ? latest.job.packet_context?.code_review_scope
+    : undefined;
+  const acceptedCurrentHead = acceptedScope?.current_head;
+  const acceptedReviewReady = latest?.state === "accepted" && (
+    acceptedCurrentHead === null ||
+    (typeof acceptedCurrentHead === "string" && acceptedCurrentHead.trim() !== "")
+  );
+  if (!codeScan.hasCodeChanges || acceptedReviewReady) {
+    const confirmation = phaseConfirmationStep(context, "apply_to_review", "Apply 与代码审查完成，等待用户确认进入最终审查");
+    if (confirmation) return confirmation;
+  }
+
   return {
     kind: "run_transition",
     state: "apply_done",
@@ -605,7 +669,7 @@ export function planTransition(name: "explore" | "propose-ready" | "start-apply"
 }
 
 function planExploreTransition(context: TransitionPlanContext): TransitionDecisionPlan {
-  const { changeRoot, mode, snapshot } = context;
+  const { changeRoot, events, mode, projectRoot, snapshot } = context;
   if (snapshot.state === "init") {
     return { kind: "advance", fromState: "init", toState: "explore", reason: "进入探索阶段" };
   }
@@ -620,7 +684,18 @@ function planExploreTransition(context: TransitionPlanContext): TransitionDecisi
   const gatePlan = reviewGatePlan(snapshot, EXPLORE_DISCOVERY_REVIEW_GATE, requiredRoles);
   if (gatePlan) return gatePlan;
 
-  return { kind: "advance", fromState: "explore", toState: "propose", reason: "探索完成" };
+  const confirmation = phaseConfirmationForBoundary(projectRoot, events, snapshot, "explore_to_propose");
+  const decision = confirmation ? latestPhaseConfirmationDecision(events, confirmation) : null;
+  if (!confirmation || !decision) {
+    return { kind: "skip", message: confirmation ? phaseConfirmationMissingMessage(confirmation) : "无法建立 Explore 阶段确认范围" };
+  }
+  return {
+    kind: "advance",
+    fromState: "explore",
+    toState: "propose",
+    reason: "探索完成",
+    payload: phaseConfirmationCommitPayload(confirmation, decision),
+  };
 }
 
 function planProposeReadyTransition(context: TransitionPlanContext): TransitionDecisionPlan {
@@ -650,7 +725,10 @@ function planProposeReadyTransition(context: TransitionPlanContext): TransitionD
   return { kind: "advance", fromState: "propose", toState: "propose_ready", reason: `risk=${risk}，所有需求已满足` };
 }
 
-function planStartApplyTransition(context: TransitionPlanContext): TransitionDecisionPlan {
+function planStartApplyTransition(
+  context: TransitionPlanContext,
+  enforceConfirmation = true,
+): TransitionDecisionPlan {
   const { changeRoot, events, projectRoot, snapshot } = context;
   if (snapshot.state !== "propose_ready") return { kind: "skip", message: `当前状态 ${snapshot.state}，需要 propose_ready` };
 
@@ -673,6 +751,11 @@ function planStartApplyTransition(context: TransitionPlanContext): TransitionDec
 
   const executionRequirementPlan = validateExecutionRequirementPlan(changeRoot);
   if (!executionRequirementPlan.ok) return { kind: "skip", message: executionRequirementPlan.message };
+  const confirmation = phaseConfirmationForBoundary(projectRoot, events, snapshot, "propose_to_apply");
+  const decision = confirmation ? latestPhaseConfirmationDecision(events, confirmation) : null;
+  if (enforceConfirmation && (!confirmation || !decision)) {
+    return { kind: "skip", message: confirmation ? phaseConfirmationMissingMessage(confirmation) : "无法建立 Propose 阶段确认范围" };
+  }
   const gitHead = currentGitHead(projectRoot);
   return {
     kind: "advance",
@@ -683,6 +766,7 @@ function planStartApplyTransition(context: TransitionPlanContext): TransitionDec
       apply_start_head: gitHead.head,
       apply_start_head_reason: gitHead.reason,
       apply_contract_mode: executionRequirementPlan.mode,
+      ...(confirmation && decision ? phaseConfirmationCommitPayload(confirmation, decision) : {}),
     },
   };
 }

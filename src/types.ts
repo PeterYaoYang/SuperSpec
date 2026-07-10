@@ -200,6 +200,13 @@ export interface TransitionCommitPayload {
     head?: string | null;
     reason?: "no_code_changes";
   };
+  phase_confirmation?: {
+    boundary: "explore_to_propose" | "propose_to_apply" | "apply_to_review" | "accepted_to_archive";
+    epoch_event_id: string;
+    material_digest: string;
+    scope: string;
+    decision_event_id: string;
+  };
 }
 
 // ===== Snapshot =====

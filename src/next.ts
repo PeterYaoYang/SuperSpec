@@ -3,7 +3,7 @@
 import { rebuildSnapshot } from "./sync.ts";
 import { readEvents } from "./store.ts";
 import { requiredJobActions } from "./job_action.ts";
-import type { Job, NextOutput, AskUser, State } from "./types.ts";
+import type { Job, NextOutput, State } from "./types.ts";
 import { planNextStep, type NextStepPlan } from "./phase_plan.ts";
 
 function requiredJobsOutput(state: State, change: string, jobs: Job[], reason: string): NextOutput {
@@ -47,14 +47,6 @@ function toNextOutput(change: string, plan: NextStepPlan): NextOutput {
       return requiredJobsOutput(plan.state, change, plan.jobs, plan.reason);
     case "ask_user":
       return { state: plan.state, path: "ask_user", ask_user: plan.ask, reason: plan.reason };
-    case "ask_archive_confirmation": {
-      const ask: AskUser = {
-        question: `审查已通过，流程停在 accepted。确认归档时请执行 ${transitionCommand(change, "archive")}`,
-        allowed_answers: ["确认归档"],
-        scope: "archive_confirmation",
-      };
-      return { state: "accepted", path: "ask_user", ask_user: ask, reason: plan.reason };
-    }
     case "run_transition":
       return {
         state: plan.state,

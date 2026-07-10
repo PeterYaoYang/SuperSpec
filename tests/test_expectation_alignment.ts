@@ -17,6 +17,7 @@ import { reviewEvidenceDigest } from "../src/review.ts";
 import { validateExecutionRequirements, tasksStructureDigest } from "../src/format.ts";
 import { sha256Text } from "../src/store.ts";
 import type { Event } from "../src/types.ts";
+import { confirmCurrentPhase } from "./phase_confirmation_support.ts";
 
 function setupChange(tasks: string, testContract = "# Test Contract\n"): { projectRoot: string; change: string; changeRoot: string; cleanup: () => void } {
   const projectRoot = mkdtempSync(join(tmpdir(), "superspec-align-"));
@@ -78,6 +79,11 @@ function initGitRepo(projectRoot: string): void {
   execFileSync("git", ["init"], { cwd: projectRoot, stdio: "ignore" });
   execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: projectRoot, stdio: "ignore" });
   execFileSync("git", ["config", "user.name", "Test User"], { cwd: projectRoot, stdio: "ignore" });
+}
+
+function startApplyConfirmed(projectRoot: string, change: string, changeRoot: string) {
+  confirmCurrentPhase(projectRoot, change, changeRoot);
+  return startApply(projectRoot, change, changeRoot);
 }
 
 test("推进校验：propose-ready 和 start-apply 都拒绝执行依据模式下缺执行依据的普通 TDD task", () => {
@@ -184,7 +190,7 @@ test("执行依据模式：task-start 输出契约，test-run 不要求 task_str
     "",
   ].join("\n"));
   try {
-    const startedApply = startApply(fx.projectRoot, fx.change, fx.changeRoot);
+    const startedApply = startApplyConfirmed(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(startedApply.to_state, "apply");
     const startCommit = readEvents(fx.projectRoot, fx.change).findLast(ev =>
       ev.event_type === "transition_commit" && (ev.payload as { transition?: unknown }).transition === "start-apply"
@@ -281,7 +287,7 @@ test("执行依据模式：同一 apply 轮后续活跃 attempt 不会被较早�
     "",
   ].join("\n"));
   try {
-    assert.equal(startApply(fx.projectRoot, fx.change, fx.changeRoot).to_state, "apply");
+    assert.equal(startApplyConfirmed(fx.projectRoot, fx.change, fx.changeRoot).to_state, "apply");
     appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "task_started", {
       task_id: "TASK-001",
       attempt_id: "ATT-old",
@@ -332,6 +338,7 @@ test("历史 start-apply 缺 apply_start_head 时只审当前工作区，不把 
     }, { transitionId: "T-legacy-start-apply", idempotencyKey: "legacy-start-apply" }));
 
     assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot).to_state, "apply_done");
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot);
     const skipped = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(skipped.outcome, "advanced");
     assert.equal(skipped.to_state, "review");
@@ -351,7 +358,7 @@ test("boundary_snapshot：仓库尚无 commit 时保留 dirty_files 归属线索
     mkdirSync(join(fx.projectRoot, "src"), { recursive: true });
     writeFileSync(join(fx.projectRoot, "src", "a.ts"), "export const value = 1;\n");
 
-    assert.equal(startApply(fx.projectRoot, fx.change, fx.changeRoot).to_state, "apply");
+    assert.equal(startApplyConfirmed(fx.projectRoot, fx.change, fx.changeRoot).to_state, "apply");
     assert.equal(taskStart(fx.projectRoot, fx.change, fx.changeRoot, "TASK-001").outcome, "advanced");
     const startedEvent = readEvents(fx.projectRoot, fx.change).findLast(ev => ev.event_type === "task_started");
     const boundary = (startedEvent?.payload as { boundary_snapshot?: unknown }).boundary_snapshot as {
@@ -380,7 +387,7 @@ test("执行依据模式：checkbox 已勾选但缺 task_completed 时 next 引�
     "",
   ].join("\n"));
   try {
-    startApply(fx.projectRoot, fx.change, fx.changeRoot);
+    startApplyConfirmed(fx.projectRoot, fx.change, fx.changeRoot);
     const started = taskStart(fx.projectRoot, fx.change, fx.changeRoot, "TASK-001");
     assert.equal(started.outcome, "advanced");
     writeFileSync(join(fx.changeRoot, "tasks.md"), readFileSync(join(fx.changeRoot, "tasks.md"), "utf8").replace("- [ ] TASK-001", "- [x] TASK-001"));
@@ -411,7 +418,7 @@ test("执行依据模式：task_completed 事件优先于 checkbox，已完成 t
     "",
   ].join("\n"));
   try {
-    startApply(fx.projectRoot, fx.change, fx.changeRoot);
+    startApplyConfirmed(fx.projectRoot, fx.change, fx.changeRoot);
     const started = taskStart(fx.projectRoot, fx.change, fx.changeRoot, "TASK-001");
     assert.equal(started.outcome, "advanced");
 
@@ -436,7 +443,7 @@ test("review-ready：apply 期间只有已提交代码变化且工作区干净�
     execFileSync("git", ["add", "."], { cwd: fx.projectRoot, stdio: "ignore" });
     execFileSync("git", ["commit", "-m", "initial"], { cwd: fx.projectRoot, stdio: "ignore" });
 
-    startApply(fx.projectRoot, fx.change, fx.changeRoot);
+    startApplyConfirmed(fx.projectRoot, fx.change, fx.changeRoot);
     writeFileSync(join(fx.projectRoot, "src", "a.ts"), "export const value = 2;\n");
     execFileSync("git", ["add", "src/a.ts"], { cwd: fx.projectRoot, stdio: "ignore" });
     execFileSync("git", ["commit", "-m", "apply code"], { cwd: fx.projectRoot, stdio: "ignore" });
@@ -479,7 +486,7 @@ test("code-reviewer packet：按 task 展示 changed_paths、test_evidence 和 c
     execFileSync("git", ["add", "."], { cwd: fx.projectRoot, stdio: "ignore" });
     execFileSync("git", ["commit", "-m", "initial"], { cwd: fx.projectRoot, stdio: "ignore" });
 
-    startApply(fx.projectRoot, fx.change, fx.changeRoot);
+    startApplyConfirmed(fx.projectRoot, fx.change, fx.changeRoot);
     const started = taskStart(fx.projectRoot, fx.change, fx.changeRoot, "TASK-001");
     const attemptId = String(started.details?.attempt_id);
     mkdirSync(join(fx.projectRoot, "src"), { recursive: true });
@@ -551,7 +558,7 @@ test("执行依据模式：task-start 拒绝 apply 期间被改坏的执行依�
     "",
   ].join("\n"));
   try {
-    assert.equal(startApply(fx.projectRoot, fx.change, fx.changeRoot).to_state, "apply");
+    assert.equal(startApplyConfirmed(fx.projectRoot, fx.change, fx.changeRoot).to_state, "apply");
     writeFileSync(join(fx.changeRoot, "tasks.md"), [
       "# Tasks",
       "",
@@ -596,7 +603,7 @@ test("执行依据模式：REVIEW-FIX task 没有执行依据时仍要求回归 
     "",
   ].join("\n"));
   try {
-    assert.equal(startApply(fx.projectRoot, fx.change, fx.changeRoot).to_state, "apply");
+    assert.equal(startApplyConfirmed(fx.projectRoot, fx.change, fx.changeRoot).to_state, "apply");
     const started = taskStart(fx.projectRoot, fx.change, fx.changeRoot, "REVIEW-FIX-JOB-1#F1");
     const attemptId = String(started.details?.attempt_id);
     const blocked = taskComplete(fx.projectRoot, fx.change, fx.changeRoot, "REVIEW-FIX-JOB-1#F1");

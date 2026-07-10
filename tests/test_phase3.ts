@@ -10,13 +10,14 @@ import { ensureChangeLayout, appendEvent, makeEvent, readEvents, rawFile, sha256
 import { rebuildSnapshot } from "../src/sync.ts";
 import { next } from "../src/next.ts";
 import { proposeReady, startApply, taskStart, taskComplete } from "../src/transition.ts";
-import { recordJobSubmit } from "../src/record.ts";
+import { recordJobSubmit, recordUserDecisionContent } from "../src/record.ts";
 import { recordTestRun, tasksStructureDigestOf } from "../src/task.ts";
 import type { Job, JobRole, State } from "../src/types.ts";
+import { confirmCurrentPhase } from "./phase_confirmation_support.ts";
 
 // ===== 夹具：seed 到 propose_ready =====
 
-function setupApply(): { projectRoot: string; change: string; changeRoot: string; cleanup: () => void } {
+function setupApply(confirmBoundary = true): { projectRoot: string; change: string; changeRoot: string; cleanup: () => void } {
   const projectRoot = mkdtempSync(join(tmpdir(), "superspec-p3-"));
   const change = "test-change";
   const changeRoot = join(projectRoot, "openspec", "changes", change);
@@ -36,6 +37,7 @@ function setupApply(): { projectRoot: string; change: string; changeRoot: string
       outcome: "advanced", created_job_ids: [], reason: t,
     }, { transitionId: `T-${t}`, idempotencyKey: `${t}-key` }));
   }
+  if (confirmBoundary) confirmCurrentPhase(projectRoot, change, changeRoot);
 
   return {
     projectRoot, change, changeRoot,
@@ -133,6 +135,38 @@ test("start-apply：propose_ready → apply", () => {
   } finally { fx.cleanup(); }
 });
 
+test("start-apply：未确认时直接调用被拒绝，只有精确确认才能推进", () => {
+  const fx = setupApply(false);
+  try {
+    const blocked = startApply(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(blocked.events_written, 0);
+    assert.match(blocked.message, /用户确认/);
+
+    const ask = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(ask.path, "ask_user");
+    assert.match(ask.ask_user.scope, /^phase_confirmation:propose_to_apply:/);
+
+    const ambiguous = recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({
+      scope: ask.ask_user.scope,
+      question: ask.ask_user.question,
+      answer: "继续",
+    }));
+    assert.equal(ambiguous.accepted, false);
+    assert.match(ambiguous.message, /必须精确/);
+
+    const confirmed = recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({
+      scope: ask.ask_user.scope,
+      question: ask.ask_user.question,
+      answer: ask.ask_user.allowed_answers[0],
+    }));
+    assert.equal(confirmed.accepted, true);
+
+    const advanced = startApply(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(advanced.outcome, "advanced");
+    assert.equal(advanced.to_state, "apply");
+  } finally { fx.cleanup(); }
+});
+
 test("start-apply：minimal 无历史 proposal 审查时可进入 apply", () => {
   const fx = setupApply();
   try {
@@ -154,6 +188,7 @@ test("start-apply：fresh proposal review accepted 后可进入 apply", () => {
     const t2 = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     assert.equal(t2.to_state, "propose_ready");
 
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     const result = startApply(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(result.outcome, "advanced");
     assert.equal(result.to_state, "apply");
@@ -283,6 +318,7 @@ test("grouped tasks：next 支持标题分组下的顶格任务", () => {
       "",
     ].join("\n"));
 
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot);
     startApply(fx.projectRoot, fx.change, fx.changeRoot);
 
     const first = next(fx.projectRoot, fx.change, fx.changeRoot, "normal");
@@ -311,6 +347,7 @@ test("task-start：已完成任务拒绝", () => {
     // 手动勾选 TASK-001
     const tasks = readFileSync(join(fx.changeRoot, "tasks.md"), "utf8");
     writeFileSync(join(fx.changeRoot, "tasks.md"), tasks.replace("TASK-001", "- [x] TASK-001").replace("- [ ] - [x]", "- [x]"));
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot);
     startApply(fx.projectRoot, fx.change, fx.changeRoot);
     const result = taskStart(fx.projectRoot, fx.change, fx.changeRoot, "TASK-001");
     assert.ok(result.message.includes("已完成"), `应报"已完成"，实际：${result.message}`);
@@ -340,7 +377,7 @@ test("record test-run：RED 登记", () => {
     const raw = JSON.parse(rawLines[0]);
     assert.equal(raw.semantic_status, "expected_failure");
     assert.equal("covers_task_ids" in raw, false);
-    assert.deepEqual(rawDirFiles(fx.projectRoot, fx.change), ["test-runs.jsonl"]);
+    assert.deepEqual(rawDirFiles(fx.projectRoot, fx.change), ["test-runs.jsonl", "user-decisions.jsonl"]);
 
     const event = readEvents(fx.projectRoot, fx.change).findLast(e => e.event_type === "test_run_recorded");
     assert.ok(event);
@@ -570,6 +607,7 @@ test("no-TDD 任务：缺 no_tdd_reason 拒绝", () => {
     }, { transitionId: `T-${t}`, idempotencyKey: `${t}-key` }));
   }
   try {
+    confirmCurrentPhase(projectRoot, change, changeRoot);
     startApply(projectRoot, change, changeRoot);
     taskStart(projectRoot, change, changeRoot, "TASK-001");
     const result = taskComplete(projectRoot, change, changeRoot, "TASK-001");
@@ -597,6 +635,7 @@ test("no-TDD 任务：有 no_tdd_reason 可完成", () => {
     }, { transitionId: `T-${t}`, idempotencyKey: `${t}-key` }));
   }
   try {
+    confirmCurrentPhase(projectRoot, change, changeRoot);
     startApply(projectRoot, change, changeRoot);
     taskStart(projectRoot, change, changeRoot, "TASK-001");
     const result = taskComplete(projectRoot, change, changeRoot, "TASK-001");
