@@ -4,6 +4,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { sha256Text, ensureChangeLayout, appendEvent, makeEvent, withLock, appendRawRecord, readEvents } from "./store.ts";
 import { tasksStructureDigest as formatDigest } from "./format.ts";
+import { RecordInputDecodingError, readRecordInputFile } from "./record_input.ts";
 import type { Event, TaskAttempt, TestRun } from "./types.ts";
 
 /** tasks.md 结构指纹（委托给 format.ts 统一实现） */
@@ -150,7 +151,12 @@ export function recordTestRun(
     ensureChangeLayout(projectRoot, change);
     if (!existsSync(inputFile)) return { accepted: false, message: `文件不存在：${inputFile}` };
 
-    return recordTestRunLoaded(projectRoot, change, readFileSync(inputFile, "utf8"));
+    try {
+      return recordTestRunLoaded(projectRoot, change, readRecordInputFile(inputFile));
+    } catch (err) {
+      if (err instanceof RecordInputDecodingError) return { accepted: false, message: err.message };
+      throw err;
+    }
   });
 }
 

@@ -49,14 +49,33 @@ function setupPropose(): { projectRoot: string; change: string; changeRoot: stri
   return fx;
 }
 
-function reviewerReport(role: "critic" | "architect" | "test-engineer" = "critic"): string {
+function reviewerReport(
+  role: "critic" | "architect" | "test-engineer" = "critic",
+  checkedPaths: string[] = [],
+): string {
   return JSON.stringify({
     role,
     verdict: "pass",
     findings: [],
+    review_scope: { checked_paths: checkedPaths },
     reviewer: { kind: "codex-subagent", id: "test-reviewer" },
     summary: "通过",
   });
+}
+
+function reviewerReportForJob(projectRoot: string, change: string, jobId: string): string {
+  const packet = jobsPacket(projectRoot, change, jobId).packet;
+  assert.ok(packet);
+  return reviewerReport(
+    packet.role as "critic" | "architect" | "test-engineer",
+    packet.boundFiles.map(file => file.path),
+  );
+}
+
+function reviewScopeForJob(projectRoot: string, change: string, jobId: string): { checked_paths: string[] } {
+  const packet = jobsPacket(projectRoot, change, jobId).packet;
+  assert.ok(packet);
+  return { checked_paths: packet.boundFiles.map(file => file.path) };
 }
 
 function rawDirFiles(projectRoot: string, change: string): string[] {
@@ -667,10 +686,14 @@ test("explore→propose 默认完整审查：创建 critic，接受 JSON 报告�
       "superspec", "record", "job-submit", "--change", fx.change, "--job", first.created_jobs[0], "--report", "-",
     ]);
     assert.equal(packet.packet?.file_fallback, true);
-    assert.deepEqual(packet.packet?.output_contract_fields, ["role", "verdict", "findings", "reviewer"]);
+    assert.deepEqual(packet.packet?.output_contract_fields, ["role", "verdict", "findings", "reviewer", "review_scope"]);
+    assert.match(packet.packet?.output_instructions ?? "", /先建立覆盖索引/);
+    assert.match(packet.packet?.output_instructions ?? "", /长文档必须分段读取/);
+    assert.match(packet.packet?.output_instructions ?? "", /不能在发现第一个 blocker 时提交/);
+    assert.match(packet.packet?.output_instructions ?? "", /PowerShell.*UTF-8/);
 
     const reportPath = join(fx.projectRoot, "critic.json");
-    writeFileSync(reportPath, reviewerReport("critic"));
+    writeFileSync(reportPath, reviewerReportForJob(fx.projectRoot, fx.change, first.created_jobs[0]));
     const record = recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, first.created_jobs[0], reportPath);
     assert.equal(record.accepted, true);
 
@@ -684,7 +707,60 @@ test("explore→propose 默认完整审查：创建 critic，接受 JSON 报告�
   } finally { fx.cleanup(); }
 });
 
-test("explore critic retry：继承历史 findings，malformed 保留来源，accepted 截断旧失败", () => {
+test("普通 reviewer：缺少 review_scope 时不关闭 job，补全后可用同一 job 提交", () => {
+  const fx = setupPropose();
+  try {
+    const created = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "strict");
+    const jobId = created.created_jobs[0];
+    const eventCount = readEvents(fx.projectRoot, fx.change).length;
+    const missingScope = recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, jobId, JSON.stringify({
+      role: "critic",
+      verdict: "pass",
+      findings: [],
+      reviewer: { kind: "codex-subagent", id: "critic-missing-scope" },
+    }));
+    assert.equal(missingScope.accepted, false);
+    assert.equal(missingScope.job_state, "requested");
+    assert.equal(missingScope.events_written, 0);
+    assert.match(missingScope.message, /缺少覆盖范围字段 review_scope/);
+    assert.equal(readEvents(fx.projectRoot, fx.change).length, eventCount);
+    assert.equal(recordJobSubmitContent(
+      fx.projectRoot,
+      fx.change,
+      fx.changeRoot,
+      jobId,
+      reviewerReportForJob(fx.projectRoot, fx.change, jobId),
+    ).accepted, true);
+  } finally { fx.cleanup(); }
+});
+
+test("job-submit：不存在的报告文件不伪装为 job_rejected，补全后可重交", () => {
+  const fx = setupPropose();
+  try {
+    const created = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "strict");
+    const jobId = created.created_jobs[0];
+    const missing = recordJobSubmit(
+      fx.projectRoot,
+      fx.change,
+      fx.changeRoot,
+      jobId,
+      join(fx.projectRoot, "does-not-exist.json"),
+    );
+    assert.equal(missing.accepted, false);
+    assert.equal(missing.event_type, undefined);
+    assert.equal(missing.job_state, "requested");
+    assert.equal(missing.events_written, 0);
+    assert.equal(recordJobSubmitContent(
+      fx.projectRoot,
+      fx.change,
+      fx.changeRoot,
+      jobId,
+      reviewerReportForJob(fx.projectRoot, fx.change, jobId),
+    ).accepted, true);
+  } finally { fx.cleanup(); }
+});
+
+test("explore critic retry：继承历史 findings；malformed 可在同一工作项重交", () => {
   const fx = setupPropose();
   try {
     const first = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "strict");
@@ -695,6 +771,7 @@ test("explore critic retry：继承历史 findings，malformed 保留来源，ac
       role: "critic",
       verdict: "fail",
       findings: [finding],
+      review_scope: reviewScopeForJob(fx.projectRoot, fx.change, firstJobId),
       reviewer: { kind: "codex-subagent", id: "critic-first" },
     })).accepted, false);
     const firstRejected = readEvents(fx.projectRoot, fx.change).findLast(event =>
@@ -716,39 +793,35 @@ test("explore critic retry：继承历史 findings，malformed 保留来源，ac
     assert.match(secondPacket?.output_instructions ?? "", /复用原 finding ID/);
     assert.match(secondPacket?.output_instructions ?? "", /legacy finding 没有 ID 时.*补一个稳定 ID/);
     assert.match(secondPacket?.output_instructions ?? "", /每个新 finding 必须分配稳定 ID/);
+    assert.ok((secondPacket?.output_instructions ?? "").indexOf("先建立覆盖索引") < (secondPacket?.output_instructions ?? "").indexOf("上一次同角色审查"));
+
+    const eventCountBeforeMalformed = readEvents(fx.projectRoot, fx.change).length;
+    const malformed = recordJobSubmitContent(
+      fx.projectRoot,
+      fx.change,
+      fx.changeRoot,
+      secondJobId,
+      "{",
+    );
+    assert.equal(malformed.accepted, false);
+    assert.equal(malformed.job_state, "requested");
+    assert.equal(malformed.events_written, 0);
+    assert.equal(readEvents(fx.projectRoot, fx.change).length, eventCountBeforeMalformed);
+    assert.equal(transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "strict").required_jobs?.[0]?.job_id, secondJobId);
 
     assert.equal(recordJobSubmitContent(
       fx.projectRoot,
       fx.change,
       fx.changeRoot,
       secondJobId,
-      "{",
-    ).accepted, false);
-    const malformed = readEvents(fx.projectRoot, fx.change).findLast(event =>
-      event.event_type === "job_rejected" && event.payload.job_id === secondJobId
-    );
-    assert.equal(malformed?.payload.result_kind, "invalid_report");
-
-    const third = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "strict");
-    const thirdPacket = jobsPacket(fx.projectRoot, fx.change, third.created_jobs[0]).packet;
-    assert.equal(thirdPacket?.previous_rejection?.result_kind, "invalid_report");
-    assert.equal(thirdPacket?.previous_rejection?.job_id, secondJobId);
-    assert.equal(thirdPacket?.previous_rejection?.findings_job_id, firstJobId);
-    assert.deepEqual(thirdPacket?.previous_rejection?.findings, [finding]);
-
-    assert.equal(recordJobSubmitContent(
-      fx.projectRoot,
-      fx.change,
-      fx.changeRoot,
-      third.created_jobs[0],
-      reviewerReport("critic"),
+      reviewerReportForJob(fx.projectRoot, fx.change, secondJobId),
     ).accepted, true);
     writeFileSync(
       join(fx.changeRoot, ".superspec", "artifacts", "discovery.md"),
       "# Discovery\n\nChanged after accepted review.\n",
     );
-    const fourth = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "strict");
-    assert.equal(jobsPacket(fx.projectRoot, fx.change, fourth.created_jobs[0]).packet?.previous_rejection, undefined);
+    const third = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "strict");
+    assert.equal(jobsPacket(fx.projectRoot, fx.change, third.created_jobs[0]).packet?.previous_rejection, undefined);
   } finally { fx.cleanup(); }
 });
 
@@ -758,7 +831,7 @@ test("explore stay：修改 discovery 后 strict critic 重新审查", () => {
     const first = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "strict");
     assert.equal(first.outcome, "job_created");
     const reportPath = join(fx.projectRoot, "critic-stay.json");
-    writeFileSync(reportPath, reviewerReport("critic"));
+    writeFileSync(reportPath, reviewerReportForJob(fx.projectRoot, fx.change, first.created_jobs[0]));
     assert.equal(recordJobSubmit(
       fx.projectRoot,
       fx.change,
@@ -1137,7 +1210,7 @@ test("propose-ready --risk normal：基础职责全满足 + critic accepted → 
 
     // 2. record job-submit → accepted
     const reportPath = join(projectRoot, "report.json");
-    writeFileSync(reportPath, reviewerReport("critic"));
+    writeFileSync(reportPath, reviewerReportForJob(projectRoot, change, jobId));
     const r1 = recordJobSubmit(projectRoot, change, changeRoot, jobId, reportPath);
     assert.equal(r1.accepted, true);
 
@@ -1194,6 +1267,8 @@ test("propose-ready 默认完整审查：创建 critic + architect + test 审核
     assert.ok(packet?.boundFiles.some(file => file.path === ".superspec/artifacts/discovery.md"));
     assert.match(packet?.output_instructions ?? "", /不得把修改只读引用列为本阶段 required fix/);
     assert.match(packet?.output_instructions ?? "", /不得单独作为本 gate 的 fail/);
+    assert.match(packet?.output_instructions ?? "", /Propose 只需审查迁移策略、回滚\/兼容设计、任务与可执行测试计划/);
+    assert.match(packet?.output_instructions ?? "", /不得只因实际环境证据尚未产生而 fail/);
   } finally {
     rmSync(projectRoot, { recursive: true, force: true });
   }
@@ -1220,6 +1295,7 @@ test("propose reviewer retry：只继承当前 gate 的同角色 findings", () =
         role: packet.role,
         verdict: "fail",
         findings: [finding],
+        review_scope: { checked_paths: packet.boundFiles.map(file => file.path) },
         reviewer: { kind: "codex-subagent", id: `${packet.role}-first` },
       })).accepted, false);
     }
@@ -1284,7 +1360,7 @@ test("propose reviewer history：legacy 无 gate_id 的同角色失败仍可继�
   } finally { fx.cleanup(); }
 });
 
-test("explore critic fail 空 findings：按 invalid_report 处理且不覆盖历史问题", () => {
+test("explore critic fail 空 findings：可在同一工作项修正重交", () => {
   const fx = setupPropose();
   try {
     const first = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "strict");
@@ -1294,6 +1370,7 @@ test("explore critic fail 空 findings：按 invalid_report 处理且不覆盖�
       role: "critic",
       verdict: "fail",
       findings: [finding],
+      review_scope: reviewScopeForJob(fx.projectRoot, fx.change, firstJobId),
       reviewer: { kind: "codex-subagent", id: "critic-first" },
     })).accepted, false);
 
@@ -1303,21 +1380,16 @@ test("explore critic fail 空 findings：按 invalid_report 处理且不覆盖�
       role: "critic",
       verdict: "fail",
       findings: [],
+      review_scope: reviewScopeForJob(fx.projectRoot, fx.change, secondJobId),
       reviewer: { kind: "codex-subagent", id: "critic-empty" },
     }));
     assert.equal(emptyFail.accepted, false);
     assert.match(emptyFail.message, /findings 至少包含一个问题/);
-    const rejected = readEvents(fx.projectRoot, fx.change).findLast(event =>
+    assert.equal(emptyFail.job_state, "requested");
+    assert.equal(readEvents(fx.projectRoot, fx.change).some(event =>
       event.event_type === "job_rejected" && event.payload.job_id === secondJobId
-    );
-    assert.equal(rejected?.payload.result_kind, "invalid_report");
-
-    const third = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "strict");
-    const previous = jobsPacket(fx.projectRoot, fx.change, third.created_jobs[0]).packet?.previous_rejection;
-    assert.equal(previous?.result_kind, "invalid_report");
-    assert.equal(previous?.job_id, secondJobId);
-    assert.equal(previous?.findings_job_id, firstJobId);
-    assert.deepEqual(previous?.findings, [finding]);
+    ), false);
+    assert.equal(transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "strict").required_jobs?.[0]?.job_id, secondJobId);
   } finally { fx.cleanup(); }
 });
 
@@ -1333,7 +1405,7 @@ test("propose-ready strict：同一 gate 下 critic 不能满足 architect 或 t
     const normal = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     assert.equal(normal.outcome, "job_created");
     const reportPath = join(fx.projectRoot, "critic.json");
-    writeFileSync(reportPath, reviewerReport("critic"));
+    writeFileSync(reportPath, reviewerReportForJob(fx.projectRoot, fx.change, normal.created_jobs[0]));
     assert.equal(recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, normal.created_jobs[0], reportPath).accepted, true);
 
     const strict = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "strict");
@@ -1380,7 +1452,7 @@ test("propose-ready strict：explore 阶段 critic accepted 不能满足 proposa
     const first = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "strict");
     assert.equal(first.outcome, "job_created");
     const reportPath = join(fx.projectRoot, "explore-critic.json");
-    writeFileSync(reportPath, reviewerReport("critic"));
+    writeFileSync(reportPath, reviewerReportForJob(fx.projectRoot, fx.change, first.created_jobs[0]));
     const record = recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, first.created_jobs[0], reportPath);
     assert.equal(record.accepted, true);
 
@@ -1438,7 +1510,7 @@ test("完整 e2e（Phase 2）：init→explore→写 discovery→propose→propo
     // record job-submit → accepted
     const jobId = t1.created_jobs[0];
     const reportPath = join(projectRoot, "report.json");
-    writeFileSync(reportPath, reviewerReport("critic"));
+    writeFileSync(reportPath, reviewerReportForJob(projectRoot, change, jobId));
     recordJobSubmit(projectRoot, change, changeRoot, jobId, reportPath);
 
     // propose-ready normal → 推进
@@ -1485,7 +1557,7 @@ test("BLOCKER 修复：改 business-invariants.md 后 accepted job 失效", () =
     const t1 = proposeReady(projectRoot, change, changeRoot, "normal");
     const jobId = t1.created_jobs[0];
     const reportPath = join(projectRoot, "report.json");
-    writeFileSync(reportPath, reviewerReport("critic"));
+    writeFileSync(reportPath, reviewerReportForJob(projectRoot, change, jobId));
     recordJobSubmit(projectRoot, change, changeRoot, jobId, reportPath);
 
     writeFileSync(join(changeRoot, ".superspec", "artifacts", "business-invariants.md"), "# BI\nchanged");
@@ -1520,7 +1592,7 @@ test("审查时缺失的单文件：新建后 accepted job 失效", () => {
       fx.change,
       fx.changeRoot,
       firstJobId,
-      reviewerReport("critic"),
+      reviewerReportForJob(fx.projectRoot, fx.change, firstJobId),
     ).accepted, true);
 
     writeFileSync(join(fx.changeRoot, "design.md"), "# Design\n");
@@ -1553,7 +1625,7 @@ test("CLI status：区分 fresh/historical/stale accepted jobs", () => {
   try {
     const t1 = proposeReady(projectRoot, change, changeRoot, "normal");
     const reportPath = join(projectRoot, "critic.json");
-    writeFileSync(reportPath, reviewerReport("critic"));
+    writeFileSync(reportPath, reviewerReportForJob(projectRoot, change, t1.created_jobs[0]));
     const record = recordJobSubmit(projectRoot, change, changeRoot, t1.created_jobs[0], reportPath);
     assert.equal(record.accepted, true);
 
@@ -1589,7 +1661,7 @@ function acceptAllProposeJobs(fx: { projectRoot: string; change: string; changeR
   const snapshot = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot);
   for (const job of snapshot.open_jobs) {
     const reportPath = join(fx.projectRoot, `${job.role}.json`);
-    writeFileSync(reportPath, reviewerReport(job.role as "critic" | "architect" | "test-engineer"));
+    writeFileSync(reportPath, reviewerReportForJob(fx.projectRoot, fx.change, job.job_id));
     assert.equal(recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, job.job_id, reportPath).accepted, true);
   }
 }

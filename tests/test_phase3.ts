@@ -10,7 +10,7 @@ import { ensureChangeLayout, appendEvent, makeEvent, readEvents, rawFile, sha256
 import { rebuildSnapshot } from "../src/sync.ts";
 import { next } from "../src/next.ts";
 import { proposeReady, startApply, taskStart, taskComplete } from "../src/transition.ts";
-import { recordJobSubmit, recordUserDecisionContent } from "../src/record.ts";
+import { jobsPacket, recordJobSubmit, recordUserDecisionContent } from "../src/record.ts";
 import { recordTestRun, tasksStructureDigestOf } from "../src/task.ts";
 import type { PhaseDecisionAction } from "../src/phase_confirmation.ts";
 import type { Job, JobRole, State } from "../src/types.ts";
@@ -81,11 +81,14 @@ function setupPropose(): ReturnType<typeof setupApply> {
   };
 }
 
-function reviewerReport(role: "critic" | "architect" | "test-engineer" = "critic"): string {
+function reviewerReportForJob(projectRoot: string, change: string, jobId: string): string {
+  const packet = jobsPacket(projectRoot, change, jobId).packet;
+  assert.ok(packet);
   return JSON.stringify({
-    role,
+    role: packet.role,
     verdict: "pass",
     findings: [],
+    review_scope: { checked_paths: packet.boundFiles.map(file => file.path) },
     reviewer: { kind: "codex-subagent", id: "test-reviewer" },
   });
 }
@@ -202,7 +205,7 @@ test("start-apply：fresh proposal review accepted 后可进入 apply", () => {
     const t1 = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     assert.equal(t1.outcome, "job_created");
     const reportPath = join(fx.projectRoot, "critic.json");
-    writeFileSync(reportPath, reviewerReport("critic"));
+    writeFileSync(reportPath, reviewerReportForJob(fx.projectRoot, fx.change, t1.created_jobs[0]));
     const accepted = recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, t1.created_jobs[0], reportPath);
     assert.equal(accepted.accepted, true);
     const t2 = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
@@ -220,7 +223,7 @@ test("start-apply：proposal review stale 时创建 fresh job，next 返回 requ
   try {
     const t1 = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     const reportPath = join(fx.projectRoot, "critic.json");
-    writeFileSync(reportPath, reviewerReport("critic"));
+    writeFileSync(reportPath, reviewerReportForJob(fx.projectRoot, fx.change, t1.created_jobs[0]));
     const accepted = recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, t1.created_jobs[0], reportPath);
     assert.equal(accepted.accepted, true);
     const t2 = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
@@ -254,7 +257,7 @@ test("propose stay：修改绑定材料后 strict 三角色重新审查", () => 
     for (const job of firstJobs) {
       assert.ok(job.role === "critic" || job.role === "architect" || job.role === "test-engineer");
       const reportPath = join(fx.projectRoot, `${job.role}.json`);
-      writeFileSync(reportPath, reviewerReport(job.role));
+      writeFileSync(reportPath, reviewerReportForJob(fx.projectRoot, fx.change, job.job_id));
       assert.equal(recordJobSubmit(
         fx.projectRoot,
         fx.change,

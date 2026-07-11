@@ -350,8 +350,10 @@ export interface TransitionResult {
 
 // ===== Record 结果 =====
 export interface RecordResult {
-  event_type: EventType;
+  /** Undefined means the input was rejected before an event was written and may be corrected and resubmitted. */
+  event_type?: EventType;
   accepted: boolean;
   message: string;
   job_state?: JobState;
+  events_written?: number;
 }

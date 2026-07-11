@@ -83,11 +83,14 @@ function setupFixture(state: "init" | "explore" | "propose" = "propose"): Fixtur
   };
 }
 
-function reviewerReport(role: "critic" | "architect" | "test-engineer" = "critic"): string {
+function reviewerReportForJob(projectRoot: string, change: string, jobId: string): string {
+  const packet = jobsPacket(projectRoot, change, jobId).packet;
+  assert.ok(packet);
   return JSON.stringify({
-    role,
+    role: packet.role,
     findings: [],
     verdict: "pass",
+    review_scope: { checked_paths: packet.boundFiles.map(file => file.path) },
     reviewer: { kind: "codex-subagent", id: "test-reviewer" },
   });
 }
@@ -246,7 +249,7 @@ test("record job-submit：接受合格报告", () => {
 
     // 写报告
     const reportPath = join(fx.projectRoot, "report.json");
-    writeFileSync(reportPath, reviewerReport("critic"));
+    writeFileSync(reportPath, reviewerReportForJob(fx.projectRoot, fx.change, jobId));
 
     // 提交
     const rResult = recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, jobId, reportPath);
@@ -309,7 +312,7 @@ test("record job-submit：raw append 失败时不写 accepted event", () => {
     const tResult = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     const jobId = tResult.created_jobs[0];
     const reportPath = join(fx.projectRoot, "report.json");
-    writeFileSync(reportPath, reviewerReport("critic"));
+    writeFileSync(reportPath, reviewerReportForJob(fx.projectRoot, fx.change, jobId));
     mkdirSync(rawFile(fx.projectRoot, fx.change, "review-reports"));
 
     assert.throws(() => recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, jobId, reportPath));
@@ -336,7 +339,7 @@ test("完整 e2e：propose → job → accept → propose_ready", () => {
 
     // 4. record job-submit → accepted
     const reportPath = join(fx.projectRoot, "report.json");
-    writeFileSync(reportPath, reviewerReport("critic"));
+    writeFileSync(reportPath, reviewerReportForJob(fx.projectRoot, fx.change, jobId));
     const step4 = recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, jobId, reportPath);
     assert.equal(step4.accepted, true);
 
@@ -359,7 +362,7 @@ test("文档变化后 accepted job 失效 → transition 创建新 job", () => {
     const t1 = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     const jobId1 = t1.created_jobs[0];
     const reportPath = join(fx.projectRoot, "report.json");
-    writeFileSync(reportPath, reviewerReport("critic"));
+    writeFileSync(reportPath, reviewerReportForJob(fx.projectRoot, fx.change, jobId1));
     recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, jobId1, reportPath);
 
     // 2. 修改 proposal.md（绑定文件变了）
@@ -400,7 +403,7 @@ test("record job-submit 幂等：同 report 返回旧结果", () => {
     const t = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     const jobId = t.created_jobs[0];
     const reportPath = join(fx.projectRoot, "report.json");
-    writeFileSync(reportPath, reviewerReport("critic"));
+    writeFileSync(reportPath, reviewerReportForJob(fx.projectRoot, fx.change, jobId));
 
     const r1 = recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, jobId, reportPath);
     assert.equal(r1.accepted, true);

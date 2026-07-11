@@ -13,6 +13,7 @@ import type { State, TransitionResult } from "./types.ts";
 import type { ReviewRisk } from "./review.ts";
 import { recordJobSubmit, recordJobSubmitContent, recordUserDecision, recordUserDecisionContent, jobsList, jobsPacket } from "./record.ts";
 import { recordTestRun, recordTestRunContent } from "./task.ts";
+import { RecordInputDecodingError, decodeRecordInput } from "./record_input.ts";
 import { probeOpenSpec, openspecStatus, changeRoot } from "./openspec.ts";
 import { SUPERSPEC_VERSION } from "./version.ts";
 
@@ -63,7 +64,7 @@ function readStdinRecordContent(flag: "--input" | "--report"): string {
   if (process.stdin.isTTY === true) {
     throw new StdinRecordInputError(flag);
   }
-  return readFileSync(0, "utf8");
+  return decodeRecordInput(readFileSync(0));
 }
 
 function transitionExitCode(result: TransitionResult): number {
@@ -774,7 +775,7 @@ jobs 子命令：
               try {
                 inputContent = readStdinRecordContent("--input");
               } catch (err) {
-                if (err instanceof StdinRecordInputError) {
+                if (err instanceof StdinRecordInputError || err instanceof RecordInputDecodingError) {
                   console.error(err.message);
                   return 1;
                 }
@@ -836,7 +837,7 @@ jobs 子命令：
                 ? recordJobSubmitContent(projectRoot, change, cr, jobId, readStdinRecordContent("--report"))
                 : recordJobSubmit(projectRoot, change, cr, jobId, report);
             } catch (err) {
-              if (err instanceof StdinRecordInputError) {
+              if (err instanceof StdinRecordInputError || err instanceof RecordInputDecodingError) {
                 console.error(err.message);
                 return 1;
               }
@@ -858,7 +859,7 @@ jobs 子命令：
                 ? recordUserDecisionContent(projectRoot, change, readStdinRecordContent("--input"))
                 : recordUserDecision(projectRoot, change, inputFile);
             } catch (err) {
-              if (err instanceof StdinRecordInputError) {
+              if (err instanceof StdinRecordInputError || err instanceof RecordInputDecodingError) {
                 console.error(err.message);
                 return 1;
               }
@@ -877,7 +878,7 @@ jobs 子命令：
                 ? recordTestRunContent(projectRoot, change, readStdinRecordContent("--input"))
                 : recordTestRun(projectRoot, change, inputFile);
             } catch (err) {
-              if (err instanceof StdinRecordInputError) {
+              if (err instanceof StdinRecordInputError || err instanceof RecordInputDecodingError) {
                 console.error(err.message);
                 return 1;
               }
