@@ -27,7 +27,6 @@ function setupApply(confirmBoundary = true): { projectRoot: string; change: stri
   writeFileSync(join(changeRoot, "tasks.md"), "# Tasks\n\n- [ ] TASK-001 Do something\n- [ ] TASK-002 Do more\n");
   writeFileSync(join(changeRoot, "design.md"), "# Design\n");
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "discovery.md"), "# Discovery\n");
-  writeFileSync(join(changeRoot, ".superspec", "artifacts", "business-invariants.md"), "# BI\n");
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");
   ensureChangeLayout(projectRoot, change);
 
@@ -66,7 +65,6 @@ function setupPropose(): ReturnType<typeof setupApply> {
   writeFileSync(join(changeRoot, "tasks.md"), "# Tasks\n\n- [ ] TASK-001 Do something\n");
   writeFileSync(join(changeRoot, "design.md"), "# Design\n");
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "discovery.md"), "# Discovery\n");
-  writeFileSync(join(changeRoot, ".superspec", "artifacts", "business-invariants.md"), "# BI\n");
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");
   ensureChangeLayout(projectRoot, change);
   for (const [t, f, to] of [["init","init","init"],["explore","init","explore"],["propose","explore","propose"]] as const) {
@@ -247,7 +245,7 @@ test("start-apply：proposal review stale 时创建 fresh job，next 返回 requ
   } finally { fx.cleanup(); }
 });
 
-test("propose stay：修改绑定材料后 strict 三角色重新审查", () => {
+test("propose stay：修改 design 后 strict 只重新审查 architect", () => {
   const fx = setupPropose();
   try {
     const first = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "strict");
@@ -284,7 +282,7 @@ test("propose stay：修改绑定材料后 strict 三角色重新审查", () => 
     const roles = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot).open_jobs
       .map(job => job.role)
       .sort();
-    assert.deepEqual(roles, ["architect", "critic", "test-engineer"]);
+    assert.deepEqual(roles, ["architect"]);
   } finally { fx.cleanup(); }
 });
 
@@ -661,7 +659,6 @@ test("no-TDD 任务：缺 no_tdd_reason 拒绝", () => {
   writeFileSync(join(changeRoot, "proposal.md"), "# P\n");
   writeFileSync(join(changeRoot, "design.md"), "# D\n");
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "discovery.md"), "# D\n");
-  writeFileSync(join(changeRoot, ".superspec", "artifacts", "business-invariants.md"), "# BI\n");
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");
   ensureChangeLayout(projectRoot, change);
   for (const [t, f, to] of [["init","init","init"],["explore","init","explore"],["propose","explore","propose"],["propose-ready","propose","propose_ready"]] as const) {
@@ -689,7 +686,6 @@ test("no-TDD 任务：有 no_tdd_reason 可完成", () => {
   writeFileSync(join(changeRoot, "proposal.md"), "# P\n");
   writeFileSync(join(changeRoot, "design.md"), "# D\n");
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "discovery.md"), "# D\n");
-  writeFileSync(join(changeRoot, ".superspec", "artifacts", "business-invariants.md"), "# BI\n");
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");
   ensureChangeLayout(projectRoot, change);
   for (const [t, f, to] of [["init","init","init"],["explore","init","explore"],["propose","explore","propose"],["propose-ready","propose","propose_ready"]] as const) {

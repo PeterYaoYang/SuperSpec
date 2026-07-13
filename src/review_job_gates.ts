@@ -34,6 +34,63 @@ export const PROPOSE_FINAL_REVIEW_GATE_ID = "propose.final_review" as const;
 export const REVIEW_CODE_REVIEW_GATE_ID = "review.code_review" as const;
 export const REVIEW_FINAL_VERIFIER_GATE_ID = "review.final_verifier" as const;
 
+function defaultReviewScope(gate: ReviewGateRule) {
+  return {
+    reviewTargets: [...gate.reviewTargets],
+    readOnlyRefs: [...gate.readOnlyRefs],
+    boundPaths: [...new Set([...gate.reviewTargets, ...gate.readOnlyRefs])],
+  };
+}
+
+export function reviewScopeForGateRole(gate: ReviewGateRule, role: JobRole) {
+  if (gate.gate_id !== PROPOSE_FINAL_REVIEW_GATE_ID) return defaultReviewScope(gate);
+
+  if (role === "critic") {
+    const reviewTargets = ["proposal.md", "specs/", "tasks.md"];
+    const readOnlyRefs = [
+      "design.md",
+      ".superspec/artifacts/test-contract.md",
+      ".superspec/artifacts/discovery.md",
+    ];
+    return {
+      reviewTargets,
+      readOnlyRefs,
+      boundPaths: [...reviewTargets, ".superspec/artifacts/discovery.md"],
+    };
+  }
+
+  if (role === "architect") {
+    const reviewTargets = ["design.md"];
+    return {
+      reviewTargets,
+      readOnlyRefs: [
+        "proposal.md",
+        "specs/",
+        "tasks.md",
+        ".superspec/artifacts/discovery.md",
+        ".superspec/artifacts/test-contract.md",
+      ],
+      boundPaths: [...reviewTargets],
+    };
+  }
+
+  if (role === "test-engineer") {
+    const reviewTargets = [".superspec/artifacts/test-contract.md", "tasks.md"];
+    return {
+      reviewTargets,
+      readOnlyRefs: [
+        "proposal.md",
+        "specs/",
+        "design.md",
+        ".superspec/artifacts/discovery.md",
+      ],
+      boundPaths: [...reviewTargets],
+    };
+  }
+
+  return defaultReviewScope(gate);
+}
+
 const EXPLORE_DISCOVERY_REVIEW_ROLES: JobRole[] = ["critic"];
 const PROPOSAL_REVIEW_ROLES: JobRole[] = ["critic", "architect", "test-engineer"];
 const PROPOSAL_REVIEW_ROLE_SET = new Set<JobRole>(PROPOSAL_REVIEW_ROLES);
@@ -63,7 +120,6 @@ export const PROPOSE_FINAL_REVIEW_GATE = makeReviewGateRule({
     "tasks.md",
     "design.md",
     "specs/",
-    ".superspec/artifacts/business-invariants.md",
     ".superspec/artifacts/test-contract.md",
   ],
   readOnlyRefs: [".superspec/artifacts/discovery.md"],

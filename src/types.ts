@@ -302,6 +302,7 @@ export interface AskUserAction {
     question: string;
     answer: string;
     reason?: string;
+    review_risk?: "minimal" | "normal" | "strict";
   };
   resume: AskUserActionResume;
 }

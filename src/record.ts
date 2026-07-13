@@ -23,8 +23,16 @@ import {
 } from "./code_review.ts";
 import { invalidReasonForSubmittedReport } from "./job_validity.ts";
 import { jobSubmitArgv } from "./job_action.ts";
-import { REVIEW_DOC_PATHS } from "./review.ts";
-import { EXPLORE_DISCOVERY_REVIEW_GATE, PROPOSE_FINAL_REVIEW_GATE } from "./review_job_gates.ts";
+import {
+  REVIEW_DOC_PATHS,
+  REVIEW_REJECTION_OVERRIDE_SCOPE_PREFIX,
+  REVIEW_REJECTION_OVERRIDE_ANSWER,
+  parseReviewRejectionOverrideScope,
+  reviewGateRoleResolution,
+  reviewRejectionOverrideScope,
+  type ReviewRejectionDecisionSource,
+} from "./review.ts";
+import { EXPLORE_DISCOVERY_REVIEW_GATE, PROPOSE_FINAL_REVIEW_GATE, type ReviewGateRule } from "./review_job_gates.ts";
 import { RecordInputDecodingError, readRecordInputFile } from "./record_input.ts";
 import type { CodeReviewResultKind, Event, RecordResult, Job, JobPacket, JobRole, JobState } from "./types.ts";
 
@@ -114,14 +122,14 @@ function reviewScopeInstruction(job: Job, reviewTargets: string[], readOnlyRefs:
   }
   const targets = reviewTargets.length > 0 ? `本 gate 可提出修改建议的审查目标为 ${reviewTargets.join(", ")}。` : "";
   const refs = readOnlyRefs.length > 0
-    ? `只读上游引用为 ${readOnlyRefs.join(", ")}；只允许读取和核对一致性，不得要求在当前阶段修改、追加、删除、重排或格式化这些文件，不得把修改只读引用列为本阶段 required fix。只读引用自身的缺失、错误或矛盾可在 risks 或 open_questions 中上报给主流程，但不得单独作为本 gate 的 fail。只有能定位到审查目标的不一致，才能作为 fail 并指向该审查目标的修复。`
+    ? `只读上游引用为 ${readOnlyRefs.join(", ")}；只允许读取和核对一致性，不得要求在当前阶段修改、追加、删除、重排或格式化这些文件。只读引用中与本次目标或绑定上游事实无直接因果关系的历史质量问题不得作为本 gate 的 fail。如果本次审查目标或 boundFiles 中绑定的上游事实直接造成变更包跨文档不一致，并且会影响明确验收或实施落地，可以 fail；finding 必须锚定为当前变更包未完成一致性闭环，required outcome 只要求消除矛盾，不得指定必须修改哪份文档或采用哪种技术方案。`
     : "";
   return targets + refs;
 }
 
 function reviewCoverageInstruction(job: Job): string {
   if (!requiresReviewScope(job)) return "";
-  return `审查顺序固定为：先建立覆盖索引，按文件和标题/行段完整浏览全部 boundFiles 至文件末尾；长文档必须分段读取，不能在发现第一个 blocker 时停止覆盖。完整读取只用于核对本次 change 的目标、直接修改及跨文档一致性，不等于允许重新审计全部历史设计。若 proposal.md 存在“需求变化”，以其中记录的受影响能力、直接修改章节和保持不变范围作为本轮增量审查的权威锚点；本轮新 finding 必须由该需求变化、为接入变化所做的直接修改，或这些修改造成的跨文档矛盾引起，并说明因果链。此前已通过且被明确记录为保持不变的设计不得重新打开为 blocker；不要凭通用风险类别猜测变化范围。注意事项和故障类别是条件式检查项，不是必须穷举的清单。Recommendation 只能描述需要补足的结果、契约或证据，不得把未经 proposal、design 或用户决定选定的新基础设施写成 required fix。报告中的 review_scope.checked_paths 必须列出全部已浏览的 boundFiles；它只是覆盖回执，不能代替语义审查，也不扩大可报告问题的范围。`;
+  return `审查顺序固定为：先建立覆盖索引，按文件和标题/行段完整浏览全部 boundFiles 至文件末尾；长文档必须分段读取，不能在发现第一个 blocker 时停止覆盖。read_only_refs 按本次问题需要读取，用于核对目标与上下游一致性，不要求机械全文遍历或写入 checked_paths。完整读取只用于核对本次 change 的目标、直接修改及跨文档一致性，不等于允许重新审计全部历史设计。若 proposal.md 存在“需求变化”，以其中记录的受影响能力、直接修改章节和保持不变范围作为本轮增量审查的权威锚点；本轮新 finding 必须由该需求变化、为接入变化所做的直接修改，或这些修改造成的跨文档矛盾引起，并说明因果链。此前已通过且被明确记录为保持不变的设计不得重新打开为 blocker；不要凭通用风险类别猜测变化范围。注意事项和故障类别是条件式检查项，不是必须穷举的清单。Recommendation 只能描述需要补足的结果、契约或证据，不得把未经 proposal、design 或用户决定选定的新基础设施写成 required fix。报告中的 review_scope.checked_paths 必须列出全部已浏览的 boundFiles；它只是覆盖回执，不能代替语义审查，也不扩大可报告问题的范围。`;
 }
 
 function migrationEvidenceInstruction(job: Job): string {
@@ -372,6 +380,30 @@ function findJob(events: Event[], jobId: string): Job | null {
     }
   }
   return null;
+}
+
+function ordinaryReviewGateForJob(job: Job): ReviewGateRule | null {
+  return [EXPLORE_DISCOVERY_REVIEW_GATE, PROPOSE_FINAL_REVIEW_GATE]
+    .find(gate => gate.isJobForGate(job)) ?? null;
+}
+
+function invalidReviewRejectionOverrideResult(
+  projectRoot: string,
+  change: string,
+  inputDigest: string,
+  decision: { scope: string; answer: unknown; decision_source?: unknown },
+  reason: string,
+  message: string,
+): RecordResult {
+  appendEvent(projectRoot, change, makeEvent(change, "user_decision_recorded", {
+    accepted: false,
+    scope: decision.scope,
+    answer: decision.answer,
+    ...(decision.decision_source !== undefined ? { decision_source: decision.decision_source } : {}),
+    reason,
+    input_digest: inputDigest,
+  }));
+  return { event_type: "user_decision_recorded", accepted: false, message };
 }
 
 /** 检查 job 是否已终态 */
@@ -690,7 +722,14 @@ function recordUserDecisionLoaded(
       && (e.payload as { input_digest?: string }).input_digest === inputDigest
   );
 
-  let decision: { scope?: unknown; question?: unknown; answer?: unknown; reason?: unknown };
+  let decision: {
+    scope?: unknown;
+    question?: unknown;
+    answer?: unknown;
+    reason?: unknown;
+    decision_source?: unknown;
+    review_risk?: unknown;
+  };
   try {
     decision = JSON.parse(content);
   } catch {
@@ -721,6 +760,7 @@ function recordUserDecisionLoaded(
 
   let phaseConfirmation: PhaseConfirmation | null = null;
   let phaseAction: PhaseDecisionAction | null = null;
+  let phaseReviewRisk: "minimal" | "normal" | "strict" | null = null;
   if (isPhaseConfirmationScope(decision.scope)) {
     const existingAccepted = existing &&
       (existing.payload as { accepted?: unknown }).accepted !== false;
@@ -737,7 +777,14 @@ function recordUserDecisionLoaded(
     });
     const changeRoot = openspecChangeRoot(projectRoot, change);
     const snapshot = rebuildSnapshot(projectRoot, change, changeRoot);
-    const current = phaseConfirmationForCurrentState(projectRoot, events, snapshot);
+    const decisionRisk = decision.review_risk === undefined
+      ? "strict"
+      : decision.review_risk === "minimal" || decision.review_risk === "normal" || decision.review_risk === "strict"
+        ? decision.review_risk
+        : null;
+    const current = decisionRisk
+      ? phaseConfirmationForCurrentState(projectRoot, events, snapshot, decisionRisk)
+      : null;
     if (
       existingAccepted &&
       current?.scope === decision.scope &&
@@ -750,7 +797,9 @@ function recordUserDecisionLoaded(
       };
     }
     const action = current ? phaseActionForAnswer(current, decision.answer) : null;
-    const rejectionReason = !current
+    const rejectionReason = !decisionRisk
+      ? "invalid_phase_confirmation_risk"
+      : !current
       ? "phase_confirmation_not_pending"
       : decision.scope !== current.scope
         ? "stale_phase_confirmation_scope"
@@ -780,6 +829,8 @@ function recordUserDecisionLoaded(
       }));
       const message = rejectionReason === "invalid_phase_confirmation_answer" && current
         ? `阶段确认答复必须精确为：${current.ask.allowed_answers.join("、")}`
+        : rejectionReason === "invalid_phase_confirmation_risk"
+          ? "阶段确认 review_risk 必须是 minimal、normal 或 strict"
         : rejectionReason === "missing_phase_confirmation_reason" && action
           ? action.reason_prompt ?? "当前选择必须写明原因"
           : "阶段确认已失效或当前没有待确认的阶段边界，请重新执行 next";
@@ -787,6 +838,7 @@ function recordUserDecisionLoaded(
     }
     phaseConfirmation = current;
     phaseAction = action;
+    phaseReviewRisk = decisionRisk;
   }
 
   if (existing && !phaseAction) {
@@ -796,6 +848,120 @@ function recordUserDecisionLoaded(
       accepted,
       message: accepted ? "幂等返回：同一用户决策已登记" : "幂等返回：同一无效用户决策已登记",
     };
+  }
+
+  let reviewRejectionOverride: {
+    job_id: string;
+    role: JobRole;
+    gate_id: NonNullable<Job["gate_id"]>;
+    packet_digest: string;
+  } | null = null;
+  let reviewRejectionDecisionSource: ReviewRejectionDecisionSource | null = null;
+  if (decision.scope.startsWith(REVIEW_REJECTION_OVERRIDE_SCOPE_PREFIX)) {
+    const jobId = parseReviewRejectionOverrideScope(decision.scope);
+    if (!jobId) {
+      return invalidReviewRejectionOverrideResult(
+        projectRoot, change, inputDigest,
+        { scope: decision.scope, answer: decision.answer, decision_source: decision.decision_source },
+        "invalid_review_rejection_override_scope",
+        "审查拒绝裁决 scope 必须包含有效 job ID",
+      );
+    }
+    if (decision.scope !== reviewRejectionOverrideScope(jobId)) {
+      return invalidReviewRejectionOverrideResult(
+        projectRoot, change, inputDigest,
+        { scope: decision.scope, answer: decision.answer, decision_source: decision.decision_source },
+        "invalid_review_rejection_override_scope",
+        `审查拒绝裁决 scope 必须精确为 ${reviewRejectionOverrideScope(jobId)}`,
+      );
+    }
+    if (decision.answer !== REVIEW_REJECTION_OVERRIDE_ANSWER) {
+      return invalidReviewRejectionOverrideResult(
+        projectRoot, change, inputDigest,
+        { scope: decision.scope, answer: decision.answer, decision_source: decision.decision_source },
+        "invalid_review_rejection_override_answer",
+        `审查拒绝裁决 answer 必须是 ${REVIEW_REJECTION_OVERRIDE_ANSWER}`,
+      );
+    }
+    if (decision.decision_source !== "main_process" && decision.decision_source !== "user") {
+      return invalidReviewRejectionOverrideResult(
+        projectRoot, change, inputDigest,
+        { scope: decision.scope, answer: decision.answer, decision_source: decision.decision_source },
+        "invalid_review_rejection_override_source",
+        "审查拒绝裁决 decision_source 必须是 main_process 或 user",
+      );
+    }
+    if (!nonEmptyString(decision.reason)) {
+      return invalidReviewRejectionOverrideResult(
+        projectRoot, change, inputDigest,
+        { scope: decision.scope, answer: decision.answer, decision_source: decision.decision_source },
+        "missing_review_rejection_override_reason",
+        "审查拒绝裁决必须写明原因",
+      );
+    }
+    const job = findJob(events, jobId);
+    const gate = job ? ordinaryReviewGateForJob(job) : null;
+    if (!job || !gate || !isOrdinaryReviewer(job.role)) {
+      return invalidReviewRejectionOverrideResult(
+        projectRoot, change, inputDigest,
+        { scope: decision.scope, answer: decision.answer, decision_source: decision.decision_source },
+        "review_rejection_override_job_not_found",
+        "审查拒绝裁决必须指向当前 Explore / Propose gate 的普通 Reviewer job",
+      );
+    }
+    const changeRoot = openspecChangeRoot(projectRoot, change);
+    const snapshot = rebuildSnapshot(projectRoot, change, changeRoot);
+    const gateIsCurrent = gate.gate_id === EXPLORE_DISCOVERY_REVIEW_GATE.gate_id
+      ? snapshot.state === "explore"
+      : snapshot.state === "propose" || snapshot.state === "propose_ready";
+    if (!gateIsCurrent) {
+      return invalidReviewRejectionOverrideResult(
+        projectRoot, change, inputDigest,
+        { scope: decision.scope, answer: decision.answer, decision_source: decision.decision_source },
+        "review_rejection_override_gate_not_current",
+        "审查拒绝裁决只能在对应 Explore / Propose gate 仍为当前阶段时登记",
+      );
+    }
+    const resolution = reviewGateRoleResolution(events, changeRoot, gate, job.role);
+    if (resolution.kind === "none" || resolution.terminal.job.job_id !== job.job_id) {
+      return invalidReviewRejectionOverrideResult(
+        projectRoot, change, inputDigest,
+        { scope: decision.scope, answer: decision.answer, decision_source: decision.decision_source },
+        "review_rejection_override_not_latest_terminal",
+        "审查拒绝裁决只能指向当前 gate cycle 中该角色最新的 terminal job",
+      );
+    }
+    if (resolution.kind === "stale") {
+      return invalidReviewRejectionOverrideResult(
+        projectRoot, change, inputDigest,
+        { scope: decision.scope, answer: decision.answer, decision_source: decision.decision_source },
+        "stale_review_rejection_override_job",
+        `审查拒绝裁决指向的 job 已过期：${resolution.stale_reason}`,
+      );
+    }
+    if (resolution.kind === "accepted") {
+      return invalidReviewRejectionOverrideResult(
+        projectRoot, change, inputDigest,
+        { scope: decision.scope, answer: decision.answer, decision_source: decision.decision_source },
+        "review_rejection_override_job_not_rejected",
+        "审查拒绝裁决只能指向 rejected job",
+      );
+    }
+    if (resolution.kind === "rejected_invalid") {
+      return invalidReviewRejectionOverrideResult(
+        projectRoot, change, inputDigest,
+        { scope: decision.scope, answer: decision.answer, decision_source: decision.decision_source },
+        "review_rejection_override_not_review_failed",
+        "只有 result_kind=review_failed 的拒绝报告可以裁决；无效报告必须修正后重新提交",
+      );
+    }
+    reviewRejectionOverride = {
+      job_id: job.job_id,
+      role: job.role,
+      gate_id: gate.gate_id,
+      packet_digest: job.packet_digest,
+    };
+    reviewRejectionDecisionSource = decision.decision_source;
   }
 
   if (decision.scope.startsWith(CODE_REVIEW_DECISION_SCOPE_PREFIX)) {
@@ -842,10 +1008,13 @@ function recordUserDecisionLoaded(
       ? phaseAction.label
       : normalizedAnswer ? codeReviewDecisionAnswerLabel(normalizedAnswer) : decision.answer,
     ...(typeof decision.reason === "string" ? { reason: decision.reason.trim() } : {}),
+    ...(reviewRejectionDecisionSource ? { decision_source: reviewRejectionDecisionSource } : {}),
+    ...(reviewRejectionOverride ? { review_rejection_override: reviewRejectionOverride } : {}),
     ...(phaseAction ? {
       phase_confirmation: {
         boundary: phaseAction.boundary,
         decision: phaseAction.decision,
+        review_risk: phaseReviewRisk ?? "strict",
       },
     } : {}),
   };

@@ -28,7 +28,6 @@ function setupChange(tasks: string, testContract = "# Test Contract\n"): { proje
   writeFileSync(join(changeRoot, "design.md"), "# Design\n");
   writeFileSync(join(changeRoot, "tasks.md"), tasks);
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "discovery.md"), "# Discovery\n");
-  writeFileSync(join(changeRoot, ".superspec", "artifacts", "business-invariants.md"), "# Business Invariants\n");
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "test-contract.md"), testContract);
   ensureChangeLayout(projectRoot, change);
   for (const [transition, from, to] of [

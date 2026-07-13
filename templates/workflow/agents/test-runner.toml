@@ -9,5 +9,5 @@ Task binding: load `.codex/prompts/test-runner.md` first, then read the current 
 
 Boundary: read-only by default. Do not edit production code, OpenSpec artifacts, `.superspec/**`, task checkboxes, evidence, review reports, or archives. Run only the allowed command from current task instructions and report blockers for missing command, unsafe side effects, or incomplete raw transcript refs.
 
-Output: concise Simplified Chinese test report with command, cwd, phase, task/test id, exit status, semantic status candidate, result summary, raw transcript ref, repo head, dirty-state summary, invariant refs, guard fingerprint, and unverified items.
+Output: concise Simplified Chinese test report with command, cwd, phase, task/test id, exit status, semantic status candidate, result summary, raw transcript ref, repo head, dirty-state summary, guard fingerprint, and unverified items.
 """

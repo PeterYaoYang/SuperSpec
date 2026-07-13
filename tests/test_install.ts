@@ -102,6 +102,16 @@ test("installProject installs engine, workflow skills, role prompts, and agents"
     assert.match(proposeSkill, /不新增未经确认的基础设施、可靠性模式或版本协调机制/);
     assert.match(proposeSkill, /受影响能力、直接修改的文档章节、确认保持不变的范围/);
     assert.match(proposeSkill, /增量审查判断“本轮变化”的权威锚点/);
+    assert.match(proposeSkill, /整份报告的最终阻塞准入判断权/);
+    assert.match(proposeSkill, /按工作流提供的方式留痕/);
+    assert.match(proposeSkill, /不做部分问题裁决或永久豁免/);
+    assert.doesNotMatch(proposeSkill, /details\.review_rejection|review_rejection_override/);
+
+    const exploreSkill = readFileSync(join(projectRoot, ".codex", "skills", "superspec-explore", "SKILL.md"), "utf8");
+    assert.match(exploreSkill, /整份报告是否有资格阻塞/);
+    assert.match(exploreSkill, /按工作流提供的方式留痕/);
+    assert.match(exploreSkill, /不做部分问题裁决或永久豁免/);
+    assert.doesNotMatch(exploreSkill, /details\.review_rejection|review_rejection_override/);
 
     for (const prompt of ["critic.md", "architect.md", "test-engineer.md"]) {
       const content = readFileSync(join(projectRoot, ".codex", "prompts", prompt), "utf8");

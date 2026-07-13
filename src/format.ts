@@ -221,7 +221,6 @@ export interface ParsedExecutionRequirement {
 export interface TestContractEntry {
   test_id: string;
   scenario: string;
-  invariant: string;
 }
 
 export type TestContractParseResult =
@@ -400,8 +399,6 @@ export function parseTestContractEntries(content: string): TestContractParseResu
     if (testIdIdx < 0 || scenarioIdx < 0) continue;
     if (!isMarkdownTableSeparator(lines[i + 1])) continue;
     sawMatchingHeader = true;
-    const invariantIdx = normalizedHeader.indexOf("invariant");
-
     for (let rowIndex = i + 2; rowIndex < lines.length; rowIndex++) {
       const row = splitMarkdownTableRow(lines[rowIndex]);
       if (row.length === 0) break;
@@ -414,7 +411,6 @@ export function parseTestContractEntries(content: string): TestContractParseResu
       entries.push({
         test_id: testId,
         scenario: (row[scenarioIdx] ?? "").trim(),
-        invariant: invariantIdx >= 0 ? (row[invariantIdx] ?? "").trim() : "",
       });
     }
   }
@@ -538,22 +534,13 @@ export function validateUserDecision(d: Record<string, unknown>): { ok: boolean;
   return { ok: true, message: "" };
 }
 
-// ===== business-invariants.md =====
-//
-// 格式（propose skill 定义）：
-//   # Business Invariants
-//   - INV-001 用户密码必须加密存储
-//
-// 引擎行为：Phase 1-5 只校验文件存在性（轻量）。
-// 内部结构（INV-XXX 编号）是 agent 指引，引擎不逐行解析。
-
 // ===== test-contract.md =====
 //
 // 格式（propose skill 定义）：
 //   # Test Contract
-//   | test_id | invariant | scenario |
-//   |---|---|---|
-//   | TEST-001 | INV-001 | 注册时密码被加密 |
+//   | test_id | scenario |
+//   |---|---|
+//   | TEST-001 | 注册时密码被加密 |
 //
 // 引擎行为：Phase 1-5 只校验文件存在性（轻量）。
 // 表格结构是 agent 指引，引擎不逐行解析。

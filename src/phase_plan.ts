@@ -15,7 +15,10 @@ import { docRef, sha256File } from "./store.ts";
 import {
   isReviewReadyVerifier,
   isFreshReviewVerifier,
+  historicalProposeReadyRoles,
   readReviewPolicyFromEvents,
+  reviewGateRoleResolution,
+  reviewRejectionOverrideScope,
   reviewEvidenceDigest,
 } from "./review.ts";
 import {
@@ -83,7 +86,7 @@ export type NextStepPlan =
 
 export type TransitionDecisionPlan =
   | { kind: "skip"; message: string }
-  | { kind: "blocked"; jobs: Job[]; reason: string }
+  | { kind: "blocked"; jobs: Job[]; reason: string; details?: Record<string, unknown> }
   | { kind: "create_gate_jobs"; gate: ReviewGateRule; roles: JobRole[]; reason: string }
   | { kind: "advance"; fromState: State; toState: State; reason: string; payload?: Record<string, unknown> };
 
@@ -123,6 +126,8 @@ function phaseConfirmationStep(
 
 function reviewGatePlan(
   snapshot: Snapshot,
+  events: Event[],
+  changeRoot: string,
   gate: ReviewGateRule,
   requiredRoles: JobRole[],
 ): ReviewGatePlanResult | null {
@@ -133,8 +138,41 @@ function reviewGatePlan(
       return { kind: "blocked", reason: `状态未推进；已有待完成工作项 ${role}（${openForRole.job_id}）`, jobs: [openForRole] };
     }
 
-    const acceptedForRole = snapshot.accepted_jobs.find(job => gate.isJobForGate(job) && job.role === role);
-    if (!acceptedForRole) missingRoles.push({ role, reason: `需求 ${role} 无已接受的工作项` });
+    const resolution = reviewGateRoleResolution(events, changeRoot, gate, role);
+    if (resolution.kind === "accepted" || resolution.kind === "overridden") continue;
+    if (resolution.kind === "rejected_pending") {
+      const terminal = resolution.terminal;
+      const overrideScope = reviewRejectionOverrideScope(terminal.job.job_id);
+      return {
+        kind: "blocked",
+        jobs: [],
+        reason: `状态未推进；${role} 审查工作项 ${terminal.job.job_id} 已拒绝。请修改绑定材料、在整份报告没有有效 blocker 时登记整体裁决，或在涉及业务决定时询问用户`,
+        details: {
+          review_rejection: {
+            job_id: terminal.job.job_id,
+            role,
+            gate_id: gate.gate_id,
+            packet_digest: terminal.job.packet_digest,
+            result_kind: terminal.result_kind,
+            reason: terminal.reason ?? "报告结论为 fail，工作项未通过",
+            override_scope: overrideScope,
+            allowed_actions: ["modify_materials", "record_override", "ask_user"],
+            record_input: {
+              scope: overrideScope,
+              answer: "do_not_block",
+              reason: "<说明整份报告为何没有有效 blocker>",
+              decision_source: "main_process",
+            },
+          },
+        },
+      };
+    }
+    const reason = resolution.kind === "stale"
+      ? `需求 ${role} 的最新审查工作项已过期：${resolution.stale_reason}`
+      : resolution.kind === "rejected_invalid"
+        ? `需求 ${role} 的最新审查报告无效，不能通过整体裁决绕过`
+        : `需求 ${role} 无已接受的工作项`;
+    missingRoles.push({ role, reason });
   }
 
   if (missingRoles.length > 0) {
@@ -171,7 +209,7 @@ function validateExecutionRequirementPlan(changeRoot: string): { ok: true; mode:
 function missingBaseArtifact(changeRoot: string, risk: ReviewRisk): string | null {
   if (risk === "minimal") return null;
   const artifactsDir = join(changeRoot, ".superspec", "artifacts");
-  for (const doc of ["discovery.md", "business-invariants.md", "test-contract.md"]) {
+  for (const doc of ["discovery.md", "test-contract.md"]) {
     if (!existsSync(join(artifactsDir, doc))) return `基础职责缺失：${doc} 不存在（risk=${risk} 需要）`;
   }
   return null;
@@ -230,21 +268,6 @@ export function latestReopenProposeBaseline(events: Event[]): Record<string, str
 export function proposalDocsChangedSinceBaseline(changeRoot: string, baseline: Record<string, string>): boolean {
   const current = proposalDocsBaseline(changeRoot);
   return Object.entries(baseline).some(([path, digest]) => current[path] !== digest);
-}
-
-export function historicalProposeReadyRoles(events: Event[]): JobRole[] {
-  const roles = new Set<JobRole>();
-  for (const ev of events) {
-    if (ev.event_type !== "transition_commit") continue;
-    const newJobs = (ev.payload as { new_jobs?: Job[] }).new_jobs ?? [];
-    for (const job of newJobs) {
-      if (
-        PROPOSE_FINAL_REVIEW_GATE.isJobForGate(job) &&
-        (job.role === "critic" || job.role === "architect" || job.role === "test-engineer")
-      ) roles.add(job.role);
-    }
-  }
-  return [...roles];
 }
 
 export function pendingTaskIds(changeRoot: string): string[] {
@@ -408,7 +431,7 @@ export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
       }
 
       const requiredRoles = EXPLORE_DISCOVERY_REVIEW_GATE.requiredRolesForRisk(mode.risk);
-      if (!reviewGatePlan(snapshot, EXPLORE_DISCOVERY_REVIEW_GATE, requiredRoles)) {
+      if (!reviewGatePlan(snapshot, events, changeRoot, EXPLORE_DISCOVERY_REVIEW_GATE, requiredRoles)) {
         const confirmation = phaseConfirmationStep(context, "explore_to_propose", "探索完成，等待用户确认进入计划阶段");
         if (confirmation) return confirmation;
       }
@@ -779,10 +802,10 @@ function planExploreTransition(context: TransitionPlanContext): TransitionDecisi
   if (!discoveryCheck.ok) return { kind: "skip", message: discoveryCheck.message };
 
   const requiredRoles = EXPLORE_DISCOVERY_REVIEW_GATE.requiredRolesForRisk(mode.risk);
-  const gatePlan = reviewGatePlan(snapshot, EXPLORE_DISCOVERY_REVIEW_GATE, requiredRoles);
+  const gatePlan = reviewGatePlan(snapshot, events, changeRoot, EXPLORE_DISCOVERY_REVIEW_GATE, requiredRoles);
   if (gatePlan) return gatePlan;
 
-  const confirmation = phaseConfirmationForBoundary(projectRoot, events, snapshot, "explore_to_propose");
+  const confirmation = phaseConfirmationForBoundary(projectRoot, events, snapshot, "explore_to_propose", mode.risk);
   const decision = confirmation ? latestAcceptedPhaseDecision(events, confirmation) : null;
   if (!confirmation || decision?.decision !== "advance") {
     return { kind: "skip", message: confirmation ? phaseConfirmationMissingMessage(confirmation) : "无法建立 Explore 阶段确认范围" };
@@ -817,10 +840,15 @@ function planProposeReadyTransition(context: TransitionPlanContext): TransitionD
   if (missingArtifact) return { kind: "skip", message: missingArtifact };
 
   const requiredRoles = PROPOSE_FINAL_REVIEW_GATE.requiredRolesForRisk(risk);
-  const gatePlan = reviewGatePlan(snapshot, PROPOSE_FINAL_REVIEW_GATE, requiredRoles);
+  const gatePlan = reviewGatePlan(snapshot, context.events, changeRoot, PROPOSE_FINAL_REVIEW_GATE, requiredRoles);
   if (gatePlan) return gatePlan;
 
-  return { kind: "advance", fromState: "propose", toState: "propose_ready", reason: `risk=${risk}，所有需求已满足` };
+  return {
+    kind: "advance",
+    fromState: "propose",
+    toState: "propose_ready",
+    reason: `risk=${risk}，所有需求已满足`,
+  };
 }
 
 function planStartApplyTransition(
@@ -838,7 +866,7 @@ function planStartApplyTransition(
 
   const reviewedRoles = historicalProposeReadyRoles(events);
   if (reviewedRoles.length > 0) {
-    const gatePlan = reviewGatePlan(snapshot, PROPOSE_FINAL_REVIEW_GATE, reviewedRoles);
+    const gatePlan = reviewGatePlan(snapshot, events, changeRoot, PROPOSE_FINAL_REVIEW_GATE, reviewedRoles);
     if (gatePlan) {
       return {
         ...gatePlan,

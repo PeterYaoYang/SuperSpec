@@ -30,7 +30,7 @@ metadata:
 1. **计划核对**：执行 `task-start` 前，确认当前 task 是 `tasks.md` 顶格任务。task 带 `执行依据:` 块时，以它为主要执行上下文；没有执行依据的历史 task 对应 `design.md` 的实现方向和 `proposal.md` 的 `## Impact` 受影响原因。缺少映射、需要新增能力/验收/影响范围时先停止，交回 propose，不写 RED。
 2. **任务开始**：执行 next 下发的 task-start 命令。
 3. **读取执行依据快照**：task-start 的返回结果包含本次任务尝试 ID（`attempt_id`，登记测试时要用）和执行依据快照（五字段在启动时刻的定格版本）。返回结果带快照时，实现和验收以它为准；返回结果标明是历史任务（`legacy_contract`）时，即使 `tasks.md` 里有执行依据文本也不采纳为引擎契约，按原有方式回读 `proposal.md`、`design.md` 和 `test-contract.md`，test-run 走历史规则。
-4. **RED**：执行依据声明了测试时，测试必须对应其中的 `TEST-xxx`（登记其他 TEST 会被拒绝）；没有执行依据的历史 task 确认测试意图能对应 `test-contract.md` 的 `test_id` 或 `business-invariants.md`，缺少对应关系时先停止，交回 propose。运行后确认失败，并用 `superspec record test-run --change "<change>" --input -` 登记。
+4. **RED**：执行依据声明了测试时，测试必须对应其中的 `TEST-xxx`（登记其他 TEST 会被拒绝）；没有执行依据的历史 task 确认测试意图能对应 `test-contract.md` 的 `test_id`，缺少对应关系时先停止，交回 propose。运行后确认失败，并用 `superspec record test-run --change "<change>" --input -` 登记。
 5. **实现**：根据任务写代码，保持范围小。`design.md` 不锁死字段名、函数名、SQL 或局部写法。
 6. **GREEN**：运行测试确认通过，并登记 test-run。执行依据声明多个测试时，每个声明 TEST 都要有 GREEN；普通 `tdd_required:true` task 还要求至少一个 TEST 形成同 TEST 先 RED 后 GREEN，其余可以只有 GREEN 作为回归覆盖。
 7. **完成 task**：执行 next 下发的 task-complete 命令。实现中发现改动明显超出 `执行依据:` 的 `边界`、`设计` 或 task 描述暗示的影响范围、但仍服务于当前 task 时，在该命令后追加 `--input -` 登记范围扩大说明（见「范围扩大说明」一节）；范围扩大改变了用户可见能力、验收标准或规范时，不要用范围扩大说明掩盖，停止实现交回 propose。

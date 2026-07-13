@@ -24,6 +24,7 @@ import {
 import {
   REVIEW_CODE_REVIEW_GATE_ID,
   REVIEW_FINAL_VERIFIER_GATE_ID,
+  reviewScopeForGateRole,
   type ReviewGateRule,
 } from "./review_job_gates.ts";
 import {
@@ -86,8 +87,9 @@ function createReviewJobsForGate(
   events: Event[],
 ): Decision {
   const newJobs: Job[] = roles.map(role => {
-    const boundPaths = [...new Set([...gate.reviewTargets, ...gate.readOnlyRefs])];
-    // 所有审查目标和只读引用都绑定时点指纹：单文件缺失使用 sha256:missing，目录缺失使用稳定空指纹。
+    const scope = reviewScopeForGateRole(gate, role);
+    // 角色职责目标和显式 freshness 路径绑定时点指纹：单文件缺失使用 sha256:missing，目录缺失使用稳定空指纹。
+    const boundPaths = [...new Set(scope.boundPaths)];
     const boundFiles: Ref[] = boundPaths
       .map(p => docRef(changeRoot, p));
     const previousRejection = latestReviewHistoryForGateRole(events, gate, role);
@@ -97,14 +99,14 @@ function createReviewJobsForGate(
       state: "requested" as const,
       gate_id: gate.gate_id,
       boundFiles,
-      ...(gate.reviewTargets.length > 0 ? { review_targets: [...gate.reviewTargets] } : {}),
-      ...(gate.readOnlyRefs.length > 0 ? { read_only_refs: [...gate.readOnlyRefs] } : {}),
+      ...(scope.reviewTargets.length > 0 ? { review_targets: [...scope.reviewTargets] } : {}),
+      ...(scope.readOnlyRefs.length > 0 ? { read_only_refs: [...scope.readOnlyRefs] } : {}),
       packet_digest: sha256Text(JSON.stringify({
         role,
         gate_id: gate.gate_id,
         boundFiles,
-        review_targets: gate.reviewTargets,
-        read_only_refs: gate.readOnlyRefs,
+        review_targets: scope.reviewTargets,
+        read_only_refs: scope.readOnlyRefs,
         created_from_transition: gate.created_from_transition,
         ...(previousRejection ? { previous_rejection: previousRejection } : {}),
       })),
@@ -600,7 +602,7 @@ function transitionPlanToDecision(
     case "skip":
       return { skip: true, message: plan.message };
     case "blocked":
-      return { blocked: true, reason: plan.reason, jobs: plan.jobs };
+      return { blocked: true, reason: plan.reason, jobs: plan.jobs, ...(plan.details ? { details: plan.details } : {}) };
     case "create_gate_jobs":
       return createReviewJobsForGate(snapshot.state, plan.gate, plan.roles, changeRoot, change, plan.reason, events);
     case "advance":
@@ -654,7 +656,7 @@ export function commitTransition(
         from_state: snapshot.state,
         to_state: snapshot.state,
         created_jobs: [],
-        required_jobs: requiredJobActions(change, decision.jobs),
+        ...(decision.jobs.length > 0 ? { required_jobs: requiredJobActions(change, decision.jobs) } : {}),
         message: decision.reason,
         events_written: 0,
         ...(decision.details ? { details: decision.details } : {}),

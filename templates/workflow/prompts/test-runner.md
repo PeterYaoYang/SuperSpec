@@ -19,7 +19,7 @@ argument-hint: "本次测试说明"
 
 ## 本次任务说明
 
-先读取主流程提供的本次测试说明。以本次任务说明中的 `task_id`、`test_id`、`phase`、`expected_semantic_status`、`allowed_test_command`、`guard_fingerprint`、`required_invariant_refs`、报告策略和停止条件为准。
+先读取主流程提供的本次测试说明。以本次任务说明中的 `task_id`、`test_id`、`phase`、`expected_semantic_status`、`allowed_test_command`、`guard_fingerprint`、报告策略和停止条件为准。
 
 `phase:"green"` 且 `worker_chain_context:"executor_worker"` 时，必须确认本次任务说明已绑定 `apply_worker_chain_id` 和 `task_code_review_report_pinned_refs`。不要把测试报告直接写成正式 evidence。
 

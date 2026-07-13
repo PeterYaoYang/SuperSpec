@@ -1,7 +1,9 @@
 import { currentGitHead, dirtyCodeFiles } from "./git_state.ts";
-import { reviewEvidenceDigest, type ReviewRisk } from "./review.ts";
+import { historicalProposeReadyRoles, reviewEvidenceDigest, reviewGateRoleResolution, type ReviewRisk } from "./review.ts";
+import { EXPLORE_DISCOVERY_REVIEW_GATE, PROPOSE_FINAL_REVIEW_GATE, type ReviewGateRule } from "./review_job_gates.ts";
+import { changeRoot as openspecChangeRoot } from "./openspec.ts";
 import { findLatestEvent, sha256Text } from "./store.ts";
-import type { AskUser, AskUserAction, Event, Snapshot, State } from "./types.ts";
+import type { AskUser, AskUserAction, Event, JobRole, Snapshot, State } from "./types.ts";
 
 export const PHASE_CONFIRMATION_SCOPE_PREFIX = "phase_confirmation:";
 
@@ -125,10 +127,23 @@ function boundaryForState(state: State): PhaseBoundary | null {
   }
 }
 
+function ordinaryReviewRolesForBoundary(
+  events: Event[],
+  boundary: PhaseBoundary,
+  gate: ReviewGateRule,
+  risk: ReviewRisk,
+): JobRole[] {
+  return boundary === "propose_to_apply"
+    ? historicalProposeReadyRoles(events)
+    : gate.requiredRolesForRisk(risk);
+}
+
 function materialDigest(
   projectRoot: string,
   events: Event[],
   snapshot: Snapshot,
+  boundary: PhaseBoundary,
+  risk: ReviewRisk,
 ): string {
   const head = currentGitHead(projectRoot);
   const dirty = dirtyCodeFiles(projectRoot);
@@ -143,11 +158,39 @@ function materialDigest(
     .sort((a, b) => a.job_id.localeCompare(b.job_id));
   const documents = Object.entries(snapshot.document_digests)
     .sort(([left], [right]) => left.localeCompare(right));
+  const ordinaryReviewGate: ReviewGateRule | null = boundary === "explore_to_propose"
+    ? EXPLORE_DISCOVERY_REVIEW_GATE
+    : boundary === "propose_to_apply"
+      ? PROPOSE_FINAL_REVIEW_GATE
+      : null;
+  const currentChangeRoot = openspecChangeRoot(projectRoot, snapshot.change_id);
+  const overriddenReviewJobs = ordinaryReviewGate
+    ? ordinaryReviewRolesForBoundary(events, boundary, ordinaryReviewGate, risk)
+      .map(role => reviewGateRoleResolution(
+        events,
+        currentChangeRoot,
+        ordinaryReviewGate,
+        role,
+      ))
+      .filter(resolution => resolution.kind === "overridden")
+      .map(resolution => ({
+        job_id: resolution.override.job_id,
+        role: resolution.override.role,
+        gate_id: resolution.override.gate_id,
+        packet_digest: resolution.override.packet_digest,
+        decision_event_id: resolution.override.decision_event_id,
+        decision_event_digest: resolution.override.decision_event_digest,
+      }))
+      .sort((left, right) => `${left.gate_id}\u0000${left.role}\u0000${left.job_id}`.localeCompare(
+        `${right.gate_id}\u0000${right.role}\u0000${right.job_id}`,
+      ))
+    : [];
 
   return sha256Text(JSON.stringify({
     documents,
     tasks_structure_digest: snapshot.tasks_structure_digest,
     accepted_jobs: acceptedJobs,
+    ...(overriddenReviewJobs.length > 0 ? { overridden_review_jobs: overriddenReviewJobs } : {}),
     review_evidence_digest: reviewEvidenceDigest(events),
     code_state: {
       head: head.head,
@@ -202,7 +245,7 @@ function buildActions(
     reason: spec.reason,
     ...(spec.reasonPrompt ? { reason_prompt: spec.reasonPrompt } : {}),
     record_argv: phaseRecordArgv(change),
-    record_input: { scope, question, answer: spec.label },
+    record_input: { scope, question, answer: spec.label, review_risk: risk },
     resume: spec.resume.kind === "next"
       ? { kind: "next", argv: nextArgv(change, risk) }
       : spec.resume.kind === "continue_current_phase"
@@ -230,7 +273,7 @@ export function phaseConfirmationForBoundary(
   if (snapshot.state !== spec.state) return null;
   const epoch = spec.epoch(events);
   const epochEventId = epoch?.event_id ?? `legacy-${spec.state}`;
-  const digest = materialDigest(projectRoot, events, snapshot);
+  const digest = materialDigest(projectRoot, events, snapshot, boundary, risk);
   const scope = `${spec.scopePrefix}:${epochEventId}:${digest}`;
   const actions = buildActions(snapshot.change_id, boundary, scope, spec.question, spec.actions, risk);
   return {

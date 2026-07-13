@@ -30,7 +30,6 @@ function setupApplyWithDoneTask(): { projectRoot: string; change: string; change
   writeFileSync(join(changeRoot, "proposal.md"), "# P\n");
   writeFileSync(join(changeRoot, "design.md"), "# D\n");
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "discovery.md"), "# D\n");
-  writeFileSync(join(changeRoot, ".superspec", "artifacts", "business-invariants.md"), "# BI\n");
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");
   ensureChangeLayout(projectRoot, change);
   // seed 到 apply
@@ -652,7 +651,6 @@ test("review-ready：apply_done → 创建 code-reviewer，review → 创建 ver
   writeFileSync(join(changeRoot, "proposal.md"), "# P\n");
   writeFileSync(join(changeRoot, "design.md"), "# D\n");
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "discovery.md"), "# D\n");
-  writeFileSync(join(changeRoot, ".superspec", "artifacts", "business-invariants.md"), "# BI\n");
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");
   ensureChangeLayout(projectRoot, change);
   for (const [t, f, to] of [
@@ -763,7 +761,6 @@ test("code_state_check：verifier 创建后的干净代码提交会列入差异�
   writeFileSync(join(changeRoot, "proposal.md"), "# P\n");
   writeFileSync(join(changeRoot, "design.md"), "# D\n");
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "discovery.md"), "# D\n");
-  writeFileSync(join(changeRoot, ".superspec", "artifacts", "business-invariants.md"), "# BI\n");
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");
   ensureChangeLayout(projectRoot, change);
   try {
@@ -840,7 +837,6 @@ test("code-reviewer scope：git diff 失败时保守创建不可靠审查范围"
   writeFileSync(join(changeRoot, "proposal.md"), "# P\n");
   writeFileSync(join(changeRoot, "design.md"), "# D\n");
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "discovery.md"), "# D\n");
-  writeFileSync(join(changeRoot, ".superspec", "artifacts", "business-invariants.md"), "# BI\n");
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");
   ensureChangeLayout(projectRoot, change);
   try {
@@ -2725,60 +2721,6 @@ test("accepted：受控 reopen 只能回到 propose，并记录计划材料基�
   } finally { fx.cleanup(); }
 });
 
-test("accepted reopen：仅修改 business-invariants 也满足计划材料变更门禁", () => {
-  const fx = setupApplyWithDoneTask();
-  try {
-    advanceApplyToReview(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
-    acceptAfterFinalVerifier(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
-
-    assert.equal(reopen(fx.projectRoot, fx.change, fx.changeRoot, "propose", "补充业务不变量").to_state, "propose");
-    writeFileSync(
-      join(fx.changeRoot, ".superspec", "artifacts", "business-invariants.md"),
-      "# BI\n\n新增验收不变量\n",
-    );
-    assert.equal(proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal").to_state, "propose_ready");
-    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
-    assert.equal(startApply(fx.projectRoot, fx.change, fx.changeRoot).to_state, "apply");
-  } finally { fx.cleanup(); }
-});
-
-test("legacy accepted baseline：补齐遗漏的不变量后仅修改不变量可推进", () => {
-  const fx = setupApplyWithDoneTask();
-  try {
-    advanceApplyToReview(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
-    createAndPassFinalVerifier(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
-    const legacyPaths = ["proposal.md", "tasks.md", "design.md", "specs/", ".superspec/artifacts/test-contract.md"];
-    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "transition_commit", {
-      transition: "accept",
-      from_state: "review",
-      to_state: "accepted",
-      outcome: "advanced",
-      created_job_ids: [],
-      reason: "legacy accepted baseline without business invariants",
-      accepted_baseline_docs: Object.fromEntries(legacyPaths.map(path => [path, docRef(fx.changeRoot, path).sha])),
-    }));
-
-    assert.equal(reopen(fx.projectRoot, fx.change, fx.changeRoot, "propose", "补充历史业务不变量").to_state, "propose");
-    const reopenCommit = readEvents(fx.projectRoot, fx.change).findLast(event =>
-      event.event_type === "transition_commit" && (event.payload as { transition?: unknown }).transition === "reopen"
-    );
-    const payload = reopenCommit?.payload as { baseline_source?: unknown; baseline_docs?: Record<string, string> };
-    assert.equal(payload.baseline_source, "accepted_backfill");
-    assert.equal(payload.baseline_docs?.[".superspec/artifacts/business-invariants.md"], docRef(
-      fx.changeRoot,
-      ".superspec/artifacts/business-invariants.md",
-    ).sha);
-
-    writeFileSync(
-      join(fx.changeRoot, ".superspec", "artifacts", "business-invariants.md"),
-      "# BI\n\n补齐历史验收不变量\n",
-    );
-    assert.equal(proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal").to_state, "propose_ready");
-    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
-    assert.equal(startApply(fx.projectRoot, fx.change, fx.changeRoot).to_state, "apply");
-  } finally { fx.cleanup(); }
-});
-
 test("accepted baseline：最新 accept 缺 baseline 时不复用更早轮次", () => {
   const change = "mixed-accepted-history";
   const older = makeEvent(change, "transition_commit", {
@@ -2907,6 +2849,12 @@ test("accepted reopen：计划材料变化后重新创建历史 proposal 审查�
       review_scope: { checked_paths: checkedPathsForJob(fx.projectRoot, fx.change, recheck.created_jobs[0]) },
       reviewer: { kind: "codex-subagent", id: "current-cycle-critic" },
     })).accepted, false);
+    const blocked = startApply(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(blocked.outcome, "blocked");
+    assert.equal(Object.hasOwn(blocked, "required_jobs"), false);
+    assert.equal((blocked.details?.review_rejection as { job_id?: string })?.job_id, recheck.created_jobs[0]);
+
+    writeFileSync(join(fx.changeRoot, "proposal.md"), "# Proposal\n\nchanged after current rejection\n");
     const retry = startApply(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(retry.outcome, "job_created");
     assert.equal(retry.to_state, "propose_ready");
@@ -2991,7 +2939,6 @@ test("H3：verifier final gate accepted 后改文档 → stale → review-ready 
   writeFileSync(join(changeRoot, "proposal.md"), "# P\noriginal");
   writeFileSync(join(changeRoot, "design.md"), "# D\n");
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "discovery.md"), "# D\n");
-  writeFileSync(join(changeRoot, ".superspec", "artifacts", "business-invariants.md"), "# BI\n");
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");
   ensureChangeLayout(projectRoot, change);
   for (const [t, f, to] of [

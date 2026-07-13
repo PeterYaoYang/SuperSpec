@@ -5,7 +5,7 @@ import { sha256File, sha256Text } from "./store.ts";
 import type { DirtyFileFingerprint } from "./types.ts";
 
 const PROCESS_DOC_RE = /^(?:openspec\/changes\/[^/]+\/)?(?:proposal|design|tasks)\.md$/;
-const PROCESS_ARTIFACT_RE = /^(?:openspec\/changes\/[^/]+\/)?\.superspec\/artifacts\/(?:discovery|business-invariants|test-contract)\.md$/;
+const PROCESS_ARTIFACT_RE = /^(?:openspec\/changes\/[^/]+\/)?\.superspec\/artifacts\/(?:discovery|test-contract)\.md$/;
 const CODE_EXTENSIONS = new Set([
   ".c", ".cc", ".cpp", ".cs", ".css", ".go", ".h", ".hpp", ".html", ".java", ".js", ".jsx",
   ".json", ".kt", ".mjs", ".mts", ".php", ".py", ".rb", ".rs", ".scss", ".sh", ".sql",

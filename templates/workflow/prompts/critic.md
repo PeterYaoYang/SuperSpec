@@ -68,7 +68,6 @@ argument-hint: "本次反方审查说明"
 - discovery 含链路五要素时，有证据确认会被本次 change 改变的下游消费者或视图差异未进入 Impact 且无排除理由；或 Impact 引用的 `CHAIN-xxx` 所代表的用户可观察行为没有测试场景映射且无不覆盖理由。仅被检查但行为不变的消费者不进入 Impact 或测试。design 仅引用 CHAIN 解释路线不重复产生测试映射；design 暴露的新消费者、视图差异或可观察行为影响必须先进入 Impact。对账不要求每条 CHAIN 单独进入 Impact；同一链路已由 IDC 覆盖且互相引用时不重复报错。
 - proposal、design、specs 与已确认的 CHAIN / IDC 结论显式矛盾，且没有声明为待确认或本次有意变更。
 - `specs/` 增量与 proposal 能力变化不对应：声明的能力缺规范增量、specs 引入未声明能力，或规范正文写成实现路线 / 过程描述。绑定为目录时须逐个打开 Markdown 规范；无法读取时必须失败。
-- `business-invariants.md` 条目不可证伪，或本次行为变化触及的核心规则缺少对应不变量。
 - `tasks.md` 无法定位到 design 的实现方案或边界约束，任务过粗，或多个独立行为混在同一 RED/GREEN 闭环。
 - task ID 重复 / 不稳定，标题混入 task ID，缩进 checkbox 或普通说明承载实际工作，task 中写入 RED/GREEN 命令、断言或预期输出。
 - tasks 顺序与依赖矛盾：被依赖 task 出现在依赖它的 task 之后；标题分组和行内依赖说明不改变全文顶格 checkbox 执行顺序。

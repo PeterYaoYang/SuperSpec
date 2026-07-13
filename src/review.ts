@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { docRef, sha256File, sha256Text } from "./store.ts";
 import {
   EXPLORE_DISCOVERY_REVIEW_GATE_ID,
+  PROPOSE_FINAL_REVIEW_GATE,
   PROPOSE_FINAL_REVIEW_GATE_ID,
   REVIEW_FINAL_VERIFIER_GATE,
   type ReviewGateRule,
@@ -25,7 +26,6 @@ export const REVIEW_DOC_PATHS = [
   "design.md",
   "specs/",
   ".superspec/artifacts/discovery.md",
-  ".superspec/artifacts/business-invariants.md",
   ".superspec/artifacts/test-contract.md",
 ];
 
@@ -79,6 +79,32 @@ function reviewResultKind(value: unknown): CodeReviewResultKind | null {
     : null;
 }
 
+export const REVIEW_REJECTION_OVERRIDE_SCOPE_PREFIX = "review_rejection_override:";
+export const REVIEW_REJECTION_OVERRIDE_ANSWER = "do_not_block";
+
+export type ReviewRejectionDecisionSource = "main_process" | "user";
+
+export interface ReviewRejectionOverrideAudit {
+  job_id: string;
+  role: JobRole;
+  gate_id: ReviewGateRule["gate_id"];
+  packet_digest: string;
+  decision_source: ReviewRejectionDecisionSource;
+  reason: string;
+  decision_event_id: string;
+  decision_event_digest: string;
+}
+
+export function reviewRejectionOverrideScope(jobId: string): string {
+  return `${REVIEW_REJECTION_OVERRIDE_SCOPE_PREFIX}${jobId}`;
+}
+
+export function parseReviewRejectionOverrideScope(scope: string): string | null {
+  if (!scope.startsWith(REVIEW_REJECTION_OVERRIDE_SCOPE_PREFIX)) return null;
+  const jobId = scope.slice(REVIEW_REJECTION_OVERRIDE_SCOPE_PREFIX.length).trim();
+  return jobId === "" ? null : jobId;
+}
+
 function reviewCycleState(gate: ReviewGateRule): State | null {
   if (gate.gate_id === EXPLORE_DISCOVERY_REVIEW_GATE_ID) return "explore";
   if (gate.gate_id === PROPOSE_FINAL_REVIEW_GATE_ID) return "propose";
@@ -97,8 +123,9 @@ function currentReviewGateCycleStart(events: Event[], gate: ReviewGateRule): num
   return 0;
 }
 
-interface ReviewTerminalResult {
+export interface ReviewTerminalResult {
   job: Job;
+  event: Event;
   state: "accepted" | "rejected";
   result_kind?: CodeReviewResultKind;
   reason?: string;
@@ -134,6 +161,7 @@ function reviewTerminalResultsForGateRole(
     const findings = Array.isArray(payload.findings) ? payload.findings : undefined;
     results.push({
       job,
+      event,
       state: event.event_type === "job_accepted" ? "accepted" : "rejected",
       ...(event.event_type === "job_rejected"
         ? { result_kind: reviewResultKind(payload.result_kind) ?? (findings ? "review_failed" : "invalid_report") }
@@ -143,6 +171,104 @@ function reviewTerminalResultsForGateRole(
     });
   }
   return results;
+}
+
+export function latestReviewTerminalForGateRole(
+  events: Event[],
+  gate: ReviewGateRule,
+  role: JobRole,
+): ReviewTerminalResult | null {
+  return reviewTerminalResultsForGateRole(events, gate, role).at(-1) ?? null;
+}
+
+function validReviewRejectionOverridePayload(
+  event: Event,
+  terminal: ReviewTerminalResult,
+  gate: ReviewGateRule,
+): ReviewRejectionOverrideAudit | null {
+  if (event.event_type !== "user_decision_recorded") return null;
+  const payload = event.payload as {
+    accepted?: unknown;
+    scope?: unknown;
+    answer?: unknown;
+    reason?: unknown;
+    decision_source?: unknown;
+    review_rejection_override?: unknown;
+  };
+  if (
+    payload.accepted !== true ||
+    payload.scope !== reviewRejectionOverrideScope(terminal.job.job_id) ||
+    payload.answer !== REVIEW_REJECTION_OVERRIDE_ANSWER ||
+    (payload.decision_source !== "main_process" && payload.decision_source !== "user") ||
+    typeof payload.reason !== "string" || payload.reason.trim() === "" ||
+    !payload.review_rejection_override ||
+    typeof payload.review_rejection_override !== "object" ||
+    Array.isArray(payload.review_rejection_override)
+  ) return null;
+  const audit = payload.review_rejection_override as {
+    job_id?: unknown;
+    role?: unknown;
+    gate_id?: unknown;
+    packet_digest?: unknown;
+  };
+  if (
+    audit.job_id !== terminal.job.job_id ||
+    audit.role !== terminal.job.role ||
+    audit.gate_id !== gate.gate_id ||
+    audit.packet_digest !== terminal.job.packet_digest
+  ) return null;
+  return {
+    job_id: terminal.job.job_id,
+    role: terminal.job.role,
+    gate_id: gate.gate_id,
+    packet_digest: terminal.job.packet_digest,
+    decision_source: payload.decision_source,
+    reason: payload.reason.trim(),
+    decision_event_id: event.event_id,
+    decision_event_digest: event.event_digest,
+  };
+}
+
+export function effectiveReviewRejectionOverride(
+  events: Event[],
+  gate: ReviewGateRule,
+  terminal: ReviewTerminalResult,
+): ReviewRejectionOverrideAudit | null {
+  const cycleStartIndex = currentReviewGateCycleStart(events, gate);
+  if (cycleStartIndex == null) return null;
+  const terminalIndex = events.findIndex(event => event.event_id === terminal.event.event_id);
+  if (terminalIndex < cycleStartIndex) return null;
+  for (let i = events.length - 1; i > terminalIndex; i--) {
+    const audit = validReviewRejectionOverridePayload(events[i], terminal, gate);
+    if (audit) return audit;
+  }
+  return null;
+}
+
+export type ReviewGateRoleResolution =
+  | { kind: "none" }
+  | { kind: "stale"; terminal: ReviewTerminalResult; stale_reason: string }
+  | { kind: "accepted"; terminal: ReviewTerminalResult }
+  | { kind: "rejected_invalid"; terminal: ReviewTerminalResult }
+  | { kind: "rejected_pending"; terminal: ReviewTerminalResult }
+  | { kind: "overridden"; terminal: ReviewTerminalResult; override: ReviewRejectionOverrideAudit };
+
+export function reviewGateRoleResolution(
+  events: Event[],
+  changeRoot: string,
+  gate: ReviewGateRule,
+  role: JobRole,
+): ReviewGateRoleResolution {
+  const terminal = latestReviewTerminalForGateRole(events, gate, role);
+  if (!terminal) return { kind: "none" };
+  const staleReason = boundFilesStaleReason(terminal.job, changeRoot);
+  if (staleReason) return { kind: "stale", terminal, stale_reason: staleReason };
+  if (terminal.state === "accepted") return { kind: "accepted", terminal };
+  if (terminal.result_kind !== "review_failed") return { kind: "rejected_invalid", terminal };
+  const override = effectiveReviewRejectionOverride(events, gate, terminal);
+  return override
+    ? { kind: "overridden", terminal, override }
+    : { kind: "rejected_pending", terminal };
 }
 
 export function latestReviewHistoryForGateRole(
@@ -187,6 +313,21 @@ export function latestReviewHistoryForGateRole(
     reason,
     job_id: latest.job.job_id,
   };
+}
+
+export function historicalProposeReadyRoles(events: Event[]): JobRole[] {
+  const roles = new Set<JobRole>();
+  for (const event of events) {
+    if (event.event_type !== "transition_commit") continue;
+    const jobs = (event.payload as { new_jobs?: Job[] }).new_jobs ?? [];
+    for (const job of jobs) {
+      if (
+        PROPOSE_FINAL_REVIEW_GATE.isJobForGate(job) &&
+        (job.role === "critic" || job.role === "architect" || job.role === "test-engineer")
+      ) roles.add(job.role);
+    }
+  }
+  return [...roles];
 }
 
 export function isReviewReadyVerifier(job: Job): boolean {

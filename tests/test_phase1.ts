@@ -32,7 +32,6 @@ function setupFixture(state: "init" | "explore" | "propose" = "propose"): Fixtur
   writeFileSync(join(changeRoot, "tasks.md"), "# Tasks\n\n- [ ] TASK-001 Do something\n");
   writeFileSync(join(changeRoot, "design.md"), "# Design\n\nDesign doc.\n");
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "discovery.md"), "# Discovery\n\nFound stuff.\n");
-  writeFileSync(join(changeRoot, ".superspec", "artifacts", "business-invariants.md"), "# Invariants\n\nINV-001.\n");
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "test-contract.md"), "# Test Contract\n\nTC-001.\n");
 
   // 初始化引擎运行时
