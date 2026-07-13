@@ -97,12 +97,27 @@ test("installProject installs engine, workflow skills, role prompts, and agents"
     const proposeSkill = readFileSync(join(projectRoot, ".codex", "skills", "superspec-propose", "SKILL.md"), "utf8");
     assert.doesNotMatch(proposeSkill, /上游产物边界/);
     assert.doesNotMatch(proposeSkill, /Discovery blocker/);
+    assert.match(proposeSkill, /审查报告是待验证的独立意见，不会自动创造新需求/);
+    assert.match(proposeSkill, /Recommendation 只是非绑定建议，不是验收标准/);
+    assert.match(proposeSkill, /不新增未经确认的基础设施、可靠性模式或版本协调机制/);
+    assert.match(proposeSkill, /受影响能力、直接修改的文档章节、确认保持不变的范围/);
+    assert.match(proposeSkill, /增量审查判断“本轮变化”的权威锚点/);
 
     for (const prompt of ["critic.md", "architect.md", "test-engineer.md"]) {
       const content = readFileSync(join(projectRoot, ".codex", "prompts", prompt), "utf8");
       assert.doesNotMatch(content, /previous_rejection\.findings/, prompt);
       assert.doesNotMatch(content, /每个新 finding 必须分配稳定 ID/, prompt);
+      assert.match(content, /审查边界与停止条件/, prompt);
+      assert.match(content, /推荐方案不是 finding 成立的证据/, prompt);
     }
+
+    const architectPrompt = readFileSync(join(projectRoot, ".codex", "prompts", "architect.md"), "utf8");
+    assert.match(architectPrompt, /不是把系统升级为理想架构/);
+    assert.match(architectPrompt, /不从一个故障场景递归推导下一层基础设施设计/);
+    const criticPrompt = readFileSync(join(projectRoot, ".codex", "prompts", "critic.md"), "utf8");
+    assert.match(criticPrompt, /消费者类别是发现线索，不是必须逐项覆盖的配额/);
+    const testEngineerPrompt = readFileSync(join(projectRoot, ".codex", "prompts", "test-engineer.md"), "utf8");
+    assert.match(testEngineerPrompt, /未采纳架构、长期可能性和通用故障注入场景不能自动成为 TEST 来源/);
 
     const config = readFileSync(join(projectRoot, ".codex", "config.toml"), "utf8");
     assert.match(config, /\[features\]/);

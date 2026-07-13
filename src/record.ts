@@ -85,8 +85,8 @@ function previousRejectionInstruction(job: Job): string {
   const previous = job.previous_rejection;
   if (!previous) return "";
   const reason = `上一次同角色审查没有形成可推进结论，原因：${previous.reason}。`;
-  if (!previous.findings || previous.findings.length === 0) return `${reason}完成全部材料覆盖和角色分析后，再针对该原因复核，`;
-  return `${reason}完成全部材料覆盖和角色分析后，再逐项复核本工作项附带的上一次同角色审查尚未闭环问题：同一问题仍存在时复用原 finding ID；legacy finding 没有 ID 时沿用其原始语义并补一个稳定 ID；已解决的问题不要重复报告，不得通过更换 ID、标题或措辞重复同一问题；新增问题必须提供与历史问题不同的具体证据。`;
+  if (!previous.findings || previous.findings.length === 0) return `${reason}本轮是修复复核；完整读取材料只用于核对当前修正和直接一致性，不得借复核重新审计与修正无关的历史设计，`;
+  return `${reason}本轮是修复复核：逐项判断本工作项附带的上一次同角色 finding 是否仍成立。Finding 中的 recommendation 只是非绑定建议，不是需求或验收标准；先独立核对 underlying problem、直接证据和本次验收，不得因原建议指定了某种架构就要求照做。同一问题仍存在时复用原 finding ID；legacy finding 没有 ID 时沿用其原始语义并补一个稳定 ID；已解决或已由等价证据闭环的问题不要重复报告，不得通过更换 ID、标题或措辞重复同一问题。默认只复核历史 finding；新 blocker 仅允许是本次修正直接引入的回归，并必须说明“修正动作 → 新问题”的因果链，不得展开无关的故障模型、消费者或架构议题。`;
 }
 
 function ordinaryReviewerFindingInstruction(job: Job): string {
@@ -121,7 +121,7 @@ function reviewScopeInstruction(job: Job, reviewTargets: string[], readOnlyRefs:
 
 function reviewCoverageInstruction(job: Job): string {
   if (!requiresReviewScope(job)) return "";
-  return `审查顺序固定为：先建立覆盖索引，按文件和标题/行段完整浏览全部 boundFiles 至文件末尾；长文档必须分段读取，每段只保留短锚点和候选风险，不能在发现第一个 blocker 时提交。随后按本角色职责进行跨文件分析；最后才复核历史 findings 并去重，一次性提交当前快照下发现的全部 blocker。报告中的 review_scope.checked_paths 必须列出全部已浏览的 boundFiles；它只是覆盖回执，不能代替语义审查。`;
+  return `审查顺序固定为：先建立覆盖索引，按文件和标题/行段完整浏览全部 boundFiles 至文件末尾；长文档必须分段读取，不能在发现第一个 blocker 时停止覆盖。完整读取只用于核对本次 change 的目标、直接修改及跨文档一致性，不等于允许重新审计全部历史设计。若 proposal.md 存在“需求变化”，以其中记录的受影响能力、直接修改章节和保持不变范围作为本轮增量审查的权威锚点；本轮新 finding 必须由该需求变化、为接入变化所做的直接修改，或这些修改造成的跨文档矛盾引起，并说明因果链。此前已通过且被明确记录为保持不变的设计不得重新打开为 blocker；不要凭通用风险类别猜测变化范围。注意事项和故障类别是条件式检查项，不是必须穷举的清单。Recommendation 只能描述需要补足的结果、契约或证据，不得把未经 proposal、design 或用户决定选定的新基础设施写成 required fix。报告中的 review_scope.checked_paths 必须列出全部已浏览的 boundFiles；它只是覆盖回执，不能代替语义审查，也不扩大可报告问题的范围。`;
 }
 
 function migrationEvidenceInstruction(job: Job): string {
