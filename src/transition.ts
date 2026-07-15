@@ -60,6 +60,7 @@ import {
   formatPendingTaskMessage,
   latestAcceptedProposalBaseline,
   pendingTaskStatusForApply,
+  planningValidationProfileForNewRound,
   planTransition,
   discoveryDocsBaseline,
   proposalDocsBaseline,
@@ -1036,6 +1037,8 @@ export function reopen(
             finding_id: ref.findingId,
             decision_scope: scope,
             baseline_docs: proposalDocsBaseline(changeRoot),
+            planning_validation_version: 2,
+            planning_validation_profile: planningValidationProfileForNewRound(projectRoot),
           },
         };
       }
@@ -1122,6 +1125,8 @@ export function reopen(
             reopen_source: snapshot.state,
             baseline_source: acceptedBaseline ? (baselineNeedsBackfill ? "accepted_backfill" : "accepted") : "reopen_fallback",
             baseline_docs: baselineDocs,
+            planning_validation_version: 2,
+            planning_validation_profile: planningValidationProfileForNewRound(projectRoot),
           },
           extraEvents: planningReopenExtraEvents(snapshot, "propose", reason.trim()),
         };

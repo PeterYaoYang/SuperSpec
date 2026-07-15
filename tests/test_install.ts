@@ -10,6 +10,16 @@ import { installProject, WORKFLOW_AGENTS, WORKFLOW_PROMPTS, WORKFLOW_SKILLS } fr
 const PACKAGE_VERSION = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version as string;
 const OPENSPEC_REQUIRED_VERSION = "1.4.1";
 const AGENTS_TEMPLATE = readFileSync(new URL("../templates/workflow/AGENTS.md", import.meta.url), "utf8").trimEnd();
+const EXPECTED_WORKFLOW_AGENTS = [
+  "architect.toml",
+  "code-reviewer.toml",
+  "critic.toml",
+  "executor.toml",
+  "explore.toml",
+  "test-engineer.toml",
+  "test-runner.toml",
+  "verifier.toml",
+] as const;
 
 function withTempProject(fn: (projectRoot: string) => void): void {
   const projectRoot = mkdtempSync(join(tmpdir(), "superspec-install-test-"));
@@ -64,6 +74,7 @@ exec "$@"
 
 test("installProject installs engine, workflow skills, role prompts, and agents", () => {
   withTempProject(projectRoot => {
+    assert.deepEqual(WORKFLOW_AGENTS, EXPECTED_WORKFLOW_AGENTS);
     const result = installProject(projectRoot);
 
     assert.equal(result.ok, true);
@@ -95,43 +106,48 @@ test("installProject installs engine, workflow skills, role prompts, and agents"
       assert.equal(existsSync(join(projectRoot, ".codex", "prompts", prompt)), true, prompt);
     }
     for (const agent of WORKFLOW_AGENTS) {
-      assert.equal(existsSync(join(projectRoot, ".codex", "agents", agent)), true, agent);
+      const agentPath = join(projectRoot, ".codex", "agents", agent);
+      assert.equal(existsSync(agentPath), true, agent);
+      const content = readFileSync(agentPath, "utf8");
+      assert.match(content, /^model_reasoning_effort = "medium"$/m, agent);
+      assert.doesNotMatch(content, /^model_reasoning_effort = "high"$/m, agent);
     }
 
     const proposeSkill = readFileSync(join(projectRoot, ".codex", "skills", "superspec-propose", "SKILL.md"), "utf8");
-    assert.doesNotMatch(proposeSkill, /上游产物边界/);
-    assert.doesNotMatch(proposeSkill, /Discovery blocker/);
-    assert.match(proposeSkill, /审查报告是待验证的独立意见，不会自动创造新需求/);
-    assert.match(proposeSkill, /Recommendation 只是非绑定建议，不是验收标准/);
-    assert.match(proposeSkill, /不新增未经确认的基础设施、可靠性模式或版本协调机制/);
-    assert.match(proposeSkill, /受影响能力、直接修改的文档章节、确认保持不变的范围/);
-    assert.match(proposeSkill, /增量审查判断“本轮变化”的权威锚点/);
-    assert.match(proposeSkill, /整份报告的最终阻塞准入判断权/);
-    assert.match(proposeSkill, /按工作流提供的方式留痕/);
-    assert.match(proposeSkill, /不做部分问题裁决或永久豁免/);
-    assert.doesNotMatch(proposeSkill, /details\.review_rejection|review_rejection_override/);
+    assert.match(proposeSkill, /Skill 提供作者模板；状态机负责校验结构、字段、引用和推进协议/);
+    assert.match(proposeSkill, /只把用户已确认的行为、边界和有证据的风险写成计划/);
+    assert.match(proposeSkill, /验证策略由 task-start 按所选模式编译/);
+    assert.match(proposeSkill, /审查意见是独立证据，不会自动创造需求/);
+    assert.match(proposeSkill, /每个普通 task 紧跟 `执行依据:`，显式写 `测试`、`设计`、`来源`、`验收`、`边界`/);
+    assert.match(proposeSkill, /## 待用户确认[\s\S]*- \[ \] DEC-001/);
+    assert.doesNotMatch(proposeSkill, /tdd_required|review_rejection/);
 
     const exploreSkill = readFileSync(join(projectRoot, ".codex", "skills", "superspec-explore", "SKILL.md"), "utf8");
-    assert.match(exploreSkill, /整份报告是否有资格阻塞/);
-    assert.match(exploreSkill, /按工作流提供的方式留痕/);
-    assert.match(exploreSkill, /不做部分问题裁决或永久豁免/);
-    assert.doesNotMatch(exploreSkill, /details\.review_rejection|review_rejection_override/);
+    assert.match(exploreSkill, /形成基于证据的 `discovery\.md`/);
+    assert.match(exploreSkill, /主流程必须委派 `explore` subagent/);
+    assert.match(exploreSkill, /事实应能追溯到源码、文档、命令输出或用户确认/);
+    assert.match(exploreSkill, /审查意见用于补足证据，不自动创造新范围、新需求或新方案/);
+    assert.match(exploreSkill, /## 待确认问题[\s\S]*- \[ \] Q-001/);
+    assert.doesNotMatch(exploreSkill, /给 subagent 的深扫任务书|对照 critic 的 Discovery 审查阻塞条件|review_rejection/);
 
     for (const prompt of ["critic.md", "architect.md", "test-engineer.md"]) {
       const content = readFileSync(join(projectRoot, ".codex", "prompts", prompt), "utf8");
-      assert.doesNotMatch(content, /previous_rejection\.findings/, prompt);
-      assert.doesNotMatch(content, /每个新 finding 必须分配稳定 ID/, prompt);
-      assert.match(content, /审查边界与停止条件/, prompt);
-      assert.match(content, /推荐方案不是 finding 成立的证据/, prompt);
+      assert.match(content, /状态机负责/, prompt);
+      assert.match(content, /仅当/, prompt);
+      assert.doesNotMatch(content, /JSON 报告按 job packet|每个新 finding 必须分配稳定 ID/, prompt);
     }
 
     const architectPrompt = readFileSync(join(projectRoot, ".codex", "prompts", "architect.md"), "utf8");
-    assert.match(architectPrompt, /不是把系统升级为理想架构/);
-    assert.match(architectPrompt, /不从一个故障场景递归推导下一层基础设施设计/);
+    assert.match(architectPrompt, /未改变的既有风险和理论故障不是 blocker/);
+    assert.match(architectPrompt, /只审查本次接入是否破坏现有契约/);
     const criticPrompt = readFileSync(join(projectRoot, ".codex", "prompts", "critic.md"), "utf8");
-    assert.match(criticPrompt, /消费者类别是发现线索，不是必须逐项覆盖的配额/);
+    assert.match(criticPrompt, /技术路线优劣交给 Architect/);
+    assert.match(criticPrompt, /范围判断、已声明验收/);
+    assert.doesNotMatch(criticPrompt, /openspec validate <change>|执行依据语义审查/);
     const testEngineerPrompt = readFileSync(join(projectRoot, ".codex", "prompts", "test-engineer.md"), "utf8");
-    assert.match(testEngineerPrompt, /未采纳架构、长期可能性和通用故障注入场景不能自动成为 TEST 来源/);
+    assert.match(testEngineerPrompt, /通用故障矩阵和 reviewer recommendation 不能自行升级为必须新增的测试/);
+    assert.match(testEngineerPrompt, /只评估测试是否真的证明本次行为/);
+    assert.doesNotMatch(testEngineerPrompt, /表头含 `test_id` 和 `scenario`|执行依据/);
 
     const config = readFileSync(join(projectRoot, ".codex", "config.toml"), "utf8");
     assert.match(config, /\[features\]/);

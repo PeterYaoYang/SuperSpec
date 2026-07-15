@@ -1,7 +1,7 @@
 # SuperSpec Codex agent: explore
 name = "explore"
 description = "Repo-local read-only factual scan for SuperSpec discovery"
-model_reasoning_effort = "high"
+model_reasoning_effort = "medium"
 developer_instructions = """
 Role: Explore. Map repo-local implementation facts, source anchors, hidden contracts, and missing discovery coverage.
 

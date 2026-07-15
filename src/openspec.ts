@@ -12,6 +12,13 @@ export interface OpenSpecProbe {
   error?: string;
 }
 
+export interface OpenSpecStrictValidation {
+  /** 调用方已经按冻结 profile 决定是否执行 strict validation。 */
+  checked: boolean;
+  ok: boolean;
+  message: string;
+}
+
 /** B2 修复：校验 change 字符集，防 shell 注入 */
 function validateChange(change: string): void {
   if (!/^[A-Za-z0-9._-]+$/.test(change)) {
@@ -43,6 +50,34 @@ export function openspecStatus(projectRoot: string, change: string): string {
     return "sha256:" + createHash("sha256").update(result).digest("hex");
   } catch {
     return "sha256:unknown";
+  }
+}
+
+/**
+ * 计划阶段的原生 OpenSpec 结构 gate。
+ *
+ * 调用方已通过冻结的 planning profile 确认应执行 strict validation。这里不再
+ * 读取实时 config.yaml，避免计划就绪后环境变化导致准入标准漂移。
+ */
+export function validateOpenSpecChange(projectRoot: string, change: string): OpenSpecStrictValidation {
+  validateChange(change);
+  try {
+    execFileSync("openspec", ["validate", change, "--type", "change", "--strict", "--no-interactive"], {
+      cwd: projectRoot,
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    return { checked: true, ok: true, message: "OpenSpec 原生结构校验通过" };
+  } catch (error) {
+    const failure = error as { stdout?: string | Buffer; stderr?: string | Buffer; code?: unknown };
+    const stdout = typeof failure.stdout === "string" ? failure.stdout : failure.stdout?.toString("utf8") ?? "";
+    const stderr = typeof failure.stderr === "string" ? failure.stderr : failure.stderr?.toString("utf8") ?? "";
+    const detail = [stdout, stderr].map(value => value.trim()).filter(Boolean).join("；");
+    return {
+      checked: true,
+      ok: false,
+      message: `OpenSpec strict 校验失败${detail ? `：${detail}` : "；请确认 openspec CLI 可用并修复 proposal/specs 结构"}`,
+    };
   }
 }
 

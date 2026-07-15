@@ -1,7 +1,7 @@
 # SuperSpec Codex agent: executor
 name = "executor"
 description = "Bounded SuperSpec apply implementation worker"
-model_reasoning_effort = "high"
+model_reasoning_effort = "medium"
 developer_instructions = """
 Role: Executor. Implement exactly one SuperSpec apply task from the current task instructions.
 

@@ -5,12 +5,17 @@ import type { ReviewGateRule } from "./review_job_gates.ts";
 import {
   collectProposeOpenQuestions,
   countDiscoveryOpenQuestions,
+  parseExecutionRequirements,
   parseTasksMd,
   pendingTasksInContent,
   validateDiscovery,
   validateExecutionRequirements,
+  validateExecutionRequirementDocumentReferences,
+  validateProposalImpact,
+  validateTasksDocument,
 } from "./format.ts";
 import { currentGitHead } from "./git_state.ts";
+import { validateOpenSpecChange } from "./openspec.ts";
 import { docRef, sha256File } from "./store.ts";
 import {
   isReviewReadyVerifier,
@@ -41,7 +46,16 @@ import {
   type PhaseBoundary,
 } from "./phase_confirmation.ts";
 import { taskEvidenceReadiness } from "./task_evidence.ts";
-import type { AcceptedMaterialFollowupContinuation, AskUser, Event, ExecutionPolicy, Job, JobRole, State } from "./types.ts";
+import type {
+  AcceptedMaterialFollowupContinuation,
+  AskUser,
+  Event,
+  ExecutionPolicy,
+  Job,
+  JobRole,
+  PlanningValidationProfile,
+  State,
+} from "./types.ts";
 import type { Snapshot } from "./types.ts";
 import type { ReviewRisk } from "./review.ts";
 import { workflowRiskForProposeRound, workflowRiskForState } from "./workflow_config.ts";
@@ -189,11 +203,17 @@ function reviewGatePlan(
   return null;
 }
 
-function validateTasksPlan(changeRoot: string): string | null {
+function validateTasksPlan(changeRoot: string, executionRequirementVersion: 1 | 2): string | null {
   const tasksPath = join(changeRoot, "tasks.md");
   if (!existsSync(tasksPath)) return "tasks.md 不存在";
   const tasksContent = readFileSync(tasksPath, "utf8");
-  if (!tasksContent.includes("# Tasks") && !tasksContent.includes("- [ ]")) return "tasks.md 内容不像任务计划文档";
+  if (executionRequirementVersion === 1) {
+    return tasksContent.includes("# Tasks") || tasksContent.includes("- [ ]")
+      ? null
+      : "tasks.md 内容不像任务计划文档";
+  }
+  const errors = validateTasksDocument(tasksContent);
+  if (errors.length > 0) return errors.join("；");
   return null;
 }
 
@@ -238,6 +258,57 @@ function missingBaseArtifact(changeRoot: string, risk: ReviewRisk): string | nul
     if (!existsSync(join(artifactsDir, doc))) return `基础职责缺失：${doc} 不存在（risk=${risk} 需要）`;
   }
   return null;
+}
+
+/** OpenSpec strict gate 只在当前 planning round 冻结为 strict 时执行。 */
+function validateOpenSpecPlanningDocuments(
+  projectRoot: string,
+  change: string,
+  changeRoot: string,
+  profile: PlanningValidationProfile | null,
+): string | null {
+  if (profile == null || profile.openspec.mode !== "strict") return null;
+  const currentConfigDigest = sha256File(join(projectRoot, "openspec", "config.yaml"));
+  if (currentConfigDigest !== profile.openspec.config_digest) {
+    return "OpenSpec 配置自本 planning round 起已变化；请恢复原配置或 reopen --to propose 创建新的计划轮";
+  }
+  const tasksPath = join(changeRoot, "tasks.md");
+  const referenceErrors = validateExecutionRequirementDocumentReferences(
+    changeRoot,
+    parseExecutionRequirements(readFileSync(tasksPath, "utf8")),
+  );
+  if (referenceErrors.length > 0) return referenceErrors.join("；");
+  const proposalPath = join(changeRoot, "proposal.md");
+  if (!existsSync(proposalPath)) return "proposal.md 不存在";
+  const impact = validateProposalImpact(readFileSync(proposalPath, "utf8"));
+  if (!impact.ok) return impact.message;
+
+  const native = validateOpenSpecChange(projectRoot, change);
+  return native.ok ? null : native.message;
+}
+
+function validatePlanningPreflight(
+  projectRoot: string,
+  change: string,
+  changeRoot: string,
+  risk: ReviewRisk,
+  executionPolicy: ExecutionPolicy,
+  profile: PlanningValidationProfile | null,
+): { error: string | null; contractMode: boolean } {
+  const executionRequirementVersion = profile?.version ?? 1;
+  const tasksPlanError = validateTasksPlan(changeRoot, executionRequirementVersion);
+  if (tasksPlanError) return { error: tasksPlanError, contractMode: false };
+
+  const executionRequirementPlan = validateExecutionRequirementPlan(changeRoot, executionPolicy, executionRequirementVersion);
+  if (!executionRequirementPlan.ok) return { error: executionRequirementPlan.message, contractMode: false };
+
+  const missingArtifact = missingBaseArtifact(changeRoot, risk);
+  if (missingArtifact) return { error: missingArtifact, contractMode: false };
+
+  return {
+    error: validateOpenSpecPlanningDocuments(projectRoot, change, changeRoot, profile),
+    contractMode: executionRequirementPlan.mode,
+  };
 }
 
 export function proposalDocsBaseline(changeRoot: string): Record<string, string> {
@@ -358,6 +429,66 @@ function executionRequirementVersionForProposeRound(events: Event[]): 1 | 2 {
     }
   }
   return 1;
+}
+
+function isPlanningValidationProfile(value: unknown): value is PlanningValidationProfile {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const profile = value as { version?: unknown; openspec?: { mode?: unknown; config_digest?: unknown } };
+  if (profile.version !== 2 || !profile.openspec || typeof profile.openspec !== "object") return false;
+  return profile.openspec.mode === "disabled" ||
+    profile.openspec.mode === "strict" && typeof profile.openspec.config_digest === "string";
+}
+
+/** 新 planning round 在进入 propose 时冻结当前 OpenSpec 校验契约。 */
+export function planningValidationProfileForNewRound(projectRoot: string): PlanningValidationProfile {
+  const configDigest = sha256File(join(projectRoot, "openspec", "config.yaml"));
+  return configDigest == null
+    ? { version: 2, openspec: { mode: "disabled" } }
+    : { version: 2, openspec: { mode: "strict", config_digest: configDigest } };
+}
+
+/** propose 状态尚未 ready 时，从进入本 planning round 的事件读取冻结 profile。 */
+function planningValidationProfileForPendingProposeRound(events: Event[]): PlanningValidationProfile | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i];
+    if (event.event_type !== "transition_commit") continue;
+    const payload = event.payload as {
+      transition?: unknown;
+      to_state?: unknown;
+      reopen_target?: unknown;
+      planning_validation_profile?: unknown;
+    };
+    // 只读取“进入 propose”的边界事件。propose-ready 创建审查 job 时也会
+    // 保持在 propose；若把它误当作新的 planning round，便会覆盖此前冻结的
+    // profile 并把当前轮错误降级为 v1。
+    const entersPropose = payload.to_state === "propose" && (
+      payload.transition === "explore" ||
+      payload.transition === "propose" ||
+      payload.transition === "reopen" && payload.reopen_target === "propose"
+    );
+    if (!entersPropose) continue;
+    return isPlanningValidationProfile(payload.planning_validation_profile)
+      ? payload.planning_validation_profile
+      : null;
+  }
+  return null;
+}
+
+/** 已完成 propose-ready 的 round 只回放当时冻结的 profile。 */
+function planningValidationProfileForReadyProposeRound(events: Event[]): PlanningValidationProfile | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i];
+    if (event.event_type !== "transition_commit") continue;
+    const payload = event.payload as { transition?: unknown; to_state?: unknown; planning_validation_profile?: unknown };
+    if (payload.transition !== "propose-ready" || payload.to_state !== "propose_ready") continue;
+    if (isPlanningValidationProfile(payload.planning_validation_profile)) return payload.planning_validation_profile;
+    // 过渡期已写 v2 执行依据、但尚未带 profile 的事件保持 v2 tasks 契约，
+    // 但不在 start-apply 追溯新增 strict gate。
+    return executionRequirementVersionFromPayload(event.payload) === 2
+      ? { version: 2, openspec: { mode: "disabled" } }
+      : null;
+  }
+  return null;
 }
 
 export function applyRequirementModeForCurrentRound(events: Event[]): boolean {
@@ -913,7 +1044,11 @@ function planExploreTransition(context: TransitionPlanContext): TransitionDecisi
     fromState: "explore",
     toState: "propose",
     reason: "探索完成",
-    payload: phaseConfirmationCommitPayload(confirmation, decision),
+    payload: {
+      ...phaseConfirmationCommitPayload(confirmation, decision),
+      planning_validation_version: 2,
+      planning_validation_profile: planningValidationProfileForNewRound(projectRoot),
+    },
   };
 }
 
@@ -921,21 +1056,23 @@ function planProposeReadyTransition(context: TransitionPlanContext): TransitionD
   const { changeRoot, mode, snapshot } = context;
   const risk = mode.risk;
   if (snapshot.state !== "propose") return { kind: "skip", message: `当前状态 ${snapshot.state}，不能 propose-ready` };
+  const planningProfile = planningValidationProfileForPendingProposeRound(context.events);
 
-  const tasksPlanError = validateTasksPlan(changeRoot);
-  if (tasksPlanError) return { kind: "skip", message: tasksPlanError };
-
-  const executionRequirementPlan = validateExecutionRequirementPlan(changeRoot, executionPolicyForRisk(risk), 2);
-  if (!executionRequirementPlan.ok) return { kind: "skip", message: executionRequirementPlan.message };
+  const preflight = validatePlanningPreflight(
+    context.projectRoot,
+    context.change,
+    changeRoot,
+    risk,
+    executionPolicyForRisk(risk),
+    planningProfile,
+  );
+  if (preflight.error) return { kind: "skip", message: preflight.error };
 
   const openQuestions = collectProposeOpenQuestions(changeRoot);
   if (openQuestions.openCount > 0) {
     const files = openQuestions.files.map(f => `${f.path}(${f.openCount})`).join(", ");
     return { kind: "skip", message: `计划文档有 ${openQuestions.openCount} 个待用户确认问题：${files}` };
   }
-
-  const missingArtifact = missingBaseArtifact(changeRoot, risk);
-  if (missingArtifact) return { kind: "skip", message: missingArtifact };
 
   const requiredRoles = PROPOSE_FINAL_REVIEW_GATE.requiredRolesForRisk(risk);
   const gatePlan = reviewGatePlan(snapshot, context.events, changeRoot, PROPOSE_FINAL_REVIEW_GATE, requiredRoles);
@@ -948,7 +1085,11 @@ function planProposeReadyTransition(context: TransitionPlanContext): TransitionD
     reason: `risk=${risk}，所有需求已满足`,
     payload: {
       workflow_mode: risk,
-      execution_requirement_version: 2,
+      ...(planningProfile ? {
+        execution_requirement_version: 2,
+        planning_validation_version: 2,
+        planning_validation_profile: planningProfile,
+      } : {}),
     },
   };
 }
@@ -979,7 +1120,19 @@ function planStartApplyTransition(
   }
 
   const risk = workflowRiskForProposeRound(events, context.mode.risk);
-  const executionRequirementVersion = executionRequirementVersionForProposeRound(events);
+  const planningProfile = planningValidationProfileForReadyProposeRound(events);
+  const executionRequirementVersion = planningProfile?.version ?? executionRequirementVersionForProposeRound(events);
+  const executionPolicy = executionPolicyForRisk(risk);
+  const preflight = validatePlanningPreflight(
+    projectRoot,
+    context.change,
+    changeRoot,
+    risk,
+    executionPolicy,
+    planningProfile,
+  );
+  if (preflight.error) return { kind: "skip", message: preflight.error };
+
   const requiredRoles = executionRequirementVersion === 2
     ? PROPOSE_FINAL_REVIEW_GATE.requiredRolesForRisk(risk)
     : historicalProposeReadyRoles(events);
@@ -994,13 +1147,6 @@ function planStartApplyTransition(
   const acceptedConfirmation = enforceConfirmation
     ? acceptedProposeToApplyConfirmation(context, risk)
     : null;
-  const executionPolicy = executionPolicyForRisk(risk);
-  const executionRequirementPlan = validateExecutionRequirementPlan(
-    changeRoot,
-    executionPolicy,
-    executionRequirementVersion,
-  );
-  if (!executionRequirementPlan.ok) return { kind: "skip", message: executionRequirementPlan.message };
   if (enforceConfirmation && !acceptedConfirmation) {
     const confirmation = phaseConfirmationForBoundary(projectRoot, events, snapshot, "propose_to_apply", risk);
     return {
@@ -1017,7 +1163,7 @@ function planStartApplyTransition(
     payload: {
       apply_start_head: gitHead.head,
       apply_start_head_reason: gitHead.reason,
-      apply_contract_mode: executionRequirementPlan.mode,
+      apply_contract_mode: preflight.contractMode,
       ...(executionRequirementVersion === 2 ? { execution_requirement_version: 2 } : {}),
       execution_policy: executionPolicy,
       workflow_mode: risk,

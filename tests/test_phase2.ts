@@ -12,10 +12,19 @@ import { rebuildSnapshot } from "../src/sync.ts";
 import { next } from "../src/next.ts";
 import { proposeReady, startApply, transitionExplore } from "../src/transition.ts";
 import { recordUserDecision, recordUserDecisionContent, recordJobSubmit, recordJobSubmitContent, jobsPacket } from "../src/record.ts";
-import { countDiscoveryOpenQuestions, countProposeOpenQuestionsInContent, validateDiscovery, validateDiscoveryChainCoverage } from "../src/format.ts";
+import {
+  countDiscoveryOpenQuestions,
+  countProposeOpenQuestionsInContent,
+  parseTestContractEntries,
+  validateDiscovery,
+  validateDiscoveryChainCoverage,
+  validateProposalImpact,
+  validateTasksDocument,
+} from "../src/format.ts";
 import { phaseConfirmationForBoundary, type PhaseDecisionAction } from "../src/phase_confirmation.ts";
 import type { Job, JobRole, State } from "../src/types.ts";
 import { confirmCurrentPhase } from "./phase_confirmation_support.ts";
+import { planningValidationProfileForNewRound } from "../src/phase_plan.ts";
 
 // ===== 夹具 =====
 
@@ -30,6 +39,11 @@ const DOCUMENTATION_TASKS = [
   "  - 边界: 不改实现代码",
   "",
 ].join("\n");
+
+const V2_DISABLED_PLANNING_PROFILE = {
+  version: 2,
+  openspec: { mode: "disabled" },
+} as const;
 
 function setupExplore(): { projectRoot: string; change: string; changeRoot: string; cleanup: () => void } {
   const projectRoot = mkdtempSync(join(tmpdir(), "superspec-p2-"));
@@ -288,6 +302,56 @@ test("discovery 链路五要素：未知阻塞必须进入待确认问题", () =
   ].join("\n"));
   assert.equal(result.ok, false);
   assert.match(result.message, /未知阻塞/);
+});
+
+test("discovery 链路五要素：状态必须使用状态机枚举", () => {
+  const result = validateDiscoveryChainCoverage([
+    "# Discovery",
+    "",
+    "## 链路五要素",
+    "",
+    "| ID | 发现方式 | 上游来源 | 规则变形 | 持久化语义 | 下游消费者 | 视图差异 | 未知/排除 | 证据 | 状态 |",
+    "|---|---|---|---|---|---|---|---|---|---|",
+    "| CHAIN-001 | rg 字段名 | 表单输入 | 无 | 不落库 | 保存接口 | 无 | 无 | src/a.ts:10 | 已确认（已核实） |",
+  ].join("\n"));
+  assert.equal(result.ok, false);
+  assert.match(result.message, /状态必须是/);
+});
+
+test("计划文档格式：状态机拒绝重复 task、隐藏 checkbox 与无效测试契约行", () => {
+  assert.deepEqual(validateTasksDocument([
+    "# Tasks",
+    "",
+    "- [ ] 1.1 First",
+    "  - [ ] hidden task",
+    "- [ ] 1.1 Duplicate",
+  ].join("\n")), [
+    "tasks.md task ID 重复：1.1",
+    "tasks.md 第 4 行存在缩进 checkbox；只有顶格 checkbox 可以作为可执行 task",
+  ]);
+
+  const invalidId = parseTestContractEntries([
+    "# Test Contract",
+    "",
+    "| test_id | scenario |",
+    "|---|---|",
+    "| TEST-001 | |",
+  ].join("\n"));
+  assert.equal(invalidId.ok, false);
+  assert.match(invalidId.message, /缺少 scenario/);
+});
+
+test("proposal Impact：状态机只校验表结构，不判断影响理由的业务真伪", () => {
+  assert.equal(validateProposalImpact([
+    "# Proposal",
+    "",
+    "## Impact",
+    "",
+    "| Area | Reason |",
+    "|---|---|",
+    "| src/a.ts | 一段可由 Critic 审查的理由 |",
+  ].join("\n")).ok, true);
+  assert.match(validateProposalImpact("# Proposal\n").message, /Impact/);
 });
 
 test("discovery 链路五要素：发现方式空泛与否由 critic 审查，引擎不拦截", () => {
@@ -1457,6 +1521,10 @@ test("propose-ready：有待用户确认问题时不创建审查 job", () => {
     appendEvent(projectRoot, change, makeEvent(change, "transition_commit", {
       transition: t, from_state: f, to_state: to,
       outcome: "advanced", created_job_ids: [], reason: t,
+      ...(t === "propose" ? {
+        planning_validation_version: 2,
+        planning_validation_profile: V2_DISABLED_PLANNING_PROFILE,
+      } : {}),
     }, { transitionId: `T-${t}`, idempotencyKey: `${t}-key` }));
   }
 
@@ -1493,6 +1561,10 @@ test("propose-ready：已确认项不阻断审查 job 创建", () => {
     appendEvent(projectRoot, change, makeEvent(change, "transition_commit", {
       transition: t, from_state: f, to_state: to,
       outcome: "advanced", created_job_ids: [], reason: t,
+      ...(t === "propose" ? {
+        planning_validation_version: 2,
+        planning_validation_profile: V2_DISABLED_PLANNING_PROFILE,
+      } : {}),
     }, { transitionId: `T-${t}`, idempotencyKey: `${t}-key` }));
   }
 
@@ -1521,6 +1593,10 @@ test("propose-ready --risk normal：缺 discovery.md 时 block（基础职责）
     appendEvent(projectRoot, change, makeEvent(change, "transition_commit", {
       transition: t, from_state: f, to_state: to,
       outcome: "advanced", created_job_ids: [], reason: t,
+      ...(t === "propose" ? {
+        planning_validation_version: 2,
+        planning_validation_profile: V2_DISABLED_PLANNING_PROFILE,
+      } : {}),
     }, { transitionId: `T-${t}`, idempotencyKey: `${t}-key` }));
   }
 
@@ -1530,6 +1606,96 @@ test("propose-ready --risk normal：缺 discovery.md 时 block（基础职责）
     assert.equal(result.events_written, 0);
   } finally {
     rmSync(projectRoot, { recursive: true, force: true });
+  }
+});
+
+test("propose-ready 与 start-apply：格式预检先于审查 job，拒绝重复 task ID", () => {
+  const fx = setupPropose();
+  try {
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "transition_commit", {
+      transition: "propose", from_state: "explore", to_state: "propose",
+      outcome: "advanced", created_job_ids: [], reason: "seed propose",
+      planning_validation_version: 2,
+      planning_validation_profile: V2_DISABLED_PLANNING_PROFILE,
+    }, { transitionId: "T-seed-propose", idempotencyKey: "seed-propose" }));
+    writeFileSync(join(fx.changeRoot, "tasks.md"), [
+      "# Tasks",
+      "",
+      "- [ ] TASK-001 First",
+      "- [ ] TASK-001 Duplicate",
+    ].join("\n"));
+
+    const propose = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.match(propose.message, /task ID 重复/);
+    assert.equal(propose.created_jobs.length, 0);
+
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "transition_commit", {
+      transition: "propose-ready", from_state: "propose", to_state: "propose_ready",
+      outcome: "advanced", created_job_ids: [], reason: "seed malformed plan",
+      workflow_mode: "minimal", execution_requirement_version: 2,
+      planning_validation_version: 2,
+      planning_validation_profile: V2_DISABLED_PLANNING_PROFILE,
+    }, { transitionId: "T-seed-propose-ready", idempotencyKey: "seed-propose-ready" }));
+
+    const apply = startApply(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.match(apply.message, /task ID 重复/);
+    assert.equal(apply.created_jobs.length, 0);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("已初始化 v2 工作流：propose-ready 与 start-apply 解析执行依据文件和锚点", () => {
+  const fx = setupPropose();
+  try {
+    writeFileSync(join(fx.projectRoot, "openspec", "config.yaml"), "schema: spec-driven\n");
+    const planningProfile = planningValidationProfileForNewRound(fx.projectRoot);
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "transition_commit", {
+      transition: "propose", from_state: "explore", to_state: "propose",
+      outcome: "advanced", created_job_ids: [], reason: "seed propose",
+      planning_validation_version: 2,
+      planning_validation_profile: planningProfile,
+    }, { transitionId: "T-ref-propose", idempotencyKey: "ref-propose" }));
+    writeFileSync(join(fx.changeRoot, "proposal.md"), [
+      "# Proposal",
+      "",
+      "## Impact",
+      "",
+      "| Area | Reason |",
+      "|---|---|",
+      "| src/a.ts | 验证引用解析 |",
+    ].join("\n"));
+    writeFileSync(join(fx.changeRoot, "design.md"), "# Design\n");
+    writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "test-contract.md"), "# Test Contract\n");
+    writeFileSync(join(fx.changeRoot, "tasks.md"), [
+      "# Tasks",
+      "",
+      "- [ ] TASK-001 Reference check",
+      "  执行依据:",
+      "  - 测试:",
+      "  - 设计: design.md#Missing route",
+      "  - 来源: proposal.md#Impact",
+      "  - 验收: 可检查的结果",
+      "  - 边界: 不改持久化",
+    ].join("\n"));
+
+    const propose = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.match(propose.message, /引用锚点不存在：design\.md#Missing route/);
+    assert.equal(propose.created_jobs.length, 0);
+
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "transition_commit", {
+      transition: "propose-ready", from_state: "propose", to_state: "propose_ready",
+      outcome: "advanced", created_job_ids: [], reason: "seed invalid refs",
+      workflow_mode: "normal", execution_requirement_version: 2,
+      planning_validation_version: 2,
+      planning_validation_profile: planningProfile,
+    }, { transitionId: "T-ref-propose-ready", idempotencyKey: "ref-propose-ready" }));
+
+    const apply = startApply(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.match(apply.message, /引用锚点不存在：design\.md#Missing route/);
+    assert.equal(apply.created_jobs.length, 0);
+  } finally {
+    fx.cleanup();
   }
 });
 
@@ -1548,6 +1714,10 @@ test("propose-ready --risk normal：基础职责全满足 + critic accepted → 
     appendEvent(projectRoot, change, makeEvent(change, "transition_commit", {
       transition: t, from_state: f, to_state: to,
       outcome: "advanced", created_job_ids: [], reason: t,
+      ...(t === "propose" ? {
+        planning_validation_version: 2,
+        planning_validation_profile: V2_DISABLED_PLANNING_PROFILE,
+      } : {}),
     }, { transitionId: `T-${t}`, idempotencyKey: `${t}-key` }));
   }
 
@@ -1587,6 +1757,10 @@ test("propose-ready 默认完整审查：创建 critic + architect + test 审核
     appendEvent(projectRoot, change, makeEvent(change, "transition_commit", {
       transition: t, from_state: f, to_state: to,
       outcome: "advanced", created_job_ids: [], reason: t,
+      ...(t === "propose" ? {
+        planning_validation_version: 2,
+        planning_validation_profile: V2_DISABLED_PLANNING_PROFILE,
+      } : {}),
     }, { transitionId: `T-${t}`, idempotencyKey: `${t}-key` }));
   }
 
@@ -2295,6 +2469,10 @@ test("CLI status：区分 fresh/historical/stale accepted jobs", () => {
     appendEvent(projectRoot, change, makeEvent(change, "transition_commit", {
       transition: t, from_state: f, to_state: to,
       outcome: "advanced", created_job_ids: [], reason: t,
+      ...(t === "propose" ? {
+        planning_validation_version: 2,
+        planning_validation_profile: V2_DISABLED_PLANNING_PROFILE,
+      } : {}),
     }, { transitionId: `T-${t}`, idempotencyKey: `${t}-key` }));
   }
 

@@ -1,7 +1,7 @@
 # SuperSpec Codex agent: architect
 name = "architect"
 description = "System design, boundaries, interfaces, long-horizon tradeoffs"
-model_reasoning_effort = "high"
+model_reasoning_effort = "medium"
 developer_instructions = """
 Role: Architect. Review system boundaries, interface contracts, data flow, maintenance risk, rollback risk, and design tradeoffs.
 

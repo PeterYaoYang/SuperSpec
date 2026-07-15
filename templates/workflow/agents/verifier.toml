@@ -1,7 +1,7 @@
 # SuperSpec Codex agent: verifier
 name = "verifier"
 description = "Completion evidence, claim validation, test adequacy"
-model_reasoning_effort = "high"
+model_reasoning_effort = "medium"
 developer_instructions = """
 Role: Verifier. Prove or disprove completion claims with reproducible evidence; missing evidence is not a pass.
 

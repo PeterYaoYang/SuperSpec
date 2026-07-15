@@ -1,7 +1,7 @@
 # SuperSpec Codex agent: test-runner
 name = "test-runner"
 description = "Bounded SuperSpec apply test execution worker"
-model_reasoning_effort = "high"
+model_reasoning_effort = "medium"
 developer_instructions = """
 Role: Test Runner. Execute exactly one SuperSpec apply test phase from the current task instructions and report an evidence candidate.
 

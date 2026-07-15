@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -10,16 +10,28 @@ import { next } from "../src/next.ts";
 import { jobsPacket, recordUserDecisionContent } from "../src/record.ts";
 import { recordTestRunContent } from "../src/task.ts";
 import { proposeReady, reviewReady, startApply, taskComplete, taskStart } from "../src/transition.ts";
-import { pendingTaskStatusForApply } from "../src/phase_plan.ts";
+import { pendingTaskStatusForApply, planningValidationProfileForNewRound } from "../src/phase_plan.ts";
 import { diffFingerprints } from "../src/git_state.ts";
 import { codeReviewPacketContext } from "../src/code_review.ts";
 import { reviewEvidenceDigest } from "../src/review.ts";
-import { validateExecutionRequirements, tasksStructureDigest } from "../src/format.ts";
+import {
+  parseExecutionRequirements,
+  parseTestContractEntries,
+  tasksStructureDigest,
+  validateExecutionRequirementDocumentReferences,
+  validateExecutionRequirements,
+} from "../src/format.ts";
+import { validateOpenSpecChange } from "../src/openspec.ts";
 import { sha256Text } from "../src/store.ts";
 import type { Event } from "../src/types.ts";
 import { phaseConfirmationForBoundary, type PhaseDecisionAction } from "../src/phase_confirmation.ts";
 import { rebuildSnapshot } from "../src/sync.ts";
 import { confirmCurrentPhase } from "./phase_confirmation_support.ts";
+
+const V2_DISABLED_PLANNING_PROFILE = {
+  version: 2,
+  openspec: { mode: "disabled" },
+} as const;
 
 function setupChange(
   tasks: string,
@@ -75,6 +87,10 @@ function setupProposeChange(tasks: string, testContract = "# Test Contract\n"): 
       outcome: "advanced",
       created_job_ids: [],
       reason: transition,
+      ...(transition === "propose" ? {
+        planning_validation_version: 2,
+        planning_validation_profile: V2_DISABLED_PLANNING_PROFILE,
+      } : {}),
     }, { transitionId: `T-propose-${transition}`, idempotencyKey: `propose-${transition}-key` }));
   }
   return fx;
@@ -204,6 +220,312 @@ test("执行依据：测试字段必须显式声明；空字段可表示非行�
     assert.match(blocked.message, /不存在的 TEST ID：TEST-999/);
   } finally {
     unknownFx.cleanup();
+  }
+});
+
+test("执行依据：设计与来源引用由状态机要求使用可定位文档格式", () => {
+  const tasks = [
+    "# Tasks",
+    "",
+    "- [ ] TASK-001 Invalid refs",
+    "  执行依据:",
+    "  - 测试: TEST-001",
+    "  - 设计: Route",
+    "  - 来源: proposal.md#Impact；CHAIN-001",
+    "  - 验收: 可检查的结果",
+    "  - 边界: 不改持久化",
+  ].join("\n");
+  const testContract = [
+    "# Test Contract",
+    "",
+    "| test_id | scenario |",
+    "|---|---|",
+    "| TEST-001 | behavior works |",
+  ].join("\n");
+
+  const result = validateExecutionRequirements(tasks, testContract, "tdd", 2);
+  assert.equal(result.ok, false);
+  assert.match(result.errors.join("；"), /设计必须使用 文件\.md#标题/);
+  assert.match(result.errors.join("；"), /来源必须使用 文件\.md#标题 的可定位引用：CHAIN-001/);
+});
+
+test("执行依据：同一文档的多个 CHAIN/IDC 锚点分别解析，discovery 使用 artifact 路径", () => {
+  const tasks = [
+    "# Tasks",
+    "",
+    "- [ ] TASK-001 Resolve grouped anchors",
+    "  执行依据:",
+    "  - 测试:",
+    "  - 设计: design.md#Route",
+    "  - 来源: discovery.md#CHAIN-001,IDC-001",
+    "  - 验收: 可检查的结果",
+    "  - 边界: 不改持久化",
+  ].join("\n");
+  const fx = setupChange(tasks);
+  try {
+    writeFileSync(join(fx.changeRoot, "design.md"), "# Design\n\n## Route\n");
+    writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "discovery.md"), "# Discovery\n\nCHAIN-001\nIDC-001\n");
+    assert.deepEqual(
+      validateExecutionRequirementDocumentReferences(fx.changeRoot, parseExecutionRequirements(tasks)),
+      [],
+    );
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("历史 v1 计划：即使项目已初始化 OpenSpec，start-apply 不追加 v2 的 Impact/strict gate", () => {
+  const fx = setupChange("# Tasks\n\n- [ ] TASK-001 Historical documentation tdd_required:false no_tdd_reason:documentation-only\n");
+  try {
+    writeFileSync(join(fx.projectRoot, "openspec", "config.yaml"), "schema: spec-driven\n");
+    const result = startApply(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.doesNotMatch(result.message, /Impact|OpenSpec strict/);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("历史 v1 计划：保留旧 tasks 形态，不要求 v2 顶级标题或任务格式", () => {
+  const fx = setupChange("## Historical plan\n\n  - [ ] TASK-001 Nested legacy task\n");
+  try {
+    writeFileSync(join(fx.projectRoot, "openspec", "config.yaml"), "schema: spec-driven\n");
+    const result = startApply(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.doesNotMatch(result.message, /tasks\.md 内容不像任务计划文档|缺少执行依据|Impact|OpenSpec strict/);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("v2 disabled profile：propose-ready 后新增 OpenSpec 配置不追溯增加 strict gate", () => {
+  const tasks = [
+    "# Tasks",
+    "",
+    "- [ ] TASK-001 Document behavior",
+    "  执行依据:",
+    "  - 测试:",
+    "  - 设计: design.md#Design",
+    "  - 来源: proposal.md#Proposal",
+    "  - 验收: 文档可阅读",
+    "  - 边界: 不改代码",
+  ].join("\n");
+  const fx = setupChange(tasks);
+  try {
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "transition_commit", {
+      transition: "propose-ready",
+      from_state: "propose_ready",
+      to_state: "propose_ready",
+      outcome: "advanced",
+      created_job_ids: [],
+      reason: "seed v2 disabled profile",
+      execution_requirement_version: 2,
+      planning_validation_version: 2,
+      planning_validation_profile: V2_DISABLED_PLANNING_PROFILE,
+    }, { transitionId: "T-v2-disabled-ready", idempotencyKey: "v2-disabled-ready" }));
+    writeFileSync(join(fx.projectRoot, "openspec", "config.yaml"), "schema: spec-driven\n");
+
+    const result = startApply(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.doesNotMatch(result.message, /Impact|OpenSpec strict|配置自本 planning round 起已变化/);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("v2 strict profile：OpenSpec 配置变化后必须 reopen 计划轮", () => {
+  const tasks = [
+    "# Tasks",
+    "",
+    "- [ ] TASK-001 Document behavior",
+    "  执行依据:",
+    "  - 测试:",
+    "  - 设计: design.md#Design",
+    "  - 来源: proposal.md#Proposal",
+    "  - 验收: 文档可阅读",
+    "  - 边界: 不改代码",
+  ].join("\n");
+  const fx = setupChange(tasks);
+  try {
+    writeFileSync(join(fx.projectRoot, "openspec", "config.yaml"), "schema: spec-driven\n");
+    const profile = planningValidationProfileForNewRound(fx.projectRoot);
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "transition_commit", {
+      transition: "propose-ready",
+      from_state: "propose_ready",
+      to_state: "propose_ready",
+      outcome: "advanced",
+      created_job_ids: [],
+      reason: "seed v2 strict profile",
+      execution_requirement_version: 2,
+      planning_validation_version: 2,
+      planning_validation_profile: profile,
+    }, { transitionId: "T-v2-strict-ready", idempotencyKey: "v2-strict-ready" }));
+    writeFileSync(join(fx.projectRoot, "openspec", "config.yaml"), "schema: spec-driven\nchanged: true\n");
+
+    const result = startApply(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.match(result.message, /配置自本 planning round 起已变化.*reopen --to propose/);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("过渡期 v2 event：只有执行版本时保留 v2 tasks gate，但不追溯 strict gate", () => {
+  const tasks = [
+    "# Tasks",
+    "",
+    "- [ ] TASK-001 Document behavior",
+    "  执行依据:",
+    "  - 测试:",
+    "  - 设计: design.md#Design",
+    "  - 来源: proposal.md#Proposal",
+    "  - 验收: 文档可阅读",
+    "  - 边界: 不改代码",
+  ].join("\n");
+  const fx = setupChange(tasks);
+  try {
+    writeFileSync(join(fx.projectRoot, "openspec", "config.yaml"), "schema: spec-driven\n");
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "transition_commit", {
+      transition: "propose-ready",
+      from_state: "propose_ready",
+      to_state: "propose_ready",
+      outcome: "advanced",
+      created_job_ids: [],
+      reason: "seed transitional v2 event",
+      execution_requirement_version: 2,
+    }, { transitionId: "T-v2-transitional-ready", idempotencyKey: "v2-transitional-ready" }));
+
+    const result = startApply(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.doesNotMatch(result.message, /Impact|OpenSpec strict|配置自本 planning round 起已变化/);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("执行依据锚点：描述性锚点必须是精确标题，ID 不能匹配更长的子串", () => {
+  const routeTasks = [
+    "# Tasks",
+    "",
+    "- [ ] TASK-001 Route reference",
+    "  执行依据:",
+    "  - 测试:",
+    "  - 设计: design.md#Route",
+    "  - 来源: proposal.md#Impact",
+    "  - 验收: 引用可定位",
+    "  - 边界: 不改代码",
+  ].join("\n");
+  const routeFx = setupChange(routeTasks);
+  try {
+    writeFileSync(join(routeFx.changeRoot, "design.md"), "# Design\n\nRoute appears in ordinary text.\n");
+    writeFileSync(join(routeFx.changeRoot, "proposal.md"), "# Proposal\n\n## Impact\n");
+    assert.deepEqual(
+      validateExecutionRequirementDocumentReferences(routeFx.changeRoot, parseExecutionRequirements(routeTasks)),
+      ["TASK-001 的引用锚点不存在：design.md#Route"],
+    );
+    writeFileSync(join(routeFx.changeRoot, "design.md"), "# Design\n\n## Route ##\n");
+    assert.deepEqual(
+      validateExecutionRequirementDocumentReferences(routeFx.changeRoot, parseExecutionRequirements(routeTasks)),
+      [],
+    );
+  } finally {
+    routeFx.cleanup();
+  }
+
+  const idTasks = routeTasks.replace("design.md#Route", "design.md#Design").replace("proposal.md#Impact", "discovery.md#CHAIN-001");
+  const idFx = setupChange(idTasks);
+  try {
+    writeFileSync(join(idFx.changeRoot, "design.md"), "# Design\n");
+    writeFileSync(join(idFx.changeRoot, ".superspec", "artifacts", "discovery.md"), "# Discovery\n\nCHAIN-0012\n");
+    assert.deepEqual(
+      validateExecutionRequirementDocumentReferences(idFx.changeRoot, parseExecutionRequirements(idTasks)),
+      ["TASK-001 的引用锚点不存在：discovery.md#CHAIN-001"],
+    );
+  } finally {
+    idFx.cleanup();
+  }
+});
+
+test("执行依据引用：符号链接解析到 change 外部时必须拒绝", (t) => {
+  if (process.platform === "win32") {
+    t.skip("Windows 创建文件符号链接可能需要管理员权限");
+    return;
+  }
+  const tasks = [
+    "# Tasks",
+    "",
+    "- [ ] TASK-001 External link",
+    "  执行依据:",
+    "  - 测试:",
+    "  - 设计: design.md#Route",
+    "  - 来源: proposal.md#Proposal",
+    "  - 验收: 引用属于当前 change",
+    "  - 边界: 不改代码",
+  ].join("\n");
+  const fx = setupChange(tasks);
+  const external = join(fx.projectRoot, "external-design.md");
+  try {
+    writeFileSync(external, "# External\n\n## Route\n");
+    rmSync(join(fx.changeRoot, "design.md"));
+    symlinkSync(external, join(fx.changeRoot, "design.md"));
+    assert.deepEqual(
+      validateExecutionRequirementDocumentReferences(fx.changeRoot, parseExecutionRequirements(tasks)),
+      ["TASK-001 的引用越出 change 目录：design.md#Route"],
+    );
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("test-contract：表格行缺少 test_id 不得被静默跳过", () => {
+  const parsed = parseTestContractEntries([
+    "# Test Contract",
+    "",
+    "| test_id | scenario |",
+    "|---|---|",
+    "|  | still has a scenario |",
+  ].join("\n"));
+  assert.equal(parsed.ok, false);
+  if (!parsed.ok) assert.match(parsed.message, /第 5 行缺少 test_id/);
+});
+
+test("OpenSpec strict：合法 delta 通过，缺 Scenario 的 delta 失败", (t) => {
+  if (spawnSync("openspec", ["--version"], { stdio: "ignore" }).status !== 0) {
+    t.skip("openspec CLI 不可用");
+    return;
+  }
+
+  const projectRoot = mkdtempSync(join(tmpdir(), "superspec-openspec-strict-"));
+  const change = "valid-fixture";
+  const specPath = join(projectRoot, "openspec", "changes", change, "specs", "sample-capability", "spec.md");
+  try {
+    mkdirSync(join(projectRoot, "openspec"), { recursive: true });
+    mkdirSync(join(projectRoot, "openspec", "changes", change, "specs", "sample-capability"), { recursive: true });
+    writeFileSync(join(projectRoot, "openspec", "config.yaml"), "schema: spec-driven\n");
+    writeFileSync(specPath, [
+      "## ADDED Requirements",
+      "",
+      "### Requirement: Sample behavior",
+      "The system SHALL expose the sample behavior.",
+      "",
+      "#### Scenario: Successful use",
+      "- **WHEN** a valid request arrives",
+      "- **THEN** the behavior completes",
+    ].join("\n"));
+
+    assert.deepEqual(validateOpenSpecChange(projectRoot, change), {
+      checked: true,
+      ok: true,
+      message: "OpenSpec 原生结构校验通过",
+    });
+
+    writeFileSync(specPath, [
+      "## ADDED Requirements",
+      "",
+      "### Requirement: Sample behavior",
+      "The system SHALL expose the sample behavior.",
+    ].join("\n"));
+    const invalid = validateOpenSpecChange(projectRoot, change);
+    assert.equal(invalid.checked, true);
+    assert.equal(invalid.ok, false);
+    assert.match(invalid.message, /OpenSpec strict 校验失败/);
+  } finally {
+    rmSync(projectRoot, { recursive: true, force: true });
   }
 });
 

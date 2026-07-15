@@ -19,6 +19,11 @@ import { PROPOSE_FINAL_REVIEW_GATE } from "../src/review_job_gates.ts";
 import type { Job, NextOutput, Snapshot } from "../src/types.ts";
 import { WorkflowConfigError, workflowRiskForProject } from "../src/workflow_config.ts";
 
+const V2_DISABLED_PLANNING_PROFILE = {
+  version: 2,
+  openspec: { mode: "disabled" },
+} as const;
+
 test("workflow profile：默认 resolver 保持现有 gate 角色矩阵", () => {
   assert.equal(workflowProfileForRisk("minimal"), "light");
   assert.equal(workflowProfileForRisk("normal"), "normal");
@@ -144,6 +149,10 @@ test("propose-ready 未显式指定 risk 时读取项目工作流配置", () => 
     ] as const) {
       appendEvent(projectRoot, change, makeEvent(change, "transition_commit", {
         transition, from_state: from, to_state: to, outcome: "advanced", created_job_ids: [], reason: transition,
+        ...(transition === "propose" ? {
+          planning_validation_version: 2,
+          planning_validation_profile: V2_DISABLED_PLANNING_PROFILE,
+        } : {}),
       }, { transitionId: `T-${transition}`, idempotencyKey: `config-${transition}` }));
     }
 
@@ -186,6 +195,10 @@ test("mode 在 propose-ready 冻结：配置变 strict 不重审也不漂移 App
     ] as const) {
       appendEvent(projectRoot, change, makeEvent(change, "transition_commit", {
         transition, from_state: from, to_state: to, outcome: "advanced", created_job_ids: [], reason: transition,
+        ...(transition === "propose" ? {
+          planning_validation_version: 2,
+          planning_validation_profile: V2_DISABLED_PLANNING_PROFILE,
+        } : {}),
       }, { transitionId: `T-mode-${transition}`, idempotencyKey: `mode-${transition}` }));
     }
 

@@ -21,6 +21,11 @@ interface Fixture {
   cleanup: () => void;
 }
 
+const V2_DISABLED_PLANNING_PROFILE = {
+  version: 2,
+  openspec: { mode: "disabled" },
+} as const;
+
 function setupFixture(state: "init" | "explore" | "propose" = "propose"): Fixture {
   const projectRoot = mkdtempSync(join(tmpdir(), "superspec-test-"));
   const change = "test-change";
@@ -78,6 +83,8 @@ function setupFixture(state: "init" | "explore" | "propose" = "propose"): Fixtur
     const proposeEv = makeEvent(change, "transition_commit", {
       transition: "explore", from_state: "explore", to_state: "propose",
       outcome: "advanced", created_job_ids: [], reason: "enter propose",
+      planning_validation_version: 2,
+      planning_validation_profile: V2_DISABLED_PLANNING_PROFILE,
     }, { transitionId: "T-propose", idempotencyKey: `propose-${change}` });
     appendEvent(projectRoot, change, initEv);
     appendEvent(projectRoot, change, exploreEv);

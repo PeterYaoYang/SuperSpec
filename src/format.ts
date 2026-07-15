@@ -1,10 +1,10 @@
 // SuperSpec 流程引擎 — format.ts：文档格式解析的唯一权威源
 //
-// 所有文档的格式定义和解析逻辑都在这里。skills 文案引用这里的格式。
-// 修改格式 = 修改这里 + 对应 skill。禁止在其它地方重复解析。
+// 所有可机械判定的文档协议、格式定义和解析逻辑都在这里。skills 只指导
+// 生成与语义判断，不得自行充当格式校验器或在其它地方重复解析。
 
-import { readFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, existsSync, realpathSync } from "node:fs";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { GREEN_ONLY_NO_TDD_REASON, type ExecutionContract, type ExecutionPolicy } from "./types.ts";
 
 // ===== discovery.md =====
@@ -63,6 +63,7 @@ const DISCOVERY_CHAIN_REQUIRED_COLUMNS = [
   "证据",
   "状态",
 ] as const;
+const DISCOVERY_CHAIN_STATUSES = new Set(["已确认", "未知阻塞", "未知非阻塞"]);
 
 export function splitMarkdownTableRow(line: string): string[] {
   const trimmed = line.trim();
@@ -114,6 +115,9 @@ export function validateDiscoveryChainCoverage(content: string): DiscoveryChainC
       }
     }
     const status = cells[statusIdx]?.trim() ?? "";
+    if (!DISCOVERY_CHAIN_STATUSES.has(status)) {
+      return { ok: false, message: `链路五要素第 ${rowNum} 行状态必须是 已确认、未知阻塞 或 未知非阻塞`, present: true };
+    }
     if (status.includes("未知阻塞") && countDiscoveryOpenQuestions(content) === 0) {
       return { ok: false, message: "链路五要素存在未知阻塞，但待确认问题中没有未解决项", present: true };
     }
@@ -137,7 +141,7 @@ export function validateDiscovery(changeRoot: string): { ok: boolean; message: s
 
 // ===== propose 待用户确认 =====
 //
-// 格式（propose skill 定义）：
+// 格式（状态机校验，propose skill 负责生成）：
 //   ## 待用户确认
 //   - [ ] DEC-001 是否兼容旧行为？
 //   - [x] DEC-002 已确认的问题
@@ -248,6 +252,29 @@ export function parseTasksMd(content: string): ParsedTask[] {
     });
   }
   return tasks;
+}
+
+/**
+ * tasks.md 的机械结构校验。任务是否拆分合理、顺序是否符合真实依赖仍由
+ * Critic/Architect 判断；这里仅拒绝引擎无法可靠驱动的格式。
+ */
+export function validateTasksDocument(content: string): string[] {
+  const errors: string[] = [];
+  if (!/^#\s+Tasks\s*$/m.test(content)) errors.push("tasks.md 缺少顶级 # Tasks 标题");
+
+  const tasks = parseTasksMd(content);
+  const seen = new Set<string>();
+  for (const task of tasks) {
+    if (seen.has(task.taskId)) errors.push(`tasks.md task ID 重复：${task.taskId}`);
+    seen.add(task.taskId);
+  }
+
+  for (const [index, line] of content.split("\n").entries()) {
+    if (/^\s+-\s+\[[ xX]\]\s+/.test(line)) {
+      errors.push(`tasks.md 第 ${index + 1} 行存在缩进 checkbox；只有顶格 checkbox 可以作为可执行 task`);
+    }
+  }
+  return errors;
 }
 
 function isTopLevelTaskLine(line: string): boolean {
@@ -403,14 +430,23 @@ export function parseTestContractEntries(content: string): TestContractParseResu
       const row = splitMarkdownTableRow(lines[rowIndex]);
       if (row.length === 0) break;
       const testId = (row[testIdIdx] ?? "").trim();
-      if (!testId.startsWith("TEST-")) continue;
+      const scenario = (row[scenarioIdx] ?? "").trim();
+      if (!testId) {
+        return { ok: false, entries: [], message: `test-contract.md 第 ${rowIndex + 1} 行缺少 test_id` };
+      }
+      if (!/^TEST-[A-Za-z0-9_-]+$/.test(testId)) {
+        return { ok: false, entries: [], message: `test-contract.md 中 TEST ID 格式无效：${testId}` };
+      }
       if (seen.has(testId)) {
         return { ok: false, entries: [], message: `test-contract.md 中 TEST ID 重复：${testId}` };
+      }
+      if (!scenario) {
+        return { ok: false, entries: [], message: `test-contract.md 中 ${testId} 缺少 scenario` };
       }
       seen.add(testId);
       entries.push({
         test_id: testId,
-        scenario: (row[scenarioIdx] ?? "").trim(),
+        scenario,
       });
     }
   }
@@ -420,11 +456,144 @@ export function parseTestContractEntries(content: string): TestContractParseResu
   return { ok: true, entries };
 }
 
+export interface ProposalImpactValidation {
+  ok: boolean;
+  message: string;
+}
+
+/** OpenSpec 项目的 proposal 采用固定 Impact 表格，供状态机进行纯结构校验。 */
+export function validateProposalImpact(content: string): ProposalImpactValidation {
+  const body = sectionBodyByHeadings(content, ["Impact"]);
+  if (body == null) return { ok: false, message: "proposal.md 缺少 ## Impact" };
+  const tableLines = body.split("\n").filter(line => line.trim().startsWith("|"));
+  if (tableLines.length < 3 || !isMarkdownTableSeparator(tableLines[1])) {
+    return { ok: false, message: "proposal.md 的 Impact 必须包含 Area / Reason 表格" };
+  }
+  const header = splitMarkdownTableRow(tableLines[0]).map(cell => cell.toLowerCase());
+  const areaIdx = header.indexOf("area");
+  const reasonIdx = header.indexOf("reason");
+  if (areaIdx < 0 || reasonIdx < 0) {
+    return { ok: false, message: "proposal.md 的 Impact 表格缺少 Area 或 Reason 列" };
+  }
+  const rows = tableLines.slice(2).map(splitMarkdownTableRow).filter(cells => cells.length > 0);
+  if (rows.length === 0) return { ok: false, message: "proposal.md 的 Impact 表格至少需要一行" };
+  for (const [index, row] of rows.entries()) {
+    if (!row[areaIdx]?.trim() || !row[reasonIdx]?.trim()) {
+      return { ok: false, message: `proposal.md 的 Impact 第 ${index + 1} 行缺少 Area 或 Reason` };
+    }
+  }
+  return { ok: true, message: "proposal.md Impact 结构有效" };
+}
+
 export interface ExecutionRequirementValidation {
   ok: boolean;
   mode: boolean;
   contracts: ParsedExecutionRequirement[];
   errors: string[];
+}
+
+function isQualifiedDocumentRef(value: string): boolean {
+  const ref = value.trim();
+  return /^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$))[^\s#]+\.md#[^\s].*$/.test(ref);
+}
+
+function executionRequirementReferenceErrors(contract: ParsedExecutionRequirement): string[] {
+  const errors: string[] = [];
+  if (contract.contract.design && !isQualifiedDocumentRef(contract.contract.design)) {
+    errors.push(`${contract.taskId} 的设计必须使用 文件.md#标题 的可定位引用`);
+  }
+  for (const source of contract.contract.source) {
+    if (!isQualifiedDocumentRef(source)) {
+      errors.push(`${contract.taskId} 的来源必须使用 文件.md#标题 的可定位引用：${source}`);
+    }
+  }
+  return errors;
+}
+
+function parseQualifiedDocumentRef(value: string): { path: string; anchor: string } | null {
+  const ref = value.trim();
+  const separator = ref.indexOf("#");
+  if (separator <= 0 || separator === ref.length - 1) return null;
+  return { path: ref.slice(0, separator), anchor: ref.slice(separator + 1).trim() };
+}
+
+function isPathInside(root: string, target: string): boolean {
+  const rel = relative(root, target);
+  return rel !== "" && !rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel);
+}
+
+function documentContainsAnchor(content: string, anchor: string): boolean {
+  if (/^(?:TEST|CHAIN|IDC)-[A-Za-z0-9_-]+$/.test(anchor)) {
+    const token = new RegExp(`(?:^|[^A-Za-z0-9_-])${escapeRegex(anchor)}(?![A-Za-z0-9_-])`);
+    return token.test(content);
+  }
+  // 支持 Markdown ATX 标题可选的 closing sequence（`## Route ##`），但正文
+  // 中同名文字仍不能冒充可定位锚点。
+  const heading = new RegExp(`^#{1,6}[\\t ]+${escapeRegex(anchor)}(?:[\\t ]+#+)?[\\t ]*$`, "m");
+  return heading.test(content);
+}
+
+function documentAnchorParts(anchor: string): string[] {
+  const parts = anchor.split(",").map(part => part.trim()).filter(Boolean);
+  return parts.length > 1 && parts.every(part => /^(?:TEST|CHAIN|IDC)-[A-Za-z0-9_-]+$/.test(part))
+    ? parts
+    : [anchor];
+}
+
+function canonicalDocumentRefPath(path: string): string {
+  if (path === "discovery.md" || path === "test-contract.md") {
+    return join(".superspec", "artifacts", path);
+  }
+  return path;
+}
+
+/**
+ * 在已初始化的当前工作流中，把执行依据的文件/锚点可解析性作为状态机协议。
+ * “该材料是否足以支撑 task”仍然是 Critic/Architect 的语义判断。
+ */
+export function validateExecutionRequirementDocumentReferences(
+  changeRoot: string,
+  contracts: readonly ParsedExecutionRequirement[],
+): string[] {
+  const root = resolve(changeRoot);
+  const realRoot = realpathSync(root);
+  const errors: string[] = [];
+  for (const contract of contracts) {
+    const refs = [contract.contract.design, ...contract.contract.source].filter((value): value is string => Boolean(value));
+    for (const ref of refs) {
+      const parsed = parseQualifiedDocumentRef(ref);
+      if (!parsed) continue; // 语法错误由 executionRequirementReferenceErrors 报告。
+      const target = resolve(root, canonicalDocumentRefPath(parsed.path));
+      if (!isPathInside(root, target)) {
+        errors.push(`${contract.taskId} 的引用越出 change 目录：${ref}`);
+        continue;
+      }
+      if (!existsSync(target)) {
+        errors.push(`${contract.taskId} 的引用文件不存在：${parsed.path}`);
+        continue;
+      }
+      // resolve/relative 只能识别字面 `..`，不能阻止 change 内的符号链接指向
+      // 外部文件；按真实路径再次校验，确保引用材料仍属于当前 change。
+      let realTarget: string;
+      try {
+        realTarget = realpathSync(target);
+      } catch {
+        errors.push(`${contract.taskId} 的引用文件无法解析：${parsed.path}`);
+        continue;
+      }
+      if (!isPathInside(realRoot, realTarget)) {
+        errors.push(`${contract.taskId} 的引用越出 change 目录：${ref}`);
+        continue;
+      }
+      const targetContent = readFileSync(target, "utf8");
+      for (const anchor of documentAnchorParts(parsed.anchor)) {
+        if (!documentContainsAnchor(targetContent, anchor)) {
+          errors.push(`${contract.taskId} 的引用锚点不存在：${parsed.path}#${anchor}`);
+        }
+      }
+    }
+  }
+  return errors;
 }
 
 export function validateExecutionRequirements(
@@ -477,6 +646,7 @@ export function validateExecutionRequirements(
       if (contract.contract.source.length === 0) errors.push(`${task.taskId} 的执行依据缺少来源`);
       if (!contract.contract.acceptance) errors.push(`${task.taskId} 的执行依据缺少验收目标`);
       if (!contract.contract.guard) errors.push(`${task.taskId} 的执行依据缺少边界`);
+      errors.push(...executionRequirementReferenceErrors(contract));
     }
     if (contract && (executionRequirementVersion === 1 && task.tddRequired || legacyGreenOnly) && contract.contract.tests.length === 0) {
       errors.push(`${task.taskId} 的执行依据缺少测试`);
@@ -566,11 +736,12 @@ export function validateUserDecision(d: Record<string, unknown>): { ok: boolean;
 
 // ===== test-contract.md =====
 //
-// 格式（propose skill 定义）：
+// 格式（状态机校验，propose skill 负责生成）：
 //   # Test Contract
 //   | test_id | scenario |
 //   |---|---|
 //   | TEST-001 | 注册时密码被加密 |
 //
-// 引擎行为：Phase 1-5 只校验文件存在性（轻量）。
-// 表格结构是 agent 指引，引擎不逐行解析。
+// 引擎行为：当 task 声明 TEST 时，状态机解析表格、TEST ID 和 scenario，
+// 并在 propose-ready / start-apply 阶段拒绝无效引用；测试语义和证明力仍由
+// Test Engineer 判断。

@@ -1837,6 +1837,19 @@ test("code-reviewer：spec 问题必须经用户决策才能 reopen propose", ()
     assert.equal((commit?.payload as { source_job_id?: unknown }).source_job_id, jobId);
     assert.equal((commit?.payload as { finding_id?: unknown }).finding_id, "CR-SPEC-001");
     assert.equal(typeof (commit?.payload as { baseline_docs?: unknown }).baseline_docs, "object");
+    assert.deepEqual((commit?.payload as { planning_validation_profile?: unknown }).planning_validation_profile, {
+      version: 2,
+      openspec: { mode: "disabled" },
+    });
+
+    writeFileSync(join(fx.changeRoot, "tasks.md"), [
+      "# Tasks",
+      "",
+      "- [ ] TASK-001 First replacement plan",
+      "- [ ] TASK-001 Duplicate replacement plan",
+    ].join("\n"));
+    const invalidPlan = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    assert.match(invalidPlan.message, /task ID 重复/);
   } finally { fx.cleanup(); }
 });
 

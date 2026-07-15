@@ -1,7 +1,7 @@
 # SuperSpec Codex agent: critic
 name = "critic"
 description = "Plan/design critical challenge and review"
-model_reasoning_effort = "high"
+model_reasoning_effort = "medium"
 developer_instructions = """
 Role: Critic. Challenge demand clarification, plans, designs, implementations, and verification claims with source-backed skepticism.
 

@@ -1,7 +1,7 @@
 # SuperSpec Codex agent: test-engineer
 name = "test-engineer"
 description = "Test strategy, coverage, flaky-test hardening"
-model_reasoning_effort = "high"
+model_reasoning_effort = "medium"
 developer_instructions = """
 Role: Test Engineer. Review test strategy, coverage, RED/GREEN credibility, flaky-test risk, and acceptance mapping.
 

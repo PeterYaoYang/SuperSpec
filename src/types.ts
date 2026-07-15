@@ -205,6 +205,15 @@ export interface Event {
   event_digest: string;
 }
 
+export type OpenSpecValidationProfile =
+  | { mode: "disabled" }
+  | { mode: "strict"; config_digest: string };
+
+export interface PlanningValidationProfile {
+  version: 2;
+  openspec: OpenSpecValidationProfile;
+}
+
 // transition_commit payload 格式
 export interface TransitionCommitPayload {
   transition: string;          // "propose-ready" 等
@@ -241,6 +250,10 @@ export interface TransitionCommitPayload {
   workflow_mode?: "minimal" | "normal" | "strict";
   /** v2 起所有普通任务必须有五字段执行依据；缺失表示旧 change，沿用旧规则回放。 */
   execution_requirement_version?: 2;
+  /** 新 planning round 的格式协议版本；缺失表示升级前的 v1 change。 */
+  planning_validation_version?: 2;
+  /** propose-ready 成功时冻结的 OpenSpec 校验 profile，start-apply 只回放此快照。 */
+  planning_validation_profile?: PlanningValidationProfile;
   execution_policy?: ExecutionPolicy;
 }
 
