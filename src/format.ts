@@ -5,6 +5,7 @@
 
 import { readFileSync, existsSync, realpathSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { sha256Text } from "./store.ts";
 import { GREEN_ONLY_NO_TDD_REASON, type ExecutionContract, type ExecutionPolicy } from "./types.ts";
 
 // ===== discovery.md =====
@@ -39,9 +40,73 @@ function sectionBodyByHeadings(content: string, headings: readonly string[]): st
   return nextHeadingMatch ? restContent.slice(0, nextHeadingMatch.index) : restContent;
 }
 
-/** 从 discovery.md 提取"待确认问题"段内的未确认项数量 */
+const DISCOVERY_QUESTION_HEADINGS = ["待确认问题", "Open Questions", "Pending Questions"] as const;
+
+export const EXPLORE_OPEN_QUESTION_SCOPE_PREFIX = "explore_open_question:";
+
+/**
+ * Discovery 的未确认项是用户决策的唯一候选来源。这里保留原有的“仅指定段落内
+ * checkbox 有效”语义；ID 缺失的历史文档按所有 checklist 在该段落中的稳定顺序
+ * 使用 item-N，避免升级时要求迁移历史 change。
+ */
+export interface DiscoveryOpenQuestion {
+  /** Q-xxx；历史材料没有 ID 时为 item-N。 */
+  id: string;
+  /** 在“待确认问题”段落中所有 checklist 的 1-based 顺序。 */
+  ordinal: number;
+  /** 去掉 markdown checkbox 后的原始内容，用于留痕与内部匹配。 */
+  text: string;
+  /** 包含 checkbox 的原始 Markdown 行，供诊断和测试使用。 */
+  raw: string;
+  /** 当前完整 discovery.md 的内容指纹，避免只改决策依据时沿用旧答复。 */
+  documentFingerprint: string;
+}
+
+/** 按文档顺序提取 discovery.md 中尚未确认的问题。 */
+export function parseDiscoveryOpenQuestions(content: string): DiscoveryOpenQuestion[] {
+  const sectionBody = sectionBodyByHeadings(content, DISCOVERY_QUESTION_HEADINGS);
+  if (sectionBody == null) return [];
+
+  const documentFingerprint = sha256Text(content);
+  const questions: DiscoveryOpenQuestion[] = [];
+  const checklist = /^\s*-\s+\[([ xX])\]\s+(.*?)\s*$/gm;
+  let ordinal = 0;
+
+  for (const match of sectionBody.matchAll(checklist)) {
+    ordinal += 1;
+    if (match[1] !== " ") continue;
+    const text = match[2];
+    const idMatch = /^\s*(Q-[A-Za-z0-9][A-Za-z0-9_-]*)\b/.exec(text);
+    questions.push({
+      id: idMatch?.[1] ?? `item-${ordinal}`,
+      ordinal,
+      text,
+      raw: match[0],
+      documentFingerprint,
+    });
+  }
+  return questions;
+}
+
+export function discoveryOpenQuestionScope(
+  question: Pick<DiscoveryOpenQuestion, "id" | "documentFingerprint">,
+  exploreRoundId: string,
+): string {
+  const fingerprint = sha256Text(`${exploreRoundId}\n${question.documentFingerprint}`);
+  return `${EXPLORE_OPEN_QUESTION_SCOPE_PREFIX}${fingerprint}:${question.id}`;
+}
+
+/** 面向用户展示时隐藏 Q-xxx 这一内部编号；历史无编号问题保持原文。 */
+export function discoveryOpenQuestionDisplayText(question: Pick<DiscoveryOpenQuestion, "id" | "text">): string {
+  if (question.id.startsWith("Q-") && question.text.startsWith(question.id)) {
+    return question.text.slice(question.id.length).replace(/^[\s:：—–-]+/, "").trim();
+  }
+  return question.text.trim();
+}
+
+/** 从 discovery.md 提取“待确认问题”段内的未确认项数量。 */
 export function countDiscoveryOpenQuestions(content: string): number {
-  return countOpenChecklistItemsInSection(content, ["待确认问题", "Open Questions", "Pending Questions"]);
+  return parseDiscoveryOpenQuestions(content).length;
 }
 
 export interface DiscoveryChainCoverageCheck {
@@ -126,7 +191,10 @@ export function validateDiscoveryChainCoverage(content: string): DiscoveryChainC
   return { ok: true, message: "链路五要素就绪", present: true };
 }
 
-/** 完整校验 discovery.md：存在 + 非空 + 无未确认问题 */
+/**
+ * 校验 discovery.md 的可解析结构。未确认问题不是格式错误：next 会把第一个问题
+ * 作为当前用户决策返回；只有缺文档、空文档或已声明链路的结构错误才在此阻断。
+ */
 export function validateDiscovery(changeRoot: string): { ok: boolean; message: string; openCount: number } {
   const path = join(changeRoot, ".superspec", "artifacts", "discovery.md");
   if (!existsSync(path)) return { ok: false, message: "discovery.md 不存在", openCount: -1 };
@@ -135,8 +203,11 @@ export function validateDiscovery(changeRoot: string): { ok: boolean; message: s
   const chainCoverage = validateDiscoveryChainCoverage(content);
   if (!chainCoverage.ok) return { ok: false, message: chainCoverage.message, openCount: -1 };
   const openCount = countDiscoveryOpenQuestions(content);
-  if (openCount > 0) return { ok: false, message: `discovery.md 有 ${openCount} 个未确认问题`, openCount };
-  return { ok: true, message: "discovery.md 就绪", openCount: 0 };
+  return {
+    ok: true,
+    message: openCount > 0 ? `discovery.md 结构有效，有 ${openCount} 个待确认问题` : "discovery.md 就绪",
+    openCount,
+  };
 }
 
 // ===== propose 待用户确认 =====

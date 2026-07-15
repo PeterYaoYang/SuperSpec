@@ -1,8 +1,11 @@
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { currentGitHead, dirtyCodeFiles } from "./git_state.ts";
 import { historicalProposeReadyRoles, reviewEvidenceDigest, reviewGateRoleResolution, type ReviewRisk } from "./review.ts";
 import { EXPLORE_DISCOVERY_REVIEW_GATE, PROPOSE_FINAL_REVIEW_GATE, type ReviewGateRule } from "./review_job_gates.ts";
 import { changeRoot as openspecChangeRoot } from "./openspec.ts";
 import { findLatestEvent, sha256Text } from "./store.ts";
+import { parseExecutionRequirements, parseTasksMd, parseTestContractEntries, type ParsedTask } from "./format.ts";
 import type { AskUser, AskUserAction, Event, JobRole, Snapshot, State } from "./types.ts";
 import {
   hasFrozenWorkflowModeForProposeRound,
@@ -38,6 +41,70 @@ interface PhaseBoundarySpec {
   actions: readonly PhaseActionSpec[];
   epoch: (events: Event[]) => Event | null;
   scopePrefix: string;
+}
+
+function taskTitle(content: string, task: ParsedTask): string {
+  const line = content.split("\n")[task.lineIdx] ?? "";
+  return line.replace(/^-\s+\[[ xX]\]\s+\S+\s*/, "").trim() || task.taskId;
+}
+
+function taskSummaryField(lines: string[], task: ParsedTask, labels: readonly string[]): string | null {
+  for (let index = task.lineIdx + 1; index < lines.length; index++) {
+    const line = lines[index];
+    if (/^-\s+\[[ xX]\]\s+\S+/.test(line) || /^#{1,6}\s+/.test(line)) break;
+    const match = /^\s*-\s*([^:：]+)\s*[:：]\s*(.+?)\s*$/.exec(line);
+    if (match && labels.includes(match[1].trim())) return match[2].trim();
+  }
+  return null;
+}
+
+/**
+ * 这是阶段确认的临时阅读面，不是新的计划格式或 gate。优先读取 task 已声明的
+ * 交付/依赖/验收；缺省项如实标为未声明，避免将任务顺序臆造成真实依赖。
+ */
+function proposeTaskDeliverySummary(changeRoot: string): string | null {
+  const tasksPath = join(changeRoot, "tasks.md");
+  if (!existsSync(tasksPath)) return null;
+  const tasksContent = readFileSync(tasksPath, "utf8");
+  const tasks = parseTasksMd(tasksContent);
+  if (tasks.length === 0) return null;
+
+  const contracts = new Map(parseExecutionRequirements(tasksContent).map(item => [item.taskId, item.contract]));
+  const testContractPath = join(changeRoot, ".superspec", "artifacts", "test-contract.md");
+  const parsedTests = existsSync(testContractPath)
+    ? parseTestContractEntries(readFileSync(testContractPath, "utf8"))
+    : null;
+  const scenarios = parsedTests?.ok
+    ? new Map(parsedTests.entries.map(entry => [entry.test_id, entry.scenario]))
+    : new Map<string, string>();
+  const lines = tasksContent.split("\n");
+
+  // Propose 展示的是当前计划，不是旧 Apply 轮的执行历史。重新打开同一 task 时，
+  // 当前 tasks.md 中的未勾选状态明确表示它已重新纳入本轮待实施范围。
+  const pendingTasks = tasks.filter(task => !task.done);
+  const completedCount = tasks.length - pendingTasks.length;
+  const items = pendingTasks.map((task, index) => {
+    const contract = contracts.get(task.taskId);
+    const explicitDelivery = taskSummaryField(lines, task, ["交付", "Delivery"]);
+    const explicitDependency = taskSummaryField(lines, task, ["依赖", "Dependencies", "Depends On"]);
+    const firstTest = contract?.tests[0];
+    const testScenario = firstTest ? scenarios.get(firstTest) : null;
+    const delivery = explicitDelivery ?? contract?.acceptance ?? taskTitle(tasksContent, task);
+    const dependency = explicitDependency ?? "无明确前置交付";
+    const acceptance = contract?.acceptance
+      ?? (testScenario ? `${firstTest}：${testScenario}` : "计划未单独声明验收");
+    return [
+      `${index + 1}. ${task.taskId} ${taskTitle(tasksContent, task)}`,
+      `   - 交付：${delivery}`,
+      `   - 依赖：${dependency}`,
+      `   - 验收：${acceptance}`,
+    ].join("\n");
+  });
+
+  const status = completedCount === 0
+    ? ""
+    : `已完成 ${completedCount} 项；${pendingTasks.length === 0 ? "当前没有待实施任务。" : `以下 ${pendingTasks.length} 项仍待实施或调整。`}\n\n`;
+  return `执行计划概览\n\n${status}${items.join("\n\n")}`;
 }
 
 export interface PhaseDecisionAction extends AskUserAction {
@@ -295,7 +362,11 @@ export function phaseConfirmationForBoundary(
   const epochEventId = epoch?.event_id ?? `legacy-${spec.state}`;
   const digest = materialDigest(projectRoot, events, snapshot, boundary, risk);
   const scope = `${spec.scopePrefix}:${epochEventId}:${digest}`;
-  const actions = buildActions(snapshot.change_id, boundary, scope, spec.question, spec.actions, risk);
+  const summary = boundary === "propose_to_apply"
+    ? proposeTaskDeliverySummary(openspecChangeRoot(projectRoot, snapshot.change_id))
+    : null;
+  const question = summary ? `${summary}\n\n${spec.question}` : spec.question;
+  const actions = buildActions(snapshot.change_id, boundary, scope, question, spec.actions, risk);
   return {
     boundary,
     epoch_event_id: epochEventId,
@@ -303,7 +374,7 @@ export function phaseConfirmationForBoundary(
     scope,
     actions,
     ask: {
-      question: spec.question,
+      question,
       allowed_answers: actions.map(action => action.label),
       scope,
       actions,

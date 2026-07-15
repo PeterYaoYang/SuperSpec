@@ -1,6 +1,6 @@
 // SuperSpec 流程引擎 — record：工作项结果登记
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import {
   ensureChangeLayout, readEvents, appendEvent, makeEvent,
@@ -35,6 +35,14 @@ import {
 } from "./review.ts";
 import { EXPLORE_DISCOVERY_REVIEW_GATE, PROPOSE_FINAL_REVIEW_GATE, type ReviewGateRule } from "./review_job_gates.ts";
 import { RecordInputDecodingError, readRecordInputFile } from "./record_input.ts";
+import { currentExploreRoundId } from "./explore_round.ts";
+import {
+  discoveryOpenQuestionDisplayText,
+  discoveryOpenQuestionScope,
+  EXPLORE_OPEN_QUESTION_SCOPE_PREFIX,
+  parseDiscoveryOpenQuestions,
+  type DiscoveryOpenQuestion,
+} from "./format.ts";
 import type { CodeReviewResultKind, Event, RecordResult, Job, JobPacket, JobRole, JobState } from "./types.ts";
 
 const REVIEW_REPORT_REQUIRED_FIELDS = ["role", "verdict", "findings"] as const;
@@ -160,6 +168,65 @@ function asObject(value: unknown): Record<string, unknown> | null {
 
 function nonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim() !== "";
+}
+
+function currentDiscoveryOpenQuestion(projectRoot: string, change: string): DiscoveryOpenQuestion | null {
+  const discoveryPath = join(openspecChangeRoot(projectRoot, change), ".superspec", "artifacts", "discovery.md");
+  if (!existsSync(discoveryPath)) return null;
+  return parseDiscoveryOpenQuestions(readFileSync(discoveryPath, "utf8"))[0] ?? null;
+}
+
+function latestAcceptedExploreOpenQuestionDecision(events: Event[], scope: string): Event | null {
+  return [...events].reverse().find(event => {
+    if (event.event_type !== "user_decision_recorded") return false;
+    const payload = event.payload as { scope?: unknown; accepted?: unknown };
+    return payload.accepted !== false && payload.scope === scope;
+  }) ?? null;
+}
+
+function isExploreOpenQuestionScope(scope: string): boolean {
+  return scope.startsWith(EXPLORE_OPEN_QUESTION_SCOPE_PREFIX);
+}
+
+function isWellFormedExploreOpenQuestionScope(scope: string): boolean {
+  return /^explore_open_question:sha256:[a-f0-9]{64}:(?:Q-[A-Za-z0-9][A-Za-z0-9_-]*|item-[1-9]\d*)$/.test(scope);
+}
+
+function invalidExploreOpenQuestionResult(
+  projectRoot: string,
+  change: string,
+  inputDigest: string,
+  existing: Event | undefined,
+  decision: { scope: string; answer: string },
+  reason:
+    | "invalid_explore_open_question_scope"
+    | "stale_explore_open_question_scope"
+    | "explore_open_question_already_recorded",
+): RecordResult {
+  const existingPayload = existing?.payload as { accepted?: unknown; reason?: unknown } | undefined;
+  if (existingPayload?.accepted === false && existingPayload.reason === reason) {
+    return {
+      event_type: "user_decision_recorded" as const,
+      accepted: false,
+      message: "幂等返回：同一无效待确认问题答复已登记",
+    };
+  }
+  appendEvent(projectRoot, change, makeEvent(change, "user_decision_recorded", {
+    accepted: false,
+    scope: decision.scope,
+    answer: decision.answer,
+    reason,
+    input_digest: inputDigest,
+  }));
+  return {
+    event_type: "user_decision_recorded" as const,
+    accepted: false,
+    message: reason === "invalid_explore_open_question_scope"
+      ? "确认事项的内部标识无效，请重新执行 next 获取当前事项"
+      : reason === "explore_open_question_already_recorded"
+        ? "这件事已有已登记答复，请先回写 discovery.md 后重新执行 next"
+      : "需要确认的事项已变化或已完成，请重新执行 next 获取当前事项",
+  };
 }
 
 function stringArray(value: unknown): value is string[] {
@@ -780,6 +847,54 @@ function recordUserDecisionLoaded(
     }));
     return { event_type: "user_decision_recorded" as const, accepted: false, message: "决策文件缺少决策范围（scope）或答复内容（answer）" };
   }
+  // Explore 的用户答复只能绑定当前文档顺序中的第一项。这里不判断答案是否
+  // “正确”，只机械校验当前项、Discovery 决策上下文和 Explore 轮次仍与 next
+  // 返回时一致，防止旧问题在材料改写或重新探索后被错误登记为新问题的决定。
+  let exploreOpenQuestion: DiscoveryOpenQuestion | null = null;
+  if (isExploreOpenQuestionScope(decision.scope)) {
+    if (!isWellFormedExploreOpenQuestionScope(decision.scope)) {
+      return invalidExploreOpenQuestionResult(
+        projectRoot,
+        change,
+        inputDigest,
+        existing,
+        { scope: decision.scope, answer: decision.answer },
+        "invalid_explore_open_question_scope",
+      );
+    }
+    const current = currentDiscoveryOpenQuestion(projectRoot, change);
+    const expectedScope = current ? discoveryOpenQuestionScope(current, currentExploreRoundId(events)) : null;
+    if (!expectedScope || decision.scope !== expectedScope) {
+      return invalidExploreOpenQuestionResult(
+        projectRoot,
+        change,
+        inputDigest,
+        existing,
+        { scope: decision.scope, answer: decision.answer },
+        "stale_explore_open_question_scope",
+      );
+    }
+    const acceptedForCurrentScope = latestAcceptedExploreOpenQuestionDecision(events, decision.scope);
+    if (acceptedForCurrentScope) {
+      const previousAnswer = (acceptedForCurrentScope.payload as { answer?: unknown }).answer;
+      if (previousAnswer === decision.answer) {
+        return {
+          event_type: "user_decision_recorded" as const,
+          accepted: true,
+          message: "幂等返回：同一用户决策已登记",
+        };
+      }
+      return invalidExploreOpenQuestionResult(
+        projectRoot,
+        change,
+        inputDigest,
+        existing,
+        { scope: decision.scope, answer: decision.answer },
+        "explore_open_question_already_recorded",
+      );
+    }
+    exploreOpenQuestion = current;
+  }
 
   let phaseConfirmation: PhaseConfirmation | null = null;
   let phaseAction: PhaseDecisionAction | null = null;
@@ -855,7 +970,10 @@ function recordUserDecisionLoaded(
     phaseReviewRisk = decisionRisk;
   }
 
-  if (existing && !phaseAction) {
+  // Explore scope 已在上面按当前问题和同 scope 的已接受答复完成校验。此前同一
+  // input 曾因 stale 被拒绝、但材料后来回到完全相同的当前项时，不能让旧拒绝
+  // 记录永久吞掉一次现在有效的登记。
+  if (existing && !phaseAction && !exploreOpenQuestion) {
     const accepted = (existing.payload as { accepted?: unknown }).accepted !== false;
     return {
       event_type: "user_decision_recorded" as const,
@@ -1017,7 +1135,9 @@ function recordUserDecisionLoaded(
     scope: decision.scope,
     question: phaseConfirmation
       ? phaseConfirmation.ask.question
-      : typeof decision.question === "string" ? decision.question : "",
+      : exploreOpenQuestion
+        ? discoveryOpenQuestionDisplayText(exploreOpenQuestion)
+        : typeof decision.question === "string" ? decision.question : "",
     answer: phaseAction
       ? phaseAction.label
       : normalizedAnswer ? codeReviewDecisionAnswerLabel(normalizedAnswer) : decision.answer,
@@ -1044,7 +1164,9 @@ function recordUserDecisionLoaded(
   return {
     event_type: "user_decision_recorded" as const,
     accepted: true,
-    message: `用户决策已登记：决策范围（scope）=${decision.scope}`,
+    message: exploreOpenQuestion
+      ? "这件事的答复已登记"
+      : `用户决策已登记：决策范围（scope）=${decision.scope}`,
   };
 }
 

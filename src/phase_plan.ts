@@ -2,10 +2,13 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { EXPLORE_DISCOVERY_REVIEW_GATE, PROPOSE_FINAL_REVIEW_GATE } from "./review_job_gates.ts";
 import type { ReviewGateRule } from "./review_job_gates.ts";
+import { currentExploreRoundId } from "./explore_round.ts";
 import {
   collectProposeOpenQuestions,
-  countDiscoveryOpenQuestions,
+  discoveryOpenQuestionDisplayText,
+  discoveryOpenQuestionScope,
   parseExecutionRequirements,
+  parseDiscoveryOpenQuestions,
   parseTasksMd,
   pendingTasksInContent,
   validateDiscovery,
@@ -618,11 +621,6 @@ export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
           reason: "回到 explore 后至少一个 discovery 材料必须变化",
         };
       }
-      const exploreReviewJobs = EXPLORE_DISCOVERY_REVIEW_GATE.openJobsForGate(snapshot);
-      if (exploreReviewJobs.length > 0) {
-        return requiredJobs("explore", exploreReviewJobs, `有 ${exploreReviewJobs.length} 个待完成探索审查工作项`);
-      }
-
       const discoveryCheck = validateDiscovery(changeRoot);
       if (!discoveryCheck.ok) {
         const ask: AskUser = {
@@ -634,14 +632,24 @@ export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
       }
 
       const content = readFileSync(join(changeRoot, ".superspec", "artifacts", "discovery.md"), "utf8");
-      const openQs = countDiscoveryOpenQuestions(content);
-      if (openQs > 0) {
+      const currentQuestion = parseDiscoveryOpenQuestions(content)[0];
+      if (currentQuestion) {
+        const questionText = discoveryOpenQuestionDisplayText(currentQuestion);
         const ask: AskUser = {
-          question: `discovery.md 有 ${openQs} 个未解决的待确认问题，请逐个确认`,
-          allowed_answers: ["所有问题已确认"],
-          scope: "explore_open_questions",
+          question: `现在有一件事需要你确认：${questionText}\n\n请只回答这一件事。主流程会先登记答复，再将结论回写 discovery.md；回写完成前会继续询问这一件事。`,
+          // 用户可以接受建议、选择其他方向或补充事实；状态机不解释答案语义。
+          allowed_answers: [],
+          scope: discoveryOpenQuestionScope(currentQuestion, currentExploreRoundId(events)),
         };
-        return { kind: "ask_user", state: "explore", ask, reason: `有 ${openQs} 个未确认问题` };
+        return { kind: "ask_user", state: "explore", ask, reason: "等待用户确认" };
+      }
+
+      // 先让用户澄清当前 Discovery，再审查材料；否则 critic 会审查一份仍有
+      // 关键业务未知的文档。正常创建的 job 已绑定 discovery 指纹，材料变化后
+      // 会由 snapshot freshness 自动失效。
+      const exploreReviewJobs = EXPLORE_DISCOVERY_REVIEW_GATE.openJobsForGate(snapshot);
+      if (exploreReviewJobs.length > 0) {
+        return requiredJobs("explore", exploreReviewJobs, `有 ${exploreReviewJobs.length} 个待完成探索审查工作项`);
       }
 
       const requiredRoles = EXPLORE_DISCOVERY_REVIEW_GATE.requiredRolesForRisk(mode.risk);
@@ -1029,6 +1037,12 @@ function planExploreTransition(context: TransitionPlanContext): TransitionDecisi
 
   const discoveryCheck = validateDiscovery(changeRoot);
   if (!discoveryCheck.ok) return { kind: "skip", message: discoveryCheck.message };
+
+  const discoveryContent = readFileSync(join(changeRoot, ".superspec", "artifacts", "discovery.md"), "utf8");
+  const currentQuestion = parseDiscoveryOpenQuestions(discoveryContent)[0];
+  if (currentQuestion) {
+    return { kind: "skip", message: "discovery.md 仍有需要确认的事项，请先完成确认并回写 discovery.md" };
+  }
 
   const requiredRoles = EXPLORE_DISCOVERY_REVIEW_GATE.requiredRolesForRisk(mode.risk);
   const gatePlan = reviewGatePlan(snapshot, events, changeRoot, EXPLORE_DISCOVERY_REVIEW_GATE, requiredRoles);

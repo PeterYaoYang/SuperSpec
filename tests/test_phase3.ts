@@ -209,6 +209,139 @@ test("start-apply：未确认时直接调用被拒绝，只有精确确认才能
   } finally { fx.cleanup(); }
 });
 
+test("propose_to_apply 阶段确认携带任务交付摘要，但不新增确认", () => {
+  const fx = setupApply(false);
+  try {
+    writeFileSync(join(fx.changeRoot, "tasks.md"), [
+      "# Tasks",
+      "",
+      "- [ ] TASK-001 生成可查询的班次摘要",
+      "  执行依据:",
+      "  - 测试: TEST-001",
+      "  - 设计: design.md#Summary",
+      "  - 来源: proposal.md#Impact",
+      "  - 验收: 管理员可查询到当日班次摘要",
+      "  - 边界: 不改变历史班次数据",
+      "  - 交付: 管理员获得按日查询的班次摘要",
+      "  - 依赖: 无",
+      "",
+      "- [ ] TASK-002 在报表中展示班次摘要",
+      "  执行依据:",
+      "  - 测试: TEST-002",
+      "  - 设计: design.md#Report",
+      "  - 来源: proposal.md#Impact",
+      "  - 验收: 报表展示与查询结果一致",
+      "  - 边界: 不改变现有报表筛选",
+      "  - 交付: 报表调用方可查看班次摘要",
+      "  - 依赖: TASK-001",
+      "",
+    ].join("\n"));
+    writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "test-contract.md"), [
+      "# Test Contract",
+      "",
+      "| test_id | scenario |",
+      "|---|---|",
+      "| TEST-001 | 给定当日班次，当管理员查询时看到摘要 |",
+      "| TEST-002 | 给定已生成摘要，当查看报表时看到相同摘要 |",
+    ].join("\n"));
+
+    const ask = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(ask.path, "ask_user");
+    assert.match(ask.ask_user.scope, /^phase_confirmation:propose_to_apply:/);
+    assert.match(ask.ask_user.question, /^执行计划概览/m);
+    assert.match(ask.ask_user.question, /TASK-001 生成可查询的班次摘要/);
+    assert.match(ask.ask_user.question, /依赖：TASK-001/);
+    assert.match(ask.ask_user.question, /验收：报表展示与查询结果一致/);
+    assert.equal((ask.ask_user.actions as PhaseDecisionAction[]).length, 2);
+  } finally { fx.cleanup(); }
+});
+
+test("propose_to_apply 对单个行为 task 也展示摘要", () => {
+  const fx = setupApply(false);
+  try {
+    writeFileSync(join(fx.changeRoot, "tasks.md"), [
+      "# Tasks",
+      "",
+      "- [ ] TASK-001 完成单次导入并允许查询结果",
+      "  执行依据:",
+      "  - 测试: TEST-001",
+      "  - 设计: design.md#Import",
+      "  - 来源: proposal.md#Import",
+      "  - 验收: 用户导入后可以查询到结果",
+      "  - 边界: 不改变历史记录",
+      "  - 交付: 用户获得可查询的导入结果",
+      "  - 依赖: 无",
+      "",
+    ].join("\n"));
+    writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "test-contract.md"), [
+      "# Test Contract",
+      "",
+      "| test_id | scenario |",
+      "|---|---|",
+      "| TEST-001 | 导入有效数据后，用户可以查询到导入结果 |",
+    ].join("\n"));
+    const ask = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(ask.path, "ask_user");
+    assert.match(ask.ask_user.question, /执行计划概览/);
+    assert.match(ask.ask_user.question, /用户获得可查询的导入结果/);
+    assert.match(ask.ask_user.question, /用户导入后可以查询到结果/);
+    assert.equal((ask.ask_user.actions as PhaseDecisionAction[]).length, 2);
+  } finally { fx.cleanup(); }
+});
+
+test("propose_to_apply 对单个极简 task 也展示默认摘要", () => {
+  const fx = setupApply(false);
+  try {
+    writeFileSync(join(fx.changeRoot, "tasks.md"), "# Tasks\n\n- [ ] TASK-001 更新单个说明\n");
+    const ask = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(ask.path, "ask_user");
+    assert.match(ask.ask_user.question, /执行计划概览/);
+    assert.match(ask.ask_user.question, /TASK-001 更新单个说明/);
+    assert.match(ask.ask_user.question, /验收：计划未单独声明验收/);
+    assert.equal((ask.ask_user.actions as PhaseDecisionAction[]).length, 2);
+  } finally { fx.cleanup(); }
+});
+
+test("propose_to_apply 摘要压缩已完成任务，只展开待实施任务", () => {
+  const fx = setupApply(false);
+  try {
+    writeFileSync(join(fx.changeRoot, "tasks.md"), [
+      "# Tasks",
+      "",
+      "- [x] TASK-001 已完成的历史导入",
+      "- [ ] TASK-002 调整后的报表展示",
+    ].join("\n"));
+
+    const ask = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(ask.path, "ask_user");
+    assert.match(ask.ask_user.question, /已完成 1 项；以下 1 项仍待实施或调整。/);
+    assert.match(ask.ask_user.question, /TASK-002 调整后的报表展示/);
+    assert.doesNotMatch(ask.ask_user.question, /TASK-001 已完成的历史导入/);
+  } finally { fx.cleanup(); }
+});
+
+test("propose_to_apply 摘要以当前计划为准：重新打开的历史任务仍会展开", () => {
+  const fx = setupApply(false);
+  try {
+    // 该 task 在较早的 Apply 轮已经完成；回到 Propose 后，计划明确把它改回
+    // 未完成，表示它已重新纳入本轮交付，摘要不能被历史 task_completed 隐藏。
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "task_completed", {
+      task_id: "TASK-001",
+      attempt_id: "ATT-previous-round",
+    }));
+    writeFileSync(join(fx.changeRoot, "tasks.md"), [
+      "# Tasks",
+      "",
+      "- [ ] TASK-001 重新调整历史导入",
+    ].join("\n"));
+
+    const ask = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(ask.path, "ask_user");
+    assert.match(ask.ask_user.question, /TASK-001 重新调整历史导入/);
+    assert.doesNotMatch(ask.ask_user.question, /已完成 1 项/);
+  } finally { fx.cleanup(); }
+});
+
 test("start-apply：minimal 无历史 proposal 审查时可进入 apply", () => {
   const fx = setupApply();
   try {
