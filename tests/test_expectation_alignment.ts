@@ -9,7 +9,7 @@ import { ensureChangeLayout, appendEvent, makeEvent, readEvents } from "../src/s
 import { next } from "../src/next.ts";
 import { jobsPacket, recordUserDecisionContent } from "../src/record.ts";
 import { recordTestRunContent } from "../src/task.ts";
-import { proposeReady, reviewReady, startApply, taskComplete, taskStart } from "../src/transition.ts";
+import { proposeReady, reviewReady, reopen, startApply, taskComplete, taskStart } from "../src/transition.ts";
 import { pendingTaskStatusForApply, planningValidationProfileForNewRound } from "../src/phase_plan.ts";
 import { diffFingerprints } from "../src/git_state.ts";
 import { codeReviewPacketContext } from "../src/code_review.ts";
@@ -1300,6 +1300,148 @@ test("执行依据模式：REVIEW-FIX task 没有执行依据时仍要求回归 
       semantic_status: "expected_success",
     })).accepted, true);
     assert.equal(taskComplete(fx.projectRoot, fx.change, fx.changeRoot, "REVIEW-FIX-JOB-1#F1").outcome, "advanced");
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("执行依据模式：自测 Fix Task 复用冻结 mode，并携带可追溯修复描述", () => {
+  const tasks = [
+    "# Tasks",
+    "",
+    "- [ ] TASK-001 Existing task tdd_required:true",
+    "  执行依据:",
+    "  - 测试: test-contract.md#TEST-001",
+    "  - 设计: design.md#Route",
+    "  - 来源: proposal.md#Impact",
+    "  - 原因: 已完成任务",
+    "  - 边界: 不改持久化",
+    "",
+  ].join("\n");
+  const testContract = [
+    "# Test Contract",
+    "",
+    "| test_id | scenario |",
+    "|---|---|",
+    "| TEST-001 | behavior works |",
+    "",
+  ].join("\n");
+
+  for (const risk of ["minimal", "normal", "strict"] as const) {
+    const fx = setupChange(tasks, testContract, risk);
+    try {
+      assert.equal(startApplyConfirmed(fx.projectRoot, fx.change, fx.changeRoot, risk).to_state, "apply");
+      const originalStarted = taskStart(fx.projectRoot, fx.change, fx.changeRoot, "TASK-001");
+      const originalAttemptId = String(originalStarted.details?.attempt_id);
+      if (risk === "strict") {
+        assert.equal(recordTestRunContent(fx.projectRoot, fx.change, JSON.stringify({
+          test_id: "TEST-001",
+          attempt_id: originalAttemptId,
+          command: "npm test -- original-task",
+          cwd: fx.projectRoot,
+          exit_code: 1,
+          semantic_status: "expected_failure",
+        })).accepted, true);
+      }
+      assert.equal(recordTestRunContent(fx.projectRoot, fx.change, JSON.stringify({
+        test_id: "TEST-001",
+        attempt_id: originalAttemptId,
+        command: "npm test -- original-task",
+        cwd: fx.projectRoot,
+        exit_code: 0,
+        semantic_status: "expected_success",
+      })).accepted, true);
+      assert.equal(taskComplete(fx.projectRoot, fx.change, fx.changeRoot, "TASK-001").outcome, "advanced");
+
+      const reopened = reopen(fx.projectRoot, fx.change, fx.changeRoot, "apply", "空输入自测失败，需要保持既有边界行为", {
+        selfTestFix: "TASK-001",
+      });
+      assert.equal(reopened.from_state, "apply");
+      assert.equal(reopened.to_state, "apply");
+
+      const fix = (readEvents(fx.projectRoot, fx.change).findLast(event =>
+        event.event_type === "transition_commit" && (event.payload as { fix?: unknown }).fix != null
+      )?.payload as { fix?: { fix_id?: string; source?: string; parent_task_id?: string; reason?: string } }).fix;
+      assert.equal(fix?.source, "self_test");
+      assert.equal(fix?.parent_task_id, "TASK-001");
+      assert.match(fix?.fix_id ?? "", /^FIX-SELFTEST-TASK-001-/);
+
+      const started = taskStart(fx.projectRoot, fx.change, fx.changeRoot, String(fix?.fix_id));
+      const attemptId = String(started.details?.attempt_id);
+      assert.deepEqual(started.details?.required_evidence, {
+        test_ids: [],
+        red_required: risk === "strict",
+        green_required: true,
+        accepted_green_statuses: ["expected_success"],
+      });
+      assert.deepEqual((started.details?.fix as { source?: string; parent_task_id?: string } | undefined), {
+        ...fix,
+      });
+
+      if (risk === "strict") {
+        assert.equal(recordTestRunContent(fx.projectRoot, fx.change, JSON.stringify({
+          test_id: "TEST-REPAIR",
+          attempt_id: attemptId,
+          command: "npm test -- self-test-fix",
+          cwd: fx.projectRoot,
+          exit_code: 1,
+          semantic_status: "expected_failure",
+        })).accepted, true);
+      }
+      assert.equal(recordTestRunContent(fx.projectRoot, fx.change, JSON.stringify({
+        test_id: "TEST-REPAIR",
+        attempt_id: attemptId,
+        command: "npm test -- self-test-fix",
+        cwd: fx.projectRoot,
+        exit_code: 0,
+        semantic_status: "expected_success",
+      })).accepted, true);
+      assert.equal(taskComplete(fx.projectRoot, fx.change, fx.changeRoot, String(fix?.fix_id)).outcome, "advanced");
+
+      const reviewContext = codeReviewPacketContext(fx.changeRoot, fx.projectRoot, {
+        base_head: null,
+        current_head: null,
+        scope_reliable: false,
+        scope_reason: "test",
+        committed_paths: null,
+        worktree_paths: [],
+        untracked_paths: [],
+        review_paths: [],
+      }, readEvents(fx.projectRoot, fx.change));
+      assert.deepEqual(reviewContext.task_execution_index?.find(entry => entry.task_id === fix?.fix_id)?.fix, fix);
+    } finally {
+      fx.cleanup();
+    }
+  }
+});
+
+test("执行依据模式：自测 Fix Task 不能只凭 checkbox 伪造已完成的父 task", () => {
+  const fx = setupChange([
+    "# Tasks",
+    "",
+    "- [x] TASK-001 Checkbox-only task tdd_required:true",
+    "  执行依据:",
+    "  - 测试: test-contract.md#TEST-001",
+    "  - 设计: design.md#Route",
+    "  - 来源: proposal.md#Impact",
+    "  - 原因: 需要完成事件",
+    "  - 边界: 不改持久化",
+    "",
+  ].join("\n"), [
+    "# Test Contract",
+    "",
+    "| test_id | scenario |",
+    "|---|---|",
+    "| TEST-001 | behavior works |",
+    "",
+  ].join("\n"));
+  try {
+    assert.equal(startApplyConfirmed(fx.projectRoot, fx.change, fx.changeRoot, "normal").to_state, "apply");
+    const result = reopen(fx.projectRoot, fx.change, fx.changeRoot, "apply", "自测问题", {
+      selfTestFix: "TASK-001",
+    });
+    assert.equal(result.events_written, 0);
+    assert.match(result.message, /缺少完成事件/);
   } finally {
     fx.cleanup();
   }

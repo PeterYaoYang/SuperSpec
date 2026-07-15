@@ -1,9 +1,9 @@
 <!-- SUPERSPEC:AGENTS:START -->
-本项目启用 SuperSpec。使用 `superspec-*` 工作流时，以 `superspec transition next --change "<change>"` 返回的下一步为准；流程完成前不得跳阶段、不得自称完成。
+本项目启用 SuperSpec 后，确定 change 后，使用 `superspec-*` 工作流时一律以 `superspec transition next --change "<change>"` 返回的下一步推进；主流程执行内部命令，不要求用户手动运行工作流命令。流程完成前不得跳阶段、不得自称完成。
 
-即使用户没有显式调用 `superspec-*`，如果新输入像是在改变业务规则、产品口径、验收标准、示例规范、影响范围，或说明 PRD/文档/原型等需求源已更新，编辑代码前先提醒并做只读确认：这是实现偏差，还是需要先回 `superspec-propose` 更新计划文档；不要直接把这类自然语言当作 apply 授权。
+当用户提出的问题涉及已有 change 时，即使用户没有显式调用 `superspec-*`，新增或改变业务规则、产品口径、验收、示例规范、影响范围，或说明 PRD/文档/原型等需求源已更新时，先确定对应 change；归属明确则回同一 change 的 `propose` 更新计划，归属不明才询问。不要把这类输入直接当作 apply 授权，也不要另建 repair change。
 
-用户补充 SuperSpec 相关内容时，先确定对应 change，再按 next 返回处理；无法确定时只询问归属，不执行流转。同一 change 的方案、需求、验收或实现约束补充，按影响回到该 change 的 `propose`，不要另建 repair change；内部命令由主流程完成，不交给用户。
+Apply 中的自测或联调 finding 不是需求补充：仍能由既有 task 的批准行为、边界和验收解释时，当前 task 未完成则直接修复；全部 task 已完成则用 `--self-test-fix` 回到同一 change 的 apply。只有无法关联既有 task，或需要改变行为、验收、接口、数据语义或实现路线时，才回 propose。
 
 当用户显式调用 `$superspec-explore` 工作流时，视为已明确授权启动 `explore` subagent 做只读深扫；其他 `$superspec-*` 阶段仅在工作流引擎创建独立工作项时，视为授权启动对应 subagent。
 

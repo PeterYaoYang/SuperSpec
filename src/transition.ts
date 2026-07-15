@@ -23,6 +23,7 @@ import {
 } from "./review.ts";
 import {
   REVIEW_CODE_REVIEW_GATE_ID,
+  REVIEW_FINAL_VERIFIER_GATE,
   REVIEW_FINAL_VERIFIER_GATE_ID,
   reviewScopeForGateRole,
   type ReviewGateRule,
@@ -37,17 +38,20 @@ import {
   computeCodeStateCheck,
   currentCodeReviewWorkingPaths,
   dismissedCodeReviewSummary,
+  effectiveCoverageExemptionRefsFromEvents,
+  latestCodeReviewGateEvidence,
   latestCodeReviewDecision,
   latestCodeReviewFailedStatus,
   missingCoverageExemptionTestIds,
   requiresFinalVerifierForCurrentReview,
   scanCodeChangesForReview,
+  taskExecutionIndexForReview,
 } from "./code_review.ts";
 import { taskEvidenceReadiness } from "./task_evidence.ts";
 import {
   adoptedContractForTask,
   findTaskInLines,
-  isReviewFixTaskId,
+  isFixTaskId,
   parseTasksMd,
   parseTestContractEntries,
   type ParsedExecutionRequirement,
@@ -75,7 +79,7 @@ import {
 } from "./phase_confirmation.ts";
 import { currentGitHead, dirtyCodeFiles, stageProductionJavaFilesSince } from "./git_state.ts";
 import { workflowRiskForProject } from "./workflow_config.ts";
-import type { CodeReviewScope, Event, Snapshot, State, Job, JobRole, TransitionResult, Ref, TaskAttempt, BoundarySnapshot, EffectiveEvidencePlan, ExecutionPolicy } from "./types.ts";
+import type { CodeReviewScope, Event, Snapshot, State, Job, JobRole, TransitionResult, Ref, TaskAttempt, BoundarySnapshot, EffectiveEvidencePlan, ExecutionPolicy, FixDescriptor } from "./types.ts";
 
 let transitionSeq = 0;
 function newTransitionId(): string { return `T-${Date.now()}-${++transitionSeq}`; }
@@ -250,12 +254,12 @@ function validateLegacyTaskStartContract(
   parsedContract: ParsedExecutionRequirement | null,
 ): string | null {
   if (!parsedContract) {
-    return tddRequired && !isReviewFixTaskId(taskId)
+    return tddRequired && !isFixTaskId(taskId)
       ? `执行依据模式下，普通 TDD 任务 ${taskId} 缺少执行依据`
       : null;
   }
   if (parsedContract.errors.length > 0) return parsedContract.errors.join("；");
-  if (tddRequired && !isReviewFixTaskId(taskId) && parsedContract.contract.tests.length === 0) {
+  if (tddRequired && !isFixTaskId(taskId) && parsedContract.contract.tests.length === 0) {
     return `${taskId} 是普通 TDD 任务，执行依据缺少测试`;
   }
   if (parsedContract.contract.tests.length === 0) return null;
@@ -278,7 +282,7 @@ function compileRequiredEvidence(
   testIds: string[],
   requiresVerificationWithoutDeclaredTest: boolean,
 ): EffectiveEvidencePlan {
-  // REVIEW-FIX 没有计划阶段声明的 TEST，但仍必须登记一次真实回归验证。
+  // Fix task 没有计划阶段声明的 TEST，但仍必须登记一次真实回归验证。
   // 是否需要 RED 始终由已冻结的 execution_policy 决定。
   const requiresVerification = testIds.length > 0 || requiresVerificationWithoutDeclaredTest;
   return {
@@ -370,27 +374,83 @@ function findReviewFailedFinding(events: Event[], ref: CodeReviewFindingRef): { 
   return { event: status.terminal.event, finding };
 }
 
-function reviewFixMarker(ref: CodeReviewFindingRef): string {
-  return `review_fix_of:${ref.jobId}#${ref.findingId}`;
-}
-
-function reviewFixTaskId(ref: CodeReviewFindingRef): string {
-  return `REVIEW-FIX-${ref.jobId}#${ref.findingId}`;
-}
-
-function appendReviewFixTask(changeRoot: string, ref: CodeReviewFindingRef, finding: Record<string, unknown>): "created" | "exists" {
-  const tasksPath = join(changeRoot, "tasks.md");
-  const content = readFileSync(tasksPath, "utf8");
-  const marker = reviewFixMarker(ref);
-  if (content.includes(marker)) return "exists";
-
-  const description = typeof finding.description === "string" && finding.description.trim()
+function reviewFixDescriptor(ref: CodeReviewFindingRef, finding: Record<string, unknown>): FixDescriptor {
+  const reason = typeof finding.description === "string" && finding.description.trim()
     ? finding.description.trim().replace(/\s+/g, " ")
     : `修复代码审查问题 ${ref.findingId}`;
-  const line = `- [ ] ${reviewFixTaskId(ref)} ${description} ${marker}`;
+  return {
+    fix_id: `REVIEW-FIX-${ref.jobId}#${ref.findingId}`,
+    source: "code_review",
+    parent_task_id: null,
+    reason,
+    review_finding: { job_id: ref.jobId, finding_id: ref.findingId },
+  };
+}
+
+function selfTestFixDescriptor(parentTaskId: string, reason: string): FixDescriptor {
+  const normalizedReason = reason.trim().replace(/\s+/g, " ");
+  const normalizedTaskId = parentTaskId.replace(/[^A-Za-z0-9_-]/g, "-");
+  const digest = sha256Text(`${parentTaskId}\n${normalizedReason}`).replace(/^sha256:/, "").slice(0, 12);
+  return {
+    fix_id: `FIX-SELFTEST-${normalizedTaskId}-${digest}`,
+    source: "self_test",
+    parent_task_id: parentTaskId,
+    reason: normalizedReason,
+  };
+}
+
+function fixMarker(fix: FixDescriptor): string {
+  if (fix.source === "code_review" && fix.review_finding) {
+    return `review_fix_of:${fix.review_finding.job_id}#${fix.review_finding.finding_id}`;
+  }
+  return `self_test_fix_of:${fix.parent_task_id ?? "unknown"}:${fix.fix_id}`;
+}
+
+function appendFixTask(changeRoot: string, fix: FixDescriptor): "created" | "exists" {
+  const tasksPath = join(changeRoot, "tasks.md");
+  const content = readFileSync(tasksPath, "utf8");
+  const marker = fixMarker(fix);
+  if (content.includes(marker)) {
+    const matchingTask = content.split("\n").some(line =>
+      line.includes(marker) && line.startsWith(`- [ ] ${fix.fix_id} `)
+    );
+    if (matchingTask) return "exists";
+    throw new Error(`修复标记 ${marker} 已被其它 task 占用，拒绝创建 ${fix.fix_id}`);
+  }
+
+  const description = fix.source === "self_test"
+    ? `修复自测问题（关联 ${fix.parent_task_id}）：${fix.reason}`
+    : fix.reason;
+  const line = `- [ ] ${fix.fix_id} ${description} ${marker}`;
   const suffix = content.endsWith("\n") ? "" : "\n";
   writeFileSync(tasksPath, `${content}${suffix}${line}\n`);
   return "created";
+}
+
+function fixDescriptorForTask(events: Event[], taskId: string): FixDescriptor | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i];
+    if (event.event_type !== "transition_commit") continue;
+    const fix = (event.payload as { fix?: unknown }).fix;
+    if (!fix || typeof fix !== "object" || Array.isArray(fix)) continue;
+    const candidate = fix as Partial<FixDescriptor>;
+    if (candidate.fix_id !== taskId) continue;
+    if (candidate.source !== "code_review" && candidate.source !== "self_test") continue;
+    if (typeof candidate.parent_task_id !== "string" && candidate.parent_task_id !== null) continue;
+    if (typeof candidate.reason !== "string") continue;
+    return candidate as FixDescriptor;
+  }
+  // 兼容发布前已写入 tasks.md、但 transition payload 尚未保存修复描述符的记录。
+  const legacy = /^REVIEW-FIX-(.+)#([^#]+)$/.exec(taskId);
+  return legacy
+    ? {
+        fix_id: taskId,
+        source: "code_review",
+        parent_task_id: null,
+        reason: "历史代码审查修复任务",
+        review_finding: { job_id: legacy[1], finding_id: legacy[2] },
+      }
+    : null;
 }
 
 function isFreshOpenCodeReviewerJob(job: Job, projectRoot: string, currentWorkingPaths?: string[]): boolean {
@@ -510,9 +570,14 @@ function createFinalVerifierJob(
   currentEvidenceDigest: string,
 ): Job {
   const boundFiles = reviewBoundFiles(changeRoot);
+  const codeReviewGate = latestCodeReviewGateEvidence(events);
   const packetContext = {
     code_state_check: computeCodeStateCheck(projectRoot, events),
+    coverage_exemption_refs: effectiveCoverageExemptionRefsFromEvents(events),
+    task_execution_index: taskExecutionIndexForReview(projectRoot, events),
+    ...(codeReviewGate ? { code_review_gate: codeReviewGate } : {}),
   };
+  const previousRejection = latestReviewHistoryForGateRole(events, REVIEW_FINAL_VERIFIER_GATE, "verifier");
   return {
     job_id: newJobId(change, "verifier"),
     role: "verifier",
@@ -528,9 +593,11 @@ function createFinalVerifierJob(
       review_evidence_digest: currentEvidenceDigest,
       packet_context: packetContext,
       created_from_transition: "review-ready",
+      ...(previousRejection ? { previous_rejection: previousRejection } : {}),
     })),
     created_from_transition: "review-ready",
     created_at: new Date().toISOString(),
+    ...(previousRejection ? { previous_rejection: previousRejection } : {}),
   };
 }
 
@@ -893,11 +960,15 @@ export function taskStart(projectRoot: string, change: string, changeRoot: strin
       // 统一出口：adopted.contract 非 null 当且仅当契约模式下有绑定块；
       // legacy 轮即使 task 带执行依据文本也输出 null，避免"看似契约、实按 legacy 校验"的误导态
       const adopted = adoptedContractForTask(tasksContent, taskId, contractMode);
-      const reviewFix = isReviewFixTaskId(taskId);
-      if (contractMode && executionRequirementVersion === 2 && !reviewFix && !adopted.parsed) {
+      const fix = fixDescriptorForTask(events, taskId);
+      const isFixTask = isFixTaskId(taskId);
+      if (isFixTask && !fix) {
+        return { skip: true, message: `Fix task ${taskId} 缺少状态机创建记录，不能直接手工追加` };
+      }
+      if (contractMode && executionRequirementVersion === 2 && !isFixTask && !adopted.parsed) {
         return { skip: true, message: `执行依据模式下，任务 ${taskId} 缺少执行依据` };
       }
-      if (contractMode && executionRequirementVersion === 2 && !reviewFix && adopted.parsed) {
+      if (contractMode && executionRequirementVersion === 2 && !isFixTask && adopted.parsed) {
         const contractError = validateTaskStartContract(changeRoot, taskId, adopted.parsed);
         if (contractError) return { skip: true, message: contractError };
       }
@@ -914,12 +985,13 @@ export function taskStart(projectRoot: string, change: string, changeRoot: strin
       const structureDigest = sha256Text(tasksContent.replace(/- \[[xX]\]/g, "- [ ]"));
       const effectivePolicy = executionPolicy;
       const requiredEvidence = contractMode && executionRequirementVersion === 2
-        ? compileRequiredEvidence(effectivePolicy, adopted.contract?.tests ?? [], reviewFix)
+        ? compileRequiredEvidence(effectivePolicy, adopted.contract?.tests ?? [], isFixTask)
         : null;
       const attempt: TaskAttempt = {
         attempt_id: `ATT-${taskId}-${Date.now()}-${++attemptSeq}`,
         task_id: taskId, state: "active",
         task_structure_digest: structureDigest,
+        ...(fix ? { fix } : {}),
         contract_mode: contractMode,
         contract: adopted.contract,
         ...(requiredEvidence ? { required_evidence: requiredEvidence } : {
@@ -948,8 +1020,9 @@ export function taskStart(projectRoot: string, change: string, changeRoot: strin
           task_id: taskId,
           execution_policy: effectivePolicy,
           contract: adopted.contract,
+          ...(fix ? { fix } : {}),
           ...(requiredEvidence ? { required_evidence: requiredEvidence } : {}),
-          // legacy 轮统一标注历史模式（无论有无执行依据文本）；契约轮无块时标 false（如 REVIEW-FIX）
+          // legacy 轮统一标注历史模式（无论有无执行依据文本）；契约轮无块时标 false（如 Fix task）
           ...(adopted.contract ? {} : { legacy_contract: !contractMode }),
         },
       };
@@ -972,7 +1045,7 @@ function abandonActiveTaskAttempts(snapshot: Snapshot, to: "explore" | "propose"
     }));
 }
 
-function invalidateOpenJobs(snapshot: Snapshot, to: "explore" | "propose", reason: string): NonNullable<Decision["extraEvents"]> {
+function invalidateOpenJobs(snapshot: Snapshot, to: State, reason: string): NonNullable<Decision["extraEvents"]> {
   return snapshot.open_jobs.map(job => ({
     type: "job_invalidated",
     payload: {
@@ -1006,13 +1079,21 @@ export function reopen(
   changeRoot: string,
   to: State,
   reason: string,
-  opts: { reviewFix?: string; reviewFinding?: string } = {},
+  opts: { reviewFix?: string; reviewFinding?: string; selfTestFix?: string } = {},
 ): TransitionResult {
   return commitTransition(projectRoot, change, changeRoot, {
-    name: "reopen", idempotencyInputs: { to, reason, reviewFix: opts.reviewFix ?? "", reviewFinding: opts.reviewFinding ?? "" },
+    name: "reopen", idempotencyInputs: {
+      to,
+      reason,
+      reviewFix: opts.reviewFix ?? "",
+      reviewFinding: opts.reviewFinding ?? "",
+      selfTestFix: opts.selfTestFix ?? "",
+    },
     decide: (snapshot) => {
       if (!reason || reason.trim() === "") return { skip: true, message: "reopen 需要非空 --reason" };
       const events = readEvents(projectRoot, change);
+      const specialFixCount = [opts.reviewFix, opts.reviewFinding, opts.selfTestFix].filter(Boolean).length;
+      if (specialFixCount > 1) return { skip: true, message: "一次 reopen 只能指定一种修复或审查引用" };
 
       if (opts.reviewFinding) {
         if (to !== "propose") return { skip: true, message: "--review-finding 只能用于回到计划阶段（reopen --to propose）" };
@@ -1058,6 +1139,7 @@ export function reopen(
         } else if (type !== "implementation") {
           return { skip: true, message: "这个代码审查问题不能直接回到实现阶段处理" };
         }
+        const fix = reviewFixDescriptor(ref, found.finding);
         return {
           fromState: "apply_done",
           toState: "apply",
@@ -1067,9 +1149,60 @@ export function reopen(
             review_fix_of: `${ref.jobId}#${ref.findingId}`,
             source_job_id: ref.jobId,
             finding_id: ref.findingId,
+            fix,
           },
           postCommit: (_pr, _ch, cr) => {
-            appendReviewFixTask(cr, ref, found.finding);
+            appendFixTask(cr, fix);
+          },
+        };
+      }
+
+      if (opts.selfTestFix) {
+        if (to !== "apply") return { skip: true, message: "--self-test-fix 只能用于回到实现阶段（reopen --to apply）" };
+        const allowedStates: State[] = ["apply", "apply_done", "review", "accepted"];
+        if (!allowedStates.includes(snapshot.state)) {
+          return { skip: true, message: `当前状态 ${snapshot.state}，不能通过自测问题回到实现阶段` };
+        }
+
+        const parentTaskId = opts.selfTestFix.trim();
+        const parentTask = parseTasksMd(readFileSync(join(changeRoot, "tasks.md"), "utf8"))
+          .find(task => task.taskId === parentTaskId);
+        if (!parentTask) return { skip: true, message: `自测修复关联的 task ${parentTaskId} 不存在` };
+        const fix = selfTestFixDescriptor(parentTaskId, reason);
+        const alreadyCreated = events.some(event =>
+          event.event_type === "transition_commit" &&
+          (event.payload as { fix?: { fix_id?: unknown } }).fix?.fix_id === fix.fix_id
+        );
+        if (alreadyCreated) return { skip: true, message: `自测修复 ${fix.fix_id} 已创建` };
+
+        const pendingStatus = pendingTaskStatusForApply(changeRoot, events);
+        if (pendingStatus.pending.length > 0 || snapshot.active_task_attempts.some(attempt => attempt.state === "active")) {
+          return { skip: true, message: "自测修复只允许在当前 task 全部完成且没有活跃执行尝试后创建" };
+        }
+        if (pendingStatus.mode === "contract" && !pendingStatus.completedByEvent.includes(parentTaskId)) {
+          return { skip: true, message: `自测修复关联的 task ${parentTaskId} 缺少完成事件，不能只依赖 checkbox` };
+        }
+        if (pendingStatus.mode === "legacy" && !parentTask.done) {
+          return { skip: true, message: `自测修复关联的 task ${parentTaskId} 尚未完成` };
+        }
+
+        const failedReview = latestCodeReviewFailedStatus(events);
+        if (failedReview?.unresolved.length) {
+          return {
+            skip: true,
+            message: `已有未处理的代码审查问题 ${failedReview.unresolved[0].id}；请先按 next 返回的 --review-fix 处理`,
+          };
+        }
+
+        return {
+          fromState: snapshot.state,
+          toState: "apply",
+          outcome: "advanced" as const,
+          reason: reason.trim(),
+          commitPayload: { fix },
+          extraEvents: invalidateOpenJobs(snapshot, "apply", reason.trim()),
+          postCommit: (_pr, _ch, cr) => {
+            appendFixTask(cr, fix);
           },
         };
       }

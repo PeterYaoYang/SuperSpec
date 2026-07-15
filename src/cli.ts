@@ -575,7 +575,7 @@ transition 子命令：
   init / explore / sync / next / propose-ready / start-apply
   task-start --task <T> / task-complete --task <T> [--input -]
   reopen --to explore|propose|apply --reason <TEXT>
-  reopen --to apply --reason <TEXT> [--review-fix <JOB#FINDING>]
+  reopen --to apply --reason <TEXT> [--review-fix <JOB#FINDING>|--self-test-fix <TASK>]
   reopen --to propose --reason <TEXT> [--review-finding <JOB#FINDING>]
   review-ready / accept
 
@@ -794,6 +794,7 @@ jobs 子命令：
             const result = reopen(projectRoot, change, cr, to, reason, {
               ...(opts["review-fix"] ? { reviewFix: opts["review-fix"] } : {}),
               ...(opts["review-finding"] ? { reviewFinding: opts["review-finding"] } : {}),
+              ...(opts["self-test-fix"] ? { selfTestFix: opts["self-test-fix"] } : {}),
             });
             console.log(JSON.stringify(result, null, 2));
             return transitionExitCode(result);

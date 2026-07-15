@@ -787,13 +787,10 @@ test("explore→propose 默认完整审查：创建 critic，接受 JSON 报告�
     ]);
     assert.equal(packet.packet?.file_fallback, true);
     assert.deepEqual(packet.packet?.output_contract_fields, ["role", "verdict", "findings", "reviewer", "review_scope"]);
-    assert.match(packet.packet?.output_instructions ?? "", /先建立覆盖索引/);
-    assert.match(packet.packet?.output_instructions ?? "", /长文档必须分段读取/);
-    assert.match(packet.packet?.output_instructions ?? "", /完整读取只用于核对本次 change/);
-    assert.match(packet.packet?.output_instructions ?? "", /不等于允许重新审计全部历史设计/);
-    assert.match(packet.packet?.output_instructions ?? "", /受影响能力、直接修改章节和保持不变范围作为本轮增量审查的权威锚点/);
-    assert.match(packet.packet?.output_instructions ?? "", /此前已通过且被明确记录为保持不变的设计不得重新打开为 blocker/);
-    assert.match(packet.packet?.output_instructions ?? "", /Recommendation 只能描述需要补足的结果、契约或证据/);
+    assert.match(packet.packet?.output_instructions ?? "", /完整审查全部 boundFiles/);
+    assert.match(packet.packet?.output_instructions ?? "", /不因发现第一个 blocker 停止/);
+    assert.match(packet.packet?.output_instructions ?? "", /review_scope\.checked_paths 必须回执/);
+    assert.doesNotMatch(packet.packet?.output_instructions ?? "", /若 proposal\.md 有“需求变化”/);
     assert.doesNotMatch(packet.packet?.output_instructions ?? "", /当前快照下发现的全部 blocker/);
     assert.match(packet.packet?.output_instructions ?? "", /PowerShell.*UTF-8/);
 
@@ -902,13 +899,12 @@ test("explore critic retry：继承历史 findings；malformed 可在同一工�
     assert.match(secondPacket?.output_instructions ?? "", /上一次同角色审查/);
     assert.match(secondPacket?.output_instructions ?? "", /本轮是修复复核/);
     assert.match(secondPacket?.output_instructions ?? "", /recommendation 只是非绑定建议/);
-    assert.match(secondPacket?.output_instructions ?? "", /复用原 finding ID/);
-    assert.match(secondPacket?.output_instructions ?? "", /legacy finding 没有 ID 时.*补一个稳定 ID/);
+    assert.match(secondPacket?.output_instructions ?? "", /不得通过更换标题或措辞重复同一问题/);
+    assert.doesNotMatch(secondPacket?.output_instructions ?? "", /复用原 finding ID|补一个稳定 ID/);
     assert.match(secondPacket?.output_instructions ?? "", /默认只复核历史 finding/);
     assert.match(secondPacket?.output_instructions ?? "", /新 blocker 仅允许是本次修正直接引入的回归/);
     assert.match(secondPacket?.output_instructions ?? "", /修正动作 → 新问题/);
-    assert.match(secondPacket?.output_instructions ?? "", /每个新 finding 必须分配稳定 ID/);
-    assert.ok((secondPacket?.output_instructions ?? "").indexOf("先建立覆盖索引") < (secondPacket?.output_instructions ?? "").indexOf("上一次同角色审查"));
+    assert.ok((secondPacket?.output_instructions ?? "").indexOf("完整审查全部 boundFiles") < (secondPacket?.output_instructions ?? "").indexOf("上一次同角色审查"));
 
     const eventCountBeforeMalformed = readEvents(fx.projectRoot, fx.change).length;
     const malformed = recordJobSubmitContent(
@@ -1821,10 +1817,9 @@ test("propose-ready 默认完整审查：创建 critic + architect + test 审核
     ]);
 
     assert.match(critic?.output_instructions ?? "", /不得指定必须修改哪份文档或采用哪种技术方案/);
-    assert.match(critic?.output_instructions ?? "", /read_only_refs 按本次问题需要读取/);
+    assert.match(critic?.output_instructions ?? "", /read_only_refs 只在核对本次问题与上下游一致性时读取/);
     assert.match(critic?.output_instructions ?? "", /Propose 只需审查迁移策略、回滚\/兼容设计、任务与可执行测试计划/);
     assert.match(critic?.output_instructions ?? "", /不得只因实际环境证据尚未产生而 fail/);
-    assert.match(critic?.output_instructions ?? "", /注意事项和故障类别是条件式检查项/);
     assert.match(critic?.output_instructions ?? "", /未经 proposal、design 或用户决定选定的新基础设施/);
   } finally {
     rmSync(projectRoot, { recursive: true, force: true });

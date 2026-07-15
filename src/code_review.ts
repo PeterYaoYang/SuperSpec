@@ -15,7 +15,7 @@ import {
   walkCodeFiles,
 } from "./git_state.ts";
 import { parseExecutionRequirements, parseTestContractEntries } from "./format.ts";
-import type { BoundarySnapshot, CodeReviewResultKind, CodeReviewScope, CodeStateCheck, CoverageExemptionRef, DirtyFileFingerprint, Event, Job, JobPacketContext, Ref, ReviewPreviousRejection, TaskAttempt, TaskExecutionIndexEntry } from "./types.ts";
+import type { BoundarySnapshot, CodeReviewGateEvidence, CodeReviewResultKind, CodeReviewScope, CodeStateCheck, CoverageExemptionRef, DirtyFileFingerprint, Event, Job, JobPacketContext, Ref, ReviewPreviousRejection, TaskAttempt, TaskExecutionIndexEntry } from "./types.ts";
 
 export const CODE_REVIEW_REPAIR_SCOPE_PREFIX = "code_reviewer_report_repair:";
 export const CODE_REVIEW_DECISION_SCOPE_PREFIX = "code_review_decision:";
@@ -499,6 +499,7 @@ function taskExecutionIndexFromEvents(projectRoot: string, events: Event[]): Tas
       entries.push({
         task_id: payload.task_id,
         attempt_id: payload.attempt_id,
+        ...(attempt?.fix ? { fix: attempt.fix } : {}),
         execution_policy: attempt?.execution_policy ?? "tdd",
         changed_paths: changedResult ? changedResult.paths : null,
         ...(changedResult?.partial_reason ? { changed_paths_partial_reason: changedResult.partial_reason } : {}),
@@ -515,6 +516,11 @@ function taskExecutionIndexFromEvents(projectRoot: string, events: Event[]): Tas
   }
   entries.sort((a, b) => a.task_id.localeCompare(b.task_id) || a.attempt_id.localeCompare(b.attempt_id));
   return entries;
+}
+
+/** Read-only execution evidence projected for code review and final verification. */
+export function taskExecutionIndexForReview(projectRoot: string, events: Event[]): TaskExecutionIndexEntry[] {
+  return taskExecutionIndexFromEvents(projectRoot, events);
 }
 
 function isCodeReviewerJob(job: Job): boolean {
@@ -693,6 +699,32 @@ export function latestApplyDoneToReviewGate(events: Event[]): { decision: "passe
       decision: gate.decision,
       ...(typeof gate.job_id === "string" ? { job_id: gate.job_id } : {}),
       ...(typeof gate.reason === "string" ? { reason: gate.reason } : {}),
+    };
+  }
+  return null;
+}
+
+/** Latest code-review gate fact for the current review cycle, frozen into verifier packets. */
+export function latestCodeReviewGateEvidence(events: Event[]): CodeReviewGateEvidence | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i];
+    if (event.event_type !== "transition_commit") continue;
+    const payload = event.payload as {
+      transition?: unknown;
+      from_state?: unknown;
+      to_state?: unknown;
+      code_review_gate?: unknown;
+    };
+    if (payload.transition !== "review-ready" || payload.from_state !== "apply_done" || payload.to_state !== "review") continue;
+    const gate = payload.code_review_gate as { decision?: unknown; job_id?: unknown; packet_digest?: unknown; reason?: unknown } | undefined;
+    if (!gate || (gate.decision !== "passed" && gate.decision !== "skipped")) return null;
+    return {
+      decision: gate.decision,
+      job_id: typeof gate.job_id === "string" ? gate.job_id : null,
+      packet_digest: typeof gate.packet_digest === "string" ? gate.packet_digest : null,
+      ...(gate.reason === "no_code_changes" ? { reason: gate.reason } : {}),
+      event_id: event.event_id,
+      event_digest: event.event_digest,
     };
   }
   return null;

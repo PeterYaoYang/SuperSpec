@@ -123,6 +123,7 @@ export function parseReviewRejectionOverrideScope(scope: string): string | null 
 function reviewCycleState(gate: ReviewGateRule): State | null {
   if (gate.gate_id === EXPLORE_DISCOVERY_REVIEW_GATE_ID) return "explore";
   if (gate.gate_id === PROPOSE_FINAL_REVIEW_GATE_ID) return "propose";
+  if (gate.gate_id === REVIEW_FINAL_VERIFIER_GATE.gate_id) return "review";
   return null;
 }
 

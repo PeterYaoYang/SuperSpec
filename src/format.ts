@@ -403,8 +403,17 @@ export function adoptedContractForTask(
   return { parsed, contract: contractMode ? parsed?.contract ?? null : null };
 }
 
+/**
+ * Fix task 由状态机从已批准的实现范围派生；它没有 proposal 阶段执行依据块。
+ * REVIEW-FIX-* 是发布前已有的持久化 task ID，必须继续可回放。
+ */
+export function isFixTaskId(taskId: string): boolean {
+  return taskId.startsWith("REVIEW-FIX-") || taskId.startsWith("FIX-");
+}
+
+/** @deprecated 新代码使用 isFixTaskId；保留给旧扩展和历史调用。 */
 export function isReviewFixTaskId(taskId: string): boolean {
-  return taskId.startsWith("REVIEW-FIX-");
+  return isFixTaskId(taskId);
 }
 
 export function isCharacterizationTask(task: ParsedTask): boolean {
@@ -609,7 +618,7 @@ export function validateExecutionRequirements(
   const hasLegacyGreenOnlyTask = tasks.some(task => task.noTddReason === GREEN_ONLY_NO_TDD_REASON);
   // v2 不允许“所有任务都没有执行依据”这一静默回退：新 Propose 的每个普通
   // task 都必须显式声明五字段。v1 的缺失版本仍保留旧的按需契约语义。
-  const hasV2OrdinaryTask = executionRequirementVersion === 2 && tasks.some(task => !isReviewFixTaskId(task.taskId));
+  const hasV2OrdinaryTask = executionRequirementVersion === 2 && tasks.some(task => !isFixTaskId(task.taskId));
   const mode = hasTaskBoundExecutionRequirements(content) || hasLegacyGreenOnlyTask || hasV2OrdinaryTask;
   const contracts = parseExecutionRequirements(content);
   // 孤儿检测必须在 mode=false 的 early return 之前：全部块都悬空时 mode=false，
@@ -632,11 +641,11 @@ export function validateExecutionRequirements(
     }
     // v2 是本次改造后的新计划：每个普通 task 必须声明完整五字段，
     // `测试:` 可显式为空以表达非行为任务。旧计划只保持原 TDD 契约要求。
-    if (executionRequirementVersion === 2 && !isReviewFixTaskId(task.taskId) && !contract) {
+    if (executionRequirementVersion === 2 && !isFixTaskId(task.taskId) && !contract) {
       errors.push(`${task.taskId} 缺少执行依据`);
       continue;
     }
-    if (executionRequirementVersion === 1 && task.tddRequired && !isReviewFixTaskId(task.taskId) && !contract) {
+    if (executionRequirementVersion === 1 && task.tddRequired && !isFixTaskId(task.taskId) && !contract) {
       errors.push(`${task.taskId} 缺少执行依据`);
       continue;
     }

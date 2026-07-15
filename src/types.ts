@@ -76,6 +76,23 @@ export interface EffectiveEvidencePlan {
   accepted_green_statuses: Array<"expected_success" | "characterization_pass">;
 }
 
+/**
+ * 状态机创建的实现修复工作项。它只纠正已批准 task 的实现，不产生新的计划需求。
+ * 旧事件没有该字段时按历史行为回放。
+ */
+export type FixSource = "code_review" | "self_test";
+
+export interface FixDescriptor {
+  fix_id: string;
+  source: FixSource;
+  parent_task_id: string | null;
+  reason: string;
+  review_finding?: {
+    job_id: string;
+    finding_id: string;
+  };
+}
+
 export interface DirtyFileFingerprint {
   path: string;
   status: "added" | "modified" | "deleted";
@@ -108,9 +125,20 @@ export interface CodeStateCheck {
   scope_reason: string;
 }
 
+/** 最终验证读取的最新代码审查门禁事实。 */
+export interface CodeReviewGateEvidence {
+  decision: "passed" | "skipped";
+  job_id: string | null;
+  packet_digest: string | null;
+  reason?: "no_code_changes";
+  event_id: string;
+  event_digest: string;
+}
+
 export interface TaskExecutionIndexEntry {
   task_id: string;
   attempt_id: string;
+  fix?: FixDescriptor | null;
   execution_policy: ExecutionPolicy;
   changed_paths: string[] | null;
   // committed 段 git diff 失败时的原因；此时 changed_paths 只含 dirty 侧对比结果
@@ -132,6 +160,7 @@ export interface CoverageExemptionRef {
 
 export interface JobPacketContext {
   code_review_scope?: CodeReviewScope;
+  code_review_gate?: CodeReviewGateEvidence;
   coverage_exemption_refs?: CoverageExemptionRef[];
   task_execution_index?: TaskExecutionIndexEntry[];
   unattributed_paths?: string[];
@@ -151,6 +180,7 @@ export interface JobPacket {
   previous_rejection?: ReviewPreviousRejection;
   packet_context?: JobPacketContext;
   code_review_scope?: CodeReviewScope;
+  code_review_gate?: CodeReviewGateEvidence;
   coverage_exemption_refs?: CoverageExemptionRef[];
   task_execution_index?: TaskExecutionIndexEntry[];
   unattributed_paths?: string[];
@@ -282,6 +312,7 @@ export interface TaskAttempt {
   task_id: string;
   state: AttemptState;
   task_structure_digest: string;
+  fix?: FixDescriptor | null;
   contract?: ExecutionContract | null;
   contract_mode?: boolean;
   /** task-start 编译出的有效执行要求；缺失表示历史 attempt，按旧字段回放。 */

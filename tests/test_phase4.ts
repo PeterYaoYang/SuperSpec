@@ -202,6 +202,7 @@ function submitVerifierPass(projectRoot: string, change: string, changeRoot: str
     findings: [],
     verdict: "pass",
     review_scope: { checked_paths: checkedPathsForJob(projectRoot, change, jobId) },
+    reviewer: { kind: "codex-subagent", id: "test-verifier" },
   }));
   return recordJobSubmit(projectRoot, change, changeRoot, jobId, reportPath);
 }
@@ -644,6 +645,33 @@ test("CLI transition reopen：apply_done + pending → apply", () => {
   } finally { fx.cleanup(); }
 });
 
+test("CLI transition reopen：self-test-fix 直接创建 Fix Task", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot).to_state, "apply_done");
+    const cli = new URL("../src/cli.ts", import.meta.url).pathname;
+    const output = execFileSync(process.execPath, [
+      cli,
+      "transition",
+      "reopen",
+      "--change",
+      fx.change,
+      "--to",
+      "apply",
+      "--self-test-fix",
+      "TASK-001",
+      "--reason",
+      "CLI 自测发现空输入失败",
+    ], {
+      cwd: fx.projectRoot,
+      encoding: "utf8",
+    });
+    const result = JSON.parse(output);
+    assert.equal(result.to_state, "apply");
+    assert.match(readFileSync(join(fx.changeRoot, "tasks.md"), "utf8"), /FIX-SELFTEST-TASK-001-/);
+  } finally { fx.cleanup(); }
+});
+
 test("review 状态后补任务：next 返回 reopen 且 accept 拒绝", () => {
   const fx = setupApplyWithDoneTask();
   try {
@@ -816,6 +844,10 @@ test("review-ready：apply_done → 创建 code-reviewer，review → 创建 ver
     const verifierPacket = jobsPacket(projectRoot, change, verifier.created_jobs[0]);
     assert.equal(verifierPacket.packet?.gate_id, "review.final_verifier");
     assert.deepEqual(verifierPacket.packet?.output_contract_fields, ["role", "verdict", "findings", "review_scope"]);
+    assert.equal(verifierPacket.packet?.code_review_gate?.decision, "passed");
+    assert.equal(verifierPacket.packet?.code_review_gate?.job_id, result.created_jobs[0]);
+    assert.deepEqual(verifierPacket.packet?.task_execution_index, []);
+    assert.deepEqual(verifierPacket.packet?.coverage_exemption_refs, []);
     assert.match(String(verifierPacket.packet?.output_instructions), /code_review_gate/);
     assert.match(String(verifierPacket.packet?.output_instructions), /attempt_id/);
   } finally { rmSync(projectRoot, { recursive: true, force: true }); }
@@ -1681,6 +1713,155 @@ test("code-reviewer：实现问题可 reopen apply 并追加审查修复 task", 
   } finally { fx.cleanup(); }
 });
 
+test("self-test-fix：已完成实现可直接回 apply，不进入 proposal 审核", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot).to_state, "apply_done");
+
+    const reopened = reopen(fx.projectRoot, fx.change, fx.changeRoot, "apply", "自测发现空输入仍会抛错", {
+      selfTestFix: "TASK-001",
+    });
+    assert.equal(reopened.from_state, "apply_done");
+    assert.equal(reopened.to_state, "apply");
+    assert.equal(rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot).open_jobs.length, 0);
+
+    const tasks = readFileSync(join(fx.changeRoot, "tasks.md"), "utf8");
+    const fixId = /^- \[ \] (FIX-SELFTEST-TASK-001-[A-Fa-f0-9]+) /m.exec(tasks)?.[1];
+    assert.ok(fixId);
+    assert.match(tasks, new RegExp(`self_test_fix_of:TASK-001:${fixId}`));
+    assert.doesNotMatch(tasks, /REVIEW-FIX-/);
+
+    const commit = readEvents(fx.projectRoot, fx.change).findLast(event =>
+      event.event_type === "transition_commit" &&
+      (event.payload as { fix?: unknown }).fix != null
+    );
+    assert.deepEqual((commit?.payload as { fix?: unknown }).fix, {
+      fix_id: fixId,
+      source: "self_test",
+      parent_task_id: "TASK-001",
+      reason: "自测发现空输入仍会抛错",
+    });
+
+    const taskStarted = taskStart(fx.projectRoot, fx.change, fx.changeRoot, fixId!);
+    assert.equal(taskStarted.to_state, "apply");
+    assert.deepEqual((taskStarted.details?.fix as { source?: string; parent_task_id?: string } | undefined), {
+      fix_id: fixId,
+      source: "self_test",
+      parent_task_id: "TASK-001",
+      reason: "自测发现空输入仍会抛错",
+    });
+
+    const repeated = reopen(fx.projectRoot, fx.change, fx.changeRoot, "apply", "自测发现空输入仍会抛错", {
+      selfTestFix: "TASK-001",
+    });
+    assert.equal(repeated.events_written, 0);
+    assert.match(repeated.message, /已创建/);
+    assert.equal((readFileSync(join(fx.changeRoot, "tasks.md"), "utf8").match(/self_test_fix_of:/g) ?? []).length, 1);
+
+    const fixAttempt = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot).active_task_attempts.find(attempt => attempt.task_id === fixId);
+    assert.ok(fixAttempt);
+    appendTestRunEvent(fx.projectRoot, fx.change, {
+      test_id: "TEST-SELFTEST-FIX",
+      attempt_id: fixAttempt.attempt_id,
+      task_structure_digest: fixAttempt.task_structure_digest,
+      semantic_status: "expected_failure",
+      exit_code: 1,
+    });
+    appendTestRunEvent(fx.projectRoot, fx.change, {
+      test_id: "TEST-SELFTEST-FIX",
+      attempt_id: fixAttempt.attempt_id,
+      task_structure_digest: fixAttempt.task_structure_digest,
+      semantic_status: "expected_success",
+      exit_code: 0,
+    });
+    assert.equal(taskComplete(fx.projectRoot, fx.change, fx.changeRoot, fixId!).to_state, "apply");
+    assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot).to_state, "apply_done");
+    advanceApplyDoneToReview(fx.projectRoot, fx.change, fx.changeRoot);
+    const verifier = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(verifier.outcome, "job_created");
+    const verifierPacket = jobsPacket(fx.projectRoot, fx.change, verifier.created_jobs[0]).packet;
+    assert.deepEqual(verifierPacket?.task_execution_index?.find(entry => entry.task_id === fixId)?.fix, {
+      fix_id: fixId,
+      source: "self_test",
+      parent_task_id: "TASK-001",
+      reason: "自测发现空输入仍会抛错",
+    });
+  } finally { fx.cleanup(); }
+});
+
+test("self-test-fix：不允许绕过未处理的代码审查问题或未完成 task", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    writeFileSync(join(fx.changeRoot, "tasks.md"), "# Tasks\n\n- [x] TASK-001 Done\n- [ ] TASK-002 Pending\n");
+    const pending = reopen(fx.projectRoot, fx.change, fx.changeRoot, "apply", "自测问题", {
+      selfTestFix: "TASK-001",
+    });
+    assert.equal(pending.events_written, 0);
+    assert.match(pending.message, /全部完成/);
+
+    writeFileSync(join(fx.changeRoot, "tasks.md"), "# Tasks\n\n- [x] TASK-001 Done\n");
+    assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot).to_state, "apply_done");
+    const created = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(created.outcome, "job_created");
+    const finding = {
+      id: "CR-BLOCK-001",
+      type: "implementation",
+      blocking: true,
+      description: "已知实现缺陷",
+      evidence: "src/example.ts:10",
+      source_refs: ["src/example.ts:10"],
+      impact: "请求失败",
+      suggested_action: "apply",
+    };
+    assert.equal(submitCodeReviewerReport(
+      fx.projectRoot,
+      fx.change,
+      fx.changeRoot,
+      created.created_jobs[0],
+      codeReviewerReport(fx.projectRoot, fx.change, created.created_jobs[0], "fail", [finding]),
+    ).accepted, false);
+
+    const blocked = reopen(fx.projectRoot, fx.change, fx.changeRoot, "apply", "另一个自测问题", {
+      selfTestFix: "TASK-001",
+    });
+    assert.equal(blocked.events_written, 0);
+    assert.match(blocked.message, /已有未处理的代码审查问题 CR-BLOCK-001/);
+  } finally { fx.cleanup(); }
+});
+
+test("self-test-fix：review 和 accepted 中均回到 apply，且 review 的旧 job 会失效", () => {
+  const reviewFx = setupApplyWithDoneTask();
+  try {
+    advanceApplyToReview(reviewFx.projectRoot, reviewFx.change, reviewFx.changeRoot, "minimal");
+    const verifier = reviewReady(reviewFx.projectRoot, reviewFx.change, reviewFx.changeRoot, "minimal");
+    assert.equal(verifier.outcome, "job_created");
+
+    const reopened = reopen(reviewFx.projectRoot, reviewFx.change, reviewFx.changeRoot, "apply", "review 后自测仍发现空输入失败", {
+      selfTestFix: "TASK-001",
+    });
+    assert.equal(reopened.from_state, "review");
+    assert.equal(reopened.to_state, "apply");
+    assert.equal(rebuildSnapshot(reviewFx.projectRoot, reviewFx.change, reviewFx.changeRoot).open_jobs.some(job => job.job_id === verifier.created_jobs[0]), false);
+    assert.equal(readEvents(reviewFx.projectRoot, reviewFx.change).some(event =>
+      event.event_type === "job_invalidated" &&
+      (event.payload as { job_id?: unknown }).job_id === verifier.created_jobs[0]
+    ), true);
+  } finally { reviewFx.cleanup(); }
+
+  const acceptedFx = setupApplyWithDoneTask();
+  try {
+    advanceApplyToReview(acceptedFx.projectRoot, acceptedFx.change, acceptedFx.changeRoot, "minimal");
+    acceptAfterFinalVerifier(acceptedFx.projectRoot, acceptedFx.change, acceptedFx.changeRoot, "minimal");
+    assert.equal(rebuildSnapshot(acceptedFx.projectRoot, acceptedFx.change, acceptedFx.changeRoot).state, "accepted");
+
+    const reopened = reopen(acceptedFx.projectRoot, acceptedFx.change, acceptedFx.changeRoot, "apply", "交付后自测仍发现空输入失败", {
+      selfTestFix: "TASK-001",
+    });
+    assert.equal(reopened.from_state, "accepted");
+    assert.equal(reopened.to_state, "apply");
+  } finally { acceptedFx.cleanup(); }
+});
+
 test("code-reviewer：reopen 只能引用当前最新代码审查失败里的阻塞问题", () => {
   const fx = setupApplyWithDoneTask();
   try {
@@ -2480,6 +2661,7 @@ test("review-ready：verifier rejected 后创建新 job 带处理提示", () => 
       findings: [{ severity: "high", message: "missing verification" }],
       verdict: "fail",
       review_scope: { checked_paths: checkedPathsForJob(fx.projectRoot, fx.change, created.created_jobs[0]) },
+      reviewer: { kind: "codex-subagent", id: "test-verifier" },
     }));
     const rejected = recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, created.created_jobs[0], reportPath);
     assert.equal(rejected.accepted, false);
@@ -2492,6 +2674,90 @@ test("review-ready：verifier rejected 后创建新 job 带处理提示", () => 
     const retry = reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     assert.equal(retry.outcome, "job_created");
     assert.match(String(retry.details?.advisory), /此前最终验证未通过/);
+    const retryPacket = jobsPacket(fx.projectRoot, fx.change, retry.created_jobs[0]).packet;
+    assert.deepEqual(retryPacket?.previous_rejection?.findings, [{ severity: "high", message: "missing verification" }]);
+  } finally { fx.cleanup(); }
+});
+
+test("verifier：fail 必须给出至少一个 finding", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    advanceApplyToReview(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    const created = reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.equal(created.outcome, "job_created");
+    const reportPath = join(fx.projectRoot, "verifier-empty-fail.json");
+    writeFileSync(reportPath, JSON.stringify({
+      role: "verifier",
+      verdict: "fail",
+      findings: [],
+      review_scope: { checked_paths: checkedPathsForJob(fx.projectRoot, fx.change, created.created_jobs[0]) },
+      reviewer: { kind: "codex-subagent", id: "test-verifier" },
+    }));
+
+    const rejected = recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, created.created_jobs[0], reportPath);
+    assert.equal(rejected.accepted, false);
+    assert.match(rejected.message, /fail 时 findings 至少包含一个问题/);
+  } finally { fx.cleanup(); }
+});
+
+test("jobs packet：审查约束只发给审查角色，最小 JSON 示例可解析", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    const boundFiles = [docRef(fx.changeRoot, "proposal.md")];
+    const executor = appendOpenJob(fx.projectRoot, fx.change, "apply", {
+      job_id: "JOB-executor-instructions",
+      role: "executor",
+      created_from_transition: "apply",
+      boundFiles,
+      review_targets: ["proposal.md"],
+    });
+    const testRun = appendOpenJob(fx.projectRoot, fx.change, "apply", {
+      job_id: "JOB-test-run-instructions",
+      role: "test-run",
+      created_from_transition: "apply",
+      boundFiles,
+    });
+    const proposalReviewer = appendOpenJob(fx.projectRoot, fx.change, "propose", {
+      job_id: "JOB-proposal-reviewer-instructions",
+      role: "critic",
+      gate_id: "propose.final_review",
+      created_from_transition: "propose-ready",
+      boundFiles,
+    });
+    const codeReviewer = appendOpenJob(fx.projectRoot, fx.change, "apply_done", {
+      job_id: "JOB-code-reviewer-instructions",
+      role: "code-reviewer",
+      gate_id: "review.code_review",
+      created_from_transition: "review-ready",
+      boundFiles,
+    });
+
+    const executorPacket = jobsPacket(fx.projectRoot, fx.change, executor.job_id).packet;
+    const testRunPacket = jobsPacket(fx.projectRoot, fx.change, testRun.job_id).packet;
+    const proposalPacket = jobsPacket(fx.projectRoot, fx.change, proposalReviewer.job_id).packet;
+    const codeReviewPacket = jobsPacket(fx.projectRoot, fx.change, codeReviewer.job_id).packet;
+    assert.ok(executorPacket && testRunPacket && proposalPacket && codeReviewPacket);
+    assert.doesNotMatch(String(executorPacket.output_instructions), /请审查|审查完成|需求变化/);
+    assert.doesNotMatch(String(testRunPacket.output_instructions), /请审查|审查完成|需求变化/);
+    assert.equal("review_targets" in executorPacket, false);
+    assert.deepEqual(executorPacket.stop_conditions, ["完成绑定范围内的实现后提交执行报告，不要修改未绑定范围"]);
+    assert.deepEqual(testRunPacket.stop_conditions, ["完成指定验证后提交测试报告，不要修改项目文档"]);
+    assert.match(String(proposalPacket.output_instructions), /需求变化/);
+    assert.doesNotMatch(String(codeReviewPacket.output_instructions), /需求变化/);
+
+    for (const packet of [executorPacket, testRunPacket, proposalPacket, codeReviewPacket]) {
+      const instructions = String(packet.output_instructions);
+      const start = instructions.indexOf("最小格式：") + "最小格式：".length;
+      const end = instructions.indexOf("。verdict", start);
+      assert.ok(start > "最小格式：".length && end > start, `${packet.role} 应提供可解析的最小 JSON 示例`);
+      assert.doesNotMatch(instructions, /"pass\|fail"/);
+      const sample = JSON.parse(instructions.slice(start, end));
+      assert.equal(sample.verdict, "pass");
+      if (packet.role === "code-reviewer") {
+        assert.deepEqual(sample.review_scope.checked_docs, ["proposal.md", "tasks.md", "design.md", "specs/", ".superspec/artifacts/discovery.md", ".superspec/artifacts/test-contract.md"]);
+        assert.deepEqual(sample.review_scope.unchecked, []);
+      }
+    }
   } finally { fx.cleanup(); }
 });
 
@@ -2601,6 +2867,11 @@ test("accept：verifier accepted 后补登记匹配 digest 的 legacy test-run �
 
     const packet = jobsPacket(fx.projectRoot, fx.change, jobId);
     assert.equal(typeof packet.packet?.review_evidence_digest, "string");
+    assert.equal(packet.packet?.code_review_gate?.decision, "passed");
+    assert.equal(typeof packet.packet?.code_review_gate?.job_id, "string");
+    assert.equal(packet.packet?.task_execution_index?.[0]?.task_id, "TASK-001");
+    assert.equal(packet.packet?.task_execution_index?.[0]?.attempt_id, attempt.attempt_id);
+    assert.match(String(packet.packet?.output_instructions), /不要提交该报告；主流程会通过 next/);
 
     const reportPath = join(fx.projectRoot, "verifier-evidence.json");
     writeFileSync(reportPath, JSON.stringify({

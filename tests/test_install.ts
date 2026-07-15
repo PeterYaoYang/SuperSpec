@@ -122,6 +122,10 @@ test("installProject installs engine, workflow skills, role prompts, and agents"
     assert.match(proposeSkill, /## 待用户确认[\s\S]*- \[ \] DEC-001/);
     assert.doesNotMatch(proposeSkill, /tdd_required|review_rejection/);
 
+    const applySkill = readFileSync(join(projectRoot, ".codex", "skills", "superspec-apply", "SKILL.md"), "utf8");
+    assert.match(applySkill, /--self-test-fix <TASK>/);
+    assert.match(applySkill, /该路径不进入 proposal 审核/);
+
     const exploreSkill = readFileSync(join(projectRoot, ".codex", "skills", "superspec-explore", "SKILL.md"), "utf8");
     assert.match(exploreSkill, /形成基于证据的 `discovery\.md`/);
     assert.match(exploreSkill, /主流程必须委派 `explore` subagent/);
@@ -159,10 +163,13 @@ test("installProject installs engine, workflow skills, role prompts, and agents"
 
     const agentsMd = readFileSync(join(projectRoot, "AGENTS.md"), "utf8");
     assert.equal(agentsMd.trimEnd(), AGENTS_TEMPLATE);
-    assert.match(agentsMd, /用户补充 SuperSpec 相关内容时，先确定对应 change，再按 next 返回处理/);
+    assert.match(agentsMd, /当用户提出的问题涉及已有 change 时/);
+    assert.match(agentsMd, /先确定对应 change；归属明确则回同一 change 的 `propose` 更新计划/);
     assert.match(agentsMd, /不要另建 repair change/);
-    assert.match(agentsMd, /无法确定时只询问归属，不执行流转/);
-    assert.match(agentsMd, /内部命令由主流程完成，不交给用户/);
+    assert.match(agentsMd, /归属不明才询问/);
+    assert.match(agentsMd, /主流程执行内部命令，不要求用户手动运行工作流命令/);
+    assert.match(agentsMd, /自测或联调 finding 不是需求补充/);
+    assert.match(agentsMd, /--self-test-fix/);
     assert.match(agentsMd, /SUPERSPEC:AGENTS:START/);
     assert.match(agentsMd, /superspec transition next --change "<change>"/);
     assert.match(agentsMd, /\*_argv/);
