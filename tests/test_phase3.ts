@@ -2,6 +2,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -56,16 +57,36 @@ function setupTaskInProgress(): ReturnType<typeof setupApply> & { taskId: string
   return { ...fx, taskId: "TASK-001", attemptId };
 }
 
-function setupPropose(): ReturnType<typeof setupApply> {
+function setupPropose(policy: "green_only" | "tdd" = "green_only"): ReturnType<typeof setupApply> {
   const projectRoot = mkdtempSync(join(tmpdir(), "superspec-p3-propose-"));
   const change = "test-change";
   const changeRoot = join(projectRoot, "openspec", "changes", change);
   mkdirSync(join(changeRoot, ".superspec", "artifacts"), { recursive: true });
   writeFileSync(join(changeRoot, "proposal.md"), "# Proposal\n");
-  writeFileSync(join(changeRoot, "tasks.md"), "# Tasks\n\n- [ ] TASK-001 Do something\n");
+  writeFileSync(join(changeRoot, "tasks.md"), [
+    "# Tasks",
+    "",
+    policy === "green_only"
+      ? "- [ ] TASK-001 Do something tdd_required:false no_tdd_reason:green-only"
+      : "- [ ] TASK-001 Do something tdd_required:true",
+    "  执行依据:",
+    "  - 测试: test-contract.md#TEST-001",
+    "  - 设计: design.md#Route",
+    "  - 来源: proposal.md#Impact",
+    "  - 原因: normal proposal review fixture",
+    "  - 边界: no persistence",
+    "",
+  ].join("\n"));
   writeFileSync(join(changeRoot, "design.md"), "# Design\n");
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "discovery.md"), "# Discovery\n");
-  writeFileSync(join(changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");
+  writeFileSync(join(changeRoot, ".superspec", "artifacts", "test-contract.md"), [
+    "# Test Contract",
+    "",
+    "| test_id | scenario |",
+    "|---|---|",
+    "| TEST-001 | proposal fixture behavior |",
+    "",
+  ].join("\n"));
   ensureChangeLayout(projectRoot, change);
   for (const [t, f, to] of [["init","init","init"],["explore","init","explore"],["propose","explore","propose"]] as const) {
     appendEvent(projectRoot, change, makeEvent(change, "transition_commit", {
@@ -246,7 +267,7 @@ test("start-apply：proposal review stale 时创建 fresh job，next 返回 requ
 });
 
 test("propose stay：修改 design 后 strict 只重新审查 architect", () => {
-  const fx = setupPropose();
+  const fx = setupPropose("tdd");
   try {
     const first = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "strict");
     assert.equal(first.outcome, "job_created");
@@ -702,5 +723,62 @@ test("no-TDD 任务：有 no_tdd_reason 可完成", () => {
     assert.equal(result.events_written, 2); // commit + task_completed
     const after = readFileSync(join(changeRoot, "tasks.md"), "utf8");
     assert.ok(after.match(/- \[x\].*TASK-001/), "TASK-001 应已勾选");
+  } finally { rmSync(projectRoot, { recursive: true, force: true }); }
+});
+
+test("task-complete：自动暂存本 task 生成的生产 Java 文件，排除测试源码和测试类", () => {
+  const projectRoot = mkdtempSync(join(tmpdir(), "superspec-p3-java-stage-"));
+  const change = "test-change";
+  const changeRoot = join(projectRoot, "openspec", "changes", change);
+  mkdirSync(join(changeRoot, ".superspec", "artifacts"), { recursive: true });
+  writeFileSync(join(changeRoot, "tasks.md"), "# Tasks\n\n- [ ] TASK-001 generate source tdd_required:false no_tdd_reason:generated-source\n");
+  writeFileSync(join(changeRoot, "proposal.md"), "# P\n");
+  writeFileSync(join(changeRoot, "design.md"), "# D\n");
+  writeFileSync(join(changeRoot, ".superspec", "artifacts", "discovery.md"), "# D\n");
+  writeFileSync(join(changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");
+  ensureChangeLayout(projectRoot, change);
+  for (const [transition, fromState, toState] of [["init","init","init"],["explore","init","explore"],["propose","explore","propose"],["propose-ready","propose","propose_ready"]] as const) {
+    appendEvent(projectRoot, change, makeEvent(change, "transition_commit", {
+      transition, from_state: fromState, to_state: toState,
+      outcome: "advanced", created_job_ids: [], reason: transition,
+    }, { transitionId: `T-java-${transition}`, idempotencyKey: `java-${transition}-key` }));
+  }
+
+  try {
+    execFileSync("git", ["init"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.name", "Test User"], { cwd: projectRoot, stdio: "ignore" });
+    mkdirSync(join(projectRoot, "src", "main", "java"), { recursive: true });
+    writeFileSync(join(projectRoot, "src", "main", "java", "Existing.java"), "class Existing {}\n");
+    execFileSync("git", ["add", "."], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "initial"], { cwd: projectRoot, stdio: "ignore" });
+
+    confirmCurrentPhase(projectRoot, change, changeRoot);
+    assert.equal(startApply(projectRoot, change, changeRoot).to_state, "apply");
+    assert.equal(taskStart(projectRoot, change, changeRoot, "TASK-001").to_state, "apply");
+
+    mkdirSync(join(projectRoot, "src", "main", "java"), { recursive: true });
+    mkdirSync(join(projectRoot, "src", "test", "java"), { recursive: true });
+    writeFileSync(join(projectRoot, "src", "main", "java", "Generated.java"), "class Generated {}\n");
+    writeFileSync(join(projectRoot, "src", "main", "java", "GeneratedTest.java"), "class GeneratedTest {}\n");
+    writeFileSync(join(projectRoot, "src", "test", "java", "TestHelper.java"), "class TestHelper {}\n");
+    writeFileSync(join(projectRoot, "src", "main", "java", "Existing.java"), "class Existing { int userEdit; }\n");
+
+    const result = taskComplete(projectRoot, change, changeRoot, "TASK-001");
+    assert.equal(result.events_written, 2);
+    const staged = execFileSync("git", ["diff", "--cached", "--name-only"], { cwd: projectRoot, encoding: "utf8" })
+      .trim().split("\n").filter(Boolean);
+    assert.deepEqual(staged, ["src/main/java/Generated.java"]);
+    assert.match(
+      execFileSync("git", ["diff", "--", "src/main/java/Existing.java"], { cwd: projectRoot, encoding: "utf8" }),
+      /userEdit/,
+      "已有源码的修改必须保留为未暂存，不能被自动 add",
+    );
+
+    const completed = readEvents(projectRoot, change).findLast(event => event.event_type === "task_completed");
+    assert.deepEqual((completed?.payload as { java_staging?: unknown }).java_staging, {
+      status: "staged",
+      files: ["src/main/java/Generated.java"],
+    });
   } finally { rmSync(projectRoot, { recursive: true, force: true }); }
 });

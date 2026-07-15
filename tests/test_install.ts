@@ -76,9 +76,13 @@ test("installProject installs engine, workflow skills, role prompts, and agents"
       [],
     );
     assert.equal(result.installed.config, ".codex/config.toml");
+    assert.equal(result.installed.workflow_config, ".superspec/config.json");
     assert.equal(result.installed.agents_md, "AGENTS.md");
     assert.equal(result.installed.openspec_config, "openspec/config.yaml");
     assert.equal(existsSync(join(projectRoot, ".superspec", "changes")), true);
+    assert.deepEqual(JSON.parse(readFileSync(join(projectRoot, ".superspec", "config.json"), "utf8")), {
+      workflow: { mode: "normal" },
+    });
     assert.equal(readFileSync(join(projectRoot, ".superspec", ".gitignore"), "utf8"), "changes/\n*.log\n*.tmp\n");
 
     for (const skill of WORKFLOW_SKILLS) {
@@ -140,6 +144,7 @@ test("installProject installs engine, workflow skills, role prompts, and agents"
     const agentsMd = readFileSync(join(projectRoot, "AGENTS.md"), "utf8");
     assert.equal(agentsMd.trimEnd(), AGENTS_TEMPLATE);
     assert.match(agentsMd, /用户补充 SuperSpec 相关内容时，先确定对应 change，再按 next 返回处理/);
+    assert.match(agentsMd, /不要另建 repair change/);
     assert.match(agentsMd, /无法确定时只询问归属，不执行流转/);
     assert.match(agentsMd, /内部命令由主流程完成，不交给用户/);
     assert.match(agentsMd, /SUPERSPEC:AGENTS:START/);
@@ -356,6 +361,7 @@ test("CLI init 交互默认 yes 时升级并递归运行新版 CLI", () => {
         prompts: [...WORKFLOW_PROMPTS],
         agents: [...WORKFLOW_AGENTS],
         config: ".codex/config.toml",
+        workflow_config: ".superspec/config.json",
         openspec_config: "openspec/config.yaml",
       },
     };
@@ -577,6 +583,7 @@ test("CLI update 默认先安装 npm latest 并递归运行新 CLI", () => {
         prompts: [...WORKFLOW_PROMPTS],
         agents: [...WORKFLOW_AGENTS],
         config: ".codex/config.toml",
+        workflow_config: ".superspec/config.json",
         openspec_config: "openspec/config.yaml",
       },
     };

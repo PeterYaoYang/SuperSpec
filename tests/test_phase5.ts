@@ -8,14 +8,16 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { simulateLoop } from "../src/skill_loop.ts";
 import { next } from "../src/next.ts";
-import { transitionExplore } from "../src/transition.ts";
-import { recordUserDecisionContent } from "../src/record.ts";
+import { proposeReady, reviewReady, startApply, transitionExplore } from "../src/transition.ts";
+import { jobsPacket, recordJobSubmitContent, recordUserDecisionContent } from "../src/record.ts";
 import { appendEvent, ensureChangeLayout, makeEvent, readEvents } from "../src/store.ts";
 import { rebuildSnapshot } from "../src/sync.ts";
 import { phaseConfirmationForCurrentState } from "../src/phase_confirmation.ts";
+import type { PhaseDecisionAction } from "../src/phase_confirmation.ts";
 import { reviewRolesForGate, resolveWorkflowProfile, workflowProfileForRisk } from "../src/workflow_profile.ts";
 import { PROPOSE_FINAL_REVIEW_GATE } from "../src/review_job_gates.ts";
 import type { Job, NextOutput, Snapshot } from "../src/types.ts";
+import { WorkflowConfigError, workflowRiskForProject } from "../src/workflow_config.ts";
 
 test("workflow profile：默认 resolver 保持现有 gate 角色矩阵", () => {
   assert.equal(workflowProfileForRisk("minimal"), "light");
@@ -72,7 +74,7 @@ test("review gate：gate_id 不能绕过角色边界", () => {
   assert.deepEqual(PROPOSE_FINAL_REVIEW_GATE.openJobsForGate(snapshot), []);
 });
 
-test("CLI：非法 risk 不会进入 profile resolver", () => {
+test("CLI：工作流 mode 只能由项目配置控制，不接受 --risk", () => {
   const projectRoot = mkdtempSync(join(tmpdir(), "superspec-risk-"));
   try {
     const cli = new URL("../src/cli.ts", import.meta.url).pathname;
@@ -83,15 +85,151 @@ test("CLI：非法 risk 不会进入 profile resolver", () => {
       "--change",
       "test-change",
       "--risk",
-      "ultra-strict",
+      "strict",
     ], {
       cwd: projectRoot,
       encoding: "utf8",
     });
 
     assert.equal(result.status, 1);
-    assert.match(result.stderr, /--risk 只能是 minimal、normal 或 strict/);
+    assert.match(result.stderr, /workflow\.mode 控制，不支持 --risk/);
     assert.equal(result.stdout.trim(), "");
+  } finally {
+    rmSync(projectRoot, { recursive: true, force: true });
+  }
+});
+
+test("项目工作流配置：读取 mode，调用方不能临时覆盖", () => {
+  const projectRoot = mkdtempSync(join(tmpdir(), "superspec-workflow-config-"));
+  try {
+    mkdirSync(join(projectRoot, ".superspec"), { recursive: true });
+    writeFileSync(join(projectRoot, ".superspec", "config.json"), JSON.stringify({ workflow: { mode: "normal" } }));
+    assert.equal(workflowRiskForProject(projectRoot), "normal");
+
+    writeFileSync(join(projectRoot, ".superspec", "config.json"), "{not json");
+    assert.throws(() => workflowRiskForProject(projectRoot), WorkflowConfigError);
+  } finally {
+    rmSync(projectRoot, { recursive: true, force: true });
+  }
+});
+
+test("propose-ready 未显式指定 risk 时读取项目工作流配置", () => {
+  const projectRoot = mkdtempSync(join(tmpdir(), "superspec-config-propose-"));
+  const change = "config-propose";
+  const changeRoot = join(projectRoot, "openspec", "changes", change);
+  try {
+    mkdirSync(join(projectRoot, ".superspec"), { recursive: true });
+    writeFileSync(join(projectRoot, ".superspec", "config.json"), JSON.stringify({ workflow: { mode: "normal" } }));
+    mkdirSync(join(changeRoot, ".superspec", "artifacts"), { recursive: true });
+    writeFileSync(join(changeRoot, "proposal.md"), "# Proposal\n");
+    writeFileSync(join(changeRoot, "design.md"), "# Design\n");
+    writeFileSync(join(changeRoot, "tasks.md"), [
+      "# Tasks", "",
+      "- [ ] TASK-001 Documentation",
+      "  执行依据:",
+      "  - 测试:",
+      "  - 设计: design.md#Design",
+      "  - 来源: proposal.md#Proposal",
+      "  - 验收: 文档说明完整",
+      "  - 边界: 不改实现代码",
+      "",
+    ].join("\n"));
+    writeFileSync(join(changeRoot, ".superspec", "artifacts", "discovery.md"), "# Discovery\n");
+    writeFileSync(join(changeRoot, ".superspec", "artifacts", "test-contract.md"), "# Test Contract\n");
+    ensureChangeLayout(projectRoot, change);
+    for (const [transition, from, to] of [
+      ["init", "init", "init"],
+      ["explore", "init", "explore"],
+      ["propose", "explore", "propose"],
+    ] as const) {
+      appendEvent(projectRoot, change, makeEvent(change, "transition_commit", {
+        transition, from_state: from, to_state: to, outcome: "advanced", created_job_ids: [], reason: transition,
+      }, { transitionId: `T-${transition}`, idempotencyKey: `config-${transition}` }));
+    }
+
+    const result = proposeReady(projectRoot, change, changeRoot);
+    assert.equal(result.outcome, "job_created");
+    assert.equal(result.created_jobs.length, 1);
+  } finally {
+    rmSync(projectRoot, { recursive: true, force: true });
+  }
+});
+
+test("mode 在 propose-ready 冻结：配置变 strict 不重审也不漂移 Apply/Review 策略", () => {
+  const projectRoot = mkdtempSync(join(tmpdir(), "superspec-mode-round-"));
+  const change = "mode-round";
+  const changeRoot = join(projectRoot, "openspec", "changes", change);
+  try {
+    mkdirSync(join(projectRoot, ".superspec"), { recursive: true });
+    writeFileSync(join(projectRoot, ".superspec", "config.json"), JSON.stringify({ workflow: { mode: "normal" } }));
+    mkdirSync(join(changeRoot, ".superspec", "artifacts"), { recursive: true });
+    writeFileSync(join(changeRoot, "proposal.md"), "# Proposal\n");
+    writeFileSync(join(changeRoot, "design.md"), "# Design\n");
+    writeFileSync(join(changeRoot, "tasks.md"), [
+      "# Tasks", "",
+      "- [x] TASK-001 Documentation update",
+      "  执行依据:",
+      "  - 测试:",
+      "  - 设计: design.md#Design",
+      "  - 来源: proposal.md#Proposal",
+      "  - 验收: 文档与计划一致",
+      "  - 边界: 不改实现代码",
+      "",
+    ].join("\n"));
+    writeFileSync(join(changeRoot, ".superspec", "artifacts", "discovery.md"), "# Discovery\n");
+    writeFileSync(join(changeRoot, ".superspec", "artifacts", "test-contract.md"), "# Test Contract\n");
+    ensureChangeLayout(projectRoot, change);
+    for (const [transition, from, to] of [
+      ["init", "init", "init"],
+      ["explore", "init", "explore"],
+      ["propose", "explore", "propose"],
+    ] as const) {
+      appendEvent(projectRoot, change, makeEvent(change, "transition_commit", {
+        transition, from_state: from, to_state: to, outcome: "advanced", created_job_ids: [], reason: transition,
+      }, { transitionId: `T-mode-${transition}`, idempotencyKey: `mode-${transition}` }));
+    }
+
+    const critic = proposeReady(projectRoot, change, changeRoot);
+    assert.equal(critic.created_jobs.length, 1, "normal 只需要 critic");
+    const criticPacket = jobsPacket(projectRoot, change, critic.created_jobs[0]).packet;
+    assert.ok(criticPacket);
+    assert.equal(recordJobSubmitContent(projectRoot, change, changeRoot, critic.created_jobs[0], JSON.stringify({
+      role: "critic",
+      verdict: "pass",
+      findings: [],
+      review_scope: { checked_paths: criticPacket.boundFiles.map(file => file.path) },
+      reviewer: { kind: "codex-subagent", id: "mode-round-critic" },
+    })).accepted, true);
+    assert.equal(proposeReady(projectRoot, change, changeRoot).to_state, "propose_ready");
+
+    const ask = next(projectRoot, change, changeRoot);
+    assert.equal(ask.path, "ask_user");
+    const advance = (ask.ask_user.actions as PhaseDecisionAction[]).find(action => action.decision === "advance");
+    assert.ok(advance);
+    assert.equal(advance.record_input.review_risk, "normal");
+    assert.equal(recordUserDecisionContent(projectRoot, change, JSON.stringify({
+      ...advance.record_input,
+      review_risk: "strict", // 外部 JSON 不能把 confirmation/round 升格。
+    })).accepted, true);
+    const decisionEvent = readEvents(projectRoot, change).findLast(event => event.event_type === "user_decision_recorded");
+    assert.equal((decisionEvent?.payload as { phase_confirmation?: { review_risk?: unknown } }).phase_confirmation?.review_risk, "normal");
+
+    // 配置从这里起只影响将来的 planning round，不能把已确认的 normal round 升格为 strict。
+    writeFileSync(join(projectRoot, ".superspec", "config.json"), JSON.stringify({ workflow: { mode: "strict" } }));
+    const applied = startApply(projectRoot, change, changeRoot);
+    assert.equal(applied.to_state, "apply");
+    const startCommit = readEvents(projectRoot, change).findLast(event =>
+      event.event_type === "transition_commit" && (event.payload as { transition?: unknown }).transition === "start-apply",
+    );
+    assert.deepEqual((startCommit?.payload as { workflow_mode?: unknown }).workflow_mode, "normal");
+    assert.deepEqual((startCommit?.payload as { execution_policy?: unknown }).execution_policy, "green_only");
+    assert.deepEqual((startCommit?.payload as { review_policy?: unknown }).review_policy, {
+      review_risk: "normal",
+      requires_verifier: true,
+    });
+
+    const applyDone = reviewReady(projectRoot, change, changeRoot);
+    assert.equal(applyDone.to_state, "apply_done");
   } finally {
     rmSync(projectRoot, { recursive: true, force: true });
   }
@@ -128,6 +266,8 @@ test("simulateLoop：真实 next 在阶段确认处暂停，登记后只推进�
   const change = "phase-confirmation-loop";
   const changeRoot = join(projectRoot, "openspec", "changes", change);
   mkdirSync(join(changeRoot, ".superspec", "artifacts"), { recursive: true });
+  mkdirSync(join(projectRoot, ".superspec"), { recursive: true });
+  writeFileSync(join(projectRoot, ".superspec", "config.json"), JSON.stringify({ workflow: { mode: "minimal" } }));
   writeFileSync(join(changeRoot, "proposal.md"), "# Proposal\n");
   writeFileSync(join(changeRoot, "tasks.md"), "# Tasks\n");
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "discovery.md"), "# Discovery\n");
@@ -157,11 +297,9 @@ test("simulateLoop：真实 next 在阶段确认处暂停，登记后只推进�
 
     const ask = next(projectRoot, change, changeRoot, "minimal");
     assert.equal(ask.path, "ask_user");
-    assert.equal(recordUserDecisionContent(projectRoot, change, JSON.stringify({
-      scope: ask.ask_user.scope,
-      question: ask.ask_user.question,
-      answer: ask.ask_user.allowed_answers[0],
-    })).accepted, true);
+    const action = (ask.ask_user.actions as PhaseDecisionAction[])[0];
+    assert.ok(action);
+    assert.equal(recordUserDecisionContent(projectRoot, change, JSON.stringify(action.record_input)).accepted, true);
 
     const afterDecision = next(projectRoot, change, changeRoot, "minimal");
     assert.equal(afterDecision.path, "next_command");

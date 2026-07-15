@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { sha256Text, ensureChangeLayout, appendEvent, makeEvent, withLock, appendRawRecord, readEvents } from "./store.ts";
 import { tasksStructureDigest as formatDigest } from "./format.ts";
 import { RecordInputDecodingError, readRecordInputFile } from "./record_input.ts";
-import type { Event, TaskAttempt, TestRun } from "./types.ts";
+import { GREEN_ONLY_NO_TDD_REASON, type Event, type TaskAttempt, type TestRun } from "./types.ts";
 
 /** tasks.md 结构指纹（委托给 format.ts 统一实现） */
 export function tasksStructureDigestOf(changeRoot: string): string | null {
@@ -127,16 +127,28 @@ function validateContractTestRunInput(
   if (!["expected_failure", "expected_success", "characterization_pass"].includes(tr.semantic_status)) {
     return { ok: false, message: "语义状态（semantic_status）必须是 expected_failure、expected_success 或 characterization_pass" };
   }
+  const requiredEvidence = attempt.required_evidence;
+  if (tr.semantic_status === "expected_failure" && requiredEvidence && !requiredEvidence.red_required) {
+    return { ok: false, message: "当前任务执行快照不要求 RED（expected_failure）；请登记声明 TEST 的 GREEN" };
+  }
+  if (tr.semantic_status === "expected_failure" && !requiredEvidence &&
+    attempt.execution_policy === "green_only" &&
+    attempt.no_tdd_reason === GREEN_ONLY_NO_TDD_REASON) {
+    return { ok: false, message: "GREEN-only 任务不登记 RED（expected_failure）；请在实现后登记声明 TEST 的 GREEN" };
+  }
   if (tr.semantic_status === "expected_failure" && tr.exit_code === 0) {
     return { ok: false, message: "RED 预期失败（expected_failure）要求退出码（exit_code）非 0" };
   }
   if ((tr.semantic_status === "expected_success" || tr.semantic_status === "characterization_pass") && tr.exit_code !== 0) {
     return { ok: false, message: `语义状态（semantic_status=${tr.semantic_status}）要求退出码（exit_code）为 0` };
   }
-  if (tr.semantic_status === "characterization_pass" && !(attempt.tdd_required === false && attempt.no_tdd_reason === "characterization")) {
+  if (tr.semantic_status === "characterization_pass" && requiredEvidence && !requiredEvidence.accepted_green_statuses.includes("characterization_pass")) {
+    return { ok: false, message: "当前任务执行快照不接受特征化通过（characterization_pass）" };
+  }
+  if (tr.semantic_status === "characterization_pass" && !requiredEvidence && !(attempt.tdd_required === false && attempt.no_tdd_reason === "characterization")) {
     return { ok: false, message: "特征化通过（characterization_pass）只适用于无需 TDD 的特征化任务（tdd_required:false，no_tdd_reason:characterization）" };
   }
-  const declaredTests = attempt.contract?.tests ?? [];
+  const declaredTests = requiredEvidence?.test_ids ?? attempt.contract?.tests ?? [];
   if (declaredTests.length > 0 && !declaredTests.includes(tr.test_id)) {
     return { ok: false, message: `测试 ID（test_id=${tr.test_id}）不属于当前任务契约声明的测试列表` };
   }

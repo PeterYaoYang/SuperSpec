@@ -434,7 +434,9 @@ function changedPathsBetweenSnapshots(
 }
 
 function testEvidenceForAttempt(events: Event[], attempt: TaskAttempt): Record<string, unknown>[] {
-  const declaredTests = attempt.contract_mode === true ? attempt.contract?.tests ?? [] : [];
+  const declaredTests = attempt.contract_mode === true
+    ? attempt.required_evidence?.test_ids ?? attempt.contract?.tests ?? []
+    : [];
   const eventsByTest = new Map<string, Event[]>();
   for (const ev of events) {
     if (ev.event_type !== "test_run_recorded") continue;
@@ -492,14 +494,17 @@ function taskExecutionIndexFromEvents(projectRoot: string, events: Event[]): Tas
       const started = attempts.get(payload.attempt_id);
       const attempt = started?.attempt;
       const effectiveContract = attempt?.contract_mode === true ? attempt.contract ?? null : null;
+      const requiredEvidence = attempt?.required_evidence ?? null;
       const changedResult = changedPathsBetweenSnapshots(projectRoot, started?.boundary ?? null, boundaryFromPayload(ev.payload));
       entries.push({
         task_id: payload.task_id,
         attempt_id: payload.attempt_id,
+        execution_policy: attempt?.execution_policy ?? "tdd",
         changed_paths: changedResult ? changedResult.paths : null,
         ...(changedResult?.partial_reason ? { changed_paths_partial_reason: changedResult.partial_reason } : {}),
         contract: effectiveContract,
-        declared_tests: effectiveContract?.tests ?? [],
+        required_evidence: requiredEvidence,
+        declared_tests: requiredEvidence?.test_ids ?? effectiveContract?.tests ?? [],
         scope_note: payload.scope_note && typeof payload.scope_note === "object" && !Array.isArray(payload.scope_note)
           ? payload.scope_note as Record<string, unknown>
           : null,

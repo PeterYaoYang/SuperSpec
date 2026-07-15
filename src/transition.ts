@@ -19,7 +19,7 @@ import {
   reviewEvidenceDigest,
   reviewPolicyForRisk,
   REVIEW_DOC_PATHS,
-  type ReviewPolicy,
+  type ReviewPolicy, type ReviewRisk,
 } from "./review.ts";
 import {
   REVIEW_CODE_REVIEW_GATE_ID,
@@ -54,11 +54,14 @@ import {
 } from "./format.ts";
 import {
   applyRequirementModeForCurrentRound,
+  executionRequirementVersionForCurrentRound,
   blockingJobsForApplyDone,
+  executionPolicyForCurrentRound,
   formatPendingTaskMessage,
   latestAcceptedProposalBaseline,
   pendingTaskStatusForApply,
   planTransition,
+  discoveryDocsBaseline,
   proposalDocsBaseline,
   type TransitionDecisionPlan,
 } from "./phase_plan.ts";
@@ -69,8 +72,9 @@ import {
   phaseConfirmationMissingMessage,
   type PhaseBoundary,
 } from "./phase_confirmation.ts";
-import { currentGitHead, dirtyCodeFiles } from "./git_state.ts";
-import type { CodeReviewScope, Event, Snapshot, State, Job, JobRole, TransitionResult, Ref, TaskAttempt, BoundarySnapshot } from "./types.ts";
+import { currentGitHead, dirtyCodeFiles, stageProductionJavaFilesSince } from "./git_state.ts";
+import { workflowRiskForProject } from "./workflow_config.ts";
+import type { CodeReviewScope, Event, Snapshot, State, Job, JobRole, TransitionResult, Ref, TaskAttempt, BoundarySnapshot, EffectiveEvidencePlan, ExecutionPolicy } from "./types.ts";
 
 let transitionSeq = 0;
 function newTransitionId(): string { return `T-${Date.now()}-${++transitionSeq}`; }
@@ -153,6 +157,18 @@ function boundarySnapshotPayload(projectRoot: string): { boundary_snapshot: Boun
   };
 }
 
+function boundarySnapshotForTaskAttempt(events: Event[], attemptId: string): BoundarySnapshot | null {
+  const start = events.findLast(event =>
+    event.event_type === "task_started" &&
+    (event.payload as { attempt_id?: unknown }).attempt_id === attemptId
+  );
+  const boundary = (start?.payload as { boundary_snapshot?: unknown } | undefined)?.boundary_snapshot;
+  if (!boundary || typeof boundary !== "object" || Array.isArray(boundary)) return null;
+  const value = boundary as Partial<BoundarySnapshot>;
+  if (!Array.isArray(value.dirty_files)) return null;
+  return value as BoundarySnapshot;
+}
+
 function parseScopeNoteInput(inputContent: string | null): { ok: true; value: Record<string, unknown> | null; digest: string | null } | { ok: false; message: string; digest: string | null } {
   if (inputContent == null) return { ok: true, value: null, digest: null };
   const digest = sha256Text(inputContent);
@@ -203,10 +219,40 @@ function parseScopeNoteInput(inputContent: string | null): { ok: true; value: Re
 function validateTaskStartContract(
   changeRoot: string,
   taskId: string,
+  parsedContract: ParsedExecutionRequirement,
+): string | null {
+  if (parsedContract.errors.length > 0) return parsedContract.errors.join("；");
+  if (!parsedContract.declaredFields.includes("tests")) return `${taskId} 的执行依据缺少测试字段`;
+  if (!parsedContract.contract.design) return `${taskId} 的执行依据缺少设计`;
+  if (parsedContract.contract.source.length === 0) return `${taskId} 的执行依据缺少来源`;
+  if (!parsedContract.contract.acceptance) return `${taskId} 的执行依据缺少验收目标`;
+  if (!parsedContract.contract.guard) return `${taskId} 的执行依据缺少边界`;
+  if (parsedContract.contract.tests.length === 0) return null;
+
+  const testContractPath = join(changeRoot, ".superspec", "artifacts", "test-contract.md");
+  if (!existsSync(testContractPath)) return "test-contract.md 不存在，无法校验执行依据测试引用";
+  const parsed = parseTestContractEntries(readFileSync(testContractPath, "utf8"));
+  if (!parsed.ok) return parsed.message;
+  const known = new Set(parsed.entries.map(entry => entry.test_id));
+  const missing = parsedContract.contract.tests.filter(testId => !known.has(testId));
+  return missing.length > 0 ? `执行依据引用了不存在的 TEST ID：${missing.join(", ")}` : null;
+}
+
+/**
+ * v1 只回放旧 contract 约束：普通 TDD task 必须保有执行依据和 TEST 引用，
+ * 但不要求 v2 新增的五字段，避免阻断历史 documentation-only task。
+ */
+function validateLegacyTaskStartContract(
+  changeRoot: string,
+  taskId: string,
   tddRequired: boolean,
   parsedContract: ParsedExecutionRequirement | null,
 ): string | null {
-  if (!parsedContract) return null;
+  if (!parsedContract) {
+    return tddRequired && !isReviewFixTaskId(taskId)
+      ? `执行依据模式下，普通 TDD 任务 ${taskId} 缺少执行依据`
+      : null;
+  }
   if (parsedContract.errors.length > 0) return parsedContract.errors.join("；");
   if (tddRequired && !isReviewFixTaskId(taskId) && parsedContract.contract.tests.length === 0) {
     return `${taskId} 是普通 TDD 任务，执行依据缺少测试`;
@@ -220,6 +266,26 @@ function validateTaskStartContract(
   const known = new Set(parsed.entries.map(entry => entry.test_id));
   const missing = parsedContract.contract.tests.filter(testId => !known.has(testId));
   return missing.length > 0 ? `执行依据引用了不存在的 TEST ID：${missing.join(", ")}` : null;
+}
+
+/**
+ * 只在 task-start 编译新模式 task 的有效证据要求。Propose 只声明 TEST，
+ * RED 是否要求由这里读取已冻结的 execution_policy 决定，之后不再依赖 tasks.md。
+ */
+function compileRequiredEvidence(
+  executionPolicy: ExecutionPolicy,
+  testIds: string[],
+  requiresVerificationWithoutDeclaredTest: boolean,
+): EffectiveEvidencePlan {
+  // REVIEW-FIX 没有计划阶段声明的 TEST，但仍必须登记一次真实回归验证。
+  // 是否需要 RED 始终由已冻结的 execution_policy 决定。
+  const requiresVerification = testIds.length > 0 || requiresVerificationWithoutDeclaredTest;
+  return {
+    test_ids: testIds,
+    red_required: executionPolicy === "tdd" && requiresVerification,
+    green_required: requiresVerification,
+    accepted_green_statuses: ["expected_success"],
+  };
 }
 
 function hasRejectedReviewReadyVerifier(events: Event[]): boolean {
@@ -320,7 +386,7 @@ function appendReviewFixTask(changeRoot: string, ref: CodeReviewFindingRef, find
   const description = typeof finding.description === "string" && finding.description.trim()
     ? finding.description.trim().replace(/\s+/g, " ")
     : `修复代码审查问题 ${ref.findingId}`;
-  const line = `- [ ] ${reviewFixTaskId(ref)} ${description} tdd_required:true ${marker}`;
+  const line = `- [ ] ${reviewFixTaskId(ref)} ${description} ${marker}`;
   const suffix = content.endsWith("\n") ? "" : "\n";
   writeFileSync(tasksPath, `${content}${suffix}${line}\n`);
   return "created";
@@ -563,6 +629,7 @@ function authorizePhaseAdvance(input: {
   events: Event[];
   snapshot: Snapshot;
   boundary: PhaseBoundary;
+  risk: ReviewRisk;
   decision: Decision;
 }): Decision | SkipDecision {
   const confirmation = phaseConfirmationForBoundary(
@@ -570,6 +637,7 @@ function authorizePhaseAdvance(input: {
     input.events,
     input.snapshot,
     input.boundary,
+    input.risk,
   );
   const phaseDecision = confirmation
     ? latestAcceptedPhaseDecision(input.events, confirmation)
@@ -723,7 +791,7 @@ export function commitTransition(
 
 // ===== propose-ready =====
 
-export function proposeReady(projectRoot: string, change: string, changeRoot: string, risk: "minimal" | "normal" | "strict" = "strict"): TransitionResult {
+export function proposeReady(projectRoot: string, change: string, changeRoot: string, risk = workflowRiskForProject(projectRoot)): TransitionResult {
   return commitTransition(projectRoot, change, changeRoot, {
     name: "propose-ready", idempotencyInputs: { risk },
     decide: (snapshot) => {
@@ -756,7 +824,7 @@ export function transitionInit(projectRoot: string, change: string, changeRoot: 
 
 // ===== explore =====
 
-export function transitionExplore(projectRoot: string, change: string, changeRoot: string, risk: "minimal" | "normal" | "strict" = "strict"): TransitionResult {
+export function transitionExplore(projectRoot: string, change: string, changeRoot: string, risk = workflowRiskForProject(projectRoot)): TransitionResult {
   return commitTransition(projectRoot, change, changeRoot, {
     name: "explore", idempotencyInputs: { phase: "explore", risk },
     decide: (snapshot) => {
@@ -787,7 +855,7 @@ export function startApply(projectRoot: string, change: string, changeRoot: stri
         changeRoot,
         events,
         snapshot,
-        mode: { kind: "risk", risk: "strict" },
+        mode: { kind: "risk", risk: workflowRiskForProject(projectRoot) },
       });
       return transitionPlanToDecision(snapshot, changeRoot, change, plan, events);
     },
@@ -809,6 +877,8 @@ export function taskStart(projectRoot: string, change: string, changeRoot: strin
       const taskLineIdx = findTaskLine(lines, taskId);
       if (taskLineIdx < 0) return { skip: true, message: `任务 ${taskId} 不存在` };
       const contractMode = applyRequirementModeForCurrentRound(events);
+      const executionRequirementVersion = executionRequirementVersionForCurrentRound(events);
+      const executionPolicy = executionPolicyForCurrentRound(events);
       if (contractMode && pendingTaskStatusForApply(changeRoot, events).completedByEvent.includes(taskId)) {
         return { skip: true, message: `任务 ${taskId} 已通过完成事件完成` };
       }
@@ -822,23 +892,42 @@ export function taskStart(projectRoot: string, change: string, changeRoot: strin
       // 统一出口：adopted.contract 非 null 当且仅当契约模式下有绑定块；
       // legacy 轮即使 task 带执行依据文本也输出 null，避免"看似契约、实按 legacy 校验"的误导态
       const adopted = adoptedContractForTask(tasksContent, taskId, contractMode);
-      if (contractMode && taskInfo.tddRequired && !isReviewFixTaskId(taskId) && !adopted.parsed) {
-        return { skip: true, message: `执行依据模式下，普通 TDD 任务 ${taskId} 缺少执行依据` };
+      const reviewFix = isReviewFixTaskId(taskId);
+      if (contractMode && executionRequirementVersion === 2 && !reviewFix && !adopted.parsed) {
+        return { skip: true, message: `执行依据模式下，任务 ${taskId} 缺少执行依据` };
       }
-      if (contractMode) {
-        const contractError = validateTaskStartContract(changeRoot, taskId, taskInfo.tddRequired, adopted.parsed);
+      if (contractMode && executionRequirementVersion === 2 && !reviewFix && adopted.parsed) {
+        const contractError = validateTaskStartContract(changeRoot, taskId, adopted.parsed);
+        if (contractError) return { skip: true, message: contractError };
+      }
+      if (contractMode && executionRequirementVersion === 1) {
+        const contractError = validateLegacyTaskStartContract(
+          changeRoot,
+          taskId,
+          taskInfo.tddRequired,
+          adopted.parsed,
+        );
         if (contractError) return { skip: true, message: contractError };
       }
 
       const structureDigest = sha256Text(tasksContent.replace(/- \[[xX]\]/g, "- [ ]"));
+      const effectivePolicy = executionPolicy;
+      const requiredEvidence = contractMode && executionRequirementVersion === 2
+        ? compileRequiredEvidence(effectivePolicy, adopted.contract?.tests ?? [], reviewFix)
+        : null;
       const attempt: TaskAttempt = {
         attempt_id: `ATT-${taskId}-${Date.now()}-${++attemptSeq}`,
         task_id: taskId, state: "active",
         task_structure_digest: structureDigest,
         contract_mode: contractMode,
         contract: adopted.contract,
-        tdd_required: taskInfo.tddRequired,
-        no_tdd_reason: taskInfo.noTddReason,
+        ...(requiredEvidence ? { required_evidence: requiredEvidence } : {
+          // 历史模式以及 v1 契约轮继续使用 task 行标记回放；v2 只消费快照。
+          tdd_required: taskInfo.tddRequired,
+          no_tdd_reason: taskInfo.noTddReason,
+        }),
+        // REVIEW-FIX 没有计划阶段测试契约，但有效证据要求仍由本轮冻结策略编译。
+        execution_policy: effectivePolicy,
         declared_write_scope: [], pre_edit_source_fingerprint: null,
         pre_edit_red_ref: null, executor_packet_digest: null,
         executor_result_ref: null, post_edit_green_ref: null,
@@ -856,7 +945,9 @@ export function taskStart(projectRoot: string, change: string, changeRoot: strin
         details: {
           attempt_id: attempt.attempt_id,
           task_id: taskId,
+          execution_policy: effectivePolicy,
           contract: adopted.contract,
+          ...(requiredEvidence ? { required_evidence: requiredEvidence } : {}),
           // legacy 轮统一标注历史模式（无论有无执行依据文本）；契约轮无块时标 false（如 REVIEW-FIX）
           ...(adopted.contract ? {} : { legacy_contract: !contractMode }),
         },
@@ -866,6 +957,47 @@ export function taskStart(projectRoot: string, change: string, changeRoot: strin
 }
 
 // ===== reopen =====
+
+function abandonActiveTaskAttempts(snapshot: Snapshot, to: "explore" | "propose", reason: string): NonNullable<Decision["extraEvents"]> {
+  return snapshot.active_task_attempts
+    .filter(attempt => attempt.state === "active")
+    .map(attempt => ({
+      type: "task_abandoned",
+      payload: {
+        attempt_id: attempt.attempt_id,
+        task_id: attempt.task_id,
+        reason: `reopen --to ${to}：${reason}`,
+      },
+    }));
+}
+
+function invalidateOpenJobs(snapshot: Snapshot, to: "explore" | "propose", reason: string): NonNullable<Decision["extraEvents"]> {
+  return snapshot.open_jobs.map(job => ({
+    type: "job_invalidated",
+    payload: {
+      job_id: job.job_id,
+      role: job.role,
+      reason: `reopen --to ${to}：${reason}`,
+    },
+  }));
+}
+
+function planningReopenExtraEvents(snapshot: Snapshot, to: "explore" | "propose", reason: string): NonNullable<Decision["extraEvents"]> {
+  return [
+    ...invalidateOpenJobs(snapshot, to, reason),
+    ...abandonActiveTaskAttempts(snapshot, to, reason),
+  ];
+}
+
+function canReopenToExplore(from: State): boolean {
+  return from === "propose" || from === "propose_ready" || from === "apply" ||
+    from === "apply_done" || from === "review" || from === "accepted";
+}
+
+function canReopenToPropose(from: State): boolean {
+  return from === "propose_ready" || from === "apply" || from === "apply_done" ||
+    from === "review" || from === "accepted";
+}
 
 export function reopen(
   projectRoot: string,
@@ -939,22 +1071,37 @@ export function reopen(
         };
       }
 
-      if (to === "propose") {
-        if (snapshot.state !== "accepted") {
-          return {
-            skip: true,
-            message: `当前状态 ${snapshot.state}，主动 reopen --to propose 只允许从 accepted 发起；apply_done 的代码审查问题请使用 --review-finding`,
-          };
+      if (to === "explore") {
+        if (!canReopenToExplore(snapshot.state)) {
+          return { skip: true, message: `当前状态 ${snapshot.state}，不能 reopen 到 explore` };
         }
-        if (snapshot.open_jobs.length > 0) {
+        return {
+          fromState: snapshot.state,
+          toState: "explore",
+          outcome: "advanced" as const,
+          reason: reason.trim(),
+          commitPayload: {
+            reopen_target: "explore",
+            reopen_source: snapshot.state,
+            baseline_docs: discoveryDocsBaseline(changeRoot),
+          },
+          extraEvents: planningReopenExtraEvents(snapshot, "explore", reason.trim()),
+        };
+      }
+
+      if (to === "propose") {
+        if (!canReopenToPropose(snapshot.state)) {
+          return { skip: true, message: `当前状态 ${snapshot.state}，不能 reopen 到 propose` };
+        }
+        if (snapshot.state === "accepted" && snapshot.open_jobs.length > 0) {
           return {
             blocked: true,
-            reason: `状态未推进；accepted 仍有 ${snapshot.open_jobs.length} 个待完成工作项`,
+            reason: `状态未推进；accepted 状态仍有 ${snapshot.open_jobs.length} 个待完成工作项`,
             jobs: snapshot.open_jobs,
           };
         }
-        const acceptedBaseline = latestAcceptedProposalBaseline(events);
         const currentBaseline = proposalDocsBaseline(changeRoot);
+        const acceptedBaseline = snapshot.state === "accepted" ? latestAcceptedProposalBaseline(events) : null;
         // 旧版 accepted 事件的基线可能缺少后来纳入 Propose gate 的材料。保留其已冻结
         // 的摘要，并用 reopen 当刻的摘要补齐缺项，确保本轮之后对任一审查目标的修改都能被检测。
         const baselineNeedsBackfill = acceptedBaseline !== null && Object.keys(currentBaseline)
@@ -966,20 +1113,21 @@ export function reopen(
           ]))
           : currentBaseline;
         return {
-          fromState: "accepted",
+          fromState: snapshot.state,
           toState: "propose",
           outcome: "advanced" as const,
           reason: reason.trim(),
           commitPayload: {
             reopen_target: "propose",
-            reopen_source: "accepted",
+            reopen_source: snapshot.state,
             baseline_source: acceptedBaseline ? (baselineNeedsBackfill ? "accepted_backfill" : "accepted") : "reopen_fallback",
             baseline_docs: baselineDocs,
           },
+          extraEvents: planningReopenExtraEvents(snapshot, "propose", reason.trim()),
         };
       }
 
-      if (to !== "apply") return { skip: true, message: `reopen 当前只支持 --to apply 或 --to propose，不支持 ${to}` };
+      if (to !== "apply") return { skip: true, message: `reopen 当前只支持 --to explore、--to propose 或 --to apply，不支持 ${to}` };
       if (snapshot.state !== "apply_done" && snapshot.state !== "review") {
         return { skip: true, message: `当前状态 ${snapshot.state}，不能 reopen 到 apply` };
       }
@@ -999,7 +1147,7 @@ export function reopen(
 
 // ===== review-ready =====
 
-export function reviewReady(projectRoot: string, change: string, changeRoot: string, risk: "minimal" | "normal" | "strict" = "strict"): TransitionResult {
+export function reviewReady(projectRoot: string, change: string, changeRoot: string, risk = workflowRiskForProject(projectRoot)): TransitionResult {
   return commitTransition(projectRoot, change, changeRoot, {
     name: "review-ready", idempotencyInputs: { phase: "review-ready", risk },
     decide: (snapshot) => {
@@ -1055,9 +1203,10 @@ export function reviewReady(projectRoot: string, change: string, changeRoot: str
           return authorizePhaseAdvance({
             projectRoot,
             events,
-            snapshot,
-            boundary: "apply_to_review",
-            decision: codeReviewDecision,
+          snapshot,
+          boundary: "apply_to_review",
+          risk: policy.review_risk,
+          decision: codeReviewDecision,
           });
         }
         return codeReviewDecision;
@@ -1094,7 +1243,7 @@ export function accept(projectRoot: string, change: string, changeRoot: string):
         changeRoot,
         events,
         snapshot,
-        mode: { kind: "risk", risk: "strict" },
+        mode: { kind: "risk", risk: workflowRiskForProject(projectRoot) },
       });
       return transitionPlanToDecision(snapshot, changeRoot, change, plan, events);
     },
@@ -1115,10 +1264,12 @@ export function taskComplete(projectRoot: string, change: string, changeRoot: st
 
       const readiness = taskEvidenceReadiness(projectRoot, change, changeRoot, attempt);
       if (!readiness.ready) return { skip: true, message: `任务 ${taskId} 无法完成：${readiness.reason}` };
+      const taskStartBoundary = boundarySnapshotForTaskAttempt(readEvents(projectRoot, change), attempt.attempt_id);
 
       const completedPayload: Record<string, unknown> = {
         task_id: taskId,
         attempt_id: attempt.attempt_id,
+        execution_policy: attempt.execution_policy ?? "tdd",
         ...boundarySnapshotPayload(projectRoot),
         checkbox_update: { status: "pending" },
         ...(scopeInput.value ? { scope_note: scopeInput.value } : {}),
@@ -1128,7 +1279,8 @@ export function taskComplete(projectRoot: string, change: string, changeRoot: st
         fromState: "apply", toState: "apply", outcome: "advanced" as const,
         reason: `任务 ${taskId} 完成`,
         extraEvents: [{ type: "task_completed", payload: completedPayload }],
-        postCommit: (_pr: string, _ch: string, cr: string) => {
+        postCommit: (pr: string, _ch: string, cr: string) => {
+          completedPayload.java_staging = stageProductionJavaFilesSince(pr, taskStartBoundary);
           const lines = readFileSync(join(cr, "tasks.md"), "utf8").split("\n");
           const idx = findTaskLine(lines, taskId);
           if (idx < 0) {

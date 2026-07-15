@@ -46,7 +46,8 @@ function replayEvents(events: Event[]): {
         }
         break;
       }
-      // H4 修复：删除 job_requested / job_invalidated 死分支——job 只通过 transition_commit 的 new_jobs payload 创建，staleness 只在 sync 内存计算（不写事件）
+      // job 只通过 transition_commit 的 new_jobs payload 创建。reopen 到更早阶段时，
+      // 已绑定旧材料的待完成工作项会被 job_invalidated 关闭，避免阻塞新一轮 gate。
       case "job_accepted": {
         const { job_id } = ev.payload as { job_id: string };
         const idx = openJobs.findIndex(j => j.job_id === job_id);
@@ -65,7 +66,12 @@ function replayEvents(events: Event[]): {
         }
         break;
       }
-      // H4：job_invalidated 事件从不发射（删除死分支）
+      case "job_invalidated": {
+        const { job_id } = ev.payload as { job_id: string };
+        const idx = openJobs.findIndex(j => j.job_id === job_id);
+        if (idx >= 0) openJobs.splice(idx, 1);
+        break;
+      }
       case "task_started": {
         const attempt = ev.payload as unknown as TaskAttempt;
         activeAttempts.push(attempt);
@@ -82,7 +88,10 @@ function replayEvents(events: Event[]): {
       case "task_abandoned": {
         const { attempt_id } = ev.payload as { attempt_id: string };
         const idx = activeAttempts.findIndex(a => a.attempt_id === attempt_id);
-        if (idx >= 0) activeAttempts.splice(idx, 1);
+        if (idx >= 0) {
+          const [attempt] = activeAttempts.splice(idx, 1);
+          taskStatuses[attempt.task_id] = "todo";
+        }
         break;
       }
     }

@@ -26,18 +26,17 @@ argument-hint: "本次测试审查说明"
 - recommendation 只能描述需要证明的行为、边界或证据，不把测试偏好和新的基础设施方案写成 required fix；推荐方案不是 finding 成立的证据。
 - 已声明行为和本次直接边界都有可信证明时停止，不为“更全面”而继续增加与验收无关的组合、故障矩阵或基础设施测试。
 
-## 任务拆分与 RED/GREEN 审查口径
+## 任务拆分与执行证据审查口径
 
 重点审查设计约束是否可验证，以及 task / design / test-contract 是否形成可信闭环。能力覆盖和文档可审查性由 Critic 主责；技术路线和系统边界由 Architect 主责。
 
-- TDD task 应形成清晰 RED/GREEN 闭环；`tasks.md` 只声明任务边界和 `tdd_required:true/false`，不得写 RED/GREEN 命令、断言或预期输出
+- `tasks.md` 只声明任务边界及执行依据（测试/设计/来源/验收/边界），不得写 RED/GREEN 命令、断言、预期输出或模式标记；task-start 的 `required_evidence` 决定本次是否需要 RED/GREEN
 - 根据 design 已采纳的实现方案、边界约束、共享契约和有当前证据的真实风险判断 test-contract 是否覆盖本次主要风险；不要求 design 使用固定字段或可选风险章节
 - task 或 test-contract 场景无法定位到对应实现方案、共享契约或边界约束，因而无法推导测试条件和预期结果时，应失败
 - task 执行依据声明的 `TEST-xxx` 必须存在，scenario 必须确实验收该 task；scenario 无法推导断言、与 task 描述明显不匹配，或 task 的主要验收路径及其边界没有测试覆盖且无豁免时，应失败
 - task 的 `设计` 引用与声明测试必须匹配；当本次 change 明确新增或改变关键边界、状态转换、优先级、一致性 / 并发 / 兼容约束，且这些行为影响验收时，只覆盖 happy path 应判为覆盖缺口。未改变的既有语义和无证据的假想风险不要求新增测试
 - `test-contract.md` 必须可解析，表头含 `test_id` 和 `scenario`，无重复 `test_id`；未绑定任何 task 的 TEST 必须有合理说明或留待用户豁免，不能把文档内的不覆盖理由当成已豁免
-- 测试方案必须能定义目标测试身份、RED 失败信号和 GREEN 覆盖映射；不能只靠退出码或笼统命令证明
-- `tdd_required:false` 必须有明确 `no_tdd_reason`；只有 `no_tdd_reason:characterization` 的 task 可以用特征化通过作为测试证据
+- 测试方案必须能定义目标测试身份、覆盖映射和 task-start 所要求的失败/通过证据；不能只靠退出码或笼统命令证明。新计划统一使用 `expected_success` 作为通过证据；`characterization_pass` 只为历史 attempt 回放保留，历史标记不构成新计划要求
 
 ## 输入数据与链路覆盖审查口径
 

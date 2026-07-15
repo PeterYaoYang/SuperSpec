@@ -29,7 +29,17 @@ function setupFixture(state: "init" | "explore" | "propose" = "propose"): Fixtur
   // 创建 OpenSpec 变更目录 + 文档
   mkdirSync(join(changeRoot, ".superspec", "artifacts"), { recursive: true });
   writeFileSync(join(changeRoot, "proposal.md"), "# Proposal\n\nTest change.\n");
-  writeFileSync(join(changeRoot, "tasks.md"), "# Tasks\n\n- [ ] TASK-001 Do something\n");
+  writeFileSync(join(changeRoot, "tasks.md"), [
+    "# Tasks", "",
+    "- [ ] TASK-001 Documentation fixture",
+    "  执行依据:",
+    "  - 测试:",
+    "  - 设计: design.md#Design",
+    "  - 来源: proposal.md#Test",
+    "  - 验收: 文档说明完整",
+    "  - 边界: 不改实现代码",
+    "",
+  ].join("\n"));
   writeFileSync(join(changeRoot, "design.md"), "# Design\n\nDesign doc.\n");
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "discovery.md"), "# Discovery\n\nFound stuff.\n");
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "test-contract.md"), "# Test Contract\n\nTC-001.\n");

@@ -10,12 +10,12 @@ import { rebuildSnapshot } from "./sync.ts";
 import { next as nextCmd } from "./next.ts";
 import { proposeReady, commitTransition, transitionInit, transitionExplore, startApply, taskStart, taskComplete, reopen, reviewReady, accept } from "./transition.ts";
 import type { State, TransitionResult } from "./types.ts";
-import type { ReviewRisk } from "./review.ts";
 import { recordJobSubmit, recordJobSubmitContent, recordUserDecision, recordUserDecisionContent, jobsList, jobsPacket } from "./record.ts";
 import { recordTestRun, recordTestRunContent } from "./task.ts";
 import { RecordInputDecodingError, decodeRecordInput } from "./record_input.ts";
 import { probeOpenSpec, openspecStatus, changeRoot } from "./openspec.ts";
 import { SUPERSPEC_VERSION } from "./version.ts";
+import { WorkflowConfigError, workflowRiskForProject } from "./workflow_config.ts";
 
 const PACKAGE_NAME = "@peterxiaoyang/superspec";
 const OPENSPEC_PACKAGE_NAME = "@fission-ai/openspec";
@@ -77,18 +77,14 @@ function proposeReadyExitCode(result: TransitionResult): number {
   return result.events_written === 0 && result.message.includes("不能") ? 1 : 0;
 }
 
-function parseReviewRisk(value: string | undefined): ReviewRisk | null {
-  if (value == null) return "strict";
-  if (value === "minimal" || value === "normal" || value === "strict") return value;
-  return null;
-}
-
-function readReviewRisk(opts: Record<string, string>): ReviewRisk | null {
-  const risk = parseReviewRisk(opts.risk);
-  if (!risk) {
-    console.error("--risk 只能是 minimal、normal 或 strict");
+function ensureWorkflowMode(projectRoot: string, _opts: Record<string, string>): boolean {
+  try {
+    workflowRiskForProject(projectRoot);
+    return true;
+  } catch (err) {
+    console.error(err instanceof WorkflowConfigError ? err.message : String(err));
+    return false;
   }
-  return risk;
 }
 
 function parseVersion(version: string): { major: number; minor: number; patch: number; prerelease: string | null } | null {
@@ -578,6 +574,7 @@ async function main(argv: string[]): Promise<number> {
 transition 子命令：
   init / explore / sync / next / propose-ready / start-apply
   task-start --task <T> / task-complete --task <T> [--input -]
+  reopen --to explore|propose|apply --reason <TEXT>
   reopen --to apply --reason <TEXT> [--review-fix <JOB#FINDING>]
   reopen --to propose --reason <TEXT> [--review-finding <JOB#FINDING>]
   review-ready / accept
@@ -707,6 +704,11 @@ jobs 子命令：
 
       case "transition": {
         const cr = changeRoot(projectRoot, change);
+        // mode 只能由项目配置和已冻结 round 快照决定；任何 transition 都不接受 --risk。
+        if (opts.risk !== undefined) {
+          console.error("工作流模式由 .superspec/config.json 的 workflow.mode 控制，不支持 --risk");
+          return 1;
+        }
 
         switch (subcommand) {
           case "init":
@@ -715,9 +717,8 @@ jobs 子命令：
 
           case "explore":
             {
-              const risk = readReviewRisk(opts);
-              if (!risk) return 1;
-              console.log(JSON.stringify(transitionExplore(projectRoot, change, cr, risk), null, 2));
+              if (!ensureWorkflowMode(projectRoot, opts)) return 1;
+              console.log(JSON.stringify(transitionExplore(projectRoot, change, cr), null, 2));
             }
             return 0;
 
@@ -734,17 +735,15 @@ jobs 子命令：
           }
 
           case "next": {
-            const risk = readReviewRisk(opts);
-            if (!risk) return 1;
-            const result = nextCmd(projectRoot, change, cr, risk);
+            if (!ensureWorkflowMode(projectRoot, opts)) return 1;
+            const result = nextCmd(projectRoot, change, cr);
             console.log(JSON.stringify(result, null, 2));
             return 0;
           }
 
           case "propose-ready": {
-            const risk = readReviewRisk(opts);
-            if (!risk) return 1;
-            const result = proposeReady(projectRoot, change, cr, risk);
+            if (!ensureWorkflowMode(projectRoot, opts)) return 1;
+            const result = proposeReady(projectRoot, change, cr);
             console.log(JSON.stringify(result, null, 2));
             return proposeReadyExitCode(result);
           }
@@ -801,9 +800,8 @@ jobs 子命令：
           }
 
           case "review-ready": {
-            const risk = readReviewRisk(opts);
-            if (!risk) return 1;
-            const result = reviewReady(projectRoot, change, cr, risk);
+            if (!ensureWorkflowMode(projectRoot, opts)) return 1;
+            const result = reviewReady(projectRoot, change, cr);
             console.log(JSON.stringify(result, null, 2));
             return transitionExitCode(result);
           }

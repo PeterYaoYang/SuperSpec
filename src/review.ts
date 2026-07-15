@@ -64,10 +64,25 @@ function isReviewPolicy(value: unknown): value is ReviewPolicy {
 }
 
 export function readReviewPolicyFromEvents(events: Event[]): ReviewPolicy | null {
-  for (const ev of events) {
+  // 新格式在 start-apply 写入，并且只能读取最新 Apply round 的策略。
+  // 回退到该 round 内的 review-ready，是为了回放升级前的历史 event。
+  let latestStartApplyIndex = -1;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i];
+    if (event.event_type !== "transition_commit") continue;
+    const payload = event.payload as { transition?: unknown; to_state?: unknown };
+    if (payload.transition === "start-apply" && payload.to_state === "apply") {
+      latestStartApplyIndex = i;
+      break;
+    }
+  }
+  if (latestStartApplyIndex < 0) return null;
+
+  for (let i = events.length - 1; i >= latestStartApplyIndex; i--) {
+    const ev = events[i];
     if (ev.event_type !== "transition_commit") continue;
     const payload = ev.payload as { transition?: unknown; review_policy?: unknown };
-    if (payload.transition !== "review-ready") continue;
+    if (payload.transition !== "start-apply" && payload.transition !== "review-ready") continue;
     if (isReviewPolicy(payload.review_policy)) return payload.review_policy;
   }
   return null;

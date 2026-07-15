@@ -7,6 +7,9 @@ export type State =
   | "archive" // legacy replay-only：新工作流不再提供进入此状态的 transition
   | "abandoned";
 
+export type ExecutionPolicy = "tdd" | "green_only";
+export const GREEN_ONLY_NO_TDD_REASON = "green-only";
+
 // Phase 1 只实现前 4 个
 export const PHASE1_STATES: ReadonlySet<State> = new Set(["init", "explore", "propose", "propose_ready"]);
 
@@ -58,8 +61,19 @@ export interface ExecutionContract {
   tests: string[];
   design: string | null;
   source: string[];
-  reason: string | null;
+  acceptance: string | null;
   guard: string | null;
+}
+
+/**
+ * task-start 将计划中的声明和本轮已冻结策略编译出的有效证据要求。
+ * 这是 attempt 的不可变快照；Apply 与 task-complete 只消费它，不再解释任务行的 TDD 标记。
+ */
+export interface EffectiveEvidencePlan {
+  test_ids: string[];
+  red_required: boolean;
+  green_required: boolean;
+  accepted_green_statuses: Array<"expected_success" | "characterization_pass">;
 }
 
 export interface DirtyFileFingerprint {
@@ -97,10 +111,12 @@ export interface CodeStateCheck {
 export interface TaskExecutionIndexEntry {
   task_id: string;
   attempt_id: string;
+  execution_policy: ExecutionPolicy;
   changed_paths: string[] | null;
   // committed 段 git diff 失败时的原因；此时 changed_paths 只含 dirty 侧对比结果
   changed_paths_partial_reason?: string;
   contract: ExecutionContract | null;
+  required_evidence: EffectiveEvidencePlan | null;
   declared_tests: string[];
   scope_note: Record<string, unknown> | null;
   test_evidence: Record<string, unknown>[];
@@ -218,8 +234,14 @@ export interface TransitionCommitPayload {
     material_digest: string;
     scope: string;
     decision_event_id: string;
+    review_risk?: "minimal" | "normal" | "strict";
   };
   accepted_baseline_docs?: Record<string, string>;
+  /** Propose-ready / start-apply 写入的本轮 workflow mode，后续阶段只读该快照。 */
+  workflow_mode?: "minimal" | "normal" | "strict";
+  /** v2 起所有普通任务必须有五字段执行依据；缺失表示旧 change，沿用旧规则回放。 */
+  execution_requirement_version?: 2;
+  execution_policy?: ExecutionPolicy;
 }
 
 // ===== Snapshot =====
@@ -249,8 +271,12 @@ export interface TaskAttempt {
   task_structure_digest: string;
   contract?: ExecutionContract | null;
   contract_mode?: boolean;
+  /** task-start 编译出的有效执行要求；缺失表示历史 attempt，按旧字段回放。 */
+  required_evidence?: EffectiveEvidencePlan | null;
+  // 以下两个字段仅用于回放历史 task；新的执行依据模式不再写入它们。
   tdd_required?: boolean;
   no_tdd_reason?: string | null;
+  execution_policy?: ExecutionPolicy;
   declared_write_scope: string[];
   pre_edit_source_fingerprint: string | null;
   pre_edit_red_ref: string | null;

@@ -2,6 +2,8 @@ import { next } from "../src/next.ts";
 import type { PhaseDecisionAction } from "../src/phase_confirmation.ts";
 import { recordUserDecisionContent } from "../src/record.ts";
 import type { NextOutput } from "../src/types.ts";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
 export function confirmCurrentPhase(
   projectRoot: string,
@@ -9,6 +11,9 @@ export function confirmCurrentPhase(
   changeRoot: string,
   risk: "minimal" | "normal" | "strict" = "strict",
 ): Extract<NextOutput, { path: "ask_user" }> {
+  // 测试中的 risk 参数模拟项目配置；生产 CLI 不接受 --risk。
+  mkdirSync(join(projectRoot, ".superspec"), { recursive: true });
+  writeFileSync(join(projectRoot, ".superspec", "config.json"), JSON.stringify({ workflow: { mode: risk } }));
   const output = next(projectRoot, change, changeRoot, risk);
   if (output.path !== "ask_user") {
     const jobs = output.path === "required_job"

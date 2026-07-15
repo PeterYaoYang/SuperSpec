@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, lstatSync, readdirSync, readlinkSync, statSync } from "node:fs";
 import { extname, join } from "node:path";
 import { sha256File, sha256Text } from "./store.ts";
-import type { DirtyFileFingerprint } from "./types.ts";
+import type { BoundarySnapshot, DirtyFileFingerprint } from "./types.ts";
 
 const PROCESS_DOC_RE = /^(?:openspec\/changes\/[^/]+\/)?(?:proposal|design|tasks)\.md$/;
 const PROCESS_ARTIFACT_RE = /^(?:openspec\/changes\/[^/]+\/)?\.superspec\/artifacts\/(?:discovery|test-contract)\.md$/;
@@ -20,6 +20,12 @@ const WALK_SKIP_DIRS = new Set([".git", "node_modules", "dist", "build", ".super
 export interface GitHeadResult {
   head: string | null;
   reason: string;
+}
+
+export interface JavaAutoStageResult {
+  status: "staged" | "skipped" | "failed";
+  files: string[];
+  reason?: string;
 }
 
 export function currentGitHead(projectRoot: string): GitHeadResult {
@@ -173,6 +179,56 @@ export function dirtyCodePaths(projectRoot: string): { ok: true; paths: string[]
   const dirty = dirtyCodeFiles(projectRoot);
   if (!dirty.ok) return { ok: false, paths: [], reason: dirty.reason };
   return { ok: true, paths: [...new Set(dirty.files.map(file => file.path))].sort() };
+}
+
+function isJavaTestPath(path: string): boolean {
+  const normalized = path.replace(/\\/g, "/");
+  const base = normalized.split("/").pop() ?? normalized;
+  return /(^|\/)src\/test\//i.test(normalized) ||
+    /(?:Test|Tests|TestCase|IT|ITCase)\.java$/i.test(base);
+}
+
+/**
+ * 仅暂存当前 task 启动后新生成的生产 Java 文件。
+ * 不能安全归因的既有文件改动绝不自动 git add：它们可能包含用户或并行任务的未提交内容。
+ * 测试源码和常见测试类命名会被排除；没有可用的启动边界或 Git 状态异常时，不影响任务完成。
+ */
+export function stageProductionJavaFilesSince(
+  projectRoot: string,
+  before: BoundarySnapshot | null,
+): JavaAutoStageResult {
+  if (!before) {
+    return { status: "skipped", files: [], reason: "missing_task_start_boundary" };
+  }
+  const current = dirtyCodeFiles(projectRoot);
+  if (!current.ok) {
+    return { status: "failed", files: [], reason: current.reason };
+  }
+
+  const currentByPath = new Map(current.files.map(file => [file.path, file]));
+  const beforeByPath = new Map(before.dirty_files.map(file => [file.path, file]));
+  const files = diffFingerprints(before.dirty_files, current.files)
+    .filter(path => path.toLowerCase().endsWith(".java"))
+    .filter(path => !isJavaTestPath(path))
+    // "added" 且 task-start 边界不存在，才是可归因于本任务的新生成文件。
+    // 已有未跟踪文件或已有源码的任何修改一律不碰，避免把用户工作带入 index。
+    .filter(path => !beforeByPath.has(path) && currentByPath.get(path)?.status === "added")
+    .filter(path => currentByPath.get(path)?.status !== "deleted")
+    .sort();
+  if (files.length === 0) return { status: "skipped", files: [], reason: "no_changed_production_java" };
+
+  try {
+    execFileSync("git", ["-C", projectRoot, "add", "--", ...files], {
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    return { status: "staged", files };
+  } catch (err) {
+    return {
+      status: "failed",
+      files,
+      reason: err instanceof Error ? err.message : "git add failed",
+    };
+  }
 }
 
 export function projectHasReadableDirectory(projectRoot: string): boolean {

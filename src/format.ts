@@ -5,7 +5,7 @@
 
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import type { ExecutionContract } from "./types.ts";
+import { GREEN_ONLY_NO_TDD_REASON, type ExecutionContract, type ExecutionPolicy } from "./types.ts";
 
 // ===== discovery.md =====
 //
@@ -177,13 +177,8 @@ export function collectProposeOpenQuestions(changeRoot: string): { openCount: nu
 
 // ===== tasks.md =====
 //
-// 格式（propose skill 定义）：
-//   # Tasks
-//
-//   - [ ] TASK-001 实现登录 tdd_required:true
-//   - [ ] TASK-002 更新文档 tdd_required:false no_tdd_reason:documentation-only
-//
-// 引擎解析每行任务：复选框状态、taskId、tdd_required、no_tdd_reason
+// task 行只定义顺序与标识。历史 task 仍允许附带 tdd_required/no_tdd_reason，
+// 但新执行依据模式由 task-start 结合冻结策略生成有效证据要求。
 
 export interface ParsedTask {
   taskId: string;
@@ -205,8 +200,11 @@ const CONTRACT_FIELD_ALIASES: Record<string, keyof ExecutionContract> = {
   "Design": "design",
   "来源": "source",
   "Source": "source",
-  "原因": "reason",
-  "Reason": "reason",
+  // 原因是历史文档字段；新文档用验收，二者都归一为 acceptance。
+  "验收": "acceptance",
+  "Acceptance": "acceptance",
+  "原因": "acceptance",
+  "Reason": "acceptance",
   "边界": "guard",
   "Guard": "guard",
 };
@@ -215,6 +213,8 @@ export interface ParsedExecutionRequirement {
   taskId: string;
   lineIdx: number;
   contract: ExecutionContract;
+  /** 执行依据中实际出现的字段；用于区分“测试为空”和“遗漏测试字段”。 */
+  declaredFields: Array<keyof ExecutionContract>;
   errors: string[];
 }
 
@@ -271,7 +271,7 @@ function emptyContract(): ExecutionContract {
     tests: [],
     design: null,
     source: [],
-    reason: null,
+    acceptance: null,
     guard: null,
   };
 }
@@ -299,7 +299,7 @@ function parseExecutionRequirementBlock(lines: string[], task: ParsedTask, heade
       errors.push(`${task.taskId} 的执行依据内不能包含复选框`);
     }
 
-    const fieldMatch = line.match(/^\s*-\s*(测试|Tests|设计|Design|来源|Source|原因|Reason|边界|Guard)\s*[:：]\s*(.*)$/);
+    const fieldMatch = line.match(/^\s*-\s*(测试|Tests|设计|Design|来源|Source|验收|Acceptance|原因|Reason|边界|Guard)\s*[:：]\s*(.*)$/);
     if (fieldMatch) {
       const key = CONTRACT_FIELD_ALIASES[fieldMatch[1]];
       const value = fieldMatch[2].trim();
@@ -320,7 +320,7 @@ function parseExecutionRequirementBlock(lines: string[], task: ParsedTask, heade
     index += 1;
   }
 
-  return { taskId: task.taskId, lineIdx: task.lineIdx, contract, errors };
+  return { taskId: task.taskId, lineIdx: task.lineIdx, contract, declaredFields: [...seen], errors };
 }
 
 export function hasTaskBoundExecutionRequirements(content: string): boolean {
@@ -427,29 +427,59 @@ export interface ExecutionRequirementValidation {
   errors: string[];
 }
 
-export function validateExecutionRequirements(content: string, testContractContent: string | null): ExecutionRequirementValidation {
-  const mode = hasTaskBoundExecutionRequirements(content);
+export function validateExecutionRequirements(
+  content: string,
+  testContractContent: string | null,
+  executionPolicy: ExecutionPolicy = "tdd",
+  executionRequirementVersion: 1 | 2 = 2,
+): ExecutionRequirementValidation {
+  const tasks = parseTasksMd(content);
+  // 历史 green-only task 在旧版本中用标记强制进入契约模式。保留该入口，
+  // 防止已生成但尚未执行的 change 在升级后静默退回无验证的 legacy 模式；
+  // 新 Propose 不再产生此标记。
+  const hasLegacyGreenOnlyTask = tasks.some(task => task.noTddReason === GREEN_ONLY_NO_TDD_REASON);
+  // v2 不允许“所有任务都没有执行依据”这一静默回退：新 Propose 的每个普通
+  // task 都必须显式声明五字段。v1 的缺失版本仍保留旧的按需契约语义。
+  const hasV2OrdinaryTask = executionRequirementVersion === 2 && tasks.some(task => !isReviewFixTaskId(task.taskId));
+  const mode = hasTaskBoundExecutionRequirements(content) || hasLegacyGreenOnlyTask || hasV2OrdinaryTask;
   const contracts = parseExecutionRequirements(content);
   // 孤儿检测必须在 mode=false 的 early return 之前：全部块都悬空时 mode=false，
   // 恰恰是最需要报错的场景（否则契约模式静默失效）
   const errors = [...orphanExecutionRequirementErrors(content), ...contracts.flatMap(item => item.errors)];
   if (!mode) return { ok: errors.length === 0, mode, contracts, errors };
 
-  const tasks = parseTasksMd(content);
   const contractsByTask = new Map(contracts.map(item => [item.taskId, item]));
   const declaredTestIds = new Set<string>();
   let needsTestContract = false;
 
   for (const task of tasks) {
     const contract = contractsByTask.get(task.taskId);
-    if (task.tddRequired && !isReviewFixTaskId(task.taskId)) {
-      if (!contract) {
-        errors.push(`${task.taskId} 缺少执行依据`);
-        continue;
-      }
-      if (contract.contract.tests.length === 0) {
-        errors.push(`${task.taskId} 是普通 TDD 任务，执行依据缺少测试`);
-      }
+    const legacyGreenOnly = task.noTddReason === GREEN_ONLY_NO_TDD_REASON;
+    if (legacyGreenOnly && task.tddRequired) {
+      errors.push(`${task.taskId} 的 no_tdd_reason=${GREEN_ONLY_NO_TDD_REASON} 必须同时声明 tdd_required:false`);
+    }
+    if (legacyGreenOnly && executionPolicy !== "green_only") {
+      errors.push(`${task.taskId} 的 no_tdd_reason=${GREEN_ONLY_NO_TDD_REASON} 只允许用于 GREEN-only apply`);
+    }
+    // v2 是本次改造后的新计划：每个普通 task 必须声明完整五字段，
+    // `测试:` 可显式为空以表达非行为任务。旧计划只保持原 TDD 契约要求。
+    if (executionRequirementVersion === 2 && !isReviewFixTaskId(task.taskId) && !contract) {
+      errors.push(`${task.taskId} 缺少执行依据`);
+      continue;
+    }
+    if (executionRequirementVersion === 1 && task.tddRequired && !isReviewFixTaskId(task.taskId) && !contract) {
+      errors.push(`${task.taskId} 缺少执行依据`);
+      continue;
+    }
+    if (contract && executionRequirementVersion === 2) {
+      if (!contract.declaredFields.includes("tests")) errors.push(`${task.taskId} 的执行依据缺少测试字段`);
+      if (!contract.contract.design) errors.push(`${task.taskId} 的执行依据缺少设计`);
+      if (contract.contract.source.length === 0) errors.push(`${task.taskId} 的执行依据缺少来源`);
+      if (!contract.contract.acceptance) errors.push(`${task.taskId} 的执行依据缺少验收目标`);
+      if (!contract.contract.guard) errors.push(`${task.taskId} 的执行依据缺少边界`);
+    }
+    if (contract && (executionRequirementVersion === 1 && task.tddRequired || legacyGreenOnly) && contract.contract.tests.length === 0) {
+      errors.push(`${task.taskId} 的执行依据缺少测试`);
     }
     if (contract && contract.contract.tests.length > 0) {
       needsTestContract = true;

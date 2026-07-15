@@ -10,16 +10,13 @@ metadata:
 
 职责：只读调查现状、梳理范围、识别风险，并把结论写入 `openspec/changes/<change>/.superspec/artifacts/discovery.md`。
 
-## 驱动方式
+## 使用方式
 
-所有状态由工作流引擎管理：
+把 `superspec transition next --change "<change>"` 的输出当成当前任务卡：只处理它给出的一组事项，不自行推断流程位置或补造命令。
 
-1. `superspec transition next --change "<change>"`
-2. 执行返回的命令、工作项或用户确认
-3. 用户确认用 `superspec record user-decision --change "<change>" --input -`；工作项审查报告用 `superspec record job-submit --change "<change>" --job <JOB> --report -`
-4. 回到第 1 步
-
-进入下一阶段前，必须先处理 next 返回的用户确认、审查或验证事项。默认完整审查路径下，`explore -> propose` 会创建 `critic` 工作项审查 discovery。
+- 返回调查/编辑动作：完成本 Skill 要求的 discovery，再重新获取下一步。
+- 返回用户确认或审查工作项：暂停调查，按输出给出的格式登记决策或提交独立审查报告。
+- 不确定时先补证据；只有业务口径、验收、范围或数据来源无法由现有材料裁决时才问用户。
 
 如果 next 提示 discovery 不完整或有未确认问题，先检查并填写 discovery，不要把草稿占位、格式缺口或路径空白直接转问用户。用户明确说 PRD、文档、原型或其它需求源已更新时，先重新核对来源，不复用旧依据。什么未知该进 `## 待确认问题`，判定标准见「写作规则」。
 
@@ -106,7 +103,6 @@ subagent 结论写入 discovery 前，抽验决定影响范围判断的关键短
 
 - 不改业务代码。
 - 不写 proposal/specs/design/tasks。
-- 不跳过 transition。
 - 不跳过完整审查路径下的审查工作项。
 - 用户未确认的决策不自行推断。
 - 审查通过后、推进前不做非必要的文档编辑；文档变更会作废已通过的审查并触发重审。

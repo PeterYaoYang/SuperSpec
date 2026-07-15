@@ -19,13 +19,25 @@ import { confirmCurrentPhase } from "./phase_confirmation_support.ts";
 
 // ===== 夹具 =====
 
+const DOCUMENTATION_TASKS = [
+  "# Tasks", "",
+  "- [ ] TASK-001 Documentation fixture",
+  "  执行依据:",
+  "  - 测试:",
+  "  - 设计: design.md#Design",
+  "  - 来源: proposal.md#Test",
+  "  - 验收: 文档说明完整",
+  "  - 边界: 不改实现代码",
+  "",
+].join("\n");
+
 function setupExplore(): { projectRoot: string; change: string; changeRoot: string; cleanup: () => void } {
   const projectRoot = mkdtempSync(join(tmpdir(), "superspec-p2-"));
   const change = "test-change";
   const changeRoot = join(projectRoot, "openspec", "changes", change);
   mkdirSync(join(changeRoot, ".superspec", "artifacts"), { recursive: true });
   writeFileSync(join(changeRoot, "proposal.md"), "# Proposal\n\nTest.\n");
-  writeFileSync(join(changeRoot, "tasks.md"), "# Tasks\n\n- [ ] TASK-001\n");
+  writeFileSync(join(changeRoot, "tasks.md"), DOCUMENTATION_TASKS);
   ensureChangeLayout(projectRoot, change);
   // seed 到 explore 状态
   appendEvent(projectRoot, change, makeEvent(change, "transition_commit", {
@@ -446,12 +458,12 @@ test("next 在 explore 显式 normal 风险时返回阶段确认", () => {
     });
     assert.equal(advance.resume.kind, "next");
     assert.deepEqual(advance.resume.argv, [
-      "superspec", "transition", "next", "--change", fx.change, "--risk", "normal",
+      "superspec", "transition", "next", "--change", fx.change,
     ]);
     assert.equal(stay.reason, "required");
     assert.equal(stay.resume.kind, "continue_current_phase");
     assert.deepEqual(stay.resume.next_argv_after_completion, [
-      "superspec", "transition", "next", "--change", fx.change, "--risk", "normal",
+      "superspec", "transition", "next", "--change", fx.change,
     ]);
   } finally { fx.cleanup(); }
 });
@@ -468,11 +480,11 @@ test("阶段确认 action resume 保留 minimal risk", () => {
     assert.ok(stay);
     assert.equal(advance.resume.kind, "next");
     assert.deepEqual(advance.resume.argv, [
-      "superspec", "transition", "next", "--change", fx.change, "--risk", "minimal",
+      "superspec", "transition", "next", "--change", fx.change,
     ]);
     assert.equal(stay.resume.kind, "continue_current_phase");
     assert.deepEqual(stay.resume.next_argv_after_completion, [
-      "superspec", "transition", "next", "--change", fx.change, "--risk", "minimal",
+      "superspec", "transition", "next", "--change", fx.change,
     ]);
   } finally { fx.cleanup(); }
 });
@@ -480,6 +492,7 @@ test("阶段确认 action resume 保留 minimal risk", () => {
 test("阶段确认：仅接受精确答复，材料变化后旧 scope 失效", () => {
   const fx = setupPropose();
   try {
+    writeFileSync(join(fx.projectRoot, ".superspec", "config.json"), JSON.stringify({ workflow: { mode: "normal" } }));
     const ask = next(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     assert.equal(ask.path, "ask_user");
     const actions = ask.ask_user.actions as PhaseDecisionAction[];
@@ -501,9 +514,10 @@ test("阶段确认：仅接受精确答复，材料变化后旧 scope 失效", (
     const invalidRisk = recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({
       ...advance.record_input,
       review_risk: "unknown",
+      answer: "继续",
     }));
     assert.equal(invalidRisk.accepted, false);
-    assert.match(invalidRisk.message, /review_risk/);
+    assert.match(invalidRisk.message, /必须精确/);
 
     const missingReason = recordUserDecisionContent(
       fx.projectRoot,
@@ -960,7 +974,7 @@ test("packet argv 字段保留包含空格和括号的 change/job token", () => 
   const changeRoot = join(projectRoot, "openspec", "changes", change);
   mkdirSync(join(changeRoot, ".superspec", "artifacts"), { recursive: true });
   writeFileSync(join(changeRoot, "proposal.md"), "# Proposal\n");
-  writeFileSync(join(changeRoot, "tasks.md"), "# Tasks\n\n- [ ] TASK-001\n");
+  writeFileSync(join(changeRoot, "tasks.md"), DOCUMENTATION_TASKS);
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "discovery.md"), "# Discovery\n\nDone.\n");
   ensureChangeLayout(projectRoot, change);
   appendEvent(projectRoot, change, makeEvent(change, "transition_commit", {
@@ -1102,6 +1116,7 @@ test("phase confirmation：normal Explore 不绑定 strict 历史 critic overrid
       decision_source: "main_process",
     })).accepted, true);
 
+    writeFileSync(join(fx.projectRoot, ".superspec", "config.json"), JSON.stringify({ workflow: { mode: "normal" } }));
     const ask1 = next(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     assert.equal(ask1.path, "ask_user");
     const advance = (ask1.ask_user.actions as PhaseDecisionAction[]).find(action => action.decision === "advance");
@@ -1433,7 +1448,7 @@ test("propose-ready：有待用户确认问题时不创建审查 job", () => {
     "",
     "- [ ] DEC-001 是否保留兼容层？",
   ].join("\n"));
-  writeFileSync(join(changeRoot, "tasks.md"), "# Tasks\n\n- [ ] TASK-001\n");
+  writeFileSync(join(changeRoot, "tasks.md"), DOCUMENTATION_TASKS);
   writeFileSync(join(changeRoot, "design.md"), "# Design\n");
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "discovery.md"), "# Discovery\n");
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");
@@ -1469,7 +1484,7 @@ test("propose-ready：已确认项不阻断审查 job 创建", () => {
     "",
     "- [x] DEC-001 已确认兼容策略",
   ].join("\n"));
-  writeFileSync(join(changeRoot, "tasks.md"), "# Tasks\n\n- [ ] TASK-001\n");
+  writeFileSync(join(changeRoot, "tasks.md"), DOCUMENTATION_TASKS);
   writeFileSync(join(changeRoot, "design.md"), "# Design\n");
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "discovery.md"), "# Discovery\n");
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");
@@ -1497,7 +1512,7 @@ test("propose-ready --risk normal：缺 discovery.md 时 block（基础职责）
   const changeRoot = join(projectRoot, "openspec", "changes", change);
   mkdirSync(join(changeRoot, ".superspec", "artifacts"), { recursive: true });
   writeFileSync(join(changeRoot, "proposal.md"), "# Proposal\n");
-  writeFileSync(join(changeRoot, "tasks.md"), "# Tasks\n\n- [ ] TASK-001\n");
+  writeFileSync(join(changeRoot, "tasks.md"), DOCUMENTATION_TASKS);
   // 只写 test-contract，故意不写 discovery
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");
   ensureChangeLayout(projectRoot, change);
@@ -1524,7 +1539,7 @@ test("propose-ready --risk normal：基础职责全满足 + critic accepted → 
   const changeRoot = join(projectRoot, "openspec", "changes", change);
   mkdirSync(join(changeRoot, ".superspec", "artifacts"), { recursive: true });
   writeFileSync(join(changeRoot, "proposal.md"), "# Proposal\n");
-  writeFileSync(join(changeRoot, "tasks.md"), "# Tasks\n\n- [ ] TASK-001\n");
+  writeFileSync(join(changeRoot, "tasks.md"), DOCUMENTATION_TASKS);
   writeFileSync(join(changeRoot, "design.md"), "# Design\n");
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "discovery.md"), "# Discovery\n");
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");
@@ -1563,7 +1578,7 @@ test("propose-ready 默认完整审查：创建 critic + architect + test 审核
   const changeRoot = join(projectRoot, "openspec", "changes", change);
   mkdirSync(join(changeRoot, ".superspec", "artifacts"), { recursive: true });
   writeFileSync(join(changeRoot, "proposal.md"), "# Proposal\n");
-  writeFileSync(join(changeRoot, "tasks.md"), "# Tasks\n\n- [ ] TASK-001\n");
+  writeFileSync(join(changeRoot, "tasks.md"), DOCUMENTATION_TASKS);
   writeFileSync(join(changeRoot, "design.md"), "# Design\n");
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "discovery.md"), "# Discovery\n");
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");
@@ -1670,7 +1685,10 @@ test("propose reviewer freshness：单文档变化只重启职责角色", () => 
     },
     {
       name: "tasks",
-      mutate: changeRoot => writeFileSync(join(changeRoot, "tasks.md"), "# Tasks\n\n- [ ] TASK-001 changed\n"),
+      mutate: changeRoot => writeFileSync(
+        join(changeRoot, "tasks.md"),
+        DOCUMENTATION_TASKS.replace("Documentation fixture", "changed"),
+      ),
       staleRoles: ["critic", "test-engineer"],
     },
     {
@@ -1861,7 +1879,7 @@ test("review gate：更新的 rejected terminal 不能被旧 accepted job 越过
   } finally { fx.cleanup(); }
 });
 
-test("phase confirmation：与 start-apply 复用同一历史 Proposal 角色集合", () => {
+test("phase confirmation：start-apply 复用 propose-ready 冻结的 strict mode", () => {
   const fx = setupPropose();
   try {
     confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "normal");
@@ -1894,9 +1912,9 @@ test("phase confirmation：与 start-apply 复用同一历史 Proposal 角色集
       }
     }
 
-    const advanced = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    const advanced = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "strict");
     assert.equal(advanced.to_state, "propose_ready");
-    const ask1 = next(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    const ask1 = next(fx.projectRoot, fx.change, fx.changeRoot, "strict");
     assert.equal(ask1.path, "ask_user");
     const architectJobId = rejectedByRole.get("architect");
     assert.ok(architectJobId);
@@ -1906,7 +1924,7 @@ test("phase confirmation：与 start-apply 复用同一历史 Proposal 角色集
       reason: "architect historical override 2",
       decision_source: "user",
     })).accepted, true);
-    const ask2 = next(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    const ask2 = next(fx.projectRoot, fx.change, fx.changeRoot, "strict");
     assert.equal(ask2.path, "ask_user");
     assert.notEqual(ask2.ask_user.scope, ask1.ask_user.scope, "start-apply 会继续要求的历史角色 override 必须进入确认摘要");
   } finally { fx.cleanup(); }
@@ -2175,7 +2193,7 @@ test("完整 e2e（Phase 2）：init→explore→写 discovery→propose→propo
   const changeRoot = join(projectRoot, "openspec", "changes", change);
   mkdirSync(join(changeRoot, ".superspec", "artifacts"), { recursive: true });
   writeFileSync(join(changeRoot, "proposal.md"), "# Proposal\n");
-  writeFileSync(join(changeRoot, "tasks.md"), "# Tasks\n\n- [ ] TASK-001\n");
+  writeFileSync(join(changeRoot, "tasks.md"), DOCUMENTATION_TASKS);
   writeFileSync(join(changeRoot, "design.md"), "# Design\n");
   ensureChangeLayout(projectRoot, change);
 
@@ -2268,7 +2286,7 @@ test("CLI status：区分 fresh/historical/stale accepted jobs", () => {
   const changeRoot = join(projectRoot, "openspec", "changes", change);
   mkdirSync(join(changeRoot, ".superspec", "artifacts"), { recursive: true });
   writeFileSync(join(changeRoot, "proposal.md"), "# Proposal\noriginal");
-  writeFileSync(join(changeRoot, "tasks.md"), "# Tasks\n\n- [ ] TASK-001\n");
+  writeFileSync(join(changeRoot, "tasks.md"), DOCUMENTATION_TASKS);
   writeFileSync(join(changeRoot, "design.md"), "# Design\n");
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "discovery.md"), "# Discovery\n");
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");

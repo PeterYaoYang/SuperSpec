@@ -73,7 +73,7 @@ test("CLI help documents stdin record input marker", () => {
     assert.match(run.stdout, /job-submit --job <J> --report <F\|->/);
     assert.match(run.stdout, /user-decision --input <F\|->/);
     assert.match(run.stdout, /test-run --input <F\|->/);
-    assert.match(run.stdout, /reopen --to propose --reason <TEXT> \[--review-finding <JOB#FINDING>\]/);
+    assert.match(run.stdout, /reopen --to explore\|propose\|apply --reason <TEXT>/);
     assert.doesNotMatch(run.stdout, /review-ready \/ accept \/ archive/);
   } finally {
     fx.cleanup();

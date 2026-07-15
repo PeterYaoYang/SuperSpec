@@ -131,7 +131,7 @@ superspec.cmd install
 
 你日常主要记住这四个入口就够了。
 
-CLI 不带 `--risk` 时默认走完整审查路径；需要轻量路径时显式传 `--risk normal` 或 `--risk minimal`。探索阶段会创建 `critic` 工作项审查需求澄清记录；计划阶段会创建 `critic`、`architect` 和 `test-engineer` 工作项后再进入实现准备。
+工作流档位由项目配置统一控制，不通过命令行临时指定。探索阶段会按配置创建相应审查工作项；计划阶段按同一档位创建 `critic`、`architect`、`test-engineer` 等必要审查后再进入实现准备。
 
 ## 它会多保存哪些记录
 
@@ -190,6 +190,18 @@ superspec install
 `superspec init --scope project` 是兼容别名，也会执行同一套安装逻辑。
 
 `superspec install` 会创建缺失的 `openspec/config.yaml`，或在没有顶层 `context` 时追加这段官方中文 context。如果文件已经有顶层 `context`，SuperSpec 不会覆盖它。
+
+它还会创建项目级 `.superspec/config.json`，用于统一设置整个工作流的默认档位：
+
+```json
+{
+  "workflow": {
+    "mode": "normal"
+  }
+}
+```
+
+可选值为 `minimal`、`normal`、`strict`。`next`、Explore、Propose、进入 Apply 和 Review 都读取此配置；`--risk` 不再是用户可用的工作流入口。已启动的 task attempt 和已经建立的审查策略仍按其事件快照执行，不会被中途改配置追溯改写。
 
 可以用下面的命令检查生成的 instructions 是否包含语言上下文：
 

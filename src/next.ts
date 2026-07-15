@@ -5,6 +5,7 @@ import { readEvents } from "./store.ts";
 import { requiredJobActions } from "./job_action.ts";
 import type { Job, NextOutput, State } from "./types.ts";
 import { planNextStep, type NextStepPlan } from "./phase_plan.ts";
+import { workflowRiskForProject } from "./workflow_config.ts";
 
 function requiredJobsOutput(state: State, change: string, jobs: Job[], reason: string): NextOutput {
   return {
@@ -19,14 +20,6 @@ function transitionCommand(change: string, name: string, extra = ""): string {
   return `superspec transition ${name} --change "${change}"${extra ? " " + extra : ""}`;
 }
 
-function riskFlag(risk: "minimal" | "normal" | "strict"): string {
-  return risk === "strict" ? "" : `--risk ${risk}`;
-}
-
-function riskArg(risk: "minimal" | "normal" | "strict" | undefined): string {
-  return risk ? riskFlag(risk) : "";
-}
-
 function formatTransitionArgs(plan: Extract<NextStepPlan, { kind: "run_transition" }>): string {
   if (plan.taskId) return `--task ${plan.taskId}`;
   if (plan.reopen?.reason === "pending_tasks") {
@@ -38,7 +31,7 @@ function formatTransitionArgs(plan: Extract<NextStepPlan, { kind: "run_transitio
   if (plan.reopen?.reason === "review_finding") {
     return `--to propose --review-finding ${plan.reopen.jobId}#${plan.reopen.findingId} --reason "根据代码审查问题 ${plan.reopen.findingId} 回到计划阶段"`;
   }
-  return riskArg(plan.risk);
+  return "";
 }
 
 function toNextOutput(change: string, plan: NextStepPlan): NextOutput {
@@ -70,7 +63,7 @@ export function next(
   projectRoot: string,
   change: string,
   changeRoot: string,
-  defaultRisk: "minimal" | "normal" | "strict" = "strict",
+  defaultRisk = workflowRiskForProject(projectRoot),
 ): NextOutput {
   const snapshot = rebuildSnapshot(projectRoot, change, changeRoot);
   const events = readEvents(projectRoot, change);

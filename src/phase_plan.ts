@@ -41,9 +41,10 @@ import {
   type PhaseBoundary,
 } from "./phase_confirmation.ts";
 import { taskEvidenceReadiness } from "./task_evidence.ts";
-import type { AcceptedMaterialFollowupContinuation, AskUser, Event, Job, JobRole, State } from "./types.ts";
+import type { AcceptedMaterialFollowupContinuation, AskUser, Event, ExecutionPolicy, Job, JobRole, State } from "./types.ts";
 import type { Snapshot } from "./types.ts";
 import type { ReviewRisk } from "./review.ts";
+import { workflowRiskForProposeRound, workflowRiskForState } from "./workflow_config.ts";
 
 export type TransitionName =
   | "explore"
@@ -108,12 +109,14 @@ function phaseConfirmationStep(
   boundary: PhaseBoundary,
   reason: string,
 ): NextStepPlan | null {
+  // 进入 propose_ready / apply 后，mode 来自本轮快照而非当前配置。
+  const risk = workflowRiskForState(context.events, context.snapshot.state, context.mode.risk);
   const confirmation = phaseConfirmationForBoundary(
     context.projectRoot,
     context.events,
     context.snapshot,
     boundary,
-    context.mode.risk,
+    risk,
   );
   if (!confirmation || isPhaseAdvanceAuthorized(context.events, confirmation)) return null;
   return {
@@ -194,13 +197,35 @@ function validateTasksPlan(changeRoot: string): string | null {
   return null;
 }
 
-function validateExecutionRequirementPlan(changeRoot: string): { ok: true; mode: boolean } | { ok: false; message: string; mode: boolean } {
+export function executionPolicyForRisk(risk: ReviewRisk): ExecutionPolicy {
+  return risk === "strict" ? "tdd" : "green_only";
+}
+
+export function executionPolicyForCurrentRound(events: Event[]): ExecutionPolicy {
+  const index = latestStartApplyIndex(events);
+  if (index < 0) return "tdd";
+  const payload = events[index].payload as { execution_policy?: unknown };
+  return payload.execution_policy === "green_only" || payload.execution_policy === "tdd"
+    ? payload.execution_policy
+    : "tdd";
+}
+
+function validateExecutionRequirementPlan(
+  changeRoot: string,
+  executionPolicy: ExecutionPolicy,
+  executionRequirementVersion: 1 | 2 = 2,
+): { ok: true; mode: boolean } | { ok: false; message: string; mode: boolean } {
   const tasksPath = join(changeRoot, "tasks.md");
   if (!existsSync(tasksPath)) return { ok: true, mode: false };
   const tasksContent = readFileSync(tasksPath, "utf8");
   const testContractPath = join(changeRoot, ".superspec", "artifacts", "test-contract.md");
   const testContractContent = existsSync(testContractPath) ? readFileSync(testContractPath, "utf8") : null;
-  const validation = validateExecutionRequirements(tasksContent, testContractContent);
+  const validation = validateExecutionRequirements(
+    tasksContent,
+    testContractContent,
+    executionPolicy,
+    executionRequirementVersion,
+  );
   return validation.ok
     ? { ok: true, mode: validation.mode }
     : { ok: false, mode: validation.mode, message: validation.errors.join("；") };
@@ -220,6 +245,16 @@ export function proposalDocsBaseline(changeRoot: string): Record<string, string>
   const docs = PROPOSE_FINAL_REVIEW_GATE.reviewTargets;
   const baseline: Record<string, string> = {};
   for (const doc of docs) {
+    baseline[doc] = docRef(changeRoot, doc).sha;
+  }
+  return baseline;
+}
+
+export function discoveryDocsBaseline(changeRoot: string): Record<string, string> {
+  // 与 Explore gate 使用同一组审查目标。回退到 explore 后，至少要更新一项
+  // discovery 材料，才允许重新进入 propose，避免把一次纯状态回退误当作新探索轮次。
+  const baseline: Record<string, string> = {};
+  for (const doc of EXPLORE_DISCOVERY_REVIEW_GATE.reviewTargets) {
     baseline[doc] = docRef(changeRoot, doc).sha;
   }
   return baseline;
@@ -265,8 +300,25 @@ export function latestReopenProposeBaseline(events: Event[]): Record<string, str
   return null;
 }
 
+export function latestReopenExploreBaseline(events: Event[]): Record<string, string> | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i];
+    if (ev.event_type !== "transition_commit") continue;
+    const payload = ev.payload as { transition?: unknown; reopen_target?: unknown; baseline_docs?: unknown };
+    if (payload.transition !== "reopen" || payload.reopen_target !== "explore") continue;
+    if (!payload.baseline_docs || typeof payload.baseline_docs !== "object" || Array.isArray(payload.baseline_docs)) return null;
+    return payload.baseline_docs as Record<string, string>;
+  }
+  return null;
+}
+
 export function proposalDocsChangedSinceBaseline(changeRoot: string, baseline: Record<string, string>): boolean {
   const current = proposalDocsBaseline(changeRoot);
+  return Object.entries(baseline).some(([path, digest]) => current[path] !== digest);
+}
+
+export function discoveryDocsChangedSinceBaseline(changeRoot: string, baseline: Record<string, string>): boolean {
+  const current = discoveryDocsBaseline(changeRoot);
   return Object.entries(baseline).some(([path, digest]) => current[path] !== digest);
 }
 
@@ -283,6 +335,29 @@ function latestStartApplyIndex(events: Event[]): number {
     if (payload.transition === "start-apply" && payload.to_state === "apply") return i;
   }
   return -1;
+}
+
+function executionRequirementVersionFromPayload(payload: Record<string, unknown>): 1 | 2 {
+  return payload.execution_requirement_version === 2 ? 2 : 1;
+}
+
+/** 当前 Apply round 的规则版本；缺失版本的历史 event 保持 v1 回放。 */
+export function executionRequirementVersionForCurrentRound(events: Event[]): 1 | 2 {
+  const index = latestStartApplyIndex(events);
+  return index < 0 ? 1 : executionRequirementVersionFromPayload(events[index].payload);
+}
+
+/** Propose-ready 的规则版本决定随后 start-apply 是否采用新的全任务声明要求。 */
+function executionRequirementVersionForProposeRound(events: Event[]): 1 | 2 {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i];
+    if (event.event_type !== "transition_commit") continue;
+    const payload = event.payload as { transition?: unknown; to_state?: unknown };
+    if (payload.transition === "propose-ready" && payload.to_state === "propose_ready") {
+      return executionRequirementVersionFromPayload(event.payload);
+    }
+  }
+  return 1;
 }
 
 export function applyRequirementModeForCurrentRound(events: Event[]): boolean {
@@ -353,14 +428,13 @@ export function formatPendingTaskMessage(ids: string[], action: string): string 
   return `尚有未完成任务：${ids.join(", ")}；${action}`;
 }
 
-function nextArgv(change: string, risk: ReviewRisk): string[] {
+function nextArgv(change: string, _risk: ReviewRisk): string[] {
   return [
     "superspec",
     "transition",
     "next",
     "--change",
     change,
-    ...(risk === "strict" ? [] : ["--risk", risk]),
   ];
 }
 
@@ -404,6 +478,15 @@ export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
       return { kind: "run_transition", state: "init", transition: "explore", reason: "初始化完成，开始探索" };
 
     case "explore": {
+      const reopenBaseline = latestReopenExploreBaseline(events);
+      if (reopenBaseline && !discoveryDocsChangedSinceBaseline(changeRoot, reopenBaseline)) {
+        return {
+          kind: "run_transition",
+          state: "explore",
+          transition: "explore",
+          reason: "回到 explore 后至少一个 discovery 材料必须变化",
+        };
+      }
       const exploreReviewJobs = EXPLORE_DISCOVERY_REVIEW_GATE.openJobsForGate(snapshot);
       if (exploreReviewJobs.length > 0) {
         return requiredJobs("explore", exploreReviewJobs, `有 ${exploreReviewJobs.length} 个待完成探索审查工作项`);
@@ -480,6 +563,16 @@ export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
       if (startApplyPlan.kind === "advance") {
         const confirmation = phaseConfirmationStep(context, "propose_to_apply", "计划阶段完成，等待用户确认开始实现");
         if (confirmation) return confirmation;
+      }
+      // 尚未获得用户确认时，按本次 next 的候选风险预检失败不能退回默认 strict
+      // 的 start-apply 命令；否则 normal/minimal 的策略不匹配会被静默改写为 strict。
+      if (startApplyPlan.kind === "skip") {
+        const ask: AskUser = {
+          question: `${startApplyPlan.message}。请更新计划材料后重新执行 next。`,
+          allowed_answers: ["计划已更新"],
+          scope: "propose_apply_preflight",
+        };
+        return { kind: "ask_user", state: "propose_ready", ask, reason: startApplyPlan.message };
       }
       return { kind: "run_transition", state: "propose_ready", transition: "start-apply", reason: "计划就绪，开始执行" };
     }
@@ -798,6 +891,11 @@ function planExploreTransition(context: TransitionPlanContext): TransitionDecisi
     return { kind: "skip", message: `当前状态 ${snapshot.state}，explore 不适用` };
   }
 
+  const reopenBaseline = latestReopenExploreBaseline(events);
+  if (reopenBaseline && !discoveryDocsChangedSinceBaseline(changeRoot, reopenBaseline)) {
+    return { kind: "skip", message: "回到 explore 后至少一个 discovery 材料必须变化" };
+  }
+
   const discoveryCheck = validateDiscovery(changeRoot);
   if (!discoveryCheck.ok) return { kind: "skip", message: discoveryCheck.message };
 
@@ -827,7 +925,7 @@ function planProposeReadyTransition(context: TransitionPlanContext): TransitionD
   const tasksPlanError = validateTasksPlan(changeRoot);
   if (tasksPlanError) return { kind: "skip", message: tasksPlanError };
 
-  const executionRequirementPlan = validateExecutionRequirementPlan(changeRoot);
+  const executionRequirementPlan = validateExecutionRequirementPlan(changeRoot, executionPolicyForRisk(risk), 2);
   if (!executionRequirementPlan.ok) return { kind: "skip", message: executionRequirementPlan.message };
 
   const openQuestions = collectProposeOpenQuestions(changeRoot);
@@ -848,7 +946,23 @@ function planProposeReadyTransition(context: TransitionPlanContext): TransitionD
     fromState: "propose",
     toState: "propose_ready",
     reason: `risk=${risk}，所有需求已满足`,
+    payload: {
+      workflow_mode: risk,
+      execution_requirement_version: 2,
+    },
   };
+}
+
+function acceptedProposeToApplyConfirmation(context: TransitionPlanContext, risk: ReviewRisk) {
+  const confirmation = phaseConfirmationForBoundary(
+    context.projectRoot,
+    context.events,
+    context.snapshot,
+    "propose_to_apply",
+    risk,
+  );
+  const decision = confirmation ? latestAcceptedPhaseDecision(context.events, confirmation) : null;
+  return confirmation && decision?.decision === "advance" ? { confirmation, decision } : null;
 }
 
 function planStartApplyTransition(
@@ -864,23 +978,35 @@ function planStartApplyTransition(
     return { kind: "skip", message: `回到 propose 后至少一个计划文档必须变化（基线绑定：${Object.keys(reopenBaseline).join("、")}）` };
   }
 
-  const reviewedRoles = historicalProposeReadyRoles(events);
-  if (reviewedRoles.length > 0) {
-    const gatePlan = reviewGatePlan(snapshot, events, changeRoot, PROPOSE_FINAL_REVIEW_GATE, reviewedRoles);
-    if (gatePlan) {
-      return {
-        ...gatePlan,
-        reason: `进入执行阶段前需要重新完成计划文档审查：${gatePlan.reason}`,
-      };
-    }
+  const risk = workflowRiskForProposeRound(events, context.mode.risk);
+  const executionRequirementVersion = executionRequirementVersionForProposeRound(events);
+  const requiredRoles = executionRequirementVersion === 2
+    ? PROPOSE_FINAL_REVIEW_GATE.requiredRolesForRisk(risk)
+    : historicalProposeReadyRoles(events);
+  const gatePlan = reviewGatePlan(snapshot, events, changeRoot, PROPOSE_FINAL_REVIEW_GATE, requiredRoles);
+  if (gatePlan) {
+    return {
+      ...gatePlan,
+      reason: `进入执行阶段前需要重新完成计划文档审查：${gatePlan.reason}`,
+    };
   }
 
-  const executionRequirementPlan = validateExecutionRequirementPlan(changeRoot);
+  const acceptedConfirmation = enforceConfirmation
+    ? acceptedProposeToApplyConfirmation(context, risk)
+    : null;
+  const executionPolicy = executionPolicyForRisk(risk);
+  const executionRequirementPlan = validateExecutionRequirementPlan(
+    changeRoot,
+    executionPolicy,
+    executionRequirementVersion,
+  );
   if (!executionRequirementPlan.ok) return { kind: "skip", message: executionRequirementPlan.message };
-  const confirmation = phaseConfirmationForBoundary(projectRoot, events, snapshot, "propose_to_apply");
-  const decision = confirmation ? latestAcceptedPhaseDecision(events, confirmation) : null;
-  if (enforceConfirmation && (!confirmation || decision?.decision !== "advance")) {
-    return { kind: "skip", message: confirmation ? phaseConfirmationMissingMessage(confirmation) : "无法建立 Propose 阶段确认范围" };
+  if (enforceConfirmation && !acceptedConfirmation) {
+    const confirmation = phaseConfirmationForBoundary(projectRoot, events, snapshot, "propose_to_apply", risk);
+    return {
+      kind: "skip",
+      message: confirmation ? phaseConfirmationMissingMessage(confirmation) : "无法建立 Propose 阶段确认范围",
+    };
   }
   const gitHead = currentGitHead(projectRoot);
   return {
@@ -892,7 +1018,17 @@ function planStartApplyTransition(
       apply_start_head: gitHead.head,
       apply_start_head_reason: gitHead.reason,
       apply_contract_mode: executionRequirementPlan.mode,
-      ...(confirmation && decision?.decision === "advance" ? phaseConfirmationCommitPayload(confirmation, decision) : {}),
+      ...(executionRequirementVersion === 2 ? { execution_requirement_version: 2 } : {}),
+      execution_policy: executionPolicy,
+      workflow_mode: risk,
+      review_policy: {
+        review_risk: risk,
+        requires_verifier: risk !== "minimal",
+      },
+      ...(acceptedConfirmation ? phaseConfirmationCommitPayload(
+        acceptedConfirmation.confirmation,
+        acceptedConfirmation.decision,
+      ) : {}),
     },
   };
 }

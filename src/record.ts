@@ -12,6 +12,7 @@ import {
   isPhaseConfirmationScope,
   phaseActionForAnswer,
   phaseConfirmationForCurrentState,
+  workflowRiskForPhaseConfirmation,
   type PhaseConfirmation,
   type PhaseDecisionAction,
 } from "./phase_confirmation.ts";
@@ -415,6 +416,13 @@ function jobTerminalState(events: Event[], jobId: string): JobState | null {
   return null;
 }
 
+function jobInvalidated(events: Event[], jobId: string): boolean {
+  return events.some(ev =>
+    ev.event_type === "job_invalidated" &&
+    (ev.payload as { job_id?: unknown }).job_id === jobId
+  );
+}
+
 function terminalJobSubmitResult(
   events: Event[],
   jobId: string,
@@ -654,6 +662,9 @@ export function recordJobSubmit(
       return { event_type: "job_rejected", accepted: false, message: `工作项 ${jobId} 不存在` };
     }
 
+    if (jobInvalidated(events, jobId)) {
+      return { accepted: false, message: `工作项 ${jobId} 已因回退到更早阶段失效，不接受新报告。` };
+    }
     const terminal = jobTerminalState(events, jobId);
     if (terminal) {
       const reportDigest = sha256File(reportFile) ?? "sha256:unknown";
@@ -700,6 +711,9 @@ export function recordJobSubmitContent(
       return { event_type: "job_rejected", accepted: false, message: `工作项 ${jobId} 不存在` };
     }
 
+    if (jobInvalidated(events, jobId)) {
+      return { accepted: false, message: `工作项 ${jobId} 已因回退到更早阶段失效，不接受新报告。` };
+    }
     const reportDigest = sha256Text(reportContent);
     const terminal = jobTerminalState(events, jobId);
     if (terminal) {
@@ -777,14 +791,9 @@ function recordUserDecisionLoaded(
     });
     const changeRoot = openspecChangeRoot(projectRoot, change);
     const snapshot = rebuildSnapshot(projectRoot, change, changeRoot);
-    const decisionRisk = decision.review_risk === undefined
-      ? "strict"
-      : decision.review_risk === "minimal" || decision.review_risk === "normal" || decision.review_risk === "strict"
-        ? decision.review_risk
-        : null;
-    const current = decisionRisk
-      ? phaseConfirmationForCurrentState(projectRoot, events, snapshot, decisionRisk)
-      : null;
+    // mode 是状态机从配置/round 快照推导的输入，不接受 user-decision JSON 注入。
+    const decisionRisk = workflowRiskForPhaseConfirmation(projectRoot, events, snapshot);
+    const current = phaseConfirmationForCurrentState(projectRoot, events, snapshot, decisionRisk);
     if (
       existingAccepted &&
       current?.scope === decision.scope &&
@@ -797,9 +806,7 @@ function recordUserDecisionLoaded(
       };
     }
     const action = current ? phaseActionForAnswer(current, decision.answer) : null;
-    const rejectionReason = !decisionRisk
-      ? "invalid_phase_confirmation_risk"
-      : !current
+    const rejectionReason = !current
       ? "phase_confirmation_not_pending"
       : decision.scope !== current.scope
         ? "stale_phase_confirmation_scope"
@@ -829,8 +836,6 @@ function recordUserDecisionLoaded(
       }));
       const message = rejectionReason === "invalid_phase_confirmation_answer" && current
         ? `阶段确认答复必须精确为：${current.ask.allowed_answers.join("、")}`
-        : rejectionReason === "invalid_phase_confirmation_risk"
-          ? "阶段确认 review_risk 必须是 minimal、normal 或 strict"
         : rejectionReason === "missing_phase_confirmation_reason" && action
           ? action.reason_prompt ?? "当前选择必须写明原因"
           : "阶段确认已失效或当前没有待确认的阶段边界，请重新执行 next";
@@ -1076,7 +1081,7 @@ export function recordUserDecisionContent(
   });
 }
 
-/** jobs list（HIGH-1 修复：从 transition_commit.new_jobs 提取，不再依赖已删除的 job_requested 事件） */
+/** jobs list（job 从 transition_commit.new_jobs 提取；reopen 可用 job_invalidated 关闭未完成工作项） */
 export function jobsList(
   projectRoot: string,
   change: string,
@@ -1107,6 +1112,10 @@ export function jobsList(
       const idx = open.findIndex(j => j.job_id === job_id);
       if (idx >= 0) open.splice(idx, 1)[0];
       rejected.push({ job_id, role });
+    } else if (ev.event_type === "job_invalidated") {
+      const { job_id } = ev.payload as { job_id: string };
+      const idx = open.findIndex(j => j.job_id === job_id);
+      if (idx >= 0) open.splice(idx, 1);
     }
   }
 
@@ -1120,8 +1129,9 @@ function packetFieldDescriptions(): Record<string, string> {
     boundFiles: "本工作项绑定的文件清单；审查报告必须说明这些文件是否都看过。",
     review_scope: "报告中的审查覆盖范围；普通 reviewer/verifier 用 checked_paths 回执全部绑定文件，code-reviewer 还需按专用协议说明未检查项。",
     code_review_scope: "代码审查范围：从已审基点到当前 HEAD 的提交改动、工作区改动和未跟踪代码文件。",
-    task_execution_index: "按任务汇总的执行证据：每个任务（task）的执行依据、声明测试、测试证据和改动文件。",
-    contract: "任务启动时的执行依据快照：tests/design/source/reason/guard 分别对应 测试/设计/来源/原因/边界；null 表示历史任务没有执行依据。",
+    task_execution_index: "按任务汇总的执行证据：每个任务（task）的执行依据、有效证据要求、声明测试、测试证据和改动文件。",
+    contract: "任务启动时的执行依据快照：tests/design/source/acceptance/guard 分别对应 测试/设计/来源/验收/边界；null 表示历史任务没有执行依据。",
+    required_evidence: "task-start 结合冻结策略编译并写入 attempt 的有效证据要求：test_ids、red_required、green_required 和允许的 GREEN 语义状态；null 表示历史任务按旧记录回放。",
     changed_paths: "与某个任务（task）或代码状态检查相关的改动文件。",
     changed_paths_partial_reason: "该任务（task）的提交段 diff 失败原因；存在时 changed_paths 只包含工作区对比结果，归属可能不完整。",
     unattributed_paths: "代码审查范围中暂时无法归属到某个任务（task）的文件。",
@@ -1202,10 +1212,10 @@ export function jobsPacket(
             ? `最小格式：{"role":"code-reviewer","verdict":"pass|fail","review_scope":{"job_id":"${job.job_id}","packet_digest":"${job.packet_digest}","checked_paths":${JSON.stringify(job.boundFiles.map(f => f.path))},"checked_docs":${JSON.stringify(REVIEW_DOC_PATHS)},"unchecked":[]},"findings":[],"reviewer":{"kind":"codex-subagent","id":"<thread-or-agent-id>"}}；审查覆盖范围（review_scope）用来说明本次审查覆盖了哪些文件和文档，已检查路径（checked_paths）与未检查项（unchecked）必须合起来覆盖全部绑定文件（boundFiles），unchecked 条目格式为 {"path":"<path>","reason":"<reason>"}。`
               + `报告结论为 fail 时，问题列表（findings）至少包含一个可处理、可追溯的阻塞问题，字段为 {"id":"<stable-id>","blocking":true,"type":"implementation|spec|mixed","description":"<what>","evidence":"<why>","source_refs":["<path:line>"],"impact":"<impact>","suggested_action":"apply|propose"}。问题类型（type）中 implementation 表示纯代码实现问题，spec 表示方案/需求文档问题，mixed 表示需要使用者判断的混合问题。`
               + (packetContext?.task_execution_index
-                ? `本工作项带任务执行索引（task_execution_index）：按 task 对照其执行依据快照（contract）审查——实现路线对照 design 引用原文、累计 diff 对照 guard 边界、测试断言对照 tests 声明的 scenario；每项的 scope_note 是执行者登记的范围扩大说明，判断其合理性与验证充分性；changed_paths 是归属线索不是结论（null 表示未知）；unattributed_paths 中的无主改动逐个判断合理性；coverage_exemption_refs 解释未绑定 task 的 TEST 豁免。`
+                ? `本工作项带任务执行索引（task_execution_index）：按 task 对照其执行依据快照（contract）审查——实现路线对照 design 引用原文、累计 diff 对照 guard 边界、测试断言对照 tests 声明的 scenario；每项的 required_evidence 是 task-start 冻结的证据口径，red_required/green_required 分别说明是否需要 RED/GREEN；每项的 scope_note 是执行者登记的范围扩大说明，判断其合理性与验证充分性；changed_paths 是归属线索不是结论（null 表示未知）；unattributed_paths 中的无主改动逐个判断合理性；coverage_exemption_refs 解释未绑定 task 的 TEST 豁免。`
                 : "")
             : job.role === "verifier"
-            ? `最小格式：{"role":"verifier","verdict":"pass|fail","findings":[]${hasReviewScope ? `,"review_scope":{"checked_paths":${JSON.stringify(job.boundFiles.map(file => file.path))}}` : ""}}。核对代码审查记录（code_review_gate）：passed 必须能追溯到已接受的代码审查工作项，skipped 必须能证明本次没有代码类改动。核对代码审查问题闭环：实现修复任务必须带审查修复引用（review_fix_of:<job_id>#<problem_id>），方案/混合问题必须有用户决策或后续修复证据。核对 RED/GREEN：证据须在同一已完成任务的任务尝试 ID（task_completed.attempt_id）下闭环——普通 TDD 任务至少一个同 TEST 先 RED（expected_failure）后 GREEN（expected_success）配对且每个声明 TEST 都有 GREEN；特征化任务（no_tdd_reason:characterization）可用 characterization_pass 作为通过证据，不要求 RED；测试运行证据应包含测试 ID（test_id）、命令（command）、工作目录（cwd）、退出码（exit_code）、语义状态（semantic_status）；审查修复的回归测试运行可用回归覆盖任务列表（covers_task_ids）说明覆盖了哪些已完成任务；缺少任务尝试 ID（attempt_id）的旧证据只能弱引用。` +
+            ? `最小格式：{"role":"verifier","verdict":"pass|fail","findings":[]${hasReviewScope ? `,"review_scope":{"checked_paths":${JSON.stringify(job.boundFiles.map(file => file.path))}}` : ""}}。核对代码审查记录（code_review_gate）：passed 必须能追溯到已接受的代码审查工作项，skipped 必须能证明本次没有代码类改动。核对代码审查问题闭环：实现修复任务必须带审查修复引用（review_fix_of:<job_id>#<problem_id>），方案/混合问题必须有用户决策或后续修复证据。按 task_execution_index 的 required_evidence 核对测试证据：red_required 时需要同一 TEST 的 RED（expected_failure）后 GREEN；green_required 时每个声明 TEST 都需要允许的 GREEN 语义状态；测试运行证据应包含测试 ID（test_id）、命令（command）、工作目录（cwd）、退出码（exit_code）、语义状态（semantic_status）。审查修复的回归测试运行可用回归覆盖任务列表（covers_task_ids）说明覆盖了哪些已完成任务；缺少任务尝试 ID（attempt_id）的旧证据只能弱引用。` +
               (packetContext?.code_state_check
                 ? `本工作项带代码状态检查（code_state_check）：head_matches 为 false 或 changed_paths 非空表示代码审查后代码又发生变化，须在报告中列出差异并交主流程与用户裁决，不自行判定无害，也不据此自动否定已接受的代码审查。`
                 : "")

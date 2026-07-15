@@ -4,6 +4,11 @@ import { EXPLORE_DISCOVERY_REVIEW_GATE, PROPOSE_FINAL_REVIEW_GATE, type ReviewGa
 import { changeRoot as openspecChangeRoot } from "./openspec.ts";
 import { findLatestEvent, sha256Text } from "./store.ts";
 import type { AskUser, AskUserAction, Event, JobRole, Snapshot, State } from "./types.ts";
+import {
+  hasFrozenWorkflowModeForProposeRound,
+  workflowRiskForProject,
+  workflowRiskForState,
+} from "./workflow_config.ts";
 
 export const PHASE_CONFIRMATION_SCOPE_PREFIX = "phase_confirmation:";
 
@@ -54,6 +59,7 @@ export interface PhaseConfirmationDecision {
   scope: string;
   answer: string;
   decision: PhaseDecision;
+  review_risk: ReviewRisk;
 }
 
 function latestTransition(
@@ -82,7 +88,7 @@ const SPECS: Record<PhaseBoundary, PhaseBoundarySpec> = {
     ],
     scopePrefix: `${PHASE_CONFIRMATION_SCOPE_PREFIX}explore_to_propose`,
     epoch: events => latestTransition(events, payload =>
-      payload.from_state === "init" && payload.to_state === "explore"
+      payload.to_state === "explore" && payload.from_state !== "explore"
     ),
   },
   propose_to_apply: {
@@ -133,9 +139,23 @@ function ordinaryReviewRolesForBoundary(
   gate: ReviewGateRule,
   risk: ReviewRisk,
 ): JobRole[] {
-  return boundary === "propose_to_apply"
-    ? historicalProposeReadyRoles(events)
-    : gate.requiredRolesForRisk(risk);
+  // 历史 plan 没有冻结 mode，当时的 gate 只能按实际创建过的角色回放。
+  if (boundary === "propose_to_apply" && !hasFrozenWorkflowModeForProposeRound(events)) {
+    return historicalProposeReadyRoles(events);
+  }
+  return gate.requiredRolesForRisk(risk);
+}
+
+/**
+ * 阶段确认不是 mode 的输入。它只读取当前 planning/apply round 的冻结快照；
+ * 仍处于 Explore/Propose 时才从项目配置获取候选 mode。
+ */
+export function workflowRiskForPhaseConfirmation(
+  projectRoot: string,
+  events: Event[],
+  snapshot: Snapshot,
+): ReviewRisk {
+  return workflowRiskForState(events, snapshot.state, workflowRiskForProject(projectRoot));
 }
 
 function materialDigest(
@@ -187,6 +207,7 @@ function materialDigest(
     : [];
 
   return sha256Text(JSON.stringify({
+    review_risk: risk,
     documents,
     tasks_structure_digest: snapshot.tasks_structure_digest,
     accepted_jobs: acceptedJobs,
@@ -205,14 +226,13 @@ function phaseRecordArgv(change: string): string[] {
   return ["superspec", "record", "user-decision", "--change", change, "--input", "-"];
 }
 
-function nextArgv(change: string, risk: ReviewRisk): string[] {
+function nextArgv(change: string, _risk: ReviewRisk): string[] {
   return [
     "superspec",
     "transition",
     "next",
     "--change",
     change,
-    ...(risk === "strict" ? [] : ["--risk", risk]),
   ];
 }
 
@@ -321,7 +341,7 @@ export function latestAcceptedPhaseDecision(
       scope?: unknown;
       answer?: unknown;
       accepted?: unknown;
-      phase_confirmation?: { boundary?: unknown; decision?: unknown };
+      phase_confirmation?: { boundary?: unknown; decision?: unknown; review_risk?: unknown };
     };
     const phase = payload.phase_confirmation;
     return payload.accepted !== false &&
@@ -332,13 +352,18 @@ export function latestAcceptedPhaseDecision(
   if (!event) return null;
   const payload = event.payload as {
     answer: string;
-    phase_confirmation: { decision: PhaseDecision };
+    phase_confirmation: { decision: PhaseDecision; review_risk?: unknown };
   };
   return {
     event,
     scope: confirmation.scope,
     answer: payload.answer,
     decision: payload.phase_confirmation.decision,
+    review_risk: payload.phase_confirmation.review_risk === "minimal" ||
+      payload.phase_confirmation.review_risk === "normal" ||
+      payload.phase_confirmation.review_risk === "strict"
+      ? payload.phase_confirmation.review_risk
+      : "strict",
   };
 }
 
@@ -364,6 +389,7 @@ export function phaseConfirmationCommitPayload(
       material_digest: confirmation.material_digest,
       scope: confirmation.scope,
       decision_event_id: decision.event.event_id,
+      review_risk: decision.review_risk,
     },
   };
 }

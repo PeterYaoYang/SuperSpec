@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { SUPERSPEC_VERSION } from "./version.ts";
+import { DEFAULT_WORKFLOW_RISK, WORKFLOW_CONFIG_PATH } from "./workflow_config.ts";
 
 export const WORKFLOW_SKILLS = [
   "superspec-explore",
@@ -42,6 +43,7 @@ export interface InstallResult {
     prompts: string[];
     agents: string[];
     config: string;
+    workflow_config: string;
     agents_md: string;
     openspec_config: string;
   };
@@ -295,6 +297,17 @@ function ensureOpenSpecChineseContext(projectRoot: string): string {
   return OPENSPEC_CONFIG_PATH;
 }
 
+function ensureWorkflowConfig(projectRoot: string): string {
+  const configPath = join(projectRoot, WORKFLOW_CONFIG_PATH);
+  mkdirSync(dirname(configPath), { recursive: true });
+  if (!existsSync(configPath)) {
+    // install/update 是显式迁移动作：为以后各轮写入 normal 默认值。
+    // 未执行安装的旧项目仍由 workflowRiskForProject 保守回放 strict。
+    writeFileSync(configPath, JSON.stringify({ workflow: { mode: DEFAULT_WORKFLOW_RISK } }, null, 2) + "\n");
+  }
+  return WORKFLOW_CONFIG_PATH;
+}
+
 const AGENTS_MD_PATH = "AGENTS.md";
 const SUPERSPEC_AGENTS_START = "<!-- SUPERSPEC:AGENTS:START -->";
 const SUPERSPEC_AGENTS_END = "<!-- SUPERSPEC:AGENTS:END -->";
@@ -360,6 +373,7 @@ export function installProject(projectRoot: string, options: InstallOptions = {}
       prompts: copyPrompts(templateRoot, projectRoot),
       agents: copyAgents(templateRoot, projectRoot),
       config: ensureCodexConfig(projectRoot),
+      workflow_config: ensureWorkflowConfig(projectRoot),
       agents_md: ensureAgentsMd(projectRoot, agentsMdTemplate),
       openspec_config: ensureOpenSpecChineseContext(projectRoot),
     },

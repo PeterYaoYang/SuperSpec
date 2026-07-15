@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { ensureChangeLayout, appendEvent, docRef, makeEvent, readEvents, rawFile, sha256Text } from "../src/store.ts";
 import { rebuildSnapshot } from "../src/sync.ts";
 import { next } from "../src/next.ts";
-import { proposeReady, reviewReady, startApply, taskStart, taskComplete, reopen, accept } from "../src/transition.ts";
+import { proposeReady, reviewReady, startApply, taskStart, taskComplete, reopen, accept, transitionExplore } from "../src/transition.ts";
 import { jobsPacket, recordJobSubmit, recordJobSubmitContent, recordUserDecisionContent } from "../src/record.ts";
 import { latestReviewHistoryForGateRole, reviewEvidenceDigest } from "../src/review.ts";
 import { REVIEW_FINAL_VERIFIER_GATE } from "../src/review_job_gates.ts";
@@ -26,7 +26,17 @@ function setupApplyWithDoneTask(): { projectRoot: string; change: string; change
   const changeRoot = join(projectRoot, "openspec", "changes", change);
   mkdirSync(join(changeRoot, ".superspec", "artifacts"), { recursive: true });
   // 任务已勾选
-  writeFileSync(join(changeRoot, "tasks.md"), "# Tasks\n\n- [x] TASK-001 Done\n");
+  writeFileSync(join(changeRoot, "tasks.md"), [
+    "# Tasks", "",
+    "- [x] TASK-001 Done",
+    "  执行依据:",
+    "  - 测试:",
+    "  - 设计: design.md#D",
+    "  - 来源: proposal.md#P",
+    "  - 验收: 已完成的文档任务保持可追溯",
+    "  - 边界: 不改实现代码",
+    "",
+  ].join("\n"));
   writeFileSync(join(changeRoot, "proposal.md"), "# P\n");
   writeFileSync(join(changeRoot, "design.md"), "# D\n");
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "discovery.md"), "# D\n");
@@ -431,6 +441,7 @@ test("apply reopen 后材料恢复相同：旧确认不能跨新 epoch 重放", 
       fx.projectRoot,
       readEvents(fx.projectRoot, fx.change),
       rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot),
+      "minimal",
     );
     assert.ok(initial);
     const initialAdvance = initial.actions.find(action => action.decision === "advance");
@@ -438,15 +449,17 @@ test("apply reopen 后材料恢复相同：旧确认不能跨新 epoch 重放", 
     const oldDecision = JSON.stringify(initialAdvance.record_input);
     assert.equal(recordUserDecisionContent(fx.projectRoot, fx.change, oldDecision).accepted, true);
 
-    writeFileSync(join(fx.changeRoot, "tasks.md"), "# Tasks\n\n- [ ] TASK-001 Done\n");
+    const originalTasks = readFileSync(join(fx.changeRoot, "tasks.md"), "utf8");
+    writeFileSync(join(fx.changeRoot, "tasks.md"), originalTasks.replace("- [x] TASK-001", "- [ ] TASK-001"));
     assert.equal(reopen(fx.projectRoot, fx.change, fx.changeRoot, "apply", "retry task").to_state, "apply");
-    writeFileSync(join(fx.changeRoot, "tasks.md"), "# Tasks\n\n- [x] TASK-001 Done\n");
+    writeFileSync(join(fx.changeRoot, "tasks.md"), originalTasks);
     assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal").to_state, "apply_done");
 
     const reentered = phaseConfirmationForCurrentState(
       fx.projectRoot,
       readEvents(fx.projectRoot, fx.change),
       rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot),
+      "minimal",
     );
     assert.ok(reentered);
     assert.equal(reentered.material_digest, initial.material_digest);
@@ -470,7 +483,7 @@ test("apply reopen 后材料恢复相同：旧确认不能跨新 epoch 重放", 
   } finally { fx.cleanup(); }
 });
 
-test("reopen：无 pending task、accepted 直回 apply 或 legacy archive 来源时拒绝", () => {
+test("reopen：无 pending task 时不能直回 apply；但可回 propose 重新规划", () => {
   const fx = setupApplyWithDoneTask();
   try {
     reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
@@ -478,9 +491,9 @@ test("reopen：无 pending task、accepted 直回 apply 或 legacy archive 来�
     assert.equal(noPending.events_written, 0);
     assert.match(noPending.message, /没有未完成任务/);
 
-    const noFinding = reopen(fx.projectRoot, fx.change, fx.changeRoot, "propose", "不能绕过代码审查 finding");
-    assert.equal(noFinding.events_written, 0);
-    assert.match(noFinding.message, /--review-finding/);
+    const replan = reopen(fx.projectRoot, fx.change, fx.changeRoot, "propose", "补充同一 change 的验收规则");
+    assert.equal(replan.from_state, "apply_done");
+    assert.equal(replan.to_state, "propose");
   } finally { fx.cleanup(); }
 
   const acceptedFx = setupApplyWithDoneTask();
@@ -512,6 +525,94 @@ test("reopen：无 pending task、accepted 直回 apply 或 legacy archive 来�
     assert.equal(fromArchive.events_written, 0);
     assert.match(fromArchive.message, /不能 reopen/);
   } finally { archiveFx.cleanup(); }
+});
+
+test("reopen：review 可以回 propose，且必须更新计划材料后才能重新开始 apply", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    advanceApplyToReview(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    const verifier = reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    assert.equal(verifier.outcome, "job_created");
+
+    const reopened = reopen(fx.projectRoot, fx.change, fx.changeRoot, "propose", "补充非全天借调的验收规则");
+    assert.equal(reopened.from_state, "review");
+    assert.equal(reopened.to_state, "propose");
+    assert.equal(reopened.events_written, 2);
+    assert.equal(rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot).open_jobs.length, 0);
+    const lateReport = recordJobSubmitContent(
+      fx.projectRoot,
+      fx.change,
+      fx.changeRoot,
+      verifier.created_jobs[0],
+      JSON.stringify({ role: "verifier", verdict: "pass", findings: [] }),
+    );
+    assert.equal(lateReport.accepted, false);
+    assert.match(lateReport.message, /已因回退到更早阶段失效/);
+
+    const commit = readEvents(fx.projectRoot, fx.change).findLast(event =>
+      event.event_type === "transition_commit" &&
+      (event.payload as { transition?: unknown }).transition === "reopen"
+    );
+    const payload = commit?.payload as { reopen_source?: unknown; reopen_target?: unknown; baseline_docs?: unknown };
+    assert.equal(payload.reopen_source, "review");
+    assert.equal(payload.reopen_target, "propose");
+    assert.equal(typeof payload.baseline_docs, "object");
+
+    assert.equal(proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal").to_state, "propose_ready");
+    const unchanged = startApply(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(unchanged.events_written, 0);
+    assert.match(unchanged.message, /至少一个计划文档必须变化/);
+
+    writeFileSync(join(fx.changeRoot, "proposal.md"), "# P\n\n补充非全天借调的验收规则\n");
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    assert.equal(startApply(fx.projectRoot, fx.change, fx.changeRoot).to_state, "apply");
+  } finally { fx.cleanup(); }
+});
+
+test("reopen：propose 可以回 explore，且必须更新 discovery 后才能重新推进", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    advanceApplyToReview(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    assert.equal(reopen(fx.projectRoot, fx.change, fx.changeRoot, "propose", "需要重新核对影响链").to_state, "propose");
+
+    const reopened = reopen(fx.projectRoot, fx.change, fx.changeRoot, "explore", "补充借调切片的上游依赖");
+    assert.equal(reopened.from_state, "propose");
+    assert.equal(reopened.to_state, "explore");
+
+    const blocked = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    assert.equal(blocked.events_written, 0);
+    assert.match(blocked.message, /至少一个 discovery 材料必须变化/);
+
+    writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "discovery.md"), "# D\n\n新增借调切片依赖\n");
+    const ask = next(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    assert.equal(ask.path, "ask_user");
+    assert.match(ask.ask_user.scope, /^phase_confirmation:explore_to_propose:/);
+    const advance = (ask.ask_user.actions as PhaseDecisionAction[]).find(action => action.decision === "advance");
+    assert.ok(advance);
+    assert.equal(recordUserDecisionContent(
+      fx.projectRoot,
+      fx.change,
+      JSON.stringify(advance.record_input),
+    ).accepted, true);
+    const advanced = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    assert.equal(advanced.to_state, "propose");
+  } finally { fx.cleanup(); }
+});
+
+test("reopen：从 apply 回计划阶段会中止活跃任务尝试", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    writeFileSync(join(fx.changeRoot, "tasks.md"), "# Tasks\n\n- [ ] TASK-001 Pending\n");
+    assert.equal(taskStart(fx.projectRoot, fx.change, fx.changeRoot, "TASK-001").to_state, "apply");
+
+    const reopened = reopen(fx.projectRoot, fx.change, fx.changeRoot, "propose", "新增需求需要重新规划");
+    assert.equal(reopened.to_state, "propose");
+    assert.equal(reopened.events_written, 2);
+    const snapshot = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(snapshot.active_task_attempts.length, 0);
+    assert.equal(snapshot.task_statuses["TASK-001"], "todo");
+    assert.equal(readEvents(fx.projectRoot, fx.change).some(event => event.event_type === "task_abandoned"), true);
+  } finally { fx.cleanup(); }
 });
 
 test("CLI transition reopen：apply_done + pending → apply", () => {
@@ -569,19 +670,19 @@ test("next：apply 所有任务完成时默认 review-ready 不显式输出 stri
   } finally { fx.cleanup(); }
 });
 
-test("next：apply/apply_done 显式 minimal 会传播到 review-ready", () => {
+test("next：apply/apply_done 不把 mode 参数暴露到 review-ready 命令", () => {
   const fx = setupApplyWithDoneTask();
   try {
     const applyResult = next(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
     assert.equal(applyResult.path, "next_command");
-    assert.ok(applyResult.next_command.includes('review-ready --change "test-change" --risk minimal'));
+    assert.equal(applyResult.next_command, 'superspec transition review-ready --change "test-change"');
 
     const transition = reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
     assert.equal(transition.to_state, "apply_done");
 
     const applyDoneResult = next(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
     assert.equal(applyDoneResult.path, "next_command");
-    assert.ok(applyDoneResult.next_command.includes('review-ready --change "test-change" --risk minimal'));
+    assert.equal(applyDoneResult.next_command, 'superspec transition review-ready --change "test-change"');
   } finally { fx.cleanup(); }
 });
 
@@ -624,7 +725,7 @@ test("review 状态无 policy：next 回 review-ready，accept 不直通", () =>
 
     const nextResult = next(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
     assert.equal(nextResult.path, "next_command");
-    assert.equal(nextResult.next_command, 'superspec transition review-ready --change "test-change" --risk minimal');
+    assert.equal(nextResult.next_command, 'superspec transition review-ready --change "test-change"');
 
     const blocked = accept(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(blocked.events_written, 0);
@@ -1576,7 +1677,7 @@ test("code-reviewer：实现问题可 reopen apply 并追加审查修复 task", 
     const tasks = readFileSync(join(fx.changeRoot, "tasks.md"), "utf8");
     assert.match(tasks, new RegExp(`REVIEW-FIX-${jobId}#CR-001`));
     assert.match(tasks, new RegExp(`review_fix_of:${jobId}#CR-001`));
-    assert.match(tasks, /tdd_required:true/);
+    assert.doesNotMatch(tasks, /tdd_required:true/);
   } finally { fx.cleanup(); }
 });
 
@@ -2256,7 +2357,7 @@ test("next：accepted 无 open job 时直接完成，不再返回归档确认或
     const normal = next(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     assert.equal(normal.path, "done");
     assert.deepEqual(normal.continuation?.resume.next_argv_after_completion, [
-      "superspec", "transition", "next", "--change", fx.change, "--risk", "normal",
+      "superspec", "transition", "next", "--change", fx.change,
     ]);
   } finally { fx.cleanup(); }
 });
@@ -2789,7 +2890,7 @@ test("accepted reopen：reopen 前已有计划材料变化时复用 accept basel
     assert.equal(done.path, "done");
     assert.equal(done.continuation?.plan_docs_changed_since_accept, true);
     assert.deepEqual(done.continuation?.resume.next_argv_after_completion, [
-      "superspec", "transition", "next", "--change", fx.change, "--risk", "minimal",
+      "superspec", "transition", "next", "--change", fx.change,
     ]);
     assert.match(done.reason, /计划材料已变化/);
 
@@ -2803,7 +2904,7 @@ test("accepted reopen：reopen 前已有计划材料变化时复用 accept basel
   } finally { fx.cleanup(); }
 });
 
-test("accepted reopen：计划材料变化后重新创建历史 proposal 审查角色", () => {
+test("accepted reopen：新 minimal planning round 不复用历史 proposal 审查角色", () => {
   const fx = setupApplyWithDoneTask();
   try {
     advanceApplyToReview(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
@@ -2832,35 +2933,13 @@ test("accepted reopen：计划材料变化后重新创建历史 proposal 审查�
     writeFileSync(join(fx.changeRoot, "design.md"), "# D\n\nchanged after accepted reopen\n");
 
     assert.equal(proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal").to_state, "propose_ready");
-    const recheck = startApply(fx.projectRoot, fx.change, fx.changeRoot);
-    assert.equal(recheck.outcome, "job_created");
-    assert.equal(recheck.to_state, "propose_ready");
-    const openRoles = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot).open_jobs.map(job => job.role);
-    assert.deepEqual(openRoles, ["critic"]);
-    assert.notEqual(recheck.created_jobs[0], historical.job_id);
-    const recheckPacket = jobsPacket(fx.projectRoot, fx.change, recheck.created_jobs[0]).packet;
-    assert.equal(recheckPacket?.previous_rejection, undefined);
-
-    const currentFinding = { id: "CURRENT-CYCLE-001", evidence: "current cycle evidence" };
-    assert.equal(recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, recheck.created_jobs[0], JSON.stringify({
-      role: "critic",
-      verdict: "fail",
-      findings: [currentFinding],
-      review_scope: { checked_paths: checkedPathsForJob(fx.projectRoot, fx.change, recheck.created_jobs[0]) },
-      reviewer: { kind: "codex-subagent", id: "current-cycle-critic" },
-    })).accepted, false);
-    const blocked = startApply(fx.projectRoot, fx.change, fx.changeRoot);
-    assert.equal(blocked.outcome, "blocked");
-    assert.equal(Object.hasOwn(blocked, "required_jobs"), false);
-    assert.equal((blocked.details?.review_rejection as { job_id?: string })?.job_id, recheck.created_jobs[0]);
-
-    writeFileSync(join(fx.changeRoot, "proposal.md"), "# Proposal\n\nchanged after current rejection\n");
-    const retry = startApply(fx.projectRoot, fx.change, fx.changeRoot);
-    assert.equal(retry.outcome, "job_created");
-    assert.equal(retry.to_state, "propose_ready");
-    const retryPacket = jobsPacket(fx.projectRoot, fx.change, retry.created_jobs[0]).packet;
-    assert.equal(retryPacket?.previous_rejection?.job_id, recheck.created_jobs[0]);
-    assert.deepEqual(retryPacket?.previous_rejection?.findings, [currentFinding]);
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    const applied = startApply(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(applied.outcome, "advanced");
+    assert.equal(applied.to_state, "apply");
+    assert.equal(rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot).open_jobs.some(job =>
+      job.job_id === historical.job_id || job.role === "critic",
+    ), false);
   } finally { fx.cleanup(); }
 });
 

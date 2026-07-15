@@ -17,9 +17,15 @@ import { reviewEvidenceDigest } from "../src/review.ts";
 import { validateExecutionRequirements, tasksStructureDigest } from "../src/format.ts";
 import { sha256Text } from "../src/store.ts";
 import type { Event } from "../src/types.ts";
+import { phaseConfirmationForBoundary, type PhaseDecisionAction } from "../src/phase_confirmation.ts";
+import { rebuildSnapshot } from "../src/sync.ts";
 import { confirmCurrentPhase } from "./phase_confirmation_support.ts";
 
-function setupChange(tasks: string, testContract = "# Test Contract\n"): { projectRoot: string; change: string; changeRoot: string; cleanup: () => void } {
+function setupChange(
+  tasks: string,
+  testContract = "# Test Contract\n",
+  _workflowMode: "minimal" | "normal" | "strict" = "strict",
+): { projectRoot: string; change: string; changeRoot: string; cleanup: () => void } {
   const projectRoot = mkdtempSync(join(tmpdir(), "superspec-align-"));
   const change = "align-change";
   const changeRoot = join(projectRoot, "openspec", "changes", change);
@@ -80,8 +86,32 @@ function initGitRepo(projectRoot: string): void {
   execFileSync("git", ["config", "user.name", "Test User"], { cwd: projectRoot, stdio: "ignore" });
 }
 
-function startApplyConfirmed(projectRoot: string, change: string, changeRoot: string) {
-  confirmCurrentPhase(projectRoot, change, changeRoot);
+function startApplyConfirmed(
+  projectRoot: string,
+  change: string,
+  changeRoot: string,
+  risk: "minimal" | "normal" | "strict" = "strict",
+) {
+  const tasks = readFileSync(join(changeRoot, "tasks.md"), "utf8");
+  // 这些 evidence-focused fixtures 不构造完整的 Proposal reviewer 历史；直接落入
+  // v2 Apply snapshot，避免让 fixture 的历史 gate 形状掩盖要验证的 task 语义。
+  if (tasks.includes("执行依据")) {
+    appendEvent(projectRoot, change, makeEvent(change, "transition_commit", {
+      transition: "start-apply",
+      from_state: "propose_ready",
+      to_state: "apply",
+      outcome: "advanced",
+      created_job_ids: [],
+      reason: "test v2 apply snapshot",
+      apply_contract_mode: true,
+      execution_requirement_version: 2,
+      execution_policy: risk === "strict" ? "tdd" : "green_only",
+      workflow_mode: risk,
+      review_policy: { review_risk: risk, requires_verifier: risk !== "minimal" },
+    }, { transitionId: `T-v2-start-${risk}`, idempotencyKey: `v2-start-${risk}` }));
+    return { to_state: "apply" };
+  }
+  confirmCurrentPhase(projectRoot, change, changeRoot, risk);
   return startApply(projectRoot, change, changeRoot);
 }
 
@@ -94,7 +124,7 @@ test("推进校验：propose-ready 和 start-apply 都拒绝执行依据模式�
     "  - 测试: test-contract.md#TEST-001",
     "  - 设计: design.md#Route",
     "  - 来源: proposal.md#Impact",
-    "  - 原因: 独立验收行为",
+    "  - 验收: 独立验收行为",
     "  - 边界: 不改持久化",
     "- [ ] TASK-002 Missing contract tdd_required:true",
     "",
@@ -127,7 +157,7 @@ test("推进校验：propose-ready 和 start-apply 都拒绝执行依据模式�
   }
 });
 
-test("推进校验：普通 TDD 执行依据必须声明存在于 test-contract 的 TEST", () => {
+test("执行依据：测试字段必须显式声明；空字段可表示非行为 task，声明的 TEST 必须存在", () => {
   const missingTestField = [
     "# Tasks",
     "",
@@ -140,6 +170,7 @@ test("推进校验：普通 TDD 执行依据必须声明存在于 test-contract 
     "",
   ].join("\n");
   const unknownTest = missingTestField.replace("  - 设计:", "  - 测试: test-contract.md#TEST-999\n  - 设计:");
+  const emptyTestField = missingTestField.replace("  - 设计:", "  - 测试:\n  - 设计:");
   const testContract = [
     "# Test Contract",
     "",
@@ -153,9 +184,17 @@ test("推进校验：普通 TDD 执行依据必须声明存在于 test-contract 
   try {
     const blocked = proposeReady(missingFx.projectRoot, missingFx.change, missingFx.changeRoot, "minimal");
     assert.equal(blocked.events_written, 0);
-    assert.match(blocked.message, /执行依据缺少测试/);
+    assert.match(blocked.message, /缺少测试字段/);
   } finally {
     missingFx.cleanup();
+  }
+
+  const emptyFx = setupProposeChange(emptyTestField, testContract);
+  try {
+    const advanced = proposeReady(emptyFx.projectRoot, emptyFx.change, emptyFx.changeRoot, "minimal");
+    assert.equal(advanced.to_state, "propose_ready");
+  } finally {
+    emptyFx.cleanup();
   }
 
   const unknownFx = setupChange(unknownTest, testContract);
@@ -195,14 +234,22 @@ test("执行依据模式：task-start 输出契约，test-run 不要求 task_str
       ev.event_type === "transition_commit" && (ev.payload as { transition?: unknown }).transition === "start-apply"
     );
     assert.equal((startCommit?.payload as { apply_contract_mode?: unknown }).apply_contract_mode, true);
+    assert.equal((startCommit?.payload as { execution_policy?: unknown }).execution_policy, "tdd");
 
     const started = taskStart(fx.projectRoot, fx.change, fx.changeRoot, "TASK-001");
     assert.deepEqual(started.details?.contract, {
       tests: ["TEST-001"],
       design: "design.md#Route",
       source: ["proposal.md#Impact"],
-      reason: "独立验收行为",
+      acceptance: "独立验收行为",
       guard: "不改持久化",
+    });
+    assert.equal(started.details?.execution_policy, "tdd");
+    assert.deepEqual(started.details?.required_evidence, {
+      test_ids: ["TEST-001"],
+      red_required: true,
+      green_required: true,
+      accepted_green_statuses: ["expected_success"],
     });
     const attemptId = started.details?.attempt_id;
     assert.equal(typeof attemptId, "string");
@@ -260,6 +307,310 @@ test("执行依据模式：task-start 输出契约，test-run 不要求 task_str
     assert.equal(lateEvidence.accepted, false);
     assert.match(lateEvidence.message, /当前活跃任务尝试/);
     assert.equal(readEvents(fx.projectRoot, fx.change).length, eventCountAfterComplete);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("normal/minimal：冻结 GREEN-only 策略，只要求声明 TEST 的 GREEN", () => {
+  const tasks = [
+    "# Tasks",
+    "",
+    "- [ ] TASK-001 Implement behavior",
+    "  执行依据:",
+    "  - 测试: test-contract.md#TEST-001",
+    "  - 设计: design.md#Route",
+    "  - 来源: proposal.md#Impact",
+    "  - 原因: normal/minimal 测试后置",
+    "  - 边界: 不改持久化",
+    "",
+  ].join("\n");
+  const testContract = [
+    "# Test Contract",
+    "",
+    "| test_id | scenario |",
+    "|---|---|",
+    "| TEST-001 | behavior works |",
+    "",
+  ].join("\n");
+
+  for (const risk of ["normal", "minimal"] as const) {
+    const fx = setupChange(tasks, testContract, risk);
+    try {
+      const startedApply = startApplyConfirmed(fx.projectRoot, fx.change, fx.changeRoot, risk);
+      assert.equal(startedApply.to_state, "apply");
+      const startCommit = readEvents(fx.projectRoot, fx.change).findLast(event =>
+        event.event_type === "transition_commit" &&
+        (event.payload as { transition?: unknown }).transition === "start-apply"
+      );
+      assert.equal((startCommit?.payload as { execution_policy?: unknown }).execution_policy, "green_only");
+
+      const started = taskStart(fx.projectRoot, fx.change, fx.changeRoot, "TASK-001");
+      const attemptId = started.details?.attempt_id;
+      assert.equal(typeof attemptId, "string");
+      assert.equal(started.details?.execution_policy, "green_only");
+      assert.equal(recordTestRunContent(fx.projectRoot, fx.change, JSON.stringify({
+        test_id: "TEST-001",
+        attempt_id: attemptId,
+        command: "npm test",
+        cwd: fx.projectRoot,
+        exit_code: 1,
+        semantic_status: "expected_failure",
+      })).accepted, false);
+      const missingGreen = taskComplete(fx.projectRoot, fx.change, fx.changeRoot, "TASK-001");
+      assert.equal(missingGreen.events_written, 0);
+      assert.match(missingGreen.message, /TEST-001 GREEN 证据/);
+      assert.equal(recordTestRunContent(fx.projectRoot, fx.change, JSON.stringify({
+        test_id: "TEST-001",
+        attempt_id: attemptId,
+        command: "npm test",
+        cwd: fx.projectRoot,
+        exit_code: 0,
+        semantic_status: "expected_success",
+      })).accepted, true);
+      assert.equal(taskComplete(fx.projectRoot, fx.change, fx.changeRoot, "TASK-001").outcome, "advanced");
+      const completion = readEvents(fx.projectRoot, fx.change).findLast(event => event.event_type === "task_completed");
+      assert.equal((completion?.payload as { execution_policy?: unknown }).execution_policy, "green_only");
+      const reviewContext = codeReviewPacketContext(fx.changeRoot, fx.projectRoot, {
+        base_head: null,
+        current_head: null,
+        scope_reliable: false,
+        scope_reason: "test",
+        committed_paths: null,
+        worktree_paths: [],
+        untracked_paths: [],
+        review_paths: [],
+      }, readEvents(fx.projectRoot, fx.change));
+      assert.equal(reviewContext.task_execution_index?.[0].execution_policy, "green_only");
+    } finally {
+      fx.cleanup();
+    }
+  }
+});
+
+test("执行依据不携带模式：新契约轮缺少契约仍阻断，模式由 task-start 编译", () => {
+  const missingContract = [
+    "# Tasks",
+    "",
+    "- [ ] TASK-001 Missing contract",
+    "- [ ] TASK-002 Declares the round",
+    "  执行依据:",
+    "  - 测试: test-contract.md#TEST-001",
+    "  - 设计: design.md#Route",
+    "  - 来源: proposal.md#Impact",
+    "  - 原因: 使本轮进入执行依据模式",
+    "  - 边界: 不改持久化",
+    "",
+  ].join("\n");
+  const testContract = "# Test Contract\n\n| test_id | scenario |\n|---|---|\n| TEST-001 | behavior works |\n";
+
+  const normalFx = setupProposeChange(missingContract, testContract);
+  try {
+    const blocked = proposeReady(normalFx.projectRoot, normalFx.change, normalFx.changeRoot, "normal");
+    assert.equal(blocked.events_written, 0);
+    assert.match(blocked.message, /缺少执行依据/);
+  } finally {
+    normalFx.cleanup();
+  }
+
+  const missingTest = setupProposeChange([
+    "# Tasks",
+    "",
+    "- [ ] TASK-001 Missing TEST",
+    "  执行依据:",
+    "  - 设计: design.md#Route",
+    "  - 来源: proposal.md#Impact",
+    "  - 原因: no test is invalid",
+    "  - 边界: no persistence",
+    "",
+  ].join("\n"), testContract);
+  try {
+    const blocked = proposeReady(missingTest.projectRoot, missingTest.change, missingTest.changeRoot, "normal");
+    assert.equal(blocked.events_written, 0);
+    assert.match(blocked.message, /缺少测试字段/);
+  } finally {
+    missingTest.cleanup();
+  }
+
+  const legacyInvalidGreenOnly = setupProposeChange([
+    "# Tasks",
+    "",
+    "- [ ] TASK-001 Wrong TDD flag no_tdd_reason:green-only",
+    "  执行依据:",
+    "  - 测试: test-contract.md#TEST-001",
+    "  - 设计: design.md#Route",
+    "  - 来源: proposal.md#Impact",
+    "  - 原因: the flag is required",
+    "  - 边界: no persistence",
+    "",
+  ].join("\n"), testContract);
+  try {
+    const blocked = proposeReady(legacyInvalidGreenOnly.projectRoot, legacyInvalidGreenOnly.change, legacyInvalidGreenOnly.changeRoot, "normal");
+    assert.equal(blocked.events_written, 0);
+    assert.match(blocked.message, /必须同时声明 tdd_required:false/);
+  } finally {
+    legacyInvalidGreenOnly.cleanup();
+  }
+
+  const strictFx = setupProposeChange([
+    "# Tasks",
+    "",
+    "- [ ] TASK-001 Green only tdd_required:false no_tdd_reason:green-only",
+    "  执行依据:",
+    "  - 测试: test-contract.md#TEST-001",
+    "  - 设计: design.md#Route",
+    "  - 来源: proposal.md#Impact",
+    "  - 原因: should be rejected in strict",
+    "  - 边界: no persistence",
+    "",
+  ].join("\n"), testContract);
+  try {
+    const blocked = proposeReady(strictFx.projectRoot, strictFx.change, strictFx.changeRoot, "strict");
+    assert.equal(blocked.events_written, 0);
+    assert.match(blocked.message, /只允许用于 GREEN-only apply/);
+  } finally {
+    strictFx.cleanup();
+  }
+});
+
+test("normal/minimal 的普通 task 与审查修复都由 task-start 编译为 GREEN-only", () => {
+  const ordinaryTdd = [
+    "# Tasks",
+    "",
+    "- [ ] TASK-001 Ordinary TDD tdd_required:true",
+    "  执行依据:",
+    "  - 测试: test-contract.md#TEST-001",
+    "  - 设计: design.md#Route",
+    "  - 来源: proposal.md#Impact",
+    "  - 原因: 由 task-start 决定证据口径",
+    "  - 边界: 不改持久化",
+    "",
+  ].join("\n");
+  const testContract = "# Test Contract\n\n| test_id | scenario |\n|---|---|\n| TEST-001 | behavior works |\n";
+  const proposeFx = setupProposeChange(ordinaryTdd, testContract);
+  try {
+    const advanced = proposeReady(proposeFx.projectRoot, proposeFx.change, proposeFx.changeRoot, "minimal");
+    assert.equal(advanced.to_state, "propose_ready");
+  } finally {
+    proposeFx.cleanup();
+  }
+
+  const applyFx = setupChange(ordinaryTdd, testContract, "normal");
+  try {
+    assert.equal(startApplyConfirmed(applyFx.projectRoot, applyFx.change, applyFx.changeRoot, "normal").to_state, "apply");
+    const started = taskStart(applyFx.projectRoot, applyFx.change, applyFx.changeRoot, "TASK-001");
+    assert.deepEqual(started.details?.required_evidence, {
+      test_ids: ["TEST-001"],
+      red_required: false,
+      green_required: true,
+      accepted_green_statuses: ["expected_success"],
+    });
+  } finally {
+    applyFx.cleanup();
+  }
+
+  const reviewFixFx = setupChange([
+    "# Tasks",
+    "",
+    "- [x] TASK-001 Document-only prerequisite tdd_required:false no_tdd_reason:documentation-only",
+    "  执行依据:",
+    "  - 测试: test-contract.md#TEST-001",
+    "  - 设计: design.md#Route",
+    "  - 来源: proposal.md#Impact",
+    "  - 原因: establish contract mode",
+    "  - 边界: no persistence",
+    "",
+  ].join("\n"), testContract, "normal");
+  try {
+    assert.equal(startApplyConfirmed(reviewFixFx.projectRoot, reviewFixFx.change, reviewFixFx.changeRoot, "normal").to_state, "apply");
+    writeFileSync(join(reviewFixFx.changeRoot, "tasks.md"), readFileSync(join(reviewFixFx.changeRoot, "tasks.md"), "utf8") +
+      "- [ ] REVIEW-FIX-JOB-1#F1 Repair review issue review_fix_of:JOB-1#F1\n");
+    const started = taskStart(reviewFixFx.projectRoot, reviewFixFx.change, reviewFixFx.changeRoot, "REVIEW-FIX-JOB-1#F1");
+    const attemptId = String(started.details?.attempt_id);
+    assert.equal(started.details?.execution_policy, "green_only");
+    assert.deepEqual(started.details?.required_evidence, {
+      test_ids: [],
+      red_required: false,
+      green_required: true,
+      accepted_green_statuses: ["expected_success"],
+    });
+    assert.equal(recordTestRunContent(reviewFixFx.projectRoot, reviewFixFx.change, JSON.stringify({
+      test_id: "TEST-REPAIR",
+      attempt_id: attemptId,
+      command: "npm test -- review-fix",
+      cwd: reviewFixFx.projectRoot,
+      exit_code: 1,
+      semantic_status: "expected_failure",
+    })).accepted, false);
+    assert.equal(recordTestRunContent(reviewFixFx.projectRoot, reviewFixFx.change, JSON.stringify({
+      test_id: "TEST-REPAIR",
+      attempt_id: attemptId,
+      command: "npm test -- review-fix",
+      cwd: reviewFixFx.projectRoot,
+      exit_code: 0,
+      semantic_status: "expected_success",
+    })).accepted, true);
+    assert.equal(taskComplete(reviewFixFx.projectRoot, reviewFixFx.change, reviewFixFx.changeRoot, "REVIEW-FIX-JOB-1#F1").outcome, "advanced");
+    const completion = readEvents(reviewFixFx.projectRoot, reviewFixFx.change).findLast(event => event.event_type === "task_completed");
+    assert.equal((completion?.payload as { execution_policy?: unknown }).execution_policy, "green_only");
+    const reviewContext = codeReviewPacketContext(reviewFixFx.changeRoot, reviewFixFx.projectRoot, {
+      base_head: null,
+      current_head: null,
+      scope_reliable: false,
+      scope_reason: "test",
+      committed_paths: null,
+      worktree_paths: [],
+      untracked_paths: [],
+      review_paths: [],
+    }, readEvents(reviewFixFx.projectRoot, reviewFixFx.change));
+    assert.equal(reviewContext.task_execution_index?.[0].execution_policy, "green_only");
+  } finally {
+    reviewFixFx.cleanup();
+  }
+});
+
+test("propose_to_apply 确认范围绑定 review risk，不能改写冻结策略", () => {
+  const fx = setupChange([
+    "# Tasks",
+    "",
+    "- [ ] TASK-001 Implement behavior tdd_required:false no_tdd_reason:green-only",
+    "  执行依据:",
+    "  - 测试: test-contract.md#TEST-001",
+    "  - 设计: design.md#Route",
+    "  - 来源: proposal.md#Impact",
+    "  - 原因: normal policy",
+    "  - 边界: no persistence",
+    "",
+  ].join("\n"), [
+    "# Test Contract",
+    "",
+    "| test_id | scenario |",
+    "|---|---|",
+    "| TEST-001 | behavior works |",
+    "",
+  ].join("\n"), "normal");
+  try {
+    writeFileSync(join(fx.projectRoot, ".superspec", "config.json"), JSON.stringify({ workflow: { mode: "normal" } }));
+    const ask = next(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.equal(ask.path, "ask_user");
+    const action = (ask.ask_user.actions as Array<PhaseDecisionAction>).find(item => item.decision === "advance");
+    assert.ok(action);
+    const forged = {
+      ...action.record_input,
+      review_risk: "strict",
+    };
+    const accepted = recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify(forged));
+    assert.equal(accepted.accepted, true);
+    const decision = readEvents(fx.projectRoot, fx.change).findLast(event => event.event_type === "user_decision_recorded");
+    assert.equal((decision?.payload as { phase_confirmation?: { review_risk?: unknown } }).phase_confirmation?.review_risk, "normal");
+
+    const started = startApply(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(started.to_state, "apply");
+    const commit = readEvents(fx.projectRoot, fx.change).findLast(event =>
+      event.event_type === "transition_commit" &&
+      (event.payload as { transition?: unknown }).transition === "start-apply"
+    );
+    assert.equal((commit?.payload as { execution_policy?: unknown }).execution_policy, "green_only");
   } finally {
     fx.cleanup();
   }
@@ -379,6 +730,7 @@ test("执行依据模式：checkbox 已勾选但缺 task_completed 时 next 引�
     "",
     "- [ ] TASK-001 Documentation tdd_required:false no_tdd_reason:documentation-only",
     "  执行依据:",
+    "  - 测试:",
     "  - 设计: design.md#Docs",
     "  - 来源: proposal.md#Docs",
     "  - 原因: 文档任务",
@@ -410,6 +762,7 @@ test("执行依据模式：task_completed 事件优先于 checkbox，已完成 t
     "",
     "- [ ] TASK-001 Documentation tdd_required:false no_tdd_reason:documentation-only",
     "  执行依据:",
+    "  - 测试:",
     "  - 设计: design.md#Docs",
     "  - 来源: proposal.md#Docs",
     "  - 原因: 文档任务",
@@ -825,8 +1178,9 @@ test("执行依据绑定：task 与块头之间允许一个空行，仍进入契
 
   const fx = setupProposeChange(tasks, TEST_CONTRACT_TABLE);
   try {
-    const ready = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
-    assert.equal(ready.to_state, "propose_ready");
+    const ready = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "strict");
+    assert.equal(ready.outcome, "job_created");
+    assert.equal(ready.to_state, "propose");
     assert.equal(ready.events_written, 1);
   } finally {
     fx.cleanup();
@@ -870,6 +1224,7 @@ test("历史 apply 轮：tasks 带执行依据文本但 contract_mode 为 false 
     const started = taskStart(fx.projectRoot, fx.change, fx.changeRoot, "TASK-001");
     assert.equal(started.details?.contract, null);
     assert.equal(started.details?.legacy_contract, true);
+    assert.equal(started.details?.execution_policy, "tdd");
 
     const structureDigest = tasksStructureDigest(readFileSync(join(fx.changeRoot, "tasks.md"), "utf8"), sha256Text);
     const attemptId = started.details?.attempt_id;
@@ -892,6 +1247,56 @@ test("历史 apply 轮：tasks 带执行依据文本但 contract_mode 为 false 
       exit_code: 1,
       semantic_status: "expected_failure",
     })).accepted, true);
+    const blocked = taskComplete(fx.projectRoot, fx.change, fx.changeRoot, "TASK-001");
+    assert.equal(blocked.events_written, 0);
+    assert.match(blocked.message, /GREEN 证据/);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("历史 v1 契约轮：无执行依据的 documentation task 仍按旧 tdd 标记回放", () => {
+  const tasks = "# Tasks\n\n- [ ] TASK-001 Legacy documentation tdd_required:false no_tdd_reason:documentation-only\n";
+  const fx = setupChange(tasks);
+  try {
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "transition_commit", {
+      transition: "start-apply",
+      from_state: "propose_ready",
+      to_state: "apply",
+      outcome: "advanced",
+      created_job_ids: [],
+      reason: "legacy contract apply",
+      apply_contract_mode: true,
+    }, { transitionId: "T-legacy-contract-v1", idempotencyKey: "legacy-contract-v1" }));
+
+    const started = taskStart(fx.projectRoot, fx.change, fx.changeRoot, "TASK-001");
+    assert.equal(started.to_state, "apply");
+    assert.equal(started.details?.required_evidence, undefined);
+    const completed = taskComplete(fx.projectRoot, fx.change, fx.changeRoot, "TASK-001");
+    assert.equal(completed.events_written, 2);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("历史 v1 契约轮：普通 TDD task 在 Apply 中丢失执行依据仍被 task-start 阻断", () => {
+  const tasks = contractTasksWithHeader();
+  const fx = setupChange(tasks, TEST_CONTRACT_TABLE);
+  try {
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "transition_commit", {
+      transition: "start-apply",
+      from_state: "propose_ready",
+      to_state: "apply",
+      outcome: "advanced",
+      created_job_ids: [],
+      reason: "legacy contract apply",
+      apply_contract_mode: true,
+    }, { transitionId: "T-legacy-contract-tdd", idempotencyKey: "legacy-contract-tdd" }));
+    writeFileSync(join(fx.changeRoot, "tasks.md"), "# Tasks\n\n- [ ] TASK-001 Implement behavior tdd_required:true\n");
+
+    const started = taskStart(fx.projectRoot, fx.change, fx.changeRoot, "TASK-001");
+    assert.equal(started.events_written, 0);
+    assert.match(started.message, /普通 TDD 任务.*缺少执行依据/);
   } finally {
     fx.cleanup();
   }

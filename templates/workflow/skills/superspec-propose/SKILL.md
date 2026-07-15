@@ -10,20 +10,17 @@ metadata:
 
 你是计划阶段。职责：把探索结论转化为可执行的计划——写 proposal.md / specs / design.md / tasks.md + test-contract.md。
 
-## 驱动方式
+## 使用方式
 
-所有状态由工作流引擎管理：
+先运行 `superspec transition next --change "<change>"`；它给出的命令、确认或工作项就是当前要处理的一组事项。不要根据历史 job 或记忆自行拼接推进命令。
 
-1. `superspec transition next --change "<change>"`
-2. 执行返回的命令、工作项或用户确认
-3. 用户确认用 `superspec record user-decision --change "<change>" --input -`；工作项审查报告用 `superspec record job-submit --change "<change>" --job <JOB> --report -`（文件路径模式仍可作为 fallback）
-4. 回到第 1 步
-
-进入下一阶段前，必须先处理 next 返回的用户确认、审查或验证事项。默认完整审查路径下，进入实现前会要求 `critic`、`architect`、`test-engineer` 三个独立审查工作项完成；审查必须由独立角色执行，不能由主流程自审代替，报告按工作流返回的格式提交并记录实际审查来源。
+- 文档未就绪：补齐本 Skill 定义的计划材料，再重新获取下一步。
+- 需要用户确认：汇总真正影响业务、验收或范围的选择，按输出格式登记。
+- 需要审查：交给输出指定的独立角色，使用返回的提交格式记录报告；主流程自检不能替代独立审查。
 
 什么问题需要用户确认，判定标准见「待用户确认」一节；就绪或审查后向用户只概括任务可验证性、关键风险/证据覆盖和下一步。
 
-执行 propose-ready 前，对照 critic / architect / test-engineer 的阻塞条件快速自检（非穷尽）：Impact 与 CHAIN/IDC 对账、specs 增量与 proposal 能力变化互相对应、design 的功能点与实现方案能推出 tasks、DEC 已有行内结论并回写、task 粒度单一行为且顺序可执行、每个普通 TDD task 有完整可定位的 `执行依据:`（声明的 TEST 都存在于 test-contract，`边界`/`原因` 具体到该 task 而非套话）、specs 中的核心业务规则可验证、test-contract 覆盖 Impact 引用的 CHAIN、test-contract 中未绑定任何 task 的 TEST 有明确取舍（绑定到 task 或留待用户豁免决策）。自检不替代审查工作项，只为减少驳回往返。
+执行 propose-ready 前，对照 critic / architect / test-engineer 的阻塞条件快速自检（非穷尽）：Impact 与 CHAIN/IDC 对账、specs 增量与 proposal 能力变化互相对应、design 的功能点与实现方案能推出 tasks、DEC 已有行内结论并回写、task 粒度单一行为且顺序可执行、每个普通 task 有完整可定位的 `执行依据:`（声明的 TEST 都存在于 test-contract，`边界`/`验收` 具体到该 task 而非套话）、specs 中的核心业务规则可验证、test-contract 覆盖 Impact 引用的 CHAIN、test-contract 中未绑定任何 task 的 TEST 有明确取舍（绑定到 task 或留待用户豁免决策）。自检不替代审查工作项，只为减少驳回往返。
 
 人类可读正文默认使用简体中文；OpenSpec 结构标题、规范关键字、命令、路径、JSON 字段、代码标识符保留原文。OpenSpec 生成文档语言不符合预期时，先检查 `openspec/config.yaml` 的官方 `context` 设置；不要在变更文档里添加自定义 `language` 字段。
 
@@ -139,43 +136,47 @@ metadata:
 
 ## Review verifier
 
-- [ ] 1.1 检查 verifier 绑定文档 tdd_required:true
+- [ ] 1.1 检查 verifier 绑定文档
   执行依据:
   - 测试: test-contract.md#TEST-001
   - 设计: design.md#Verifier 文档绑定：沿用现有校验入口
   - 来源: proposal.md#Impact；specs/review/spec.md#verifier 绑定
-  - 原因: 独立可验收行为，可由 TEST-001 验收
+  - 验收: 独立可验收行为，可由 TEST-001 验收
   - 边界: 保持既有 job 提交协议不变
-- [ ] 1.2 检查 verifier 绑定执行证据 tdd_required:true
+- [ ] 1.2 检查 verifier 绑定执行证据
   执行依据:
   - 测试: test-contract.md#TEST-002,TEST-003
   - 设计: design.md#执行证据核对：复用现有证据链
   - 来源: proposal.md#Impact；discovery.md#CHAIN-001
-  - 原因: 证据核对与文档绑定是两个独立验收入口
+  - 验收: 证据核对与文档绑定是两个独立验收入口
   - 边界: 不改变历史证据的判定语义
 
 ## Documentation
 
-- [ ] 2.1 更新文档 tdd_required:false no_tdd_reason:documentation-only
+- [ ] 2.1 更新文档
+  执行依据:
+  - 测试:
+  - 设计: design.md#文档说明
+  - 来源: proposal.md#Impact
+  - 验收: 文档准确反映已确定的行为变化
+  - 边界: 不改业务代码或行为
 ```
 
 规则：
-- 每个普通 TDD task（`tdd_required:true`）必须紧跟一个 `执行依据:` 块，包含五个字段：`测试`（该 task 必须兑现的 test-contract 场景，引用 `test-contract.md#TEST-xxx`，多个用逗号合并）、`设计`（执行路线在 `design.md` 的位置或短摘录）、`来源`（task 产生依据，如 `proposal.md#Impact`、spec delta、`discovery.md#CHAIN-xxx,IDC-xxx`，已有明确文件路径的补充材料用 `.superspec/artifacts/...`）、`原因`（为什么单独拆出这个 task）、`边界`（执行时需要保护的边界）
+- 每个普通 task 必须紧跟一个 `执行依据:` 块，包含五个字段：`测试`（该 task 必须兑现的 test-contract 场景，引用 `test-contract.md#TEST-xxx`，多个用逗号合并；没有自动化测试的纯文档/机械任务留空）、`设计`（执行路线在 `design.md` 的位置或短摘录）、`来源`（task 产生依据，如 `proposal.md#Impact`、spec delta、`discovery.md#CHAIN-xxx,IDC-xxx`，已有明确文件路径的补充材料用 `.superspec/artifacts/...`）、`验收`（完成后可检查的结果）、`边界`（执行时需要保护的边界）
 - `执行依据:` 必须紧跟所属 task 行（中间最多允许一个空行）；字段不得重复；块内不得出现 checkbox（`- [ ]` / `- [x]`），否则会变成无人执行的暗任务并被引擎拒绝
 - `设计`、`来源` 的标题或短摘录引用必须使用带文件名前缀的可定位格式，如 `design.md#...`、`proposal.md#...`、`specs/.../spec.md#...`；只有 ID 型引用（TEST/CHAIN/IDC）可以逗号合并。`边界` 默认直接写可对照 diff 的具体保护语义，不需要文件前缀；只有主动引用既有文档原文时才写对应文件和锚点
 - 声明的每个 `TEST-xxx` 必须存在于 `test-contract.md`，否则 `propose-ready` 和 `start-apply` 会被阻断
-- 五个字段的内容必须针对该 task 具体可核验，执行者和审查者要拿它们对照实现：`边界` 写出改动不应触碰的具体行为、模块或语义（能对着 diff 判断有没有越界），不写"不破坏现有功能"这类放在任何 task 上都成立的套话；`原因` 说明这个 task 独立存在的理由，不写"需要单独实现"；不同 task 的执行依据不应互相复制
+- 五个字段的内容必须针对该 task 具体可核验，执行者和审查者要拿它们对照实现：`边界` 写出改动不应触碰的具体行为、模块或语义（能对着 diff 判断有没有越界），不写"不破坏现有功能"这类放在任何 task 上都成立的套话；`验收` 写出完成后的可检查结果，不写"完成实现"；不同 task 的执行依据不应互相复制
 - 写不出可定位的 `设计` 引用时，说明 `design.md` 缺少该 task 的实现方案或边界约束——先补设计，不编造引用
-- 单个 task 声明的测试超过 3 个时，`原因` 必须说明为什么不再拆分
-- `tdd_required:false` task 可以写执行依据，`测试` 字段按需填写；特征化任务（characterization task，指为固化既有行为而写保护测试、不引入新行为的任务）用 `tdd_required:false no_tdd_reason:characterization` 标记，只有这类任务可以在执行阶段以特征化通过作为测试证据
+- 单个 task 声明的测试超过 3 个时，`验收` 必须说明为什么不再拆分
+- Propose 只声明 TEST 和验收目标，不写 `tdd_required`、`no_tdd_reason`、RED/GREEN 或模式参数；`task-start` 会把本轮已冻结的策略与该声明编译为执行要求。代码/行为 task 必须声明至少一个 TEST；纯文档、配置或机械任务的 `测试` 留空，并在验收与边界中说明其非行为性质
 - `REVIEW-FIX-*` task 由引擎在审查返工时追加，不需要手写执行依据
 - `<task_id>` 可以是 `1.1` 或 `TASK-001.1`，必须唯一、稳定；标题不要包含 task id token，例如不要写 `## 1.1 Review verifier`
 - task 内部步骤用普通 bullet，不用缩进 checkbox——引擎只解析顶格 checkbox 行，缩进的会变成无人执行的暗任务
-- `tdd_required:true`（默认）——改运行时代码/业务逻辑/权限/外部接口
-- `tdd_required:false` + `no_tdd_reason:xxx`——纯文档/配置/机械改名/生成物
-- task 行只标记是否需要 TDD，不写 RED/GREEN 命令、断言或预期输出；实际 RED/GREEN 由 apply 阶段执行并记录
+- task 行不写 RED/GREEN 命令、断言、预期输出或执行模式；实际需要的验证由 task-start 返回的执行快照决定
 - 一个 task 对应一个可独立验证的行为变化，或一个明确的非行为改动
-- 多个行为变化、入口或运行时模块不能形成同一个 RED/GREEN 闭环时拆开；需要“顺便”改多个不相邻模块的 task 在 propose 阶段就拆分或补充任务，不留到 apply 阶段扩大范围
+- 多个行为变化、入口或运行时模块不能形成同一个独立验证边界时拆开；需要“顺便”改多个不相邻模块的 task 在 propose 阶段就拆分或补充任务，不留到 apply 阶段扩大范围
 - 任务按可执行顺序排列：引擎忽略标题、按全文顶格 checkbox 行的先后顺序逐个驱动执行，被依赖的任务必须排在依赖它的任务之前，跨组同样如此（顺序与分组冲突时调整任务归组或拆组）；跨组依赖可在任务行内注明依赖的 task id 作为提示，但注明不改变执行顺序
 
 ### test-contract.md
@@ -213,7 +214,7 @@ discovery 含 `## 链路五要素` 时，`proposal.md` `## Impact` 中引用的 
 
 每个确认项只含一个决策点，带稳定 ID `DEC-xxx`：决策类写明影响面（引用相关 `CHAIN-xxx` / `IDC-xxx`）、候选项及后果、建议默认值及理由；事实类写明需要用户提供什么信息、为什么阻塞。选项和补充说明用普通文本或普通 bullet，不要写成 `- [ ]`，引擎会把它们计为未确认项。
 
-`next` 会在 propose 阶段检查 `proposal.md`、`design.md` 和 `test-contract.md` 的该段落。存在未确认项时，汇总一次向用户提问（按影响排序并说明问题间依赖，不逐个往返）；收到回答后用驱动方式中的 `record user-decision` 命令登记，JSON 经 stdin 传入（scope 建议引用 `DEC-xxx`，一条决策可列多个 ID；此为留痕约定，引擎不校验格式）。
+`next` 会在计划材料中检查该段落。存在未确认项时，汇总一次向用户提问（按影响排序并说明问题间依赖，不逐个往返）；收到回答后按当前输出给出的 `record user-decision` 格式登记，JSON 经 stdin 传入（scope 建议引用 `DEC-xxx`，一条决策可列多个 ID；此为留痕约定，引擎不校验格式）。
 
 答案来自用户时，先登记再勾选；答案来自需求文档、代码证据等外部事实核对时，行内写明证据来源，不伪造用户决策。用户回答含糊、与候选项不匹配或引出新问题时，不视为已确认；复述理解并获得明确答复后再登记。把结论反映到 proposal/design/test-contract 相关内容，勾选行内注明结论要点；确认项作废或重复时改为 `[x]` 并注明理由，不要删除确认项。局部实现细节、命名、普通文件组织和不影响需求/验收/风险的技术微调不要升级为用户确认。
 
@@ -225,13 +226,12 @@ discovery 含 `## 链路五要素` 时，`proposal.md` `## Impact` 中引用的 
 
 ## 完成条件
 
-tasks.md 作为计划文档就绪（不是复选框全完成）+ 基础职责文档齐全 → next 返回 propose-ready 命令。
+计划材料准备好后重新运行 `next`；由它决定是否需要确认、审查或可以继续。
 
 ## Guardrails
 
 - 只产出计划文档，不改业务代码、不做实现
 - 不绕过 `## 待用户确认` 中的未确认项
-- tdd_required 标注真实
-- 不跳过 transition
+- 不手写流程推进结果；只执行 `next` 当前返回的动作。
 - 不跳过完整审查路径下的审核工作项
 - 审查通过后、推进前不做非必要的文档编辑；计划材料变更会按当前审查模式和角色职责触发必要的复审。
