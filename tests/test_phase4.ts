@@ -1294,6 +1294,43 @@ test("code-reviewer：代码目录内的 fallback scope 错误同样不会进入
   } finally { fx.cleanup(); }
 });
 
+test("code-reviewer：代码目录内的有效失败报告不应使当前用户决策过期", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    initGitRepo(fx.projectRoot);
+    mkdirSync(join(fx.projectRoot, "src"), { recursive: true });
+    writeFileSync(join(fx.projectRoot, "src", "example.ts"), "export const value = 1;\n");
+
+    assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot).to_state, "apply_done");
+    const created = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(created.outcome, "job_created");
+    const jobId = created.created_jobs[0];
+    const reportPath = join(fx.projectRoot, "src", "report.json");
+    writeFileSync(reportPath, JSON.stringify(codeReviewerReport(fx.projectRoot, fx.change, jobId, "fail", [{
+      id: "CR-SRC-REPORT-SPEC",
+      type: "spec",
+      blocking: true,
+      description: "当前实现与计划边界需要确认",
+      evidence: "src/example.ts 与 tasks.md 的行为不一致",
+      source_refs: ["src/example.ts", "tasks.md"],
+      impact: "实现路线可能偏离计划",
+      suggested_action: "propose",
+    }], ["src/example.ts"])));
+    assert.equal(recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, jobId, reportPath).accepted, false);
+    assert.equal((readEvents(fx.projectRoot, fx.change).findLast(event => event.event_type === "job_rejected")?.payload as {
+      report_path?: unknown;
+    }).report_path, "src/report.json");
+
+    const ask = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(ask.path, "ask_user");
+    assert.equal(recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({
+      scope: ask.ask_user.scope,
+      answer: "回到计划阶段",
+      reason: "需要补充实现边界",
+    })).accepted, true);
+  } finally { fx.cleanup(); }
+});
+
 test("code-reviewer：accepted pass 后绑定文件变化必须重新审查", () => {
   const fx = setupApplyWithDoneTask();
   try {
@@ -1755,7 +1792,7 @@ test("self-test-fix：已完成实现可直接回 apply，不进入 proposal 审
       selfTestFix: "TASK-001",
     });
     assert.equal(repeated.events_written, 0);
-    assert.match(repeated.message, /已创建/);
+    assert.match(repeated.message, /尚未完成/);
     assert.equal((readFileSync(join(fx.changeRoot, "tasks.md"), "utf8").match(/self_test_fix_of:/g) ?? []).length, 1);
 
     const fixAttempt = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot).active_task_attempts.find(attempt => attempt.task_id === fixId);
@@ -1786,6 +1823,123 @@ test("self-test-fix：已完成实现可直接回 apply，不进入 proposal 审
       parent_task_id: "TASK-001",
       reason: "自测发现空输入仍会抛错",
     });
+  } finally { fx.cleanup(); }
+});
+
+test("self-test-fix：同一自测问题完成后可创建新的修复发生次数", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot).to_state, "apply_done");
+    const reason = "自测发现空输入仍会抛错";
+    assert.equal(reopen(fx.projectRoot, fx.change, fx.changeRoot, "apply", reason, {
+      selfTestFix: "TASK-001",
+    }).to_state, "apply");
+    const firstFix = (readEvents(fx.projectRoot, fx.change).findLast(event =>
+      event.event_type === "transition_commit" && (event.payload as { fix?: unknown }).fix != null
+    )?.payload as { fix?: { fix_id?: string } }).fix?.fix_id;
+    assert.equal(typeof firstFix, "string");
+
+    const started = taskStart(fx.projectRoot, fx.change, fx.changeRoot, String(firstFix));
+    const attemptId = String(started.details?.attempt_id);
+    appendTestRunEvent(fx.projectRoot, fx.change, {
+      test_id: "TEST-SELFTEST-RECURRENCE",
+      attempt_id: attemptId,
+      task_structure_digest: rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot).active_task_attempts[0].task_structure_digest,
+      semantic_status: "expected_failure",
+      exit_code: 1,
+    });
+    appendTestRunEvent(fx.projectRoot, fx.change, {
+      test_id: "TEST-SELFTEST-RECURRENCE",
+      attempt_id: attemptId,
+      task_structure_digest: rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot).active_task_attempts[0].task_structure_digest,
+      semantic_status: "expected_success",
+      exit_code: 0,
+    });
+    assert.equal(taskComplete(fx.projectRoot, fx.change, fx.changeRoot, String(firstFix)).to_state, "apply");
+    assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot).to_state, "apply_done");
+
+    assert.equal(reopen(fx.projectRoot, fx.change, fx.changeRoot, "apply", reason, {
+      selfTestFix: "TASK-001",
+    }).to_state, "apply");
+    const secondFix = (readEvents(fx.projectRoot, fx.change).findLast(event =>
+      event.event_type === "transition_commit" && (event.payload as { fix?: unknown }).fix != null
+    )?.payload as { fix?: { fix_id?: string } }).fix?.fix_id;
+    assert.equal(secondFix, `${firstFix}-2`);
+    assert.equal((readFileSync(join(fx.changeRoot, "tasks.md"), "utf8").match(/self_test_fix_of:/g) ?? []).length, 2);
+  } finally { fx.cleanup(); }
+});
+
+test("self-test-fix：第十次之后继续使用新的发生次数而不复用 task ID", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot).to_state, "apply_done");
+    const reason = "自测发现同一边界仍会回归";
+    assert.equal(reopen(fx.projectRoot, fx.change, fx.changeRoot, "apply", reason, {
+      selfTestFix: "TASK-001",
+    }).to_state, "apply");
+    const firstFix = (readEvents(fx.projectRoot, fx.change).findLast(event =>
+      event.event_type === "transition_commit" && (event.payload as { fix?: unknown }).fix != null
+    )?.payload as { fix?: { fix_id?: string } }).fix?.fix_id;
+    assert.equal(typeof firstFix, "string");
+
+    const tasksPath = join(fx.changeRoot, "tasks.md");
+    const historicalOccurrences = Array.from({ length: 9 }, (_, index) =>
+      `- [x] ${firstFix}-${index + 2} historical completed occurrence`
+    );
+    const completedFirst = readFileSync(tasksPath, "utf8")
+      .replace(`- [ ] ${firstFix} `, `- [x] ${firstFix} `);
+    writeFileSync(tasksPath, `${completedFirst}${historicalOccurrences.join("\n")}\n`);
+
+    assert.equal(reopen(fx.projectRoot, fx.change, fx.changeRoot, "apply", reason, {
+      selfTestFix: "TASK-001",
+    }).to_state, "apply");
+    const eleventhFix = (readEvents(fx.projectRoot, fx.change).findLast(event =>
+      event.event_type === "transition_commit" && (event.payload as { fix?: unknown }).fix != null
+    )?.payload as { fix?: { fix_id?: string } }).fix?.fix_id;
+    assert.equal(eleventhFix, `${firstFix}-11`);
+  } finally { fx.cleanup(); }
+});
+
+test("self-test-fix：新 Apply 轮保留已完成旧修复的完成态", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    const reason = "自测发现同一边界仍会回归";
+    assert.equal(reopen(fx.projectRoot, fx.change, fx.changeRoot, "apply", reason, {
+      selfTestFix: "TASK-001",
+    }).to_state, "apply");
+    const firstFix = (readEvents(fx.projectRoot, fx.change).findLast(event =>
+      event.event_type === "transition_commit" && (event.payload as { fix?: unknown }).fix != null
+    )?.payload as { fix?: { fix_id?: string } }).fix?.fix_id;
+    assert.equal(typeof firstFix, "string");
+    const tasksPath = join(fx.changeRoot, "tasks.md");
+    writeFileSync(
+      tasksPath,
+      readFileSync(tasksPath, "utf8").replace(`- [ ] ${firstFix} `, `- [x] ${firstFix} `),
+    );
+
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "transition_commit", {
+      transition: "start-apply",
+      from_state: "propose_ready",
+      to_state: "apply",
+      outcome: "advanced",
+      created_job_ids: [],
+      reason: "new contract apply round",
+      apply_contract_mode: true,
+      execution_requirement_version: 2,
+      execution_policy: "green_only",
+    }, { transitionId: "T-new-contract-apply", idempotencyKey: "new-contract-apply" }));
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "task_completed", {
+      task_id: "TASK-001",
+      attempt_id: "ATT-parent-current-round",
+    }, { transitionId: "T-parent-current-round", idempotencyKey: "parent-current-round" }));
+
+    assert.equal(reopen(fx.projectRoot, fx.change, fx.changeRoot, "apply", reason, {
+      selfTestFix: "TASK-001",
+    }).to_state, "apply");
+    const secondFix = (readEvents(fx.projectRoot, fx.change).findLast(event =>
+      event.event_type === "transition_commit" && (event.payload as { fix?: unknown }).fix != null
+    )?.payload as { fix?: { fix_id?: string } }).fix?.fix_id;
+    assert.equal(secondFix, `${firstFix}-2`);
   } finally { fx.cleanup(); }
 });
 
@@ -2005,6 +2159,14 @@ test("code-reviewer：spec 问题必须经用户决策才能 reopen propose", ()
       reason: "设计文档需要补充降级路径",
     }));
     assert.equal(decision.accepted, true);
+    const decisionEvent = readEvents(fx.projectRoot, fx.change).findLast(event => event.event_type === "user_decision_recorded");
+    const decisionRef = (decisionEvent?.payload as {
+      code_review_decision?: { job_id?: unknown; finding_id?: unknown; rejection_event_id?: unknown; packet_digest?: unknown };
+    }).code_review_decision;
+    assert.equal(decisionRef?.job_id, jobId);
+    assert.equal(decisionRef?.finding_id, "CR-SPEC-001");
+    assert.equal(typeof decisionRef?.rejection_event_id, "string");
+    assert.equal(typeof decisionRef?.packet_digest, "string");
 
     const reopened = reopen(fx.projectRoot, fx.change, fx.changeRoot, "propose", "补充降级路径设计", {
       reviewFinding: `${jobId}#CR-SPEC-001`,
@@ -2094,7 +2256,7 @@ test("code-reviewer：mixed 问题可经用户决策回 apply 修实现", () => 
   } finally { fx.cleanup(); }
 });
 
-test("record user-decision：代码审查决策必须写明原因，重复无效输入保持幂等", () => {
+test("record user-decision：代码审查决策必须写明原因，且不能伪造未出现的 finding", () => {
   const fx = setupApplyWithDoneTask();
   try {
     const missingReason = JSON.stringify({
@@ -2125,14 +2287,15 @@ test("record user-decision：代码审查决策必须写明原因，重复无效
     assert.equal(invalidAnswer.accepted, false);
     assert.match(invalidAnswer.message, /回到计划阶段、回到实现阶段 或 驳回该问题/);
 
-    const valid = recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({
+    const forged = recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({
       scope: "code_review_decision:JOB-test#CR-001",
       answer: "驳回该问题",
       reason: "该问题不是本次阻塞项",
     }));
-    assert.equal(valid.accepted, true);
-    const acceptedEvent = readEvents(fx.projectRoot, fx.change).at(-1);
-    assert.equal((acceptedEvent?.payload as { answer?: unknown }).answer, "驳回该问题");
+    assert.equal(forged.accepted, false);
+    assert.match(forged.message, /当前代码审查报告中的待决定问题/);
+    const rejectedEvent = readEvents(fx.projectRoot, fx.change).at(-1);
+    assert.equal((rejectedEvent?.payload as { accepted?: unknown }).accepted, false);
   } finally { fx.cleanup(); }
 });
 

@@ -173,6 +173,50 @@ test("推进校验：propose-ready 和 start-apply 都拒绝执行依据模式�
   }
 });
 
+test("执行依据模式：普通 FIX-* task 保持普通约束且可执行", () => {
+  const missingContract = [
+    "# Tasks",
+    "",
+    "- [ ] FIX-001 Ordinary planned task tdd_required:true",
+    "",
+  ].join("\n");
+  const missing = validateExecutionRequirements(missingContract, null, "tdd", 2);
+  assert.equal(missing.ok, false);
+  assert.ok(missing.errors.some(error => error.includes("FIX-001 缺少执行依据")));
+
+  const tasks = [
+    "# Tasks",
+    "",
+    "- [ ] FIX-001 Ordinary planned task tdd_required:true",
+    "  执行依据:",
+    "  - 测试: test-contract.md#TEST-001",
+    "  - 设计: design.md#Route",
+    "  - 来源: proposal.md#Impact",
+    "  - 验收: 普通计划任务可以执行",
+    "  - 边界: 不改既有接口",
+    "",
+  ].join("\n");
+  const testContract = [
+    "# Test Contract",
+    "",
+    "| test_id | scenario |",
+    "|---|---|",
+    "| TEST-001 | behavior works |",
+    "",
+  ].join("\n");
+  const fx = setupChange(tasks, testContract);
+  try {
+    assert.equal(startApplyConfirmed(fx.projectRoot, fx.change, fx.changeRoot).to_state, "apply");
+    const started = taskStart(fx.projectRoot, fx.change, fx.changeRoot, "FIX-001");
+    assert.ok(started.events_written > 0);
+    const contract = started.details?.contract as { tests?: string[] } | null | undefined;
+    assert.deepEqual(contract?.tests, ["TEST-001"]);
+    assert.doesNotMatch(started.message, /缺少状态机创建记录/);
+  } finally {
+    fx.cleanup();
+  }
+});
+
 test("执行依据：测试字段必须显式声明；空字段可表示非行为 task，声明的 TEST 必须存在", () => {
   const missingTestField = [
     "# Tasks",
@@ -1740,6 +1784,59 @@ test("历史 v1 契约轮：无执行依据的 documentation task 仍按旧 tdd 
     assert.equal(completed.events_written, 2);
   } finally {
     fx.cleanup();
+  }
+});
+
+test("历史 Apply：状态机新建 Fix 仍按已冻结策略生成证据要求，缺策略时保守回退 TDD", () => {
+  for (const policy of ["green_only", undefined] as const) {
+    const fx = setupChange("# Tasks\n\n- [x] TASK-001 Completed parent task\n");
+    try {
+      appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "transition_commit", {
+        transition: "start-apply",
+        from_state: "propose_ready",
+        to_state: "apply",
+        outcome: "advanced",
+        created_job_ids: [],
+        reason: "legacy apply round",
+        ...(policy ? { execution_policy: policy } : {}),
+      }, { transitionId: `T-legacy-fix-${policy ?? "unknown"}`, idempotencyKey: `legacy-fix-${policy ?? "unknown"}` }));
+
+      assert.equal(reopen(fx.projectRoot, fx.change, fx.changeRoot, "apply", "自测发现边界回归", {
+        selfTestFix: "TASK-001",
+      }).to_state, "apply");
+      const fix = (readEvents(fx.projectRoot, fx.change).findLast(event =>
+        event.event_type === "transition_commit" && (event.payload as { fix?: unknown }).fix != null
+      )?.payload as { fix?: { fix_id?: string } }).fix;
+      assert.equal(typeof fix?.fix_id, "string");
+
+      const started = taskStart(fx.projectRoot, fx.change, fx.changeRoot, String(fix?.fix_id));
+      const attemptId = String(started.details?.attempt_id);
+      assert.deepEqual(started.details?.required_evidence, {
+        test_ids: [],
+        red_required: policy !== "green_only",
+        green_required: true,
+        accepted_green_statuses: ["expected_success"],
+      });
+      assert.equal(recordTestRunContent(fx.projectRoot, fx.change, JSON.stringify({
+        test_id: "TEST-LEGACY-FIX",
+        attempt_id: attemptId,
+        task_structure_digest: tasksStructureDigest(readFileSync(join(fx.changeRoot, "tasks.md"), "utf8"), sha256Text),
+        command: "npm test -- legacy-fix",
+        cwd: fx.projectRoot,
+        exit_code: 0,
+        semantic_status: "expected_success",
+      })).accepted, true);
+
+      const completion = taskComplete(fx.projectRoot, fx.change, fx.changeRoot, String(fix?.fix_id));
+      if (policy === "green_only") {
+        assert.equal(completion.events_written, 2);
+      } else {
+        assert.equal(completion.events_written, 0);
+        assert.match(completion.message, /RED 证据/);
+      }
+    } finally {
+      fx.cleanup();
+    }
   }
 });
 

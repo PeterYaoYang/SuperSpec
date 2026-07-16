@@ -2,7 +2,11 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { EXPLORE_DISCOVERY_REVIEW_GATE, PROPOSE_FINAL_REVIEW_GATE } from "./review_job_gates.ts";
 import type { ReviewGateRule } from "./review_job_gates.ts";
-import { currentExploreRoundId } from "./explore_round.ts";
+import {
+  currentExploreRoundId,
+  exploreAnswerRegistrationPayload,
+  unregisteredClosedExploreQuestions,
+} from "./explore_round.ts";
 import {
   collectProposeOpenQuestions,
   discoveryOpenQuestionDisplayText,
@@ -334,6 +338,12 @@ export function discoveryDocsBaseline(changeRoot: string): Record<string, string
   return baseline;
 }
 
+/** 新 Explore 轮次冻结已有已确认事项，避免把历史答复当作本轮遗漏。 */
+export function exploreAnswerRegistrationPayloadForChange(changeRoot: string): ReturnType<typeof exploreAnswerRegistrationPayload> {
+  const discoveryPath = join(changeRoot, ".superspec", "artifacts", "discovery.md");
+  return exploreAnswerRegistrationPayload(existsSync(discoveryPath) ? readFileSync(discoveryPath, "utf8") : null);
+}
+
 function isDigestMap(value: unknown): value is Record<string, string> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const entries = Object.entries(value as Record<string, unknown>);
@@ -644,6 +654,16 @@ export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
         return { kind: "ask_user", state: "explore", ask, reason: "等待用户确认" };
       }
 
+      const unregisteredClosedQuestions = unregisteredClosedExploreQuestions(events, content);
+      if (unregisteredClosedQuestions.length > 0) {
+        const ask: AskUser = {
+          question: "发现一项已标记为已确认的事项没有对应的答复登记。请先将该项恢复为待确认，按主流程重新登记用户答复并回写 discovery.md 后继续。",
+          allowed_answers: ["已处理"],
+          scope: "explore_answer_registration",
+        };
+        return { kind: "ask_user", state: "explore", ask, reason: "存在未登记答复的已确认事项" };
+      }
+
       // 先让用户澄清当前 Discovery，再审查材料；否则 critic 会审查一份仍有
       // 关键业务未知的文档。正常创建的 job 已绑定 discovery 指纹，材料变化后
       // 会由 snapshot freshness 自动失效。
@@ -846,6 +866,16 @@ function planApplyDoneNext(context: PhasePlanContext): NextStepPlan {
 
   const latest = facts.latestTerminal;
   if (latest?.state === "rejected" && latest.result_kind === "review_failed") {
+    const staleReason = codeReviewJobStaleReason(context.projectRoot, latest.job, currentWorkingPaths);
+    if (staleReason) {
+      return {
+        kind: "run_transition",
+        state: "apply_done",
+        transition: "review-ready",
+        risk: mode.risk,
+        reason: `代码审查结论已过期，重新发起审查：${staleReason}`,
+      };
+    }
     const status = latestCodeReviewFailedStatus(events);
     const pendingFinding = status?.unresolved[0] ?? null;
     if (status && status.findings.length > 0 && !pendingFinding) {
@@ -1024,7 +1054,13 @@ export function planTransition(name: "explore" | "propose-ready" | "start-apply"
 function planExploreTransition(context: TransitionPlanContext): TransitionDecisionPlan {
   const { changeRoot, events, mode, projectRoot, snapshot } = context;
   if (snapshot.state === "init") {
-    return { kind: "advance", fromState: "init", toState: "explore", reason: "进入探索阶段" };
+    return {
+      kind: "advance",
+      fromState: "init",
+      toState: "explore",
+      reason: "进入探索阶段",
+      payload: exploreAnswerRegistrationPayloadForChange(changeRoot),
+    };
   }
   if (snapshot.state !== "explore") {
     return { kind: "skip", message: `当前状态 ${snapshot.state}，explore 不适用` };
@@ -1042,6 +1078,10 @@ function planExploreTransition(context: TransitionPlanContext): TransitionDecisi
   const currentQuestion = parseDiscoveryOpenQuestions(discoveryContent)[0];
   if (currentQuestion) {
     return { kind: "skip", message: "discovery.md 仍有需要确认的事项，请先完成确认并回写 discovery.md" };
+  }
+
+  if (unregisteredClosedExploreQuestions(events, discoveryContent).length > 0) {
+    return { kind: "skip", message: "discovery.md 有已确认事项缺少对应答复登记，请先恢复为待确认并按主流程登记答复" };
   }
 
   const requiredRoles = EXPLORE_DISCOVERY_REVIEW_GATE.requiredRolesForRisk(mode.risk);

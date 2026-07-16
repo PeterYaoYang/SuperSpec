@@ -1,6 +1,6 @@
 // SuperSpec 流程引擎 — OpenSpec 探测
 
-import { execSync, execFileSync } from "node:child_process";
+import { execFileSync, type ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -19,6 +19,27 @@ export interface OpenSpecStrictValidation {
   message: string;
 }
 
+function isTestMode(): boolean {
+  return process.env.SUPERSPEC_TEST_MODE === "1" || process.env.NODE_ENV === "test";
+}
+
+function runtimePlatform(): string {
+  return isTestMode() ? process.env.SUPERSPEC_TEST_PLATFORM ?? process.platform : process.platform;
+}
+
+function windowsCommandHost(): string {
+  return process.env.ComSpec ?? "cmd.exe";
+}
+
+/**
+ * 在 Windows 上，npm 安装的 CLI 是 .cmd 启动器，不能被 execFileSync 直接执行。
+ * 保留数组参数传递；只有启动器这一层通过 cmd.exe 运行。
+ */
+function execOpenSpec(args: string[], options: ExecFileSyncOptionsWithStringEncoding): string {
+  if (runtimePlatform() !== "win32") return execFileSync("openspec", args, options);
+  return execFileSync(windowsCommandHost(), ["/d", "/s", "/c", "openspec.cmd", ...args], options);
+}
+
 /** B2 修复：校验 change 字符集，防 shell 注入 */
 function validateChange(change: string): void {
   if (!/^[A-Za-z0-9._-]+$/.test(change)) {
@@ -28,7 +49,10 @@ function validateChange(change: string): void {
 
 export function probeOpenSpec(projectRoot: string, change?: string): OpenSpecProbe {
   try {
-    const version = execSync("openspec --version 2>/dev/null", { encoding: "utf8" }).trim();
+    const version = execOpenSpec(["--version"], {
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "ignore"],
+    }).trim();
     let changeExists = false;
     if (change) {
       validateChange(change);
@@ -43,8 +67,8 @@ export function probeOpenSpec(projectRoot: string, change?: string): OpenSpecPro
 export function openspecStatus(projectRoot: string, change: string): string {
   validateChange(change);
   try {
-    // B2 修复：用 execFileSync 数组传参，彻底避免 shell 解析
-    const result = execFileSync("openspec", ["status", "--change", change, "--json"], {
+    // B2 修复：参数始终走数组；Windows 仅通过 cmd.exe 运行 .cmd 启动器。
+    const result = execOpenSpec(["status", "--change", change, "--json"], {
       encoding: "utf8", cwd: projectRoot, stdio: ["pipe", "pipe", "ignore"],
     });
     return "sha256:" + createHash("sha256").update(result).digest("hex");
@@ -62,7 +86,7 @@ export function openspecStatus(projectRoot: string, change: string): string {
 export function validateOpenSpecChange(projectRoot: string, change: string): OpenSpecStrictValidation {
   validateChange(change);
   try {
-    execFileSync("openspec", ["validate", change, "--type", "change", "--strict", "--no-interactive"], {
+    execOpenSpec(["validate", change, "--type", "change", "--strict", "--no-interactive"], {
       cwd: projectRoot,
       encoding: "utf8",
       stdio: ["pipe", "pipe", "pipe"],

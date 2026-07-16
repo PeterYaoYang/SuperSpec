@@ -1,6 +1,6 @@
 ---
 name: superspec-apply
-description: "在 SuperSpec Apply 阶段按已批准的 tasks 实现代码并登记真实验证。适用于逐 task 开始、实现、测试和完成。"
+description: "仅在用户显式调用 $superspec-apply，或明确要求继续某个 SuperSpec change 的 Apply 阶段时使用；普通开发、修复或测试请求不得自动触发。"
 metadata:
   author: SuperSpec
   source: SuperSpec

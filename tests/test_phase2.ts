@@ -23,6 +23,7 @@ import {
   validateTasksDocument,
 } from "../src/format.ts";
 import { phaseConfirmationForBoundary, type PhaseDecisionAction } from "../src/phase_confirmation.ts";
+import { exploreAnswerRegistrationPayload } from "../src/explore_round.ts";
 import type { Job, JobRole, State } from "../src/types.ts";
 import { confirmCurrentPhase } from "./phase_confirmation_support.ts";
 import { planningValidationProfileForNewRound } from "../src/phase_plan.ts";
@@ -901,6 +902,144 @@ test("next 在 explore 一次只返回当前问题，登记后必须回写才能
     const blocked = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(blocked.events_written, 0);
     assert.match(blocked.message, /仍有需要确认的事项/);
+  } finally { fx.cleanup(); }
+});
+
+test("Explore 新轮次：直接勾选确认事项不能绕过答复登记", () => {
+  const fx = setupExplore();
+  try {
+    const discoveryPath = join(fx.changeRoot, ".superspec", "artifacts", "discovery.md");
+    const openDiscovery = [
+      "# Discovery",
+      "",
+      "## 待确认问题",
+      "",
+      "- [ ] Q-001 是否保留旧行为？",
+    ].join("\n");
+    writeFileSync(discoveryPath, openDiscovery);
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "transition_commit", {
+      transition: "reopen",
+      from_state: "explore",
+      to_state: "explore",
+      outcome: "advanced",
+      created_job_ids: [],
+      reason: "test registered explore round",
+      reopen_target: "explore",
+      ...exploreAnswerRegistrationPayload(openDiscovery),
+    }, { transitionId: "T-registered-explore-round", idempotencyKey: "registered-explore-round" }));
+
+    writeFileSync(discoveryPath, openDiscovery.replace("- [ ]", "- [x]").replace("是否保留旧行为？", "保留旧行为。"));
+    const blocked = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(blocked.path, "ask_user");
+    assert.equal(blocked.ask_user.scope, "explore_answer_registration");
+    assert.match(blocked.ask_user.question, /没有对应的答复登记/);
+
+    const transition = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(transition.events_written, 0);
+    assert.match(transition.message, /缺少对应答复登记/);
+  } finally { fx.cleanup(); }
+});
+
+test("Explore 新轮次：登记答复后回写通过，轮次开始前的已确认事项保持兼容", () => {
+  const fx = setupExplore();
+  try {
+    const discoveryPath = join(fx.changeRoot, ".superspec", "artifacts", "discovery.md");
+    const openDiscovery = [
+      "# Discovery",
+      "",
+      "## 待确认问题",
+      "",
+      "- [ ] Q-001 是否保留旧行为？",
+    ].join("\n");
+    writeFileSync(discoveryPath, openDiscovery);
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "transition_commit", {
+      transition: "reopen",
+      from_state: "explore",
+      to_state: "explore",
+      outcome: "advanced",
+      created_job_ids: [],
+      reason: "test registered explore round",
+      reopen_target: "explore",
+      ...exploreAnswerRegistrationPayload(openDiscovery),
+    }, { transitionId: "T-registered-explore-answer", idempotencyKey: "registered-explore-answer" }));
+
+    const question = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(question.path, "ask_user");
+    assert.equal(recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({
+      scope: question.ask_user.scope,
+      answer: "保留旧行为",
+    })).accepted, true);
+    const decision = readEvents(fx.projectRoot, fx.change).findLast(event => event.event_type === "user_decision_recorded");
+    assert.equal((decision?.payload as { explore_open_question?: { question_id?: unknown } }).explore_open_question?.question_id, "Q-001");
+
+    writeFileSync(discoveryPath, openDiscovery.replace("- [ ]", "- [x]").replace("是否保留旧行为？", "保留旧行为。"));
+    const afterRewrite = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.notEqual(afterRewrite.path === "ask_user" ? afterRewrite.ask_user.scope : "", "explore_answer_registration");
+
+    const historicalClosed = [
+      "# Discovery",
+      "",
+      "## 待确认问题",
+      "",
+      "- [x] Q-001 之前已确认的旧行为。",
+    ].join("\n");
+    writeFileSync(discoveryPath, historicalClosed);
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "transition_commit", {
+      transition: "reopen",
+      from_state: "explore",
+      to_state: "explore",
+      outcome: "advanced",
+      created_job_ids: [],
+      reason: "test historical closed baseline",
+      reopen_target: "explore",
+      ...exploreAnswerRegistrationPayload(historicalClosed),
+    }, { transitionId: "T-registered-explore-baseline", idempotencyKey: "registered-explore-baseline" }));
+    const historical = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.notEqual(historical.path === "ask_user" ? historical.ask_user.scope : "", "explore_answer_registration");
+  } finally { fx.cleanup(); }
+});
+
+test("Explore 新轮次：调查材料变化后不能直接复用旧答复关闭", () => {
+  const fx = setupExplore();
+  try {
+    const discoveryPath = join(fx.changeRoot, ".superspec", "artifacts", "discovery.md");
+    const openDiscovery = [
+      "# Discovery",
+      "",
+      "## 需求理解",
+      "",
+      "- 当前前提：保留旧行为",
+      "",
+      "## 待确认问题",
+      "",
+      "- [ ] Q-001 是否保留旧行为？",
+    ].join("\n");
+    writeFileSync(discoveryPath, openDiscovery);
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "transition_commit", {
+      transition: "reopen",
+      from_state: "explore",
+      to_state: "explore",
+      outcome: "advanced",
+      created_job_ids: [],
+      reason: "test stale explore answer",
+      reopen_target: "explore",
+      ...exploreAnswerRegistrationPayload(openDiscovery),
+    }, { transitionId: "T-stale-explore", idempotencyKey: "stale-explore" }));
+
+    const question = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(question.path, "ask_user");
+    assert.equal(recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({
+      scope: question.ask_user.scope,
+      answer: "保留旧行为",
+    })).accepted, true);
+
+    const closed = openDiscovery
+      .replace("当前前提：保留旧行为", "当前前提：改为新行为")
+      .replace("- [ ] Q-001 是否保留旧行为？", "- [x] Q-001 保留旧行为。");
+    writeFileSync(discoveryPath, closed);
+    const blocked = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(blocked.path, "ask_user");
+    assert.equal(blocked.ask_user.scope, "explore_answer_registration");
   } finally { fx.cleanup(); }
 });
 

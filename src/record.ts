@@ -19,8 +19,12 @@ import {
 import {
   CODE_REVIEW_DECISION_ANSWER_LABELS,
   CODE_REVIEW_DECISION_SCOPE_PREFIX,
+  codeReviewJobStaleReason,
   codeReviewDecisionAnswerLabel,
+  currentCodeReviewWorkingPaths,
+  latestCodeReviewFailedStatus,
   normalizeCodeReviewDecisionAnswer,
+  parseCodeReviewDecisionScope,
 } from "./code_review.ts";
 import { invalidReasonForSubmittedReport } from "./job_validity.ts";
 import { jobSubmitArgv } from "./job_action.ts";
@@ -38,6 +42,7 @@ import { RecordInputDecodingError, readRecordInputFile } from "./record_input.ts
 import { currentExploreRoundId } from "./explore_round.ts";
 import {
   discoveryOpenQuestionDisplayText,
+  discoveryQuestionContextFingerprint,
   discoveryOpenQuestionScope,
   EXPLORE_OPEN_QUESTION_SCOPE_PREFIX,
   parseDiscoveryOpenQuestions,
@@ -227,6 +232,29 @@ function invalidExploreOpenQuestionResult(
         ? "这件事已有已登记答复，请先回写 discovery.md 后重新执行 next"
       : "需要确认的事项已变化或已完成，请重新执行 next 获取当前事项",
   };
+}
+
+function invalidCodeReviewDecisionResult(
+  projectRoot: string,
+  change: string,
+  inputDigest: string,
+  existing: Event | undefined,
+  decision: { scope: string; answer: unknown },
+  reason: string,
+  message: string,
+): RecordResult {
+  const existingPayload = existing?.payload as { accepted?: unknown; reason?: unknown } | undefined;
+  if (existingPayload?.accepted === false && existingPayload.reason === reason) {
+    return { event_type: "user_decision_recorded", accepted: false, message: "幂等返回：同一无效代码审查决策已登记" };
+  }
+  appendEvent(projectRoot, change, makeEvent(change, "user_decision_recorded", {
+    accepted: false,
+    scope: decision.scope,
+    answer: decision.answer,
+    reason,
+    input_digest: inputDigest,
+  }));
+  return { event_type: "user_decision_recorded", accepted: false, message };
 }
 
 function stringArray(value: unknown): value is string[] {
@@ -851,6 +879,8 @@ function recordUserDecisionLoaded(
   // “正确”，只机械校验当前项、Discovery 决策上下文和 Explore 轮次仍与 next
   // 返回时一致，防止旧问题在材料改写或重新探索后被错误登记为新问题的决定。
   let exploreOpenQuestion: DiscoveryOpenQuestion | null = null;
+  let exploreOpenQuestionRoundId: string | null = null;
+  let exploreOpenQuestionContextFingerprint: string | null = null;
   if (isExploreOpenQuestionScope(decision.scope)) {
     if (!isWellFormedExploreOpenQuestionScope(decision.scope)) {
       return invalidExploreOpenQuestionResult(
@@ -894,6 +924,11 @@ function recordUserDecisionLoaded(
       );
     }
     exploreOpenQuestion = current;
+    exploreOpenQuestionRoundId = currentExploreRoundId(events);
+    const discoveryPath = join(openspecChangeRoot(projectRoot, change), ".superspec", "artifacts", "discovery.md");
+    exploreOpenQuestionContextFingerprint = current
+      ? discoveryQuestionContextFingerprint(readFileSync(discoveryPath, "utf8"), current)
+      : null;
   }
 
   let phaseConfirmation: PhaseConfirmation | null = null;
@@ -1096,36 +1131,76 @@ function recordUserDecisionLoaded(
     reviewRejectionDecisionSource = decision.decision_source;
   }
 
+  let codeReviewDecisionReference: {
+    job_id: string;
+    finding_id: string;
+    rejection_event_id: string;
+    rejection_event_digest: string;
+    packet_digest: string;
+  } | null = null;
   if (decision.scope.startsWith(CODE_REVIEW_DECISION_SCOPE_PREFIX)) {
     const normalizedAnswer = normalizeCodeReviewDecisionAnswer(decision.answer);
     if (!normalizedAnswer) {
-      appendEvent(projectRoot, change, makeEvent(change, "user_decision_recorded", {
-        accepted: false,
-        scope: decision.scope,
-        answer: decision.answer,
-        reason: "invalid_code_review_decision_answer",
-        input_digest: inputDigest,
-      }));
-      return {
-        event_type: "user_decision_recorded" as const,
-        accepted: false,
-        message: `代码审查决策必须是 ${CODE_REVIEW_DECISION_ANSWER_LABELS.reopen_propose}、${CODE_REVIEW_DECISION_ANSWER_LABELS.reopen_apply} 或 ${CODE_REVIEW_DECISION_ANSWER_LABELS.dismiss}`,
-      };
+      return invalidCodeReviewDecisionResult(
+        projectRoot,
+        change,
+        inputDigest,
+        existing,
+        { scope: decision.scope, answer: decision.answer },
+        "invalid_code_review_decision_answer",
+        `代码审查决策必须是 ${CODE_REVIEW_DECISION_ANSWER_LABELS.reopen_propose}、${CODE_REVIEW_DECISION_ANSWER_LABELS.reopen_apply} 或 ${CODE_REVIEW_DECISION_ANSWER_LABELS.dismiss}`,
+      );
     }
     if (!nonEmptyString(decision.reason)) {
-      appendEvent(projectRoot, change, makeEvent(change, "user_decision_recorded", {
-        accepted: false,
-        scope: decision.scope,
-        answer: decision.answer,
-        reason: "missing_reason",
-        input_digest: inputDigest,
-      }));
-      return {
-        event_type: "user_decision_recorded" as const,
-        accepted: false,
-        message: "代码审查决策必须写明原因",
-      };
+      return invalidCodeReviewDecisionResult(
+        projectRoot,
+        change,
+        inputDigest,
+        existing,
+        { scope: decision.scope, answer: decision.answer },
+        "missing_reason",
+        "代码审查决策必须写明原因",
+      );
     }
+
+    const ref = parseCodeReviewDecisionScope(decision.scope);
+    const changeRoot = openspecChangeRoot(projectRoot, change);
+    const snapshot = rebuildSnapshot(projectRoot, change, changeRoot);
+    const status = latestCodeReviewFailedStatus(events);
+    const finding = ref && status?.terminal.job.job_id === ref.jobId
+      ? status.findings.find(item => item.id === ref.findingId && (item.type === "spec" || item.type === "mixed"))
+      : null;
+    const staleReason = status && ref && status.terminal.job.job_id === ref.jobId
+      ? codeReviewJobStaleReason(projectRoot, status.terminal.job, currentCodeReviewWorkingPaths(projectRoot, events))
+      : null;
+    if (!ref || snapshot.state !== "apply_done" || !status || !finding || staleReason) {
+      const reason = !ref
+        ? "invalid_code_review_decision_scope"
+        : snapshot.state !== "apply_done"
+          ? "code_review_decision_not_current"
+          : staleReason
+            ? "stale_code_review_decision_target"
+            : "code_review_decision_target_not_found";
+      const message = staleReason
+        ? "代码审查材料已不再匹配当前代码，请先重新执行 review-ready 获取新的审查结论"
+        : "代码审查决策只能关联当前代码审查报告中的待决定问题，请先执行 next 获取当前选择";
+      return invalidCodeReviewDecisionResult(
+        projectRoot,
+        change,
+        inputDigest,
+        existing,
+        { scope: decision.scope, answer: decision.answer },
+        reason,
+        message,
+      );
+    }
+    codeReviewDecisionReference = {
+      job_id: status.terminal.job.job_id,
+      finding_id: finding.id,
+      rejection_event_id: status.terminal.event.event_id,
+      rejection_event_digest: status.terminal.event.event_digest,
+      packet_digest: status.terminal.job.packet_digest,
+    };
   }
 
   const normalizedAnswer = decision.scope.startsWith(CODE_REVIEW_DECISION_SCOPE_PREFIX)
@@ -1144,6 +1219,16 @@ function recordUserDecisionLoaded(
     ...(typeof decision.reason === "string" ? { reason: decision.reason.trim() } : {}),
     ...(reviewRejectionDecisionSource ? { decision_source: reviewRejectionDecisionSource } : {}),
     ...(reviewRejectionOverride ? { review_rejection_override: reviewRejectionOverride } : {}),
+    ...(codeReviewDecisionReference ? { code_review_decision: codeReviewDecisionReference } : {}),
+    ...(exploreOpenQuestion && exploreOpenQuestionRoundId && exploreOpenQuestionContextFingerprint ? {
+      explore_open_question: {
+        round_id: exploreOpenQuestionRoundId,
+        question_id: exploreOpenQuestion.id,
+        question_ordinal: exploreOpenQuestion.ordinal,
+        document_fingerprint: exploreOpenQuestion.documentFingerprint,
+        context_fingerprint: exploreOpenQuestionContextFingerprint,
+      },
+    } : {}),
     ...(phaseAction ? {
       phase_confirmation: {
         boundary: phaseAction.boundary,

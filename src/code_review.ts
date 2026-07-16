@@ -537,6 +537,22 @@ export function codeReviewDecisionScope(jobId: string, findingId: string): strin
   return `${CODE_REVIEW_DECISION_SCOPE_PREFIX}${jobId}#${findingId}`;
 }
 
+export interface CodeReviewDecisionScopeRef {
+  jobId: string;
+  findingId: string;
+}
+
+/** 只接受状态机生成的 <job>#<finding> 决策范围。 */
+export function parseCodeReviewDecisionScope(scope: string): CodeReviewDecisionScopeRef | null {
+  if (!scope.startsWith(CODE_REVIEW_DECISION_SCOPE_PREFIX)) return null;
+  const value = scope.slice(CODE_REVIEW_DECISION_SCOPE_PREFIX.length);
+  const separator = value.indexOf("#");
+  if (separator <= 0 || separator === value.length - 1) return null;
+  const jobId = value.slice(0, separator);
+  const findingId = value.slice(separator + 1);
+  return jobId.trim() !== "" && findingId.trim() !== "" ? { jobId, findingId } : null;
+}
+
 export function isCodeReviewDecisionAnswer(value: unknown): value is CodeReviewDecisionAnswer {
   return value === "reopen_propose" || value === "reopen_apply" || value === "dismiss";
 }

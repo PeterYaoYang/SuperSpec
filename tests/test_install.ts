@@ -117,11 +117,18 @@ test("installProject installs engine, workflow skills, role prompts, and agents"
       );
     }
     const installedAgentsMd = readFileSync(join(projectRoot, "AGENTS.md"), "utf8");
+    assert.match(installedAgentsMd, /只有当用户显式调用 `superspec-\*`/);
+    assert.match(installedAgentsMd, /不得自行启动工作流、创建 change、执行 `transition next`/);
     assert.doesNotMatch(
       installedAgentsMd,
       /状态机|job packet|task-start|snapshot|冻结|RED\/GREEN|scope|event|gate|propose_to_apply|mock|fake|seam|adapter|fixture/,
       "AGENTS.md",
     );
+    for (const skill of WORKFLOW_SKILLS) {
+      const content = readFileSync(join(projectRoot, ".codex", "skills", skill, "SKILL.md"), "utf8");
+      assert.match(content, /^description: "仅在用户显式调用 \$superspec-/m, skill);
+      assert.match(content, /不得自动触发。"$/m, skill);
+    }
     for (const agent of WORKFLOW_AGENTS) {
       const agentPath = join(projectRoot, ".codex", "agents", agent);
       assert.equal(existsSync(agentPath), true, agent);
@@ -197,7 +204,7 @@ test("installProject installs engine, workflow skills, role prompts, and agents"
 
     const agentsMd = readFileSync(join(projectRoot, "AGENTS.md"), "utf8");
     assert.equal(agentsMd.trimEnd(), AGENTS_TEMPLATE);
-    assert.match(agentsMd, /当用户提出的问题涉及已有 change 时/);
+    assert.match(agentsMd, /在用户已显式启动工作流或明确指定 change 后/);
     assert.match(agentsMd, /先确定对应 change；归属明确则回同一 change 的 `propose` 更新计划/);
     assert.match(agentsMd, /不要另建 repair change/);
     assert.match(agentsMd, /归属不明才询问/);

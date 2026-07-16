@@ -1,6 +1,6 @@
 ---
 name: superspec-explore
-description: "一.探索现状、澄清范围"
+description: "仅在用户显式调用 $superspec-explore，或明确要求继续某个 SuperSpec change 的 Explore 阶段时使用；普通分析、排查或修复请求不得自动触发。"
 metadata:
   author: SuperSpec
   source: SuperSpec

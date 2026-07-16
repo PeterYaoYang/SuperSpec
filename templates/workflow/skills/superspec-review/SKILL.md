@@ -1,6 +1,6 @@
 ---
 name: superspec-review
-description: "在 SuperSpec Review 阶段运行独立代码审查、最终验证并完成交付闭环。适用于 apply 结束后的审查、修复、验证。"
+description: "仅在用户显式调用 $superspec-review，或明确要求继续某个 SuperSpec change 的 Review 阶段时使用；普通代码审查、验证或修复请求不得自动触发。"
 metadata:
   author: SuperSpec
   source: SuperSpec

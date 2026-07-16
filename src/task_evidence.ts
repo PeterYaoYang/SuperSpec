@@ -14,6 +14,11 @@ export function taskEvidenceReadiness(
   changeRoot: string,
   attempt: TaskAttempt,
 ): TaskEvidenceReadiness {
+  // 有效证据计划是 task-start 在当时策略下冻结的事实。状态机新建的 Fix
+  // 即使来自历史/v1 Apply，也必须优先按这个快照回放。
+  if (attempt.required_evidence) {
+    return effectiveContractTaskEvidenceReadiness(projectRoot, change, attempt);
+  }
   if (attempt.contract_mode === true) {
     return contractTaskEvidenceReadiness(projectRoot, change, attempt);
   }
@@ -65,9 +70,6 @@ function contractTaskEvidenceReadiness(
   change: string,
   attempt: TaskAttempt,
 ): TaskEvidenceReadiness {
-  if (attempt.required_evidence) {
-    return effectiveContractTaskEvidenceReadiness(projectRoot, change, attempt);
-  }
   return legacyContractTaskEvidenceReadiness(projectRoot, change, attempt);
 }
 

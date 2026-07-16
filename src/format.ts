@@ -29,7 +29,7 @@ function countOpenChecklistItemsInSection(content: string, headings: readonly st
   return matches ? matches.length : 0;
 }
 
-function sectionBodyByHeadings(content: string, headings: readonly string[]): string | null {
+function sectionRangeByHeadings(content: string, headings: readonly string[]): { start: number; end: number } | null {
   const headingPattern = headings.map(escapeRegex).join("|");
   const sectionMatch = new RegExp(`^#{1,6}\\s*(?:${headingPattern})\\s*$`, "im").exec(content);
   if (!sectionMatch) return null;
@@ -37,7 +37,15 @@ function sectionBodyByHeadings(content: string, headings: readonly string[]): st
   // 截取到下一个标题或文件末尾
   const restContent = content.slice(sectionStart);
   const nextHeadingMatch = restContent.match(/^#{1,6}\s+/m);
-  return nextHeadingMatch ? restContent.slice(0, nextHeadingMatch.index) : restContent;
+  return {
+    start: sectionStart,
+    end: nextHeadingMatch ? sectionStart + nextHeadingMatch.index! : content.length,
+  };
+}
+
+function sectionBodyByHeadings(content: string, headings: readonly string[]): string | null {
+  const range = sectionRangeByHeadings(content, headings);
+  return range ? content.slice(range.start, range.end) : null;
 }
 
 const DISCOVERY_QUESTION_HEADINGS = ["待确认问题", "Open Questions", "Pending Questions"] as const;
@@ -62,19 +70,55 @@ export interface DiscoveryOpenQuestion {
   documentFingerprint: string;
 }
 
-/** 按文档顺序提取 discovery.md 中尚未确认的问题。 */
-export function parseDiscoveryOpenQuestions(content: string): DiscoveryOpenQuestion[] {
+/** Discovery 待确认段中的一项；状态机需要同时识别待答复和已回写的项。 */
+export interface DiscoveryQuestion extends DiscoveryOpenQuestion {
+  status: "open" | "closed";
+}
+
+/**
+ * 当前文档中同一确认事项的稳定键。结合 Q-ID、顺序和原文，避免把本轮开始前
+ * 已经确认的旧事项误认为新答复。
+ */
+export function discoveryQuestionKey(question: Pick<DiscoveryQuestion, "id" | "ordinal" | "text">): string {
+  return sha256Text(`${question.id}\n${question.ordinal}\n${question.text}`);
+}
+
+/**
+ * 计算某一确认事项之外的 Discovery 决策上下文。回写时该事项本身会从问题改为
+ * 结论，因此只归一化这一行；其余事实、证据和其它待确认项的改动都会使指纹失效。
+ */
+export function discoveryQuestionContextFingerprint(
+  content: string,
+  question: Pick<DiscoveryQuestion, "id" | "ordinal">,
+): string | null {
+  const range = sectionRangeByHeadings(content, DISCOVERY_QUESTION_HEADINGS);
+  if (!range) return null;
+  const sectionBody = content.slice(range.start, range.end);
+  const checklist = /^\s*-\s+\[([ xX])\]\s+(.*?)\s*$/gm;
+  let ordinal = 0;
+  for (const match of sectionBody.matchAll(checklist)) {
+    ordinal += 1;
+    if (ordinal !== question.ordinal) continue;
+    const lineStart = range.start + match.index!;
+    const lineEnd = lineStart + match[0].length;
+    const placeholder = `- [ ] <discovery-question:${question.id}:${question.ordinal}>`;
+    return sha256Text(`${content.slice(0, lineStart)}${placeholder}${content.slice(lineEnd)}`);
+  }
+  return null;
+}
+
+/** 按文档顺序提取 discovery.md 的全部确认事项。 */
+export function parseDiscoveryQuestions(content: string): DiscoveryQuestion[] {
   const sectionBody = sectionBodyByHeadings(content, DISCOVERY_QUESTION_HEADINGS);
   if (sectionBody == null) return [];
 
   const documentFingerprint = sha256Text(content);
-  const questions: DiscoveryOpenQuestion[] = [];
+  const questions: DiscoveryQuestion[] = [];
   const checklist = /^\s*-\s+\[([ xX])\]\s+(.*?)\s*$/gm;
   let ordinal = 0;
 
   for (const match of sectionBody.matchAll(checklist)) {
     ordinal += 1;
-    if (match[1] !== " ") continue;
     const text = match[2];
     const idMatch = /^\s*(Q-[A-Za-z0-9][A-Za-z0-9_-]*)\b/.exec(text);
     questions.push({
@@ -83,9 +127,17 @@ export function parseDiscoveryOpenQuestions(content: string): DiscoveryOpenQuest
       text,
       raw: match[0],
       documentFingerprint,
+      status: match[1] === " " ? "open" : "closed",
     });
   }
   return questions;
+}
+
+/** 按文档顺序提取 discovery.md 中尚未确认的问题。 */
+export function parseDiscoveryOpenQuestions(content: string): DiscoveryOpenQuestion[] {
+  return parseDiscoveryQuestions(content)
+    .filter(question => question.status === "open")
+    .map(({ status: _status, ...question }) => question);
 }
 
 export function discoveryOpenQuestionScope(
@@ -476,10 +528,11 @@ export function adoptedContractForTask(
 
 /**
  * Fix task 由状态机从已批准的实现范围派生；它没有 proposal 阶段执行依据块。
- * REVIEW-FIX-* 是发布前已有的持久化 task ID，必须继续可回放。
+ * REVIEW-FIX-* 是发布前已有的持久化 task ID，FIX-SELFTEST-* 是当前引擎生成的
+ * 自测修复 task。不能把通用 FIX-* 前缀保留为内部命名空间。
  */
 export function isFixTaskId(taskId: string): boolean {
-  return taskId.startsWith("REVIEW-FIX-") || taskId.startsWith("FIX-");
+  return taskId.startsWith("REVIEW-FIX-") || taskId.startsWith("FIX-SELFTEST-");
 }
 
 /** @deprecated 新代码使用 isFixTaskId；保留给旧扩展和历史调用。 */

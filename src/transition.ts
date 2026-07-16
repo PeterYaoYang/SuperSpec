@@ -67,6 +67,7 @@ import {
   planningValidationProfileForNewRound,
   planTransition,
   discoveryDocsBaseline,
+  exploreAnswerRegistrationPayloadForChange,
   proposalDocsBaseline,
   type TransitionDecisionPlan,
 } from "./phase_plan.ts";
@@ -387,16 +388,64 @@ function reviewFixDescriptor(ref: CodeReviewFindingRef, finding: Record<string, 
   };
 }
 
-function selfTestFixDescriptor(parentTaskId: string, reason: string): FixDescriptor {
+function selfTestFixBaseId(parentTaskId: string, reason: string): string {
   const normalizedReason = reason.trim().replace(/\s+/g, " ");
   const normalizedTaskId = parentTaskId.replace(/[^A-Za-z0-9_-]/g, "-");
   const digest = sha256Text(`${parentTaskId}\n${normalizedReason}`).replace(/^sha256:/, "").slice(0, 12);
+  return `FIX-SELFTEST-${normalizedTaskId}-${digest}`;
+}
+
+function selfTestFixDescriptor(parentTaskId: string, reason: string, occurrence: number): FixDescriptor {
+  const normalizedReason = reason.trim().replace(/\s+/g, " ");
+  const baseId = selfTestFixBaseId(parentTaskId, normalizedReason);
   return {
-    fix_id: `FIX-SELFTEST-${normalizedTaskId}-${digest}`,
+    fix_id: occurrence === 1 ? baseId : `${baseId}-${occurrence}`,
     source: "self_test",
     parent_task_id: parentTaskId,
     reason: normalizedReason,
   };
+}
+
+function selfTestFixOccurrence(taskId: string, baseId: string): number | null {
+  if (taskId === baseId) return 1;
+  const suffix = taskId.slice(baseId.length + 1);
+  if (!taskId.startsWith(`${baseId}-`) || !/^\d+$/.test(suffix)) return null;
+  const occurrence = Number(suffix);
+  return Number.isSafeInteger(occurrence) && occurrence >= 2 ? occurrence : null;
+}
+
+function nextSelfTestFixDescriptor(
+  changeRoot: string,
+  events: Event[],
+  parentTaskId: string,
+  reason: string,
+): { fix: FixDescriptor } | { activeFixTaskId: string } {
+  const normalizedReason = reason.trim().replace(/\s+/g, " ");
+  const baseId = selfTestFixBaseId(parentTaskId, normalizedReason);
+  let maxOccurrence = 0;
+  const completion = pendingTaskStatusForApply(changeRoot, events);
+  const pendingTaskIds = new Set(completion.pending);
+
+  const taskInfos = parseTasksMd(readFileSync(join(changeRoot, "tasks.md"), "utf8"));
+  for (const task of taskInfos) {
+    const occurrence = selfTestFixOccurrence(task.taskId, baseId);
+    if (occurrence == null) continue;
+    maxOccurrence = Math.max(maxOccurrence, occurrence);
+    if (pendingTaskIds.has(task.taskId)) return { activeFixTaskId: task.taskId };
+  }
+
+  for (const event of events) {
+    if (event.event_type !== "transition_commit") continue;
+    const fix = (event.payload as { fix?: unknown }).fix;
+    if (!fix || typeof fix !== "object" || Array.isArray(fix)) continue;
+    const candidate = fix as Partial<FixDescriptor>;
+    if (candidate.source !== "self_test" || candidate.parent_task_id !== parentTaskId || candidate.reason !== normalizedReason) continue;
+    if (typeof candidate.fix_id !== "string") continue;
+    const occurrence = selfTestFixOccurrence(candidate.fix_id, baseId);
+    if (occurrence != null) maxOccurrence = Math.max(maxOccurrence, occurrence);
+  }
+
+  return { fix: selfTestFixDescriptor(parentTaskId, normalizedReason, maxOccurrence + 1) };
 }
 
 function fixMarker(fix: FixDescriptor): string {
@@ -416,6 +465,9 @@ function appendFixTask(changeRoot: string, fix: FixDescriptor): "created" | "exi
     );
     if (matchingTask) return "exists";
     throw new Error(`修复标记 ${marker} 已被其它 task 占用，拒绝创建 ${fix.fix_id}`);
+  }
+  if (parseTasksMd(content).some(task => task.taskId === fix.fix_id)) {
+    throw new Error(`修复 task ID ${fix.fix_id} 已被其它任务占用，拒绝创建重复修复`);
   }
 
   const description = fix.source === "self_test"
@@ -517,6 +569,17 @@ function evaluateApplyDoneCodeReviewGate(input: {
       };
     }
     if (latest?.state === "rejected" && latest.result_kind === "review_failed") {
+      const staleReason = codeReviewJobStaleReason(input.projectRoot, latest.job, currentWorkingPaths);
+      if (staleReason) {
+        const { job, scanReason } = createCodeReviewerJob(input.change, input.projectRoot, input.changeRoot, input.events);
+        return {
+          fromState: "apply_done",
+          toState: "apply_done",
+          outcome: "job_created" as const,
+          newJobs: [job],
+          reason: `代码审查结论已不再匹配当前代码状态，重新创建代码审查工作项；${staleReason}；${scanReason}`,
+        };
+      }
       const reviewFailedStatus = latestCodeReviewFailedStatus(input.events);
       if (reviewFailedStatus && reviewFailedStatus.findings.length > 0 && reviewFailedStatus.unresolved.length === 0) {
         const { job, scanReason } = createCodeReviewerJob(input.change, input.projectRoot, input.changeRoot, input.events);
@@ -984,7 +1047,7 @@ export function taskStart(projectRoot: string, change: string, changeRoot: strin
 
       const structureDigest = sha256Text(tasksContent.replace(/- \[[xX]\]/g, "- [ ]"));
       const effectivePolicy = executionPolicy;
-      const requiredEvidence = contractMode && executionRequirementVersion === 2
+      const requiredEvidence = isFixTask || (contractMode && executionRequirementVersion === 2)
         ? compileRequiredEvidence(effectivePolicy, adopted.contract?.tests ?? [], isFixTask)
         : null;
       const attempt: TaskAttempt = {
@@ -995,7 +1058,8 @@ export function taskStart(projectRoot: string, change: string, changeRoot: strin
         contract_mode: contractMode,
         contract: adopted.contract,
         ...(requiredEvidence ? { required_evidence: requiredEvidence } : {
-          // 历史模式以及 v1 契约轮继续使用 task 行标记回放；v2 只消费快照。
+          // 非 Fix 的历史模式以及 v1 契约轮继续使用 task 行标记回放；新建 Fix
+          // 无论来自哪个版本，均只消费本轮冻结的有效证据要求。
           tdd_required: taskInfo.tddRequired,
           no_tdd_reason: taskInfo.noTddReason,
         }),
@@ -1168,12 +1232,11 @@ export function reopen(
         const parentTask = parseTasksMd(readFileSync(join(changeRoot, "tasks.md"), "utf8"))
           .find(task => task.taskId === parentTaskId);
         if (!parentTask) return { skip: true, message: `自测修复关联的 task ${parentTaskId} 不存在` };
-        const fix = selfTestFixDescriptor(parentTaskId, reason);
-        const alreadyCreated = events.some(event =>
-          event.event_type === "transition_commit" &&
-          (event.payload as { fix?: { fix_id?: unknown } }).fix?.fix_id === fix.fix_id
-        );
-        if (alreadyCreated) return { skip: true, message: `自测修复 ${fix.fix_id} 已创建` };
+        const nextFix = nextSelfTestFixDescriptor(changeRoot, events, parentTaskId, reason);
+        if ("activeFixTaskId" in nextFix) {
+          return { skip: true, message: `同一自测问题的修复 ${nextFix.activeFixTaskId} 尚未完成，不能重复创建` };
+        }
+        const fix = nextFix.fix;
 
         const pendingStatus = pendingTaskStatusForApply(changeRoot, events);
         if (pendingStatus.pending.length > 0 || snapshot.active_task_attempts.some(attempt => attempt.state === "active")) {
@@ -1220,6 +1283,7 @@ export function reopen(
             reopen_target: "explore",
             reopen_source: snapshot.state,
             baseline_docs: discoveryDocsBaseline(changeRoot),
+            ...exploreAnswerRegistrationPayloadForChange(changeRoot),
           },
           extraEvents: planningReopenExtraEvents(snapshot, "explore", reason.trim()),
         };
