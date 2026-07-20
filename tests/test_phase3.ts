@@ -112,6 +112,17 @@ function reviewerReportForJob(projectRoot: string, change: string, jobId: string
   });
 }
 
+function acceptCreatedReviewJobs(
+  fx: { projectRoot: string; change: string; changeRoot: string },
+  jobIds: string[],
+): void {
+  for (const jobId of jobIds) {
+    const reportPath = join(fx.projectRoot, `${jobId}.json`);
+    writeFileSync(reportPath, reviewerReportForJob(fx.projectRoot, fx.change, jobId));
+    assert.equal(recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, jobId, reportPath).accepted, true);
+  }
+}
+
 function rawDirFiles(projectRoot: string, change: string): string[] {
   return readdirSync(join(projectRoot, ".superspec", "changes", change, "raw")).sort();
 }
@@ -356,10 +367,7 @@ test("start-apply：fresh proposal review accepted 后可进入 apply", () => {
   try {
     const t1 = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     assert.equal(t1.outcome, "job_created");
-    const reportPath = join(fx.projectRoot, "critic.json");
-    writeFileSync(reportPath, reviewerReportForJob(fx.projectRoot, fx.change, t1.created_jobs[0]));
-    const accepted = recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, t1.created_jobs[0], reportPath);
-    assert.equal(accepted.accepted, true);
+    acceptCreatedReviewJobs(fx, t1.created_jobs);
     const t2 = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     assert.equal(t2.to_state, "propose_ready");
 
@@ -374,10 +382,7 @@ test("start-apply：proposal review stale 时创建 fresh job，next 返回 requ
   const fx = setupPropose();
   try {
     const t1 = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
-    const reportPath = join(fx.projectRoot, "critic.json");
-    writeFileSync(reportPath, reviewerReportForJob(fx.projectRoot, fx.change, t1.created_jobs[0]));
-    const accepted = recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, t1.created_jobs[0], reportPath);
-    assert.equal(accepted.accepted, true);
+    acceptCreatedReviewJobs(fx, t1.created_jobs);
     const t2 = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     assert.equal(t2.to_state, "propose_ready");
 

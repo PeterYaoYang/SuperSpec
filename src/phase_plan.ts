@@ -1,16 +1,25 @@
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { EXPLORE_DISCOVERY_REVIEW_GATE, PROPOSE_FINAL_REVIEW_GATE } from "./review_job_gates.ts";
 import type { ReviewGateRule } from "./review_job_gates.ts";
 import {
   currentExploreRoundId,
   exploreAnswerRegistrationPayload,
   unregisteredClosedExploreQuestions,
+  unresolvedPresentedExploreQuestionScopes,
 } from "./explore_round.ts";
 import {
-  collectProposeOpenQuestions,
+  currentProposeOpenQuestion,
+  currentProposeRoundId,
+  proposeAnswerRegistrationPayload,
+  unregisteredClosedProposeQuestions,
+  unresolvedPresentedProposeQuestionScopes,
+} from "./propose_round.ts";
+import {
   discoveryOpenQuestionDisplayText,
   discoveryOpenQuestionScope,
+  proposeOpenQuestionDisplayText,
+  proposeOpenQuestionScope,
   parseExecutionRequirements,
   parseDiscoveryOpenQuestions,
   parseTasksMd,
@@ -61,6 +70,7 @@ import type {
   Job,
   JobRole,
   PlanningValidationProfile,
+  WorkflowArtifactKind,
   State,
 } from "./types.ts";
 import type { Snapshot } from "./types.ts";
@@ -97,7 +107,15 @@ export type ReopenNextStep =
 
 export type NextStepPlan =
   | { kind: "required_jobs"; state: State; jobs: Job[]; reason: string }
+  | {
+      kind: "artifact_required";
+      state: State;
+      artifact: { kind: WorkflowArtifactKind; path: string; operation: "create_or_update" };
+      resume: { argv: string[] };
+      reason: string;
+    }
   | { kind: "ask_user"; state: State; ask: AskUser; reason: string }
+  | { kind: "material_update_required"; state: State; errors: string[]; reason: string }
   | { kind: "run_transition"; state: State; transition: TransitionName; reason: string; risk?: ReviewRisk; taskId?: string; reopen?: ReopenNextStep }
   | {
       kind: "done";
@@ -109,7 +127,7 @@ export type NextStepPlan =
 export type TransitionDecisionPlan =
   | { kind: "skip"; message: string }
   | { kind: "blocked"; jobs: Job[]; reason: string; details?: Record<string, unknown> }
-  | { kind: "create_gate_jobs"; gate: ReviewGateRule; roles: JobRole[]; reason: string }
+  | { kind: "create_gate_jobs"; gate: ReviewGateRule; roles: JobRole[]; requiredRoles: JobRole[]; reason: string }
   | { kind: "advance"; fromState: State; toState: State; reason: string; payload?: Record<string, unknown> };
 
 export interface ApplyPendingTaskStatus {
@@ -123,6 +141,36 @@ type ReviewGatePlanResult = Extract<TransitionDecisionPlan, { kind: "blocked" | 
 
 function requiredJobs(state: State, jobs: Job[], reason: string): NextStepPlan {
   return { kind: "required_jobs", state, jobs, reason };
+}
+
+function freeTextDecisionAsk(change: string, question: string, scope: string): AskUser {
+  return {
+    question,
+    allowed_answers: [],
+    scope,
+    record_argv: ["superspec", "record", "user-decision", "--change", change, "--input", "-"],
+    record_input: { scope, question, answer: null },
+    required_fields: ["answer"],
+  };
+}
+
+function requiredArtifact(
+  projectRoot: string,
+  change: string,
+  changeRoot: string,
+  state: State,
+  kind: WorkflowArtifactKind,
+  fileName: string,
+  risk: ReviewRisk,
+): NextStepPlan {
+  const artifactPath = relative(projectRoot, join(changeRoot, ".superspec", "artifacts", fileName)).replaceAll("\\", "/");
+  return {
+    kind: "artifact_required",
+    state,
+    artifact: { kind, path: artifactPath, operation: "create_or_update" },
+    resume: { argv: nextArgv(change, risk) },
+    reason: `${fileName} 不存在`,
+  };
 }
 
 function phaseConfirmationStep(
@@ -204,6 +252,7 @@ function reviewGatePlan(
       kind: "create_gate_jobs",
       gate,
       roles: missingRoles.map(item => item.role),
+      requiredRoles: [...requiredRoles],
       reason: missingRoles.map(item => item.reason).join("; "),
     };
   }
@@ -221,6 +270,38 @@ function validateTasksPlan(changeRoot: string, executionRequirementVersion: 1 | 
   }
   const errors = validateTasksDocument(tasksContent);
   if (errors.length > 0) return errors.join("；");
+  return null;
+}
+
+const REQUIRED_DESIGN_HEADINGS = [
+  "# 设计",
+  "## 背景",
+  "## 设计目标",
+  "## 非目标",
+  "## 总体方案",
+  "## 实现方案",
+] as const;
+
+function validateDesignPlan(changeRoot: string, profile: PlanningValidationProfile | null): string | null {
+  if (profile?.openspec.mode !== "strict" || profile.design?.schema_version !== 1) return null;
+  const designPath = join(changeRoot, "design.md");
+  if (!existsSync(designPath)) return null;
+  const lines = readFileSync(designPath, "utf8").split(/\r?\n/).map(line => line.trimEnd());
+  const errors: string[] = [];
+  const headingIndexes = new Map<string, number[]>();
+  for (const heading of REQUIRED_DESIGN_HEADINGS) {
+    const indexes = lines.flatMap((line, index) => line === heading ? [index] : []);
+    headingIndexes.set(heading, indexes);
+    if (indexes.length === 0) errors.push(`design.md 缺少稳定结构标题：${heading}`);
+    if (indexes.length > 1) errors.push(`design.md 稳定结构标题重复：${heading}`);
+  }
+  if (errors.length > 0) return errors.join("；");
+  let previousIndex = -1;
+  for (const heading of REQUIRED_DESIGN_HEADINGS) {
+    const indexes = headingIndexes.get(heading)!;
+    if (indexes[0] <= previousIndex) return `design.md 稳定结构标题顺序错误：${heading}`;
+    previousIndex = indexes[0];
+  }
   return null;
 }
 
@@ -301,19 +382,29 @@ function validatePlanningPreflight(
   risk: ReviewRisk,
   executionPolicy: ExecutionPolicy,
   profile: PlanningValidationProfile | null,
-): { error: string | null; contractMode: boolean } {
+): { error: string | null; errors: string[]; contractMode: boolean } {
   const executionRequirementVersion = profile?.version ?? 1;
+  const errors: string[] = [];
   const tasksPlanError = validateTasksPlan(changeRoot, executionRequirementVersion);
-  if (tasksPlanError) return { error: tasksPlanError, contractMode: false };
+  if (tasksPlanError) errors.push(tasksPlanError);
 
   const executionRequirementPlan = validateExecutionRequirementPlan(changeRoot, executionPolicy, executionRequirementVersion);
-  if (!executionRequirementPlan.ok) return { error: executionRequirementPlan.message, contractMode: false };
+  if (!executionRequirementPlan.ok) errors.push(executionRequirementPlan.message);
 
   const missingArtifact = missingBaseArtifact(changeRoot, risk);
-  if (missingArtifact) return { error: missingArtifact, contractMode: false };
+  if (missingArtifact) errors.push(missingArtifact);
+
+  const designPlanError = validateDesignPlan(changeRoot, profile);
+  if (designPlanError) errors.push(designPlanError);
+
+  if (existsSync(join(changeRoot, "tasks.md"))) {
+    const openSpecError = validateOpenSpecPlanningDocuments(projectRoot, change, changeRoot, profile);
+    if (openSpecError) errors.push(openSpecError);
+  }
 
   return {
-    error: validateOpenSpecPlanningDocuments(projectRoot, change, changeRoot, profile),
+    error: errors.length > 0 ? [...new Set(errors)].join("；") : null,
+    errors: [...new Set(errors)],
     contractMode: executionRequirementPlan.mode,
   };
 }
@@ -342,6 +433,10 @@ export function discoveryDocsBaseline(changeRoot: string): Record<string, string
 export function exploreAnswerRegistrationPayloadForChange(changeRoot: string): ReturnType<typeof exploreAnswerRegistrationPayload> {
   const discoveryPath = join(changeRoot, ".superspec", "artifacts", "discovery.md");
   return exploreAnswerRegistrationPayload(existsSync(discoveryPath) ? readFileSync(discoveryPath, "utf8") : null);
+}
+
+export function proposeAnswerRegistrationPayloadForChange(changeRoot: string): ReturnType<typeof proposeAnswerRegistrationPayload> {
+  return proposeAnswerRegistrationPayload(changeRoot);
 }
 
 function isDigestMap(value: unknown): value is Record<string, string> {
@@ -446,18 +541,23 @@ function executionRequirementVersionForProposeRound(events: Event[]): 1 | 2 {
 
 function isPlanningValidationProfile(value: unknown): value is PlanningValidationProfile {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const profile = value as { version?: unknown; openspec?: { mode?: unknown; config_digest?: unknown } };
+  const profile = value as {
+    version?: unknown;
+    openspec?: { mode?: unknown; config_digest?: unknown };
+    design?: { schema_version?: unknown };
+  };
   if (profile.version !== 2 || !profile.openspec || typeof profile.openspec !== "object") return false;
-  return profile.openspec.mode === "disabled" ||
-    profile.openspec.mode === "strict" && typeof profile.openspec.config_digest === "string";
+  const designValid = profile.design == null || profile.design.schema_version === 1;
+  return designValid && (profile.openspec.mode === "disabled" ||
+    profile.openspec.mode === "strict" && typeof profile.openspec.config_digest === "string");
 }
 
 /** 新 planning round 在进入 propose 时冻结当前 OpenSpec 校验契约。 */
 export function planningValidationProfileForNewRound(projectRoot: string): PlanningValidationProfile {
   const configDigest = sha256File(join(projectRoot, "openspec", "config.yaml"));
   return configDigest == null
-    ? { version: 2, openspec: { mode: "disabled" } }
-    : { version: 2, openspec: { mode: "strict", config_digest: configDigest } };
+    ? { version: 2, openspec: { mode: "disabled" }, design: { schema_version: 1 } }
+    : { version: 2, openspec: { mode: "strict", config_digest: configDigest }, design: { schema_version: 1 } };
 }
 
 /** propose 状态尚未 ready 时，从进入本 planning round 的事件读取冻结 profile。 */
@@ -612,7 +712,7 @@ function acceptedMaterialFollowup(
 }
 
 export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
-  const { change, changeRoot, events, mode, snapshot } = context;
+  const { projectRoot, change, changeRoot, events, mode, snapshot } = context;
 
   switch (snapshot.state) {
     case "init":
@@ -631,6 +731,10 @@ export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
           reason: "回到 explore 后至少一个 discovery 材料必须变化",
         };
       }
+      const discoveryPath = join(changeRoot, ".superspec", "artifacts", "discovery.md");
+      if (!existsSync(discoveryPath)) {
+        return requiredArtifact(projectRoot, change, changeRoot, "explore", "discovery", "discovery.md", mode.risk);
+      }
       const discoveryCheck = validateDiscovery(changeRoot);
       if (!discoveryCheck.ok) {
         const ask: AskUser = {
@@ -645,23 +749,28 @@ export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
       const currentQuestion = parseDiscoveryOpenQuestions(content)[0];
       if (currentQuestion) {
         const questionText = discoveryOpenQuestionDisplayText(currentQuestion);
-        const ask: AskUser = {
-          question: `现在有一件事需要你确认：${questionText}\n\n请只回答这一件事。主流程会先登记答复，再将结论回写 discovery.md；回写完成前会继续询问这一件事。`,
-          // 用户可以接受建议、选择其他方向或补充事实；状态机不解释答案语义。
-          allowed_answers: [],
-          scope: discoveryOpenQuestionScope(currentQuestion, currentExploreRoundId(events)),
-        };
+        const question = `现在有一件事需要你确认：${questionText}\n\n请只回答这一件事。主流程会先登记答复，再将结论回写 discovery.md；回写完成前会继续询问这一件事。`;
+        const scope = discoveryOpenQuestionScope(currentQuestion, currentExploreRoundId(events));
+        const ask = freeTextDecisionAsk(change, question, scope);
         return { kind: "ask_user", state: "explore", ask, reason: "等待用户确认" };
       }
 
       const unregisteredClosedQuestions = unregisteredClosedExploreQuestions(events, content);
       if (unregisteredClosedQuestions.length > 0) {
-        const ask: AskUser = {
-          question: "发现一项已标记为已确认的事项没有对应的答复登记。请先将该项恢复为待确认，按主流程重新登记用户答复并回写 discovery.md 后继续。",
-          allowed_answers: ["已处理"],
-          scope: "explore_answer_registration",
+        return {
+          kind: "material_update_required",
+          state: "explore",
+          errors: ["发现一项已标记为已确认的事项没有对应答复登记；请恢复为待确认，通过 next 登记真实答复后再回写 discovery.md"],
+          reason: "存在未登记答复的已确认事项",
         };
-        return { kind: "ask_user", state: "explore", ask, reason: "存在未登记答复的已确认事项" };
+      }
+      if (unresolvedPresentedExploreQuestionScopes(events).length > 0) {
+        return {
+          kind: "material_update_required",
+          state: "explore",
+          errors: ["此前已展示的 Explore 问题尚未登记答复但已从 discovery.md 消失；请恢复原问题，通过 next 登记答复后再回写结论"],
+          reason: "已展示的 Explore 问题缺少答复登记",
+        };
       }
 
       // 先让用户澄清当前 Discovery，再审查材料；否则 critic 会审查一份仍有
@@ -688,15 +797,52 @@ export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
     }
 
     case "propose": {
-      const openQuestions = collectProposeOpenQuestions(changeRoot);
-      if (openQuestions.openCount > 0) {
-        const files = openQuestions.files.map(f => `${f.path}(${f.openCount})`).join(", ");
-        const ask: AskUser = {
-          question: `计划文档有 ${openQuestions.openCount} 个待用户确认问题：${files}。请确认并更新计划文档后继续`,
-          allowed_answers: ["所有问题已确认"],
-          scope: "propose_open_questions",
+      const currentQuestion = currentProposeOpenQuestion(changeRoot);
+      if (currentQuestion) {
+        const question = `设计方案中有一件高影响取舍需要你决定：${proposeOpenQuestionDisplayText(currentQuestion)}\n\n请只回答这一件事。主流程会登记答复并将决定回写相关计划材料；回写完成前仍会停在当前事项。`;
+        const scope = proposeOpenQuestionScope(currentQuestion, currentProposeRoundId(events));
+        const ask = freeTextDecisionAsk(change, question, scope);
+        return { kind: "ask_user", state: "propose", ask, reason: "等待用户确认设计取舍" };
+      }
+
+      if (unregisteredClosedProposeQuestions(events, changeRoot).length > 0) {
+        return {
+          kind: "material_update_required",
+          state: "propose",
+          errors: ["发现一项已标记为确认的设计决定没有对应答复登记；请恢复为待确认，通过 next 登记真实答复后再回写计划材料"],
+          reason: "存在未登记答复的设计决定",
         };
-        return { kind: "ask_user", state: "propose", ask, reason: `有 ${openQuestions.openCount} 个 propose 未确认问题` };
+      }
+      if (unresolvedPresentedProposeQuestionScopes(events).length > 0) {
+        return {
+          kind: "material_update_required",
+          state: "propose",
+          errors: ["此前已展示的设计问题尚未登记答复但已从计划材料消失；请恢复原问题，通过 next 登记答复后再回写结论"],
+          reason: "已展示的设计问题缺少答复登记",
+        };
+      }
+
+      const testContractPath = join(changeRoot, ".superspec", "artifacts", "test-contract.md");
+      if (!existsSync(testContractPath)) {
+        return requiredArtifact(projectRoot, change, changeRoot, "propose", "test_contract", "test-contract.md", mode.risk);
+      }
+
+      const planningProfile = planningValidationProfileForPendingProposeRound(events);
+      const preflight = validatePlanningPreflight(
+        projectRoot,
+        change,
+        changeRoot,
+        mode.risk,
+        executionPolicyForRisk(mode.risk),
+        planningProfile,
+      );
+      if (preflight.error) {
+        return {
+          kind: "material_update_required",
+          state: "propose",
+          errors: preflight.errors,
+          reason: preflight.error,
+        };
       }
 
       const proposalReviewJobs = PROPOSE_FINAL_REVIEW_GATE.openJobsForGate(snapshot);
@@ -1083,6 +1229,9 @@ function planExploreTransition(context: TransitionPlanContext): TransitionDecisi
   if (unregisteredClosedExploreQuestions(events, discoveryContent).length > 0) {
     return { kind: "skip", message: "discovery.md 有已确认事项缺少对应答复登记，请先恢复为待确认并按主流程登记答复" };
   }
+  if (unresolvedPresentedExploreQuestionScopes(events).length > 0) {
+    return { kind: "skip", message: "此前展示的 Explore 问题缺少答复登记且已从 discovery.md 消失，请恢复原问题并完成登记" };
+  }
 
   const requiredRoles = EXPLORE_DISCOVERY_REVIEW_GATE.requiredRolesForRisk(mode.risk);
   const gatePlan = reviewGatePlan(snapshot, events, changeRoot, EXPLORE_DISCOVERY_REVIEW_GATE, requiredRoles);
@@ -1102,6 +1251,7 @@ function planExploreTransition(context: TransitionPlanContext): TransitionDecisi
       ...phaseConfirmationCommitPayload(confirmation, decision),
       planning_validation_version: 2,
       planning_validation_profile: planningValidationProfileForNewRound(projectRoot),
+      ...proposeAnswerRegistrationPayloadForChange(changeRoot),
     },
   };
 }
@@ -1122,10 +1272,14 @@ function planProposeReadyTransition(context: TransitionPlanContext): TransitionD
   );
   if (preflight.error) return { kind: "skip", message: preflight.error };
 
-  const openQuestions = collectProposeOpenQuestions(changeRoot);
-  if (openQuestions.openCount > 0) {
-    const files = openQuestions.files.map(f => `${f.path}(${f.openCount})`).join(", ");
-    return { kind: "skip", message: `计划文档有 ${openQuestions.openCount} 个待用户确认问题：${files}` };
+  if (currentProposeOpenQuestion(changeRoot)) {
+    return { kind: "skip", message: "计划文档仍有待用户确认的设计决定，请先完成确认并回写计划材料" };
+  }
+  if (unregisteredClosedProposeQuestions(context.events, changeRoot).length > 0) {
+    return { kind: "skip", message: "计划文档有已确认设计决定缺少对应答复登记，请先恢复为待确认并按主流程登记答复" };
+  }
+  if (unresolvedPresentedProposeQuestionScopes(context.events).length > 0) {
+    return { kind: "skip", message: "此前展示的设计问题缺少答复登记且已从计划材料消失，请恢复原问题并完成登记" };
   }
 
   const requiredRoles = PROPOSE_FINAL_REVIEW_GATE.requiredRolesForRisk(risk);

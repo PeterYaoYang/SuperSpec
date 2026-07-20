@@ -74,7 +74,7 @@ function transitionExitCode(result: TransitionResult): number {
 
 function proposeReadyExitCode(result: TransitionResult): number {
   if (result.outcome === "blocked") return 0;
-  return result.events_written === 0 && result.message.includes("不能") ? 1 : 0;
+  return result.events_written === 0 && result.outcome === "advanced" && result.from_state === result.to_state ? 1 : 0;
 }
 
 function ensureWorkflowMode(projectRoot: string, _opts: Record<string, string>): boolean {
@@ -554,10 +554,8 @@ async function askToUpdateSelfIfNeeded(projectRoot: string, rerunArgs: string[])
 
 // ===== 主分发 =====
 
-async function main(argv: string[]): Promise<number> {
-  // --help / 无参数 → 打印用法
-  if (argv.length === 0 || argv.includes("--help") || argv.includes("-h")) {
-    console.log(`SuperSpec 流程引擎 ${SUPERSPEC_VERSION}
+function topLevelHelp(): string {
+  return `SuperSpec 流程引擎 ${SUPERSPEC_VERSION}
 
 用法：superspec <命令> [选项]
 
@@ -568,8 +566,8 @@ async function main(argv: string[]): Promise<number> {
   jobs <子命令> --change <C>        工作项管理（见下）
   install                           安装项目工作流入口
   init --scope project              install 的兼容别名
-  update                           升级 CLI 到 npm latest 并同步项目工作流模板
-  version                          版本号
+  update                            升级 CLI 到 npm latest 并同步项目工作流模板
+  version                           版本号
 
 transition 子命令：
   init / explore / sync / next / propose-ready / start-apply
@@ -586,7 +584,51 @@ record 子命令：
 
 jobs 子命令：
   list / packet --job <J>
-`);
+`;
+}
+
+function commandHelp(command: string | undefined, subcommand: string | undefined): string {
+  if (command === "record" && subcommand === "user-decision") {
+    return `用法：superspec record user-decision --change <C> --input <F|->
+
+从 JSON 文件读取用户决定；--input - 表示从 stdin 读取。
+输入至少包含 scope 和 answer，工作流给出的 question 可一并保留。
+
+示例：
+  printf '%s' '{"scope":"<next 返回的 scope>","question":"<原问题>","answer":"<用户答复>"}' | superspec record user-decision --change <C> --input -
+`;
+  }
+  if (command === "record" && subcommand === "job-submit") {
+    return `用法：superspec record job-submit --change <C> --job <J> --report <F|->
+
+提交 reviewer JSON 报告；--report - 表示从 stdin 读取。报告契约以 jobs packet 返回的 report_schema 为准。
+
+示例：
+  superspec jobs packet --change <C> --job <J>
+  superspec record job-submit --change <C> --job <J> --report report.json
+`;
+  }
+  if (command === "record" && subcommand === "test-run") {
+    return `用法：superspec record test-run --change <C> --input <F|->
+
+登记测试证据；--input - 表示从 stdin 读取。输入需包含 test_id、task_structure_digest、command、cwd、exit_code 和 semantic_status。
+
+示例：
+  printf '%s' '{"test_id":"TEST-001","task_structure_digest":"sha256:<digest>","command":"npm test","cwd":"<project>","exit_code":0,"semantic_status":"expected_success"}' | superspec record test-run --change <C> --input -
+`;
+  }
+  if (command === "transition" && subcommand === "propose-ready") {
+    return `用法：superspec transition propose-ready --change <C>
+
+校验当前计划材料和审查门禁；满足条件时推进到 propose_ready。工作流模式来自项目配置，不接受 --risk。
+`;
+  }
+  return topLevelHelp();
+}
+
+async function main(argv: string[]): Promise<number> {
+  if (argv.length === 0) {
+    console.log(topLevelHelp());
     return 0;
   }
 
@@ -597,6 +639,10 @@ jobs 子命令：
   }
 
   const { command, subcommand, opts } = parseArgs(argv);
+  if (argv.includes("--help") || argv.includes("-h") || command === "--help" || command === "-h") {
+    console.log(commandHelp(command, subcommand));
+    return 0;
+  }
   const projectRoot = process.cwd();
 
   // install / init / update 不需要 --change

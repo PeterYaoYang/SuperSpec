@@ -30,7 +30,7 @@ test("workflow profile：默认 resolver 保持现有 gate 角色矩阵", () => 
   assert.equal(workflowProfileForRisk("strict"), "strict");
 
   assert.deepEqual(reviewRolesForGate("explore.discovery_review", "minimal"), []);
-  assert.deepEqual(reviewRolesForGate("explore.discovery_review", "normal"), []);
+  assert.deepEqual(reviewRolesForGate("explore.discovery_review", "normal"), ["critic"]);
   assert.deepEqual(reviewRolesForGate("explore.discovery_review", "strict"), ["critic"]);
 
   assert.deepEqual(reviewRolesForGate("propose.final_review", "minimal"), []);
@@ -206,6 +206,15 @@ test("mode 在 propose-ready 冻结：配置变 strict 不重审也不漂移 App
     assert.equal(critic.created_jobs.length, 1, "normal 只需要 critic");
     const criticPacket = jobsPacket(projectRoot, change, critic.created_jobs[0]).packet;
     assert.ok(criticPacket);
+    assert.deepEqual(criticPacket.review_targets, [
+      "proposal.md",
+      "specs/",
+      "design.md",
+      "tasks.md",
+      ".superspec/artifacts/test-contract.md",
+    ]);
+    assert.deepEqual(criticPacket.read_only_refs, [".superspec/artifacts/discovery.md"]);
+    assert.ok(criticPacket.boundFiles.some(file => file.path === "design.md"));
     assert.equal(recordJobSubmitContent(projectRoot, change, changeRoot, critic.created_jobs[0], JSON.stringify({
       role: "critic",
       verdict: "pass",
@@ -421,6 +430,42 @@ test("simulateLoop：ask_user 暂停", () => {
   assert.equal(result.completed, false);
   assert.equal(result.steps.length, 1);
   assert.ok(result.message.includes("请确认"));
+});
+
+test("simulateLoop：artifact_required 返回可执行的产物停点", () => {
+  const result = simulateLoop(
+    () => ({
+      state: "explore",
+      path: "artifact_required",
+      artifact: {
+        kind: "discovery",
+        path: "openspec/changes/demo/.superspec/artifacts/discovery.md",
+        operation: "create_or_update",
+      },
+      resume: { argv: ["superspec", "transition", "next", "--change", "demo"] },
+      reason: "discovery.md 不存在",
+    }),
+    () => { throw new Error("artifact_required 不应由循环自动执行"); },
+  );
+  assert.equal(result.completed, false);
+  assert.equal(result.steps[0].action, "artifact");
+  assert.match(result.message, /artifacts\/discovery\.md/);
+});
+
+test("simulateLoop：material_update_required 返回材料修正停点", () => {
+  const result = simulateLoop(
+    () => ({
+      state: "propose",
+      path: "material_update_required",
+      errors: ["tasks.md 缺少执行依据"],
+      resume: { argv: ["superspec", "transition", "next", "--change", "demo"] },
+      reason: "计划材料预检失败",
+    }),
+    () => { throw new Error("material_update_required 不应由循环自动执行"); },
+  );
+  assert.equal(result.completed, false);
+  assert.equal(result.steps[0].action, "material_update");
+  assert.match(result.message, /tasks\.md 缺少执行依据/);
 });
 
 test("simulateLoop：execute 失败立即停止", () => {

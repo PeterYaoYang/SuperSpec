@@ -131,6 +131,28 @@ function startApplyConfirmed(
   return startApply(projectRoot, change, changeRoot);
 }
 
+function expectedEvidenceActions(
+  change: string,
+  attemptId: string,
+  testIds: string[],
+  statuses: Array<"expected_failure" | "expected_success" | "characterization_pass">,
+) {
+  return testIds.flatMap(testId => statuses.map(semanticStatus => ({
+    kind: "test_run",
+    test_id: testId,
+    record_argv: ["superspec", "record", "test-run", "--change", change, "--input", "-"],
+    record_input: {
+      test_id: testId,
+      attempt_id: attemptId,
+      command: null,
+      cwd: null,
+      exit_code: null,
+      semantic_status: semanticStatus,
+    },
+    required_fields: ["command", "cwd", "exit_code"],
+  })));
+}
+
 test("推进校验：propose-ready 和 start-apply 都拒绝执行依据模式下缺执行依据的普通 TDD task", () => {
   const tasks = [
     "# Tasks",
@@ -381,13 +403,27 @@ test("v2 strict profile：OpenSpec 配置变化后必须 reopen 计划轮", () =
     "- [ ] TASK-001 Document behavior",
     "  执行依据:",
     "  - 测试:",
-    "  - 设计: design.md#Design",
+    "  - 设计: design.md#设计",
     "  - 来源: proposal.md#Proposal",
     "  - 验收: 文档可阅读",
     "  - 边界: 不改代码",
   ].join("\n");
   const fx = setupChange(tasks);
   try {
+    writeFileSync(join(fx.changeRoot, "design.md"), [
+      "# 设计",
+      "",
+      "## 背景",
+      "",
+      "## 设计目标",
+      "",
+      "## 非目标",
+      "",
+      "## 总体方案",
+      "",
+      "## 实现方案",
+      "",
+    ].join("\n"));
     writeFileSync(join(fx.projectRoot, "openspec", "config.yaml"), "schema: spec-driven\n");
     const profile = planningValidationProfileForNewRound(fx.projectRoot);
     appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "transition_commit", {
@@ -458,10 +494,10 @@ test("执行依据锚点：描述性锚点必须是精确标题，ID 不能匹�
   try {
     writeFileSync(join(routeFx.changeRoot, "design.md"), "# Design\n\nRoute appears in ordinary text.\n");
     writeFileSync(join(routeFx.changeRoot, "proposal.md"), "# Proposal\n\n## Impact\n");
-    assert.deepEqual(
-      validateExecutionRequirementDocumentReferences(routeFx.changeRoot, parseExecutionRequirements(routeTasks)),
-      ["TASK-001 的引用锚点不存在：design.md#Route"],
-    );
+    const missingRoute = validateExecutionRequirementDocumentReferences(routeFx.changeRoot, parseExecutionRequirements(routeTasks));
+    assert.equal(missingRoute.length, 1);
+    assert.match(missingRoute[0], /引用锚点不存在：design\.md#Route/);
+    assert.match(missingRoute[0], /可用锚点：design\.md#Design/);
     writeFileSync(join(routeFx.changeRoot, "design.md"), "# Design\n\n## Route ##\n");
     assert.deepEqual(
       validateExecutionRequirementDocumentReferences(routeFx.changeRoot, parseExecutionRequirements(routeTasks)),
@@ -476,10 +512,11 @@ test("执行依据锚点：描述性锚点必须是精确标题，ID 不能匹�
   try {
     writeFileSync(join(idFx.changeRoot, "design.md"), "# Design\n");
     writeFileSync(join(idFx.changeRoot, ".superspec", "artifacts", "discovery.md"), "# Discovery\n\nCHAIN-0012\n");
-    assert.deepEqual(
-      validateExecutionRequirementDocumentReferences(idFx.changeRoot, parseExecutionRequirements(idTasks)),
-      ["TASK-001 的引用锚点不存在：discovery.md#CHAIN-001"],
-    );
+    const missingChain = validateExecutionRequirementDocumentReferences(idFx.changeRoot, parseExecutionRequirements(idTasks));
+    assert.equal(missingChain.length, 1);
+    assert.match(missingChain[0], /引用锚点不存在：discovery\.md#CHAIN-001/);
+    assert.match(missingChain[0], /可用锚点：/);
+    assert.match(missingChain[0], /discovery\.md#Discovery/);
   } finally {
     idFx.cleanup();
   }
@@ -619,6 +656,10 @@ test("执行依据模式：task-start 输出契约，test-run 不要求 task_str
     });
     const attemptId = started.details?.attempt_id;
     assert.equal(typeof attemptId, "string");
+    assert.deepEqual(
+      started.details?.evidence_actions,
+      expectedEvidenceActions(fx.change, String(attemptId), ["TEST-001"], ["expected_failure", "expected_success"]),
+    );
 
     assert.equal(recordTestRunContent(fx.projectRoot, fx.change, JSON.stringify({
       test_id: "TEST-001",
@@ -871,6 +912,10 @@ test("normal/minimal 的普通 task 与审查修复都由 task-start 编译为 G
       green_required: true,
       accepted_green_statuses: ["expected_success"],
     });
+    assert.deepEqual(
+      started.details?.evidence_actions,
+      expectedEvidenceActions(applyFx.change, String(started.details?.attempt_id), ["TEST-001"], ["expected_success"]),
+    );
   } finally {
     applyFx.cleanup();
   }
@@ -900,6 +945,18 @@ test("normal/minimal 的普通 task 与审查修复都由 task-start 编译为 G
       green_required: true,
       accepted_green_statuses: ["expected_success"],
     });
+    assert.deepEqual(started.details?.evidence_actions, [{
+      kind: "test_run",
+      record_argv: ["superspec", "record", "test-run", "--change", reviewFixFx.change, "--input", "-"],
+      record_input: {
+        attempt_id: attemptId,
+        command: null,
+        cwd: null,
+        exit_code: null,
+        semantic_status: "expected_success",
+      },
+      required_fields: ["command", "cwd", "exit_code"],
+    }]);
     assert.equal(recordTestRunContent(reviewFixFx.projectRoot, reviewFixFx.change, JSON.stringify({
       test_id: "TEST-REPAIR",
       attempt_id: attemptId,
@@ -932,6 +989,44 @@ test("normal/minimal 的普通 task 与审查修复都由 task-start 编译为 G
     assert.equal(reviewContext.task_execution_index?.[0].execution_policy, "green_only");
   } finally {
     reviewFixFx.cleanup();
+  }
+});
+
+test("task-start 为多个 TEST 返回逐项 RED/GREEN 提交动作", () => {
+  const fx = setupChange([
+    "# Tasks",
+    "",
+    "- [ ] TASK-001 Implement two behaviors",
+    "  执行依据:",
+    "  - 测试: test-contract.md#TEST-001；test-contract.md#TEST-002",
+    "  - 设计: design.md#Route",
+    "  - 来源: proposal.md#Impact",
+    "  - 验收: 两个行为均可独立验证",
+    "  - 边界: 不改持久化",
+    "",
+  ].join("\n"), [
+    "# Test Contract",
+    "",
+    "| test_id | scenario |",
+    "|---|---|",
+    "| TEST-001 | first behavior works |",
+    "| TEST-002 | second behavior works |",
+    "",
+  ].join("\n"));
+  try {
+    assert.equal(startApplyConfirmed(fx.projectRoot, fx.change, fx.changeRoot, "strict").to_state, "apply");
+    const started = taskStart(fx.projectRoot, fx.change, fx.changeRoot, "TASK-001");
+    assert.deepEqual(
+      started.details?.evidence_actions,
+      expectedEvidenceActions(
+        fx.change,
+        String(started.details?.attempt_id),
+        ["TEST-001", "TEST-002"],
+        ["expected_failure", "expected_success"],
+      ),
+    );
+  } finally {
+    fx.cleanup();
   }
 });
 
@@ -1780,6 +1875,7 @@ test("历史 v1 契约轮：无执行依据的 documentation task 仍按旧 tdd 
     const started = taskStart(fx.projectRoot, fx.change, fx.changeRoot, "TASK-001");
     assert.equal(started.to_state, "apply");
     assert.equal(started.details?.required_evidence, undefined);
+    assert.equal(started.details?.evidence_actions, undefined);
     const completed = taskComplete(fx.projectRoot, fx.change, fx.changeRoot, "TASK-001");
     assert.equal(completed.events_written, 2);
   } finally {

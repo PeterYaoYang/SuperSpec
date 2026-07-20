@@ -191,6 +191,9 @@ const SPECS: Record<PhaseBoundary, PhaseBoundarySpec> = {
   },
 };
 
+const CURRENT_USER_DECISION_NOTICE =
+  "请向用户展示本次选择并等待当前明确答复；不得用启动工作流、要求推进、一般授权、历史偏好或模型推断代替本次回答。";
+
 function boundaryForState(state: State): PhaseBoundary | null {
   switch (state) {
     case "explore": return "explore_to_propose";
@@ -365,7 +368,8 @@ export function phaseConfirmationForBoundary(
   const summary = boundary === "propose_to_apply"
     ? proposeTaskDeliverySummary(openspecChangeRoot(projectRoot, snapshot.change_id))
     : null;
-  const question = summary ? `${summary}\n\n${spec.question}` : spec.question;
+  const boundaryQuestion = `${spec.question}\n\n${CURRENT_USER_DECISION_NOTICE}`;
+  const question = summary ? `${summary}\n\n${boundaryQuestion}` : boundaryQuestion;
   const actions = buildActions(snapshot.change_id, boundary, scope, question, spec.actions, risk);
   return {
     boundary,

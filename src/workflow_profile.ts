@@ -17,7 +17,7 @@ const CURRENT_GATE_ROLES_BY_RISK: Record<ReviewRisk, Partial<Record<ReviewJobGat
     "review.final_verifier": ["verifier"],
   },
   normal: {
-    "explore.discovery_review": [],
+    "explore.discovery_review": ["critic"],
     "propose.final_review": ["critic"],
     "review.code_review": ["code-reviewer"],
     "review.final_verifier": ["verifier"],

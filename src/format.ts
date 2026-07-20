@@ -83,6 +83,21 @@ export function discoveryQuestionKey(question: Pick<DiscoveryQuestion, "id" | "o
   return sha256Text(`${question.id}\n${question.ordinal}\n${question.text}`);
 }
 
+function normalizedDecisionQuestionText(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+/**
+ * 当前决定所依据的规范化问题内容。会改变选择、推荐或影响的事实必须写入该问题项；
+ * 状态机只绑定这份明确依据，不猜测文档其它段落与决定是否相关。
+ */
+export function discoveryQuestionDecisionBasisDigest(
+  question: Pick<DiscoveryQuestion, "id" | "ordinal" | "text">,
+): string {
+  const legacyOrdinal = question.id.startsWith("item-") ? String(question.ordinal) : "explicit-id";
+  return sha256Text(`decision-basis:v1\nexplore\n${question.id}\n${legacyOrdinal}\n${normalizedDecisionQuestionText(question.text)}`);
+}
+
 /**
  * 计算某一确认事项之外的 Discovery 决策上下文。回写时该事项本身会从问题改为
  * 结论，因此只归一化这一行；其余事实、证据和其它待确认项的改动都会使指纹失效。
@@ -141,6 +156,15 @@ export function parseDiscoveryOpenQuestions(content: string): DiscoveryOpenQuest
 }
 
 export function discoveryOpenQuestionScope(
+  question: Pick<DiscoveryOpenQuestion, "id" | "ordinal" | "text">,
+  exploreRoundId: string,
+): string {
+  const fingerprint = sha256Text(`${exploreRoundId}\n${discoveryQuestionDecisionBasisDigest(question)}`);
+  return `${EXPLORE_OPEN_QUESTION_SCOPE_PREFIX}${fingerprint}:${question.id}`;
+}
+
+/** 兼容升级前已经展示给用户、但尚未登记的 scope。 */
+export function legacyDiscoveryOpenQuestionScope(
   question: Pick<DiscoveryOpenQuestion, "id" | "documentFingerprint">,
   exploreRoundId: string,
 ): string {
@@ -223,22 +247,25 @@ export function validateDiscoveryChainCoverage(content: string): DiscoveryChainC
 
   const statusIdx = header.indexOf("状态");
   const requiredColumnIndexes = DISCOVERY_CHAIN_REQUIRED_COLUMNS.map(col => ({ col, idx: header.indexOf(col) }));
+  const errors: string[] = [];
 
   for (const [idx, cells] of rows.entries()) {
     const rowNum = idx + 1;
     for (const { col, idx: colIdx } of requiredColumnIndexes) {
       if (!(cells[colIdx]?.trim())) {
-        return { ok: false, message: `链路五要素第 ${rowNum} 行缺少${col}`, present: true };
+        errors.push(`链路五要素第 ${rowNum} 行缺少${col}`);
       }
     }
     const status = cells[statusIdx]?.trim() ?? "";
     if (!DISCOVERY_CHAIN_STATUSES.has(status)) {
-      return { ok: false, message: `链路五要素第 ${rowNum} 行状态必须是 已确认、未知阻塞 或 未知非阻塞`, present: true };
+      errors.push(`链路五要素第 ${rowNum} 行状态必须是 已确认、未知阻塞 或 未知非阻塞`);
     }
     if (status.includes("未知阻塞") && countDiscoveryOpenQuestions(content) === 0) {
-      return { ok: false, message: "链路五要素存在未知阻塞，但待确认问题中没有未解决项", present: true };
+      errors.push("链路五要素存在未知阻塞，但待确认问题中没有未解决项");
     }
   }
+
+  if (errors.length > 0) return { ok: false, message: [...new Set(errors)].join("；"), present: true };
 
   return { ok: true, message: "链路五要素就绪", present: true };
 }
@@ -276,6 +303,18 @@ export interface ProposeOpenQuestionFile {
   openCount: number;
 }
 
+export const PROPOSE_OPEN_QUESTION_SCOPE_PREFIX = "propose_open_question:";
+
+export interface ProposeQuestion {
+  path: string;
+  id: string;
+  ordinal: number;
+  text: string;
+  raw: string;
+  documentFingerprint: string;
+  status: "open" | "closed";
+}
+
 const PROPOSE_CONFIRMATION_DOCS = [
   "proposal.md",
   "design.md",
@@ -283,6 +322,87 @@ const PROPOSE_CONFIRMATION_DOCS = [
 ] as const;
 
 const PROPOSE_CONFIRMATION_HEADINGS = ["待用户确认", "待确认问题", "Open Questions", "Pending Questions"] as const;
+
+export function parseProposeQuestions(content: string, path: string): ProposeQuestion[] {
+  const sectionBody = sectionBodyByHeadings(content, PROPOSE_CONFIRMATION_HEADINGS);
+  if (sectionBody == null) return [];
+  const documentFingerprint = sha256Text(content);
+  const questions: ProposeQuestion[] = [];
+  const checklist = /^\s*-\s+\[([ xX])\]\s+(.*?)\s*$/gm;
+  let ordinal = 0;
+  for (const match of sectionBody.matchAll(checklist)) {
+    ordinal += 1;
+    const text = match[2];
+    const idMatch = /^\s*(DEC-[A-Za-z0-9][A-Za-z0-9_-]*)\b/.exec(text);
+    questions.push({
+      path,
+      id: idMatch?.[1] ?? `item-${ordinal}`,
+      ordinal,
+      text,
+      raw: match[0],
+      documentFingerprint,
+      status: match[1] === " " ? "open" : "closed",
+    });
+  }
+  return questions;
+}
+
+export function proposeQuestionKey(question: Pick<ProposeQuestion, "path" | "id" | "ordinal" | "text">): string {
+  return sha256Text(`${question.path}\n${question.id}\n${question.ordinal}\n${question.text}`);
+}
+
+/** Propose 决定的明确依据；其它计划材料变化不会自动使已展示决定失效。 */
+export function proposeQuestionDecisionBasisDigest(
+  question: Pick<ProposeQuestion, "path" | "id" | "ordinal" | "text">,
+): string {
+  const legacyOrdinal = question.id.startsWith("item-") ? String(question.ordinal) : "explicit-id";
+  return sha256Text(`decision-basis:v1\npropose\n${question.path}\n${question.id}\n${legacyOrdinal}\n${normalizedDecisionQuestionText(question.text)}`);
+}
+
+export function proposeQuestionContextFingerprint(
+  content: string,
+  question: Pick<ProposeQuestion, "id" | "ordinal">,
+): string | null {
+  const range = sectionRangeByHeadings(content, PROPOSE_CONFIRMATION_HEADINGS);
+  if (!range) return null;
+  const sectionBody = content.slice(range.start, range.end);
+  const checklist = /^\s*-\s+\[([ xX])\]\s+(.*?)\s*$/gm;
+  let ordinal = 0;
+  for (const match of sectionBody.matchAll(checklist)) {
+    ordinal += 1;
+    if (ordinal !== question.ordinal) continue;
+    const lineStart = range.start + match.index!;
+    const lineEnd = lineStart + match[0].length;
+    const placeholder = `- [ ] <propose-question:${question.id}:${question.ordinal}>`;
+    return sha256Text(`${content.slice(0, lineStart)}${placeholder}${content.slice(lineEnd)}`);
+  }
+  return null;
+}
+
+export function proposeOpenQuestionScope(question: ProposeQuestion, proposeRoundId: string): string {
+  const fingerprint = sha256Text(`${proposeRoundId}\n${proposeQuestionDecisionBasisDigest(question)}`);
+  return `${PROPOSE_OPEN_QUESTION_SCOPE_PREFIX}${fingerprint}:${question.id}`;
+}
+
+/** 兼容升级前已经展示给用户、但尚未登记的 scope。 */
+export function legacyProposeOpenQuestionScope(question: ProposeQuestion, proposeRoundId: string): string {
+  const fingerprint = sha256Text(`${proposeRoundId}\n${question.path}\n${question.documentFingerprint}`);
+  return `${PROPOSE_OPEN_QUESTION_SCOPE_PREFIX}${fingerprint}:${question.id}`;
+}
+
+export function proposeOpenQuestionDisplayText(question: Pick<ProposeQuestion, "id" | "text">): string {
+  if (question.id.startsWith("DEC-") && question.text.startsWith(question.id)) {
+    return question.text.slice(question.id.length).replace(/^[\s:：—–-]+/, "").trim();
+  }
+  return question.text.trim();
+}
+
+export function collectProposeQuestions(changeRoot: string): ProposeQuestion[] {
+  return PROPOSE_CONFIRMATION_DOCS.flatMap(path => {
+    const fullPath = join(changeRoot, path);
+    return existsSync(fullPath) ? parseProposeQuestions(readFileSync(fullPath, "utf8"), path) : [];
+  });
+}
 
 export function countProposeOpenQuestionsInContent(content: string): number {
   return countOpenChecklistItemsInSection(content, PROPOSE_CONFIRMATION_HEADINGS);
@@ -673,6 +793,29 @@ function documentAnchorParts(anchor: string): string[] {
     : [anchor];
 }
 
+function documentAnchorCandidates(content: string, path: string, requested: string): string[] {
+  const candidates: { anchor: string; index: number }[] = [];
+  for (const match of content.matchAll(/^#{1,6}[\t ]+(.+?)(?:[\t ]+#+)?[\t ]*$/gm)) {
+    const anchor = match[1]?.trim();
+    if (anchor) candidates.push({ anchor, index: match.index ?? candidates.length });
+  }
+  for (const match of content.matchAll(/(?:^|[^A-Za-z0-9_-])((?:TEST|CHAIN|IDC)-[A-Za-z0-9_-]+)(?![A-Za-z0-9_-])/gm)) {
+    candidates.push({ anchor: match[1], index: match.index ?? candidates.length });
+  }
+  const normalizedRequested = requested.toLocaleLowerCase();
+  const score = (anchor: string): number => {
+    const normalized = anchor.toLocaleLowerCase();
+    if (normalized === normalizedRequested) return 100;
+    if (normalized.includes(normalizedRequested) || normalizedRequested.includes(normalized)) return 50;
+    const requestedTokens = new Set(normalizedRequested.split(/[^\p{L}\p{N}_-]+/u).filter(Boolean));
+    return normalized.split(/[^\p{L}\p{N}_-]+/u).filter(Boolean).filter(token => requestedTokens.has(token)).length * 10;
+  };
+  return [...new Map(candidates.map(candidate => [candidate.anchor, candidate])).values()]
+    .sort((left, right) => score(right.anchor) - score(left.anchor) || left.index - right.index)
+    .slice(0, 8)
+    .map(candidate => `${path}#${candidate.anchor}`);
+}
+
 function canonicalDocumentRefPath(path: string): string {
   if (path === "discovery.md" || path === "test-contract.md") {
     return join(".superspec", "artifacts", path);
@@ -721,7 +864,8 @@ export function validateExecutionRequirementDocumentReferences(
       const targetContent = readFileSync(target, "utf8");
       for (const anchor of documentAnchorParts(parsed.anchor)) {
         if (!documentContainsAnchor(targetContent, anchor)) {
-          errors.push(`${contract.taskId} 的引用锚点不存在：${parsed.path}#${anchor}`);
+          const candidates = documentAnchorCandidates(targetContent, parsed.path, anchor);
+          errors.push(`${contract.taskId} 的引用锚点不存在：${parsed.path}#${anchor}${candidates.length > 0 ? `；可用锚点：${candidates.join("、")}` : ""}`);
         }
       }
     }

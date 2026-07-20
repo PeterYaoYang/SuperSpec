@@ -217,7 +217,7 @@ export type EventType =
   | "task_started" | "task_completed" | "task_abandoned"
   // record events (don't advance state)
   | "job_accepted" | "job_rejected"
-  | "user_decision_recorded" | "test_run_recorded"
+  | "user_question_presented" | "user_decision_recorded" | "test_run_recorded"
   | "task_activation_recorded" | "artifact_recorded";
 
 export interface Event {
@@ -242,6 +242,7 @@ export type OpenSpecValidationProfile =
 export interface PlanningValidationProfile {
   version: 2;
   openspec: OpenSpecValidationProfile;
+  design?: { schema_version: 1 };
 }
 
 // transition_commit payload 格式
@@ -382,6 +383,14 @@ export interface AskUser {
   allowed_answers: string[];
   scope: string;
   actions?: AskUserAction[];
+  /** 自由文本问题的直接登记入口；固定选项继续使用 actions。 */
+  record_argv?: string[];
+  record_input?: {
+    scope: string;
+    question: string;
+    answer: null;
+  };
+  required_fields?: Array<"answer">;
 }
 
 export interface AcceptedMaterialFollowupContinuation {
@@ -397,11 +406,45 @@ export interface AcceptedMaterialFollowupContinuation {
   plan_docs_changed_since_accept: boolean | null;
 }
 
+export type WorkflowArtifactKind = "discovery" | "test_contract";
+
+export interface RequiredWorkflowArtifact {
+  kind: WorkflowArtifactKind;
+  /** Repository-relative canonical path owned by the workflow engine. */
+  path: string;
+  operation: "create_or_update";
+}
+
+export interface ArtifactRequiredResume {
+  argv: string[];
+}
+
+export interface MaterialUpdateRequiredResume {
+  argv: string[];
+}
+
+export interface TestEvidenceAction {
+  kind: "test_run";
+  test_id?: string;
+  record_argv: string[];
+  record_input: {
+    test_id?: string;
+    attempt_id: string;
+    command: null;
+    cwd: null;
+    exit_code: null;
+    semantic_status: "expected_failure" | "expected_success" | "characterization_pass";
+  };
+  required_fields: Array<"command" | "cwd" | "exit_code">;
+}
+
 export type NextOutput = {
   state: State;
 } & (
   | { path: "next_command"; next_command: string; reason: string; missing_inputs: MissingInput[] }
   | { path: "required_job"; required_jobs: RequiredJobAction[]; reason: string }
+  | { path: "artifact_required"; artifact: RequiredWorkflowArtifact; resume: ArtifactRequiredResume; reason: string }
+  | { path: "material_update_required"; errors: string[]; resume: MaterialUpdateRequiredResume; reason: string }
   | { path: "ask_user"; ask_user: AskUser; reason: string }
   | { path: "done"; reason: string; continuation?: AcceptedMaterialFollowupContinuation }
 );

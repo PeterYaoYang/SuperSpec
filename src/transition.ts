@@ -68,6 +68,7 @@ import {
   planTransition,
   discoveryDocsBaseline,
   exploreAnswerRegistrationPayloadForChange,
+  proposeAnswerRegistrationPayloadForChange,
   proposalDocsBaseline,
   type TransitionDecisionPlan,
 } from "./phase_plan.ts";
@@ -80,7 +81,7 @@ import {
 } from "./phase_confirmation.ts";
 import { currentGitHead, dirtyCodeFiles, stageProductionJavaFilesSince } from "./git_state.ts";
 import { workflowRiskForProject } from "./workflow_config.ts";
-import type { CodeReviewScope, Event, Snapshot, State, Job, JobRole, TransitionResult, Ref, TaskAttempt, BoundarySnapshot, EffectiveEvidencePlan, ExecutionPolicy, FixDescriptor } from "./types.ts";
+import type { CodeReviewScope, Event, Snapshot, State, Job, JobRole, TransitionResult, Ref, TaskAttempt, BoundarySnapshot, EffectiveEvidencePlan, ExecutionPolicy, FixDescriptor, TestEvidenceAction } from "./types.ts";
 
 let transitionSeq = 0;
 function newTransitionId(): string { return `T-${Date.now()}-${++transitionSeq}`; }
@@ -91,13 +92,14 @@ function createReviewJobsForGate(
   state: State,
   gate: ReviewGateRule,
   roles: JobRole[],
+  requiredRoles: JobRole[],
   changeRoot: string,
   change: string,
   reason: string,
   events: Event[],
 ): Decision {
   const newJobs: Job[] = roles.map(role => {
-    const scope = reviewScopeForGateRole(gate, role);
+    const scope = reviewScopeForGateRole(gate, role, requiredRoles);
     // 角色职责目标和显式 freshness 路径绑定时点指纹：单文件缺失使用 sha256:missing，目录缺失使用稳定空指纹。
     const boundPaths = [...new Set(scope.boundPaths)];
     const boundFiles: Ref[] = boundPaths
@@ -292,6 +294,32 @@ function compileRequiredEvidence(
     green_required: requiresVerification,
     accepted_green_statuses: ["expected_success"],
   };
+}
+
+function evidenceActionsForAttempt(
+  change: string,
+  attemptId: string,
+  required: EffectiveEvidencePlan,
+): TestEvidenceAction[] {
+  const testIds: Array<string | undefined> = required.test_ids.length > 0 ? required.test_ids : [undefined];
+  const statuses: TestEvidenceAction["record_input"]["semantic_status"][] = [];
+  if (required.red_required) statuses.push("expected_failure");
+  if (required.green_required) statuses.push(required.accepted_green_statuses[0] ?? "expected_success");
+
+  return testIds.flatMap(testId => statuses.map(semanticStatus => ({
+    kind: "test_run" as const,
+    ...(testId ? { test_id: testId } : {}),
+    record_argv: ["superspec", "record", "test-run", "--change", change, "--input", "-"],
+    record_input: {
+      ...(testId ? { test_id: testId } : {}),
+      attempt_id: attemptId,
+      command: null,
+      cwd: null,
+      exit_code: null,
+      semantic_status: semanticStatus,
+    },
+    required_fields: ["command", "cwd", "exit_code"],
+  })));
 }
 
 function hasRejectedReviewReadyVerifier(events: Event[]): boolean {
@@ -803,7 +831,7 @@ function transitionPlanToDecision(
     case "blocked":
       return { blocked: true, reason: plan.reason, jobs: plan.jobs, ...(plan.details ? { details: plan.details } : {}) };
     case "create_gate_jobs":
-      return createReviewJobsForGate(snapshot.state, plan.gate, plan.roles, changeRoot, change, plan.reason, events);
+      return createReviewJobsForGate(snapshot.state, plan.gate, plan.roles, plan.requiredRoles, changeRoot, change, plan.reason, events);
     case "advance":
       return {
         fromState: plan.fromState,
@@ -1074,6 +1102,9 @@ export function taskStart(projectRoot: string, change: string, changeRoot: strin
         ...attempt,
         ...boundarySnapshotPayload(projectRoot),
       };
+      const evidenceActions = requiredEvidence
+        ? evidenceActionsForAttempt(change, attempt.attempt_id, requiredEvidence)
+        : null;
 
       return {
         fromState: "apply", toState: "apply", outcome: "advanced" as const,
@@ -1086,6 +1117,7 @@ export function taskStart(projectRoot: string, change: string, changeRoot: strin
           contract: adopted.contract,
           ...(fix ? { fix } : {}),
           ...(requiredEvidence ? { required_evidence: requiredEvidence } : {}),
+          ...(evidenceActions ? { evidence_actions: evidenceActions } : {}),
           // legacy 轮统一标注历史模式（无论有无执行依据文本）；契约轮无块时标 false（如 Fix task）
           ...(adopted.contract ? {} : { legacy_contract: !contractMode }),
         },
@@ -1184,6 +1216,7 @@ export function reopen(
             baseline_docs: proposalDocsBaseline(changeRoot),
             planning_validation_version: 2,
             planning_validation_profile: planningValidationProfileForNewRound(projectRoot),
+            ...proposeAnswerRegistrationPayloadForChange(changeRoot),
           },
         };
       }

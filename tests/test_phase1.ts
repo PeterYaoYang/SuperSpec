@@ -111,6 +111,14 @@ function reviewerReportForJob(projectRoot: string, change: string, jobId: string
   });
 }
 
+function acceptCreatedJobs(fx: Fixture, jobIds: string[]): void {
+  for (const jobId of jobIds) {
+    const reportPath = join(fx.projectRoot, `${jobId}.json`);
+    writeFileSync(reportPath, reviewerReportForJob(fx.projectRoot, fx.change, jobId));
+    assert.equal(recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, jobId, reportPath).accepted, true);
+  }
+}
+
 function rawDirFiles(projectRoot: string, change: string): string[] {
   return readdirSync(join(projectRoot, ".superspec", "changes", change, "raw")).sort();
 }
@@ -353,11 +361,8 @@ test("完整 e2e：propose → job → accept → propose_ready", () => {
     assert.equal(step3.found, true);
     assert.equal(step3.packet?.gate_id, "propose.final_review");
 
-    // 4. record job-submit → accepted
-    const reportPath = join(fx.projectRoot, "report.json");
-    writeFileSync(reportPath, reviewerReportForJob(fx.projectRoot, fx.change, jobId));
-    const step4 = recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, jobId, reportPath);
-    assert.equal(step4.accepted, true);
+    // 4. 所有 normal 计划审查工作项均 accepted
+    acceptCreatedJobs(fx, step1.created_jobs);
 
     // 5. propose-ready normal → 推进到 propose_ready
     const step5 = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
@@ -376,10 +381,8 @@ test("文档变化后 accepted job 失效 → transition 创建新 job", () => {
   try {
     // 1. 创建 + 接受 job
     const t1 = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
-    const jobId1 = t1.created_jobs[0];
-    const reportPath = join(fx.projectRoot, "report.json");
-    writeFileSync(reportPath, reviewerReportForJob(fx.projectRoot, fx.change, jobId1));
-    recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, jobId1, reportPath);
+    const criticJobId = t1.created_jobs[0];
+    acceptCreatedJobs(fx, t1.created_jobs);
 
     // 2. 修改 proposal.md（绑定文件变了）
     writeFileSync(join(fx.changeRoot, "proposal.md"), "# Proposal\n\nCHANGED CONTENT.\n");
@@ -392,7 +395,26 @@ test("文档变化后 accepted job 失效 → transition 创建新 job", () => {
     const t2 = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     assert.equal(t2.outcome, "job_created");
     assert.equal(t2.created_jobs.length, 1);
-    assert.notEqual(t2.created_jobs[0], jobId1, "新 job id 应不同于旧 job");
+    assert.notEqual(t2.created_jobs[0], criticJobId, "新 critic job id 应不同于旧 job");
+  } finally { fx.cleanup(); }
+});
+
+test("normal 计划审查：design 变化使 critic 失效并重建", () => {
+  const fx = setupFixture("propose");
+  try {
+    const first = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    const criticJobId = first.created_jobs[0];
+    acceptCreatedJobs(fx, first.created_jobs);
+
+    writeFileSync(join(fx.changeRoot, "design.md"), "# Design\n\nchanged normal design\n");
+    const snapshot = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(snapshot.accepted_jobs.length, 0);
+
+    const retry = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.equal(retry.outcome, "job_created");
+    assert.equal(retry.created_jobs.length, 1);
+    assert.notEqual(retry.created_jobs[0], criticJobId);
+    assert.equal(rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot).open_jobs[0].role, "critic");
   } finally { fx.cleanup(); }
 });
 

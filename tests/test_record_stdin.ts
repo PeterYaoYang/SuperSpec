@@ -80,6 +80,32 @@ test("CLI help documents stdin record input marker", () => {
   }
 });
 
+test("CLI subcommand help exposes record input contracts", () => {
+  const fx = setupProject();
+  try {
+    const userDecision = runCli(fx.projectRoot, ["record", "user-decision", "--help"], "");
+    assert.equal(userDecision.status, 0, userDecision.stderr || userDecision.stdout);
+    assert.match(userDecision.stdout, /--change <C>/);
+    assert.match(userDecision.stdout, /--input <F\|->/);
+    assert.match(userDecision.stdout, /scope/);
+    assert.match(userDecision.stdout, /answer/);
+
+    const jobSubmit = runCli(fx.projectRoot, ["record", "job-submit", "--help"], "");
+    assert.equal(jobSubmit.status, 0, jobSubmit.stderr || jobSubmit.stdout);
+    assert.match(jobSubmit.stdout, /--job <J>/);
+    assert.match(jobSubmit.stdout, /--report <F\|->/);
+    assert.match(jobSubmit.stdout, /report_schema/);
+
+    const testRun = runCli(fx.projectRoot, ["record", "test-run", "--help"], "");
+    assert.equal(testRun.status, 0, testRun.stderr || testRun.stdout);
+    assert.match(testRun.stdout, /--input <F\|->/);
+    assert.match(testRun.stdout, /test_id/);
+    assert.match(testRun.stdout, /semantic_status/);
+  } finally {
+    fx.cleanup();
+  }
+});
+
 test("CLI record user-decision reads JSON from stdin", () => {
   const fx = setupProject();
   try {

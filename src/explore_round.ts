@@ -1,5 +1,6 @@
 import {
   discoveryQuestionContextFingerprint,
+  discoveryQuestionDecisionBasisDigest,
   discoveryQuestionKey,
   parseDiscoveryQuestions,
   type DiscoveryQuestion,
@@ -104,11 +105,12 @@ function currentExploreAnswerRegistration(events: readonly Event[]): ExploreAnsw
 export function exploreAnswerWasRecorded(
   events: readonly Event[],
   roundId: string,
-  question: Pick<DiscoveryQuestion, "id" | "ordinal">,
+  question: Pick<DiscoveryQuestion, "id" | "ordinal" | "text">,
   discoveryContent: string,
 ): boolean {
   const currentContextFingerprint = discoveryQuestionContextFingerprint(discoveryContent, question);
   if (!currentContextFingerprint) return false;
+  const currentBasisDigest = discoveryQuestionDecisionBasisDigest(question);
   return events.some(event => {
     if (event.event_type !== "user_decision_recorded") return false;
     const payload = event.payload as {
@@ -118,14 +120,18 @@ export function exploreAnswerWasRecorded(
         question_id?: unknown;
         question_ordinal?: unknown;
         context_fingerprint?: unknown;
+        decision_basis_digest?: unknown;
       };
     };
     const recorded = payload.explore_open_question;
+    const revisionMatches = typeof recorded?.decision_basis_digest === "string"
+      ? recorded.decision_basis_digest === currentBasisDigest
+      : recorded?.context_fingerprint === currentContextFingerprint;
     return payload.accepted === true &&
       recorded?.round_id === roundId &&
       recorded.question_id === question.id &&
-      recorded.question_ordinal === question.ordinal &&
-      recorded.context_fingerprint === currentContextFingerprint;
+      (!question.id.startsWith("item-") || recorded.question_ordinal === question.ordinal) &&
+      revisionMatches;
   });
 }
 
@@ -141,4 +147,65 @@ export function unregisteredClosedExploreQuestions(events: readonly Event[], dis
     !registration.baselineClosedQuestionKeys.has(discoveryQuestionKey(question)) &&
     !exploreAnswerWasRecorded(events, registration.roundId, question, discoveryContent)
   );
+}
+
+/** 已正式展示但尚未登记答复的 Explore 问题不能通过删除问题行绕过。 */
+export function unresolvedPresentedExploreQuestionScopes(events: readonly Event[]): string[] {
+  const roundId = currentExploreRoundId(events);
+  const acceptedDecisions = events.flatMap(event => {
+    if (event.event_type !== "user_decision_recorded") return [];
+    const payload = event.payload as {
+      accepted?: unknown;
+      scope?: unknown;
+      explore_open_question?: {
+        round_id?: unknown;
+        question_id?: unknown;
+        question_ordinal?: unknown;
+        decision_basis_digest?: unknown;
+      };
+    };
+    return payload.accepted === true ? [payload] : [];
+  });
+  const latestByQuestion = new Map<string, {
+    scope: string;
+    legacyScope: string | null;
+    questionId: string;
+    questionOrdinal: unknown;
+    revisionDigest: unknown;
+  }>();
+  for (const event of events) {
+    if (event.event_type !== "user_question_presented") continue;
+    const payload = event.payload as {
+      phase?: unknown;
+      round_id?: unknown;
+      scope?: unknown;
+      legacy_scope?: unknown;
+      question_id?: unknown;
+      question_ordinal?: unknown;
+      decision_basis_digest?: unknown;
+    };
+    if (payload.phase !== "explore" || payload.round_id !== roundId || typeof payload.scope !== "string" || typeof payload.question_id !== "string") continue;
+    const identity = payload.question_id.startsWith("item-")
+      ? `${payload.question_id}:${String(payload.question_ordinal)}`
+      : payload.question_id;
+    latestByQuestion.set(identity, {
+      scope: payload.scope,
+      legacyScope: typeof payload.legacy_scope === "string" ? payload.legacy_scope : null,
+      questionId: payload.question_id,
+      questionOrdinal: payload.question_ordinal,
+      revisionDigest: payload.decision_basis_digest,
+    });
+  }
+  return [...latestByQuestion.values()].flatMap(presented => {
+    const answered = acceptedDecisions.some(decision => {
+      if (decision.scope === presented.scope || decision.scope === presented.legacyScope) return true;
+      const recorded = decision.explore_open_question;
+      return recorded?.round_id === roundId &&
+        recorded.question_id === presented.questionId &&
+        (!presented.questionId.startsWith("item-") || recorded.question_ordinal === presented.questionOrdinal) &&
+        typeof presented.revisionDigest === "string" &&
+        recorded.decision_basis_digest === presented.revisionDigest;
+    });
+    return answered ? [] : [presented.scope];
+  });
 }

@@ -42,14 +42,26 @@ function defaultReviewScope(gate: ReviewGateRule) {
   };
 }
 
-export function reviewScopeForGateRole(gate: ReviewGateRule, role: JobRole) {
+export function reviewScopeForGateRole(
+  gate: ReviewGateRule,
+  role: JobRole,
+  requiredRoles: readonly JobRole[] = gate.allowedRoles,
+) {
   if (gate.gate_id !== PROPOSE_FINAL_REVIEW_GATE_ID) return defaultReviewScope(gate);
 
   if (role === "critic") {
-    const reviewTargets = ["proposal.md", "specs/", "tasks.md"];
+    const ownsDesign = !requiredRoles.includes("architect");
+    const ownsTestContract = !requiredRoles.includes("test-engineer");
+    const reviewTargets = [
+      "proposal.md",
+      "specs/",
+      ...(ownsDesign ? ["design.md"] : []),
+      "tasks.md",
+      ...(ownsTestContract ? [".superspec/artifacts/test-contract.md"] : []),
+    ];
     const readOnlyRefs = [
-      "design.md",
-      ".superspec/artifacts/test-contract.md",
+      ...(!ownsDesign ? ["design.md"] : []),
+      ...(!ownsTestContract ? [".superspec/artifacts/test-contract.md"] : []),
       ".superspec/artifacts/discovery.md",
     ];
     return {

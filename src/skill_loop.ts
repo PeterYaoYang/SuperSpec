@@ -75,6 +75,28 @@ export function simulateLoop(
         }
         break;
 
+      case "artifact_required":
+        step.action = "artifact";
+        step.detail = output.artifact.path;
+        steps.push(step);
+        return {
+          completed: false,
+          steps,
+          finalState: output.state,
+          message: `需要创建或更新工作流产物：${output.artifact.path}`,
+        };
+
+      case "material_update_required":
+        step.action = "material_update";
+        step.detail = output.errors.join("；");
+        steps.push(step);
+        return {
+          completed: false,
+          steps,
+          finalState: output.state,
+          message: `需要修正工作流材料：${output.errors.join("；")}`,
+        };
+
       case "ask_user":
         step.action = "ask";
         step.detail = output.ask_user.question;

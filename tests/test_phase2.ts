@@ -2,7 +2,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync, readdirSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -15,17 +15,23 @@ import { recordUserDecision, recordUserDecisionContent, recordJobSubmit, recordJ
 import {
   countDiscoveryOpenQuestions,
   countProposeOpenQuestionsInContent,
+  collectProposeQuestions,
+  discoveryQuestionContextFingerprint,
+  legacyDiscoveryOpenQuestionScope,
+  legacyProposeOpenQuestionScope,
   parseDiscoveryOpenQuestions,
   parseTestContractEntries,
+  proposeQuestionContextFingerprint,
   validateDiscovery,
   validateDiscoveryChainCoverage,
   validateProposalImpact,
   validateTasksDocument,
 } from "../src/format.ts";
 import { phaseConfirmationForBoundary, type PhaseDecisionAction } from "../src/phase_confirmation.ts";
-import { exploreAnswerRegistrationPayload } from "../src/explore_round.ts";
+import { currentExploreRoundId, exploreAnswerRegistrationPayload } from "../src/explore_round.ts";
+import { currentProposeRoundId } from "../src/propose_round.ts";
 import type { Job, JobRole, State } from "../src/types.ts";
-import { confirmCurrentPhase } from "./phase_confirmation_support.ts";
+import { confirmCurrentPhase, prepareCurrentPhaseConfirmation } from "./phase_confirmation_support.ts";
 import { planningValidationProfileForNewRound } from "../src/phase_plan.ts";
 
 // ===== 夹具 =====
@@ -46,6 +52,21 @@ const V2_DISABLED_PLANNING_PROFILE = {
   version: 2,
   openspec: { mode: "disabled" },
 } as const;
+
+const STRICT_DESIGN = [
+  "# 设计",
+  "",
+  "## 背景",
+  "",
+  "## 设计目标",
+  "",
+  "## 非目标",
+  "",
+  "## 总体方案",
+  "",
+  "## 实现方案",
+  "",
+].join("\n");
 
 function setupExplore(): { projectRoot: string; change: string; changeRoot: string; cleanup: () => void } {
   const projectRoot = mkdtempSync(join(tmpdir(), "superspec-p2-"));
@@ -264,6 +285,7 @@ test("discovery 链路五要素：行级缺证据或状态失败", () => {
   ].join("\n"));
   assert.equal(missingStatus.ok, false);
   assert.match(missingStatus.message, /缺少状态/);
+  assert.match(missingStatus.message, /状态必须是 已确认、未知阻塞 或 未知非阻塞/);
 });
 
 test("discovery 链路五要素：行级缺核心列或未知排除失败", () => {
@@ -491,9 +513,9 @@ test("explore→propose：discovery.md 有未确认问题时不推进", () => {
 test("explore→propose normal：完成后须确认才推进", () => {
   const fx = setupPropose();
   try {
-    const blocked = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal");
-    assert.equal(blocked.events_written, 0);
-    assert.match(blocked.message, /用户确认/);
+    const review = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.equal(review.outcome, "job_created");
+    assert.equal(review.required_jobs?.[0]?.role, "critic");
     confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     const result = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     assert.equal(result.outcome, "advanced");
@@ -504,12 +526,23 @@ test("explore→propose normal：完成后须确认才推进", () => {
   } finally { fx.cleanup(); }
 });
 
-test("next 在 explore 无 discovery 时返回 ask_user", () => {
+test("next 在 explore 无 discovery 时返回 canonical artifact_required", () => {
   const fx = setupExplore();
   try {
     const result = next(fx.projectRoot, fx.change, fx.changeRoot);
-    assert.equal(result.path, "ask_user");
-    assert.ok(result.ask_user.scope.includes("explore"));
+    assert.deepEqual(result, {
+      state: "explore",
+      path: "artifact_required",
+      artifact: {
+        kind: "discovery",
+        path: "openspec/changes/test-change/.superspec/artifacts/discovery.md",
+        operation: "create_or_update",
+      },
+      resume: {
+        argv: ["superspec", "transition", "next", "--change", "test-change"],
+      },
+      reason: "discovery.md 不存在",
+    });
   } finally { fx.cleanup(); }
 });
 
@@ -526,7 +559,7 @@ test("next 在 explore 有 discovery 无问题时返回 transition 命令", () =
 test("next 在 explore 显式 normal 风险时返回阶段确认", () => {
   const fx = setupPropose();
   try {
-    const result = next(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    const result = prepareCurrentPhaseConfirmation(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     assert.equal(result.path, "ask_user");
     assert.match(result.ask_user.scope, /^phase_confirmation:explore_to_propose:/);
     const actions = result.ask_user.actions as PhaseDecisionAction[];
@@ -582,7 +615,7 @@ test("阶段确认：仅接受精确答复，材料变化后旧 scope 失效", (
   const fx = setupPropose();
   try {
     writeFileSync(join(fx.projectRoot, ".superspec", "config.json"), JSON.stringify({ workflow: { mode: "normal" } }));
-    const ask = next(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    const ask = prepareCurrentPhaseConfirmation(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     assert.equal(ask.path, "ask_user");
     const actions = ask.ask_user.actions as PhaseDecisionAction[];
     const advance = actions.find(action => action.decision === "advance");
@@ -657,7 +690,7 @@ test("阶段确认：仅接受精确答复，材料变化后旧 scope 失效", (
     assert.equal(stale.accepted, false);
     assert.match(stale.message, /已失效|重新执行 next/);
 
-    const refreshed = next(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    const refreshed = prepareCurrentPhaseConfirmation(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     assert.equal(refreshed.path, "ask_user");
     assert.notEqual(refreshed.ask_user.scope, ask.ask_user.scope);
   } finally { fx.cleanup(); }
@@ -698,7 +731,37 @@ test("next 在 propose 待用户确认问题优先于审查 job", () => {
 
     const result = next(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(result.path, "ask_user");
-    assert.equal(result.ask_user.scope, "propose_open_questions");
+    assert.match(result.ask_user.scope, /^propose_open_question:sha256:[a-f0-9]{64}:DEC-001$/);
+    assert.match(result.ask_user.question, /是否兼容旧 API/);
+    assert.deepEqual(result.ask_user.record_argv, [
+      "superspec", "record", "user-decision", "--change", fx.change, "--input", "-",
+    ]);
+    assert.deepEqual(result.ask_user.record_input, {
+      scope: result.ask_user.scope,
+      question: result.ask_user.question,
+      answer: null,
+    });
+    assert.deepEqual(result.ask_user.required_fields, ["answer"]);
+
+    const recorded = recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({
+      scope: result.ask_user.scope,
+      answer: "保留旧 API 兼容层",
+    }));
+    assert.equal(recorded.accepted, true);
+    const currentDecision = collectProposeQuestions(fx.changeRoot).find(question => question.status === "open");
+    assert.ok(currentDecision);
+    const legacyScope = legacyProposeOpenQuestionScope(currentDecision, currentProposeRoundId(readEvents(fx.projectRoot, fx.change)));
+    assert.equal(recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({
+      scope: legacyScope,
+      answer: "保留旧 API 兼容层",
+    })).accepted, true);
+    assert.equal(recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({
+      scope: legacyScope,
+      answer: "移除旧 API",
+    })).accepted, false);
+    const beforeWriteback = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(beforeWriteback.path, "ask_user");
+    assert.equal(beforeWriteback.ask_user.scope, result.ask_user.scope);
 
     writeFileSync(join(fx.changeRoot, "proposal.md"), [
       "# Proposal",
@@ -707,6 +770,7 @@ test("next 在 propose 待用户确认问题优先于审查 job", () => {
       "",
       "- [x] DEC-001 是否兼容旧 API？",
     ].join("\n"));
+    writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "test-contract.md"), "# Test Contract\n");
 
     const afterConfirmed = next(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(afterConfirmed.path, "required_job");
@@ -715,10 +779,220 @@ test("next 在 propose 待用户确认问题优先于审查 job", () => {
     assert.deepEqual(afterConfirmed.required_jobs[0].packet_argv, [
       "superspec", "jobs", "packet", "--change", fx.change, "--job", job.job_id,
     ]);
+    const decision = readEvents(fx.projectRoot, fx.change).find(event =>
+      event.event_type === "user_decision_recorded" &&
+      (event.payload as { propose_open_question?: unknown }).propose_open_question != null
+    );
+    assert.equal((decision?.payload as { propose_open_question?: { question_id?: unknown } }).propose_open_question?.question_id, "DEC-001");
   } finally { fx.cleanup(); }
 });
 
-test("next 在 explore 先校验 discovery，再返回阶段 critic job", () => {
+test("Propose 设计决定：无关材料变化不重复提问，问题修订后旧 scope 失效", () => {
+  const fx = setupPropose();
+  try {
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    const entered = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.equal(entered.to_state, "propose");
+    writeFileSync(join(fx.changeRoot, "design.md"), [
+      "# Design",
+      "",
+      "## 待用户确认",
+      "",
+      "- [ ] DEC-001 兼容策略：A 迁移 / B fallback。建议：A",
+      "- [ ] DEC-002 发布方式：A 一次 / B 分批。建议：B",
+    ].join("\n"));
+
+    const first = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(first.path, "ask_user");
+    assert.match(first.ask_user.scope, /:DEC-001$/);
+
+    writeFileSync(join(fx.changeRoot, "design.md"), [
+      "# Design",
+      "",
+      "## 背景",
+      "新增事实使原决定上下文变化。",
+      "",
+      "## 待用户确认",
+      "",
+      "- [ ] DEC-001 兼容策略：A 迁移 / B fallback。建议：A",
+      "- [ ] DEC-002 发布方式：A 一次 / B 分批。建议：B",
+    ].join("\n"));
+    const unchanged = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(unchanged.path, "ask_user");
+    if (unchanged.path !== "ask_user") throw new Error("expected unchanged Propose decision");
+    assert.equal(unchanged.ask_user.scope, first.ask_user.scope);
+
+    writeFileSync(join(fx.changeRoot, "design.md"), [
+      "# Design",
+      "",
+      "## 背景",
+      "新增事实使原决定上下文变化。",
+      "",
+      "## 待用户确认",
+      "",
+      "- [ ] DEC-001 兼容策略：A 双写迁移 / B fallback。建议：A",
+      "- [ ] DEC-002 发布方式：A 一次 / B 分批。建议：B",
+    ].join("\n"));
+    const stale = recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({ scope: first.ask_user.scope, answer: "选择 A" }));
+    assert.equal(stale.accepted, false);
+
+    const refreshed = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(refreshed.path, "ask_user");
+    if (refreshed.path !== "ask_user") throw new Error("expected refreshed Propose decision");
+    assert.notEqual(refreshed.ask_user.scope, first.ask_user.scope);
+    assert.equal(recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({ scope: refreshed.ask_user.scope, answer: "选择 A" })).accepted, true);
+
+    writeFileSync(join(fx.changeRoot, "design.md"), [
+      "# Design",
+      "",
+      "## 背景",
+      "新增事实使原决定上下文变化。",
+      "",
+      "## 待用户确认",
+      "",
+      "- [x] DEC-001 兼容策略：A 迁移 / B fallback。建议：A",
+      "- [ ] DEC-002 发布方式：A 一次 / B 分批。建议：B",
+    ].join("\n"));
+    const second = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(second.path, "ask_user");
+    if (second.path !== "ask_user") throw new Error("expected second Propose decision");
+    assert.match(second.ask_user.scope, /:DEC-002$/);
+
+    writeFileSync(join(fx.changeRoot, "design.md"), [
+      "# Design",
+      "",
+      "## 背景",
+      "新增事实使原决定上下文变化。",
+      "",
+      "## 待用户确认",
+      "",
+      "- [x] DEC-001 兼容策略：A 迁移 / B fallback。建议：A",
+      "- [x] DEC-002 未经登记直接勾选",
+    ].join("\n"));
+    const missingRegistration = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(missingRegistration.path, "material_update_required");
+  } finally { fx.cleanup(); }
+});
+
+test("Propose 决策身份：legacy 答复在无关材料变化后仍阻止冲突 v2 答复", () => {
+  const fx = setupPropose();
+  try {
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    const proposalPath = join(fx.changeRoot, "proposal.md");
+    const content = "# Proposal\n\n## 背景\n\n旧接口位于模块 A。\n\n## 待用户确认\n\n- [ ] DEC-001 是否兼容旧 API？\n";
+    writeFileSync(proposalPath, content);
+    const presented = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(presented.path, "ask_user");
+    const current = collectProposeQuestions(fx.changeRoot).find(question => question.status === "open");
+    assert.ok(current);
+    const legacyScope = legacyProposeOpenQuestionScope(current, currentProposeRoundId(readEvents(fx.projectRoot, fx.change)));
+    assert.equal(recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({ scope: legacyScope, answer: "保留兼容" })).accepted, true);
+
+    writeFileSync(proposalPath, content.replace("旧接口位于模块 A。", "旧接口位于模块 A，另有一处调用。"));
+    const stable = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(stable.path, "ask_user");
+    assert.equal(stable.ask_user.scope, presented.ask_user.scope);
+    assert.equal(recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({ scope: stable.ask_user.scope, answer: "移除兼容" })).accepted, false);
+  } finally { fx.cleanup(); }
+});
+
+test("Propose 决策身份：升级前 legacy accepted 事件阻止冲突 v2 答复", () => {
+  const fx = setupPropose();
+  try {
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    const proposalPath = join(fx.changeRoot, "proposal.md");
+    writeFileSync(proposalPath, "# Proposal\n\n## 待用户确认\n\n- [ ] DEC-001 是否兼容旧 API？\n");
+    const events = readEvents(fx.projectRoot, fx.change);
+    const current = collectProposeQuestions(fx.changeRoot).find(question => question.status === "open");
+    assert.ok(current);
+    const roundId = currentProposeRoundId(events);
+    const legacyScope = legacyProposeOpenQuestionScope(current, roundId);
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "user_decision_recorded", {
+      scope: legacyScope,
+      question: "是否兼容旧 API？",
+      answer: "保留兼容",
+      accepted: true,
+      propose_open_question: {
+        round_id: roundId,
+        path: current.path,
+        question_id: current.id,
+        question_ordinal: current.ordinal,
+        context_fingerprint: proposeQuestionContextFingerprint(readFileSync(proposalPath, "utf8"), current),
+      },
+    }));
+    const presented = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(presented.path, "ask_user");
+    assert.equal(recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({ scope: presented.ask_user.scope, answer: "移除兼容" })).accepted, false);
+    writeFileSync(proposalPath, "# Proposal\n\n## 待用户确认\n\n- [x] DEC-001 是否兼容旧 API？\n");
+    assert.notEqual(next(fx.projectRoot, fx.change, fx.changeRoot).path, "material_update_required");
+  } finally { fx.cleanup(); }
+});
+
+test("Explore 决策 basis：A→B→A 不用 B 的答复关闭 A", () => {
+  const fx = setupExplore();
+  try {
+    const discoveryPath = join(fx.changeRoot, ".superspec", "artifacts", "discovery.md");
+    const a = "# Discovery\n\n## 待确认问题\n\n- [ ] Q-001 兼容策略：A 保留 / B 移除。建议：A。\n";
+    const b = a.replace("建议：A。", "新增证据支持移除，建议：B。");
+    writeFileSync(discoveryPath, a);
+    const firstA = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(firstA.path, "ask_user");
+    writeFileSync(discoveryPath, b);
+    const shownB = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(shownB.path, "ask_user");
+    assert.notEqual(shownB.ask_user.scope, firstA.ask_user.scope);
+    assert.equal(recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({ scope: shownB.ask_user.scope, answer: "选择 B" })).accepted, true);
+
+    writeFileSync(discoveryPath, a);
+    const returnedA = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(returnedA.path, "ask_user");
+    assert.equal(returnedA.ask_user.scope, firstA.ask_user.scope);
+    const latestPresented = readEvents(fx.projectRoot, fx.change).findLast(event => event.event_type === "user_question_presented");
+    assert.equal((latestPresented?.payload as { scope?: unknown }).scope, returnedA.ask_user.scope);
+    writeFileSync(discoveryPath, a.replace("- [ ]", "- [x]"));
+    assert.equal(next(fx.projectRoot, fx.change, fx.changeRoot).path, "material_update_required");
+
+    writeFileSync(discoveryPath, a);
+    assert.equal(recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({ scope: returnedA.ask_user.scope, answer: "选择 A" })).accepted, true);
+    writeFileSync(discoveryPath, a.replace("- [ ]", "- [x]"));
+    assert.notEqual(next(fx.projectRoot, fx.change, fx.changeRoot).path, "material_update_required");
+  } finally { fx.cleanup(); }
+});
+
+test("Propose 决策 basis：A→B→A 不用 B 的答复关闭 A", () => {
+  const fx = setupPropose();
+  try {
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    const proposalPath = join(fx.changeRoot, "proposal.md");
+    const a = "# Proposal\n\n## 待用户确认\n\n- [ ] DEC-001 兼容策略：A 保留 / B 移除。建议：A。\n";
+    const b = a.replace("建议：A。", "新增证据支持移除，建议：B。");
+    writeFileSync(proposalPath, a);
+    const firstA = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(firstA.path, "ask_user");
+    writeFileSync(proposalPath, b);
+    const shownB = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(shownB.path, "ask_user");
+    assert.equal(recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({ scope: shownB.ask_user.scope, answer: "选择 B" })).accepted, true);
+
+    writeFileSync(proposalPath, a);
+    const returnedA = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(returnedA.path, "ask_user");
+    const latestPresented = readEvents(fx.projectRoot, fx.change).findLast(event => event.event_type === "user_question_presented");
+    assert.equal((latestPresented?.payload as { scope?: unknown }).scope, returnedA.ask_user.scope);
+    writeFileSync(proposalPath, a.replace("- [ ]", "- [x]"));
+    assert.equal(next(fx.projectRoot, fx.change, fx.changeRoot).path, "material_update_required");
+
+    writeFileSync(proposalPath, a);
+    assert.equal(recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({ scope: returnedA.ask_user.scope, answer: "选择 A" })).accepted, true);
+    writeFileSync(proposalPath, a.replace("- [ ]", "- [x]"));
+    assert.notEqual(next(fx.projectRoot, fx.change, fx.changeRoot).path, "material_update_required");
+  } finally { fx.cleanup(); }
+});
+
+test("next 在 explore 先要求 discovery artifact，再返回阶段 critic job", () => {
   const fx = setupExplore();
   try {
     appendOpenJob(fx.projectRoot, fx.change, "explore", {
@@ -728,8 +1002,8 @@ test("next 在 explore 先校验 discovery，再返回阶段 critic job", () => 
     });
 
     const result = next(fx.projectRoot, fx.change, fx.changeRoot);
-    assert.equal(result.path, "ask_user");
-    assert.equal(result.ask_user.scope, "explore_discovery");
+    assert.equal(result.path, "artifact_required");
+    assert.equal(result.artifact.kind, "discovery");
   } finally { fx.cleanup(); }
 });
 
@@ -747,6 +1021,54 @@ test("next 在 explore 有当前 Q 时优先于已有 critic job", () => {
     const result = next(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(result.path, "ask_user");
     assert.match(result.ask_user.scope, /^explore_open_question:sha256:[a-f0-9]{64}:Q-001$/);
+  } finally { fx.cleanup(); }
+});
+
+test("并发 transition next：锁竞争不重复登记用户问题，重试保持幂等", async () => {
+  const fx = setupExplore();
+  try {
+    writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "discovery.md"), [
+      "# Discovery",
+      "",
+      "## 待确认问题",
+      "",
+      "- [ ] Q-001 兼容策略：A 保留 / B 移除。建议：A；影响旧调用方。",
+    ].join("\n"));
+    const cli = new URL("../src/cli.ts", import.meta.url).pathname;
+    const runNext = () => new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
+      const child = spawn(process.execPath, [cli, "transition", "next", "--change", fx.change], {
+        cwd: fx.projectRoot,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.setEncoding("utf8").on("data", chunk => { stdout += chunk; });
+      child.stderr.setEncoding("utf8").on("data", chunk => { stderr += chunk; });
+      child.on("error", reject);
+      child.on("close", code => resolve({ code, stdout, stderr }));
+    });
+
+    const [first, second] = await Promise.all([runNext(), runNext()]);
+    const successful = [first, second].filter(result => result.code === 0);
+    const contended = [first, second].filter(result => result.code !== 0);
+    assert.ok(successful.length >= 1);
+    assert.ok(contended.length <= 1);
+    for (const result of contended) assert.match(result.stderr, /Lock contention/);
+    const successfulOutputs = successful.map(result => JSON.parse(result.stdout) as { path: string; ask_user: { scope: string } });
+    const firstOutput = successfulOutputs[0];
+    assert.equal(firstOutput.path, "ask_user");
+    for (const output of successfulOutputs) {
+      assert.equal(output.path, "ask_user");
+      assert.equal(output.ask_user.scope, firstOutput.ask_user.scope);
+    }
+    const retryOutput = JSON.parse(execFileSync(process.execPath, [cli, "transition", "next", "--change", fx.change], {
+      cwd: fx.projectRoot,
+      encoding: "utf8",
+    })) as { path: string; ask_user: { scope: string } };
+    assert.equal(retryOutput.path, "ask_user");
+    assert.equal(retryOutput.ask_user.scope, firstOutput.ask_user.scope);
+    const presented = readEvents(fx.projectRoot, fx.change).filter(event => event.event_type === "user_question_presented");
+    assert.equal(presented.length, 1);
   } finally { fx.cleanup(); }
 });
 
@@ -804,7 +1126,7 @@ test("Explore Q 回写后，绑定旧 Discovery 的 critic job 自动重建", ()
   } finally { fx.cleanup(); }
 });
 
-test("next 在 explore 不让非阶段 open job 抢占 discovery 校验", () => {
+test("next 在 explore 不让非阶段 open job 抢占 discovery artifact", () => {
   const fx = setupExplore();
   try {
     appendOpenJob(fx.projectRoot, fx.change, "explore", {
@@ -814,8 +1136,8 @@ test("next 在 explore 不让非阶段 open job 抢占 discovery 校验", () => 
     });
 
     const result = next(fx.projectRoot, fx.change, fx.changeRoot);
-    assert.equal(result.path, "ask_user");
-    assert.equal(result.ask_user.scope, "explore_discovery");
+    assert.equal(result.path, "artifact_required");
+    assert.equal(result.artifact.kind, "discovery");
   } finally { fx.cleanup(); }
 });
 
@@ -839,6 +1161,15 @@ test("next 在 explore 一次只返回当前问题，登记后必须回写才能
     assert.doesNotMatch(first.ask_user.question, /Q-001/);
     assert.doesNotMatch(first.ask_user.question, /Q-002/);
     assert.deepEqual(first.ask_user.allowed_answers, []);
+    assert.deepEqual(first.ask_user.record_argv, [
+      "superspec", "record", "user-decision", "--change", fx.change, "--input", "-",
+    ]);
+    assert.deepEqual(first.ask_user.record_input, {
+      scope: first.ask_user.scope,
+      question: first.ask_user.question,
+      answer: null,
+    });
+    assert.deepEqual(first.ask_user.required_fields, ["answer"]);
 
     const firstInput = JSON.stringify({
       scope: first.ask_user.scope,
@@ -883,7 +1214,7 @@ test("next 在 explore 一次只返回当前问题，登记后必须回写才能
       "",
       "## 待确认问题",
       "",
-      "- [x] Q-001 保留旧行为。",
+      "- [x] Q-001 是否保留旧行为？",
       "- [ ] Q-002 默认展示什么内容？",
     ].join("\n"));
     const second = next(fx.projectRoot, fx.change, fx.changeRoot);
@@ -930,13 +1261,119 @@ test("Explore 新轮次：直接勾选确认事项不能绕过答复登记", () 
 
     writeFileSync(discoveryPath, openDiscovery.replace("- [ ]", "- [x]").replace("是否保留旧行为？", "保留旧行为。"));
     const blocked = next(fx.projectRoot, fx.change, fx.changeRoot);
-    assert.equal(blocked.path, "ask_user");
-    assert.equal(blocked.ask_user.scope, "explore_answer_registration");
-    assert.match(blocked.ask_user.question, /没有对应的答复登记/);
+    assert.equal(blocked.path, "material_update_required");
+    assert.match(blocked.reason, /未登记答复/);
 
     const transition = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(transition.events_written, 0);
     assert.match(transition.message, /缺少对应答复登记/);
+  } finally { fx.cleanup(); }
+});
+
+test("Explore 已展示问题：删除问题行不能绕过答复登记", () => {
+  const fx = setupExplore();
+  try {
+    const discoveryPath = join(fx.changeRoot, ".superspec", "artifacts", "discovery.md");
+    writeFileSync(discoveryPath, [
+      "# Discovery",
+      "",
+      "## 待确认问题",
+      "",
+      "- [ ] Q-001 团队规则按查看者匹配还是按成员匹配？",
+    ].join("\n"));
+
+    const presented = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(presented.path, "ask_user");
+    assert.match(presented.ask_user.scope, /^explore_open_question:/);
+    assert.ok(readEvents(fx.projectRoot, fx.change).some(event => event.event_type === "user_question_presented"));
+
+    writeFileSync(discoveryPath, "# Discovery\n\n团队规则按查看者匹配。\n");
+    const blocked = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(blocked.path, "material_update_required");
+    assert.match(blocked.errors.join("\n"), /已从 discovery\.md 消失/);
+
+    const transition = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(transition.events_written, 0);
+    assert.match(transition.message, /缺少答复登记且已从 discovery\.md 消失/);
+
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "transition_commit", {
+      transition: "reopen",
+      from_state: "explore",
+      to_state: "explore",
+      outcome: "advanced",
+      created_job_ids: [],
+      reason: "start a new explore round",
+      reopen_target: "explore",
+      ...exploreAnswerRegistrationPayload("# Discovery\n\n团队规则按查看者匹配。\n"),
+    }, { transitionId: "T-new-explore-round", idempotencyKey: "new-explore-round" }));
+    const newRound = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.notEqual(newRound.path === "ask_user" ? newRound.ask_user.scope : "", "explore_answer_registration");
+  } finally { fx.cleanup(); }
+});
+
+test("Explore 升级兼容：新 scope 已展示后仍可用同题 legacy scope 完成登记", () => {
+  const fx = setupExplore();
+  try {
+    const discoveryPath = join(fx.changeRoot, ".superspec", "artifacts", "discovery.md");
+    const openDiscovery = "# Discovery\n\n## 调查\n\n旧实现位于模块 A。\n\n## 待确认问题\n\n- [ ] Q-001 是否保留旧行为？\n";
+    writeFileSync(discoveryPath, openDiscovery);
+
+    const presented = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(presented.path, "ask_user");
+    const current = parseDiscoveryOpenQuestions(openDiscovery)[0];
+    const events = readEvents(fx.projectRoot, fx.change);
+    const legacyScope = legacyDiscoveryOpenQuestionScope(current, currentExploreRoundId(events));
+    assert.notEqual(legacyScope, presented.path === "ask_user" ? presented.ask_user.scope : "");
+    assert.equal(recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({
+      scope: legacyScope,
+      answer: "保留旧行为",
+    })).accepted, true);
+    writeFileSync(discoveryPath, openDiscovery.replace("旧实现位于模块 A。", "旧实现位于模块 A，另有一处调用。"));
+    const afterUnrelatedChange = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(afterUnrelatedChange.path, "ask_user");
+    assert.equal(afterUnrelatedChange.ask_user.scope, presented.path === "ask_user" ? presented.ask_user.scope : "");
+    assert.equal(recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({
+      scope: afterUnrelatedChange.ask_user.scope,
+      answer: "保留旧行为",
+    })).accepted, true);
+    assert.equal(recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({
+      scope: afterUnrelatedChange.ask_user.scope,
+      answer: "不保留旧行为",
+    })).accepted, false);
+
+    writeFileSync(discoveryPath, openDiscovery.replace("旧实现位于模块 A。", "旧实现位于模块 A，另有一处调用。").replace("- [ ]", "- [x]"));
+    const afterWriteback = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.notEqual(afterWriteback.path, "material_update_required");
+  } finally { fx.cleanup(); }
+});
+
+test("Explore 决策身份：升级前 legacy accepted 事件阻止冲突 v2 答复", () => {
+  const fx = setupExplore();
+  try {
+    const discoveryPath = join(fx.changeRoot, ".superspec", "artifacts", "discovery.md");
+    const content = "# Discovery\n\n## 待确认问题\n\n- [ ] Q-001 是否保留旧行为？\n";
+    writeFileSync(discoveryPath, content);
+    const events = readEvents(fx.projectRoot, fx.change);
+    const current = parseDiscoveryOpenQuestions(content)[0];
+    const roundId = currentExploreRoundId(events);
+    const legacyScope = legacyDiscoveryOpenQuestionScope(current, roundId);
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "user_decision_recorded", {
+      scope: legacyScope,
+      question: "是否保留旧行为？",
+      answer: "保留旧行为",
+      accepted: true,
+      explore_open_question: {
+        round_id: roundId,
+        question_id: current.id,
+        question_ordinal: current.ordinal,
+        context_fingerprint: discoveryQuestionContextFingerprint(content, current),
+      },
+    }));
+    const presented = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(presented.path, "ask_user");
+    assert.equal(recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({ scope: presented.ask_user.scope, answer: "不保留旧行为" })).accepted, false);
+    writeFileSync(discoveryPath, content.replace("- [ ]", "- [x]"));
+    assert.notEqual(next(fx.projectRoot, fx.change, fx.changeRoot).path, "material_update_required");
   } finally { fx.cleanup(); }
 });
 
@@ -972,9 +1409,9 @@ test("Explore 新轮次：登记答复后回写通过，轮次开始前的已确
     const decision = readEvents(fx.projectRoot, fx.change).findLast(event => event.event_type === "user_decision_recorded");
     assert.equal((decision?.payload as { explore_open_question?: { question_id?: unknown } }).explore_open_question?.question_id, "Q-001");
 
-    writeFileSync(discoveryPath, openDiscovery.replace("- [ ]", "- [x]").replace("是否保留旧行为？", "保留旧行为。"));
+    writeFileSync(discoveryPath, openDiscovery.replace("- [ ]", "- [x]"));
     const afterRewrite = next(fx.projectRoot, fx.change, fx.changeRoot);
-    assert.notEqual(afterRewrite.path === "ask_user" ? afterRewrite.ask_user.scope : "", "explore_answer_registration");
+    assert.notEqual(afterRewrite.path, "material_update_required");
 
     const historicalClosed = [
       "# Discovery",
@@ -999,7 +1436,7 @@ test("Explore 新轮次：登记答复后回写通过，轮次开始前的已确
   } finally { fx.cleanup(); }
 });
 
-test("Explore 新轮次：调查材料变化后不能直接复用旧答复关闭", () => {
+test("Explore 新轮次：无关调查材料变化不使已登记答复失效", () => {
   const fx = setupExplore();
   try {
     const discoveryPath = join(fx.changeRoot, ".superspec", "artifacts", "discovery.md");
@@ -1008,7 +1445,7 @@ test("Explore 新轮次：调查材料变化后不能直接复用旧答复关闭
       "",
       "## 需求理解",
       "",
-      "- 当前前提：保留旧行为",
+      "- 补充调查：旧实现由同一模块维护",
       "",
       "## 待确认问题",
       "",
@@ -1034,16 +1471,15 @@ test("Explore 新轮次：调查材料变化后不能直接复用旧答复关闭
     })).accepted, true);
 
     const closed = openDiscovery
-      .replace("当前前提：保留旧行为", "当前前提：改为新行为")
-      .replace("- [ ] Q-001 是否保留旧行为？", "- [x] Q-001 保留旧行为。");
+      .replace("补充调查：旧实现由同一模块维护", "补充调查：旧实现还有另一处调用")
+      .replace("- [ ]", "- [x]");
     writeFileSync(discoveryPath, closed);
-    const blocked = next(fx.projectRoot, fx.change, fx.changeRoot);
-    assert.equal(blocked.path, "ask_user");
-    assert.equal(blocked.ask_user.scope, "explore_answer_registration");
+    const afterWriteback = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.notEqual(afterWriteback.path, "material_update_required");
   } finally { fx.cleanup(); }
 });
 
-test("Explore 决策依据或轮次变化后，同一问题可以登记新的答复", () => {
+test("Explore 问题修订或轮次变化后，同一问题可以登记新的答复", () => {
   const fx = setupExplore();
   try {
     const discoveryPath = join(fx.changeRoot, ".superspec", "artifacts", "discovery.md");
@@ -1069,9 +1505,16 @@ test("Explore 决策依据或轮次变化后，同一问题可以登记新的答
     writeFileSync(discoveryPath, original.replace("旧的兼容口径", "新需求要求统一新行为"));
     const afterContextChange = next(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(afterContextChange.path, "ask_user");
-    assert.notEqual(afterContextChange.ask_user.scope, first.ask_user.scope);
+    assert.equal(afterContextChange.ask_user.scope, first.ask_user.scope);
+
+    writeFileSync(discoveryPath, original
+      .replace("旧的兼容口径", "新需求要求统一新行为")
+      .replace("是否保留旧行为？", "是否继续保留旧行为及兼容入口？"));
+    const afterQuestionChange = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(afterQuestionChange.path, "ask_user");
+    assert.notEqual(afterQuestionChange.ask_user.scope, first.ask_user.scope);
     assert.equal(recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({
-      scope: afterContextChange.ask_user.scope,
+      scope: afterQuestionChange.ask_user.scope,
       answer: "不保留旧行为",
     })).accepted, true);
 
@@ -1090,7 +1533,7 @@ test("Explore 决策依据或轮次变化后，同一问题可以登记新的答
     const afterReopen = next(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(afterReopen.path, "ask_user");
     assert.notEqual(afterReopen.ask_user.scope, first.ask_user.scope);
-    assert.notEqual(afterReopen.ask_user.scope, afterContextChange.ask_user.scope);
+    assert.notEqual(afterReopen.ask_user.scope, afterQuestionChange.ask_user.scope);
     assert.equal(recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({
       scope: afterReopen.ask_user.scope,
       answer: "重新确认后保留旧行为",
@@ -1153,6 +1596,7 @@ test("next 在 propose 不让非阶段 open job 抢占正常推进", () => {
       role: "executor",
       created_from_transition: "apply",
     });
+    writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "test-contract.md"), "# Test Contract\n");
 
     const result = next(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(result.path, "next_command");
@@ -1160,17 +1604,64 @@ test("next 在 propose 不让非阶段 open job 抢占正常推进", () => {
   } finally { fx.cleanup(); }
 });
 
-test("next 在 propose 不把 tasks 普通 checklist 当成待用户确认", () => {
+test("next 在 propose 不把 tasks 普通 checklist 解析成设计决定", () => {
   const fx = setupPropose();
   try {
     confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     const entered = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     assert.equal(entered.to_state, "propose");
     writeFileSync(join(fx.changeRoot, "tasks.md"), "# Tasks\n\n- [ ] TASK-001 tdd_required:true\n");
+    writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "test-contract.md"), "# Test Contract\n");
 
     const result = next(fx.projectRoot, fx.change, fx.changeRoot);
-    assert.equal(result.path, "next_command");
-    assert.match(result.next_command, /propose-ready/);
+    assert.equal(result.path, "material_update_required");
+    if (result.path !== "material_update_required") throw new Error("expected planning preflight feedback");
+    assert.ok(result.errors.length > 0);
+    assert.deepEqual(result.resume.argv, ["superspec", "transition", "next", "--change", fx.change]);
+  } finally { fx.cleanup(); }
+});
+
+test("next 在 propose 缺 test-contract 时返回 canonical artifact_required", () => {
+  const fx = setupPropose();
+  try {
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.equal(transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal").to_state, "propose");
+
+    const result = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.deepEqual(result, {
+      state: "propose",
+      path: "artifact_required",
+      artifact: {
+        kind: "test_contract",
+        path: "openspec/changes/test-change/.superspec/artifacts/test-contract.md",
+        operation: "create_or_update",
+      },
+      resume: {
+        argv: ["superspec", "transition", "next", "--change", "test-change"],
+      },
+      reason: "test-contract.md 不存在",
+    });
+  } finally { fx.cleanup(); }
+});
+
+test("next 在 propose 宣称计划就绪前复用 propose-ready 预检", () => {
+  const fx = setupPropose();
+  try {
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.equal(transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal").to_state, "propose");
+    writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "test-contract.md"), "# Test Contract\n");
+    writeFileSync(join(fx.changeRoot, "tasks.md"), [
+      "# Tasks",
+      "",
+      "- [ ] TASK-001 first",
+      "- [ ] TASK-001 duplicate",
+    ].join("\n"));
+
+    const result = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(result.path, "material_update_required");
+    if (result.path !== "material_update_required") throw new Error("expected planning preflight feedback");
+    assert.ok(result.errors.some(error => /TASK-001/.test(error)));
+    assert.match(result.reason, /TASK-001/);
   } finally { fx.cleanup(); }
 });
 
@@ -1579,7 +2070,7 @@ test("explore review override：fresh rejected 稳定 blocked，整体裁决后 
   } finally { fx.cleanup(); }
 });
 
-test("phase confirmation：normal Explore 不绑定 strict 历史 critic override", () => {
+test("phase confirmation：normal Explore 绑定现有 critic override", () => {
   const fx = setupPropose();
   try {
     const created = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "strict");
@@ -1610,7 +2101,7 @@ test("phase confirmation：normal Explore 不绑定 strict 历史 critic overrid
     })).accepted, true);
     const ask2 = next(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     assert.equal(ask2.path, "ask_user");
-    assert.equal(ask2.ask_user.scope, ask1.ask_user.scope, "normal gate 未使用 critic，不应因其 override 更新而重新确认");
+    assert.notEqual(ask2.ask_user.scope, ask1.ask_user.scope, "normal gate 使用 critic，override 更新应使阶段确认失效");
 
     const advance2 = (ask2.ask_user.actions as PhaseDecisionAction[]).find(action => action.decision === "advance");
     assert.ok(advance2);
@@ -2094,6 +2585,13 @@ test("已初始化 v2 工作流：propose-ready 与 start-apply 解析执行依�
       "  - 边界: 不改持久化",
     ].join("\n"));
 
+    const invalidDesign = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.match(invalidDesign.message, /design\.md 缺少稳定结构标题：# 设计/);
+    assert.match(invalidDesign.message, /design\.md 缺少稳定结构标题：## 实现方案/);
+    assert.match(invalidDesign.message, /引用锚点不存在：design\.md#Missing route/);
+    assert.equal(invalidDesign.created_jobs.length, 0);
+
+    writeFileSync(join(fx.changeRoot, "design.md"), STRICT_DESIGN);
     const propose = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     assert.match(propose.message, /引用锚点不存在：design\.md#Missing route/);
     assert.equal(propose.created_jobs.length, 0);
@@ -2109,6 +2607,48 @@ test("已初始化 v2 工作流：propose-ready 与 start-apply 解析执行依�
     const apply = startApply(fx.projectRoot, fx.change, fx.changeRoot);
     assert.match(apply.message, /引用锚点不存在：design\.md#Missing route/);
     assert.equal(apply.created_jobs.length, 0);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("历史 v2 strict planning round 不追溯要求新版 design 结构", () => {
+  const fx = setupPropose();
+  try {
+    writeFileSync(join(fx.projectRoot, "openspec", "config.yaml"), "schema: spec-driven\n");
+    const currentProfile = planningValidationProfileForNewRound(fx.projectRoot);
+    const historicalProfile = { version: 2, openspec: currentProfile.openspec } as const;
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "transition_commit", {
+      transition: "propose", from_state: "explore", to_state: "propose",
+      outcome: "advanced", created_job_ids: [], reason: "seed historical v2 propose",
+      planning_validation_version: 2,
+      planning_validation_profile: historicalProfile,
+    }, { transitionId: "T-historical-v2-propose", idempotencyKey: "historical-v2-propose" }));
+    writeFileSync(join(fx.changeRoot, "proposal.md"), [
+      "# Proposal",
+      "",
+      "## Impact",
+      "",
+      "| Area | Reason |",
+      "|---|---|",
+      "| src/a.ts | Historical compatibility |",
+    ].join("\n"));
+    writeFileSync(join(fx.changeRoot, "design.md"), "# Design\n\n## Route\n");
+    writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "test-contract.md"), "# Test Contract\n");
+    writeFileSync(join(fx.changeRoot, "tasks.md"), [
+      "# Tasks",
+      "",
+      "- [ ] TASK-001 Historical design",
+      "  执行依据:",
+      "  - 测试:",
+      "  - 设计: design.md#Route",
+      "  - 来源: proposal.md#Impact",
+      "  - 验收: 历史结构可继续推进",
+      "  - 边界: 不改业务代码",
+    ].join("\n"));
+
+    const result = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.doesNotMatch(result.message, /design\.md .*稳定结构|design\.md 缺少稳定结构标题/);
   } finally {
     fx.cleanup();
   }
@@ -2140,13 +2680,10 @@ test("propose-ready --risk normal：基础职责全满足 + critic accepted → 
     // 1. propose-ready normal → 创建 critic
     const t1 = proposeReady(projectRoot, change, changeRoot, "normal");
     assert.equal(t1.outcome, "job_created");
-    const jobId = t1.created_jobs[0];
+    assert.deepEqual(rebuildSnapshot(projectRoot, change, changeRoot).open_jobs.map(job => job.role), ["critic"]);
 
-    // 2. record job-submit → accepted
-    const reportPath = join(projectRoot, "report.json");
-    writeFileSync(reportPath, reviewerReportForJob(projectRoot, change, jobId));
-    const r1 = recordJobSubmit(projectRoot, change, changeRoot, jobId, reportPath);
-    assert.equal(r1.accepted, true);
+    // 2. normal 模式的计划审查 accepted
+    acceptAllProposeJobs({ projectRoot, change, changeRoot });
 
     // 3. propose-ready normal → 推进到 propose_ready
     const t2 = proposeReady(projectRoot, change, changeRoot, "normal");
@@ -2195,7 +2732,11 @@ test("propose-ready 默认完整审查：创建 critic + architect + test 审核
     const byRole = new Map(packets.map(packet => [packet?.role, packet]));
 
     const critic = byRole.get("critic");
-    assert.deepEqual(critic?.review_targets, ["proposal.md", "specs/", "tasks.md"]);
+    assert.deepEqual(critic?.review_targets, [
+      "proposal.md",
+      "specs/",
+      "tasks.md",
+    ]);
     assert.deepEqual(critic?.read_only_refs, [
       "design.md",
       ".superspec/artifacts/test-contract.md",
@@ -2305,6 +2846,7 @@ test("propose reviewer freshness：单文档变化只重启职责角色", () => 
         .filter(role => !staleSet.has(role as JobRole))
         .sort();
       const freshRoles = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot).accepted_jobs
+        .filter(job => job.created_from_transition === "propose-ready")
         .map(job => job.role)
         .sort();
       assert.deepEqual(freshRoles, expectedFresh, `${scenario.name} 的 fresh 角色不正确`);
@@ -2419,7 +2961,13 @@ test("propose review override：只裁决 rejected 角色，其他角色仍须 a
     assert.equal(advanced.to_state, "propose_ready");
     const snapshot = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(snapshot.accepted_jobs.some(job => job.job_id === architectJobId), false);
-    assert.deepEqual(snapshot.accepted_jobs.map(job => job.role).sort(), ["critic", "test-engineer"]);
+    assert.deepEqual(
+      snapshot.accepted_jobs
+        .filter(job => job.created_from_transition === "propose-ready")
+        .map(job => job.role)
+        .sort(),
+      ["critic", "test-engineer"],
+    );
   } finally { fx.cleanup(); }
 });
 
@@ -2666,9 +3214,7 @@ test("propose-ready strict：同一 gate 下 critic 不能满足 architect 或 t
 
     const normal = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     assert.equal(normal.outcome, "job_created");
-    const reportPath = join(fx.projectRoot, "critic.json");
-    writeFileSync(reportPath, reviewerReportForJob(fx.projectRoot, fx.change, normal.created_jobs[0]));
-    assert.equal(recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, normal.created_jobs[0], reportPath).accepted, true);
+    acceptAllProposeJobs(fx);
 
     const strict = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "strict");
     assert.equal(strict.outcome, "job_created");
@@ -2738,10 +3284,18 @@ test("legacy propose job：已取消历史绑定路径缺失时仅 stale，且�
       report_digest: "sha256:legacy-retired-path-report",
       accepted_at: new Date().toISOString(),
     }));
-    assert.equal(rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot).accepted_jobs.length, 1);
+    assert.equal(
+      rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot).accepted_jobs
+        .filter(accepted => accepted.created_from_transition === "propose-ready").length,
+      1,
+    );
 
     rmSync(join(fx.changeRoot, legacyPath));
-    assert.equal(rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot).accepted_jobs.length, 0);
+    assert.equal(
+      rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot).accepted_jobs
+        .filter(accepted => accepted.created_from_transition === "propose-ready").length,
+      0,
+    );
 
     const retry = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     assert.equal(retry.outcome, "job_created");
@@ -2811,10 +3365,7 @@ test("完整 e2e（Phase 2）：init→explore→写 discovery→propose→propo
     assert.equal(t1.outcome, "job_created");
 
     // record job-submit → accepted
-    const jobId = t1.created_jobs[0];
-    const reportPath = join(projectRoot, "report.json");
-    writeFileSync(reportPath, reviewerReportForJob(projectRoot, change, jobId));
-    recordJobSubmit(projectRoot, change, changeRoot, jobId, reportPath);
+    acceptAllProposeJobs({ projectRoot, change, changeRoot });
 
     // propose-ready normal → 推进
     const t2 = proposeReady(projectRoot, change, changeRoot, "normal");
@@ -2834,6 +3385,25 @@ test("next 在 explore 有空 discovery.md 时返回 ask_user", () => {
     const result = next(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(result.path, "ask_user");
     assert.ok(result.reason.includes("为空"), `应报"为空"，实际：${result.reason}`);
+  } finally { fx.cleanup(); }
+});
+
+test("next 在 explore 已有但结构无效的 discovery 时仍返回校验反馈", () => {
+  const fx = setupExplore();
+  try {
+    writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "discovery.md"), [
+      "# Discovery",
+      "",
+      "## 链路五要素",
+      "| ID | 状态 |",
+      "|---|---|",
+      "| CHAIN-001 | 错误状态 |",
+      "",
+    ].join("\n"));
+    const result = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(result.path, "ask_user");
+    assert.notEqual(result.path, "artifact_required");
+    assert.match(result.reason, /链路五要素/);
   } finally { fx.cleanup(); }
 });
 
@@ -2857,7 +3427,10 @@ test("architect 审查时 design 缺失：新建后仅 architect accepted job �
 
     writeFileSync(join(fx.changeRoot, "design.md"), "# Design\n");
     assert.deepEqual(
-      rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot).accepted_jobs.map(job => job.role).sort(),
+      rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot).accepted_jobs
+        .filter(job => job.created_from_transition === "propose-ready")
+        .map(job => job.role)
+        .sort(),
       ["critic", "test-engineer"],
     );
     const retry = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "strict");
@@ -2954,11 +3527,19 @@ test("specs freshness：审查通过后修改 specs 文件，accepted job 变 st
     transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     acceptAllProposeJobs(fx);
-    assert.equal(rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot).accepted_jobs.length, 1);
+    assert.equal(
+      rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot).accepted_jobs
+        .filter(job => job.created_from_transition === "propose-ready").length,
+      1,
+    );
 
     writeFileSync(join(fx.changeRoot, "specs", "auth", "spec.md"), "# Auth Spec\n\n## ADDED Requirements\n\n改动\n");
     const snap = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot);
-    assert.equal(snap.accepted_jobs.length, 0, "修改 specs 文件应作废已通过的计划审查");
+    assert.equal(
+      snap.accepted_jobs.filter(job => job.created_from_transition === "propose-ready").length,
+      0,
+      "修改 specs 文件应作废已通过的计划审查",
+    );
   } finally { fx.cleanup(); }
 });
 
@@ -2973,7 +3554,11 @@ test("specs freshness：审查通过后新增 specs 文件同样作废审查", (
     mkdirSync(join(fx.changeRoot, "specs", "billing"), { recursive: true });
     writeFileSync(join(fx.changeRoot, "specs", "billing", "spec.md"), "# Billing Spec\n");
     const snap = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot);
-    assert.equal(snap.accepted_jobs.length, 0, "新增 specs 文件应作废已通过的计划审查");
+    assert.equal(
+      snap.accepted_jobs.filter(job => job.created_from_transition === "propose-ready").length,
+      0,
+      "新增 specs 文件应作废已通过的计划审查",
+    );
   } finally { fx.cleanup(); }
 });
 
@@ -2987,7 +3572,11 @@ test("specs freshness：删除 specs 文件同样作废审查", () => {
 
     rmSync(join(fx.changeRoot, "specs", "auth", "spec.md"));
     const snap = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot);
-    assert.equal(snap.accepted_jobs.length, 0, "删除 specs 文件应作废已通过的计划审查");
+    assert.equal(
+      snap.accepted_jobs.filter(job => job.created_from_transition === "propose-ready").length,
+      0,
+      "删除 specs 文件应作废已通过的计划审查",
+    );
   } finally { fx.cleanup(); }
 });
 
@@ -3006,7 +3595,11 @@ test("specs freshness：审查时无 specs 目录、通过后新建 specs 同样
     mkdirSync(join(fx.changeRoot, "specs", "auth"), { recursive: true });
     writeFileSync(join(fx.changeRoot, "specs", "auth", "spec.md"), "# Auth Spec\n");
     const snap = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot);
-    assert.equal(snap.accepted_jobs.length, 0, "审查后新建 specs 目录应作废已通过的计划审查");
+    assert.equal(
+      snap.accepted_jobs.filter(job => job.created_from_transition === "propose-ready").length,
+      0,
+      "审查后新建 specs 目录应作废已通过的计划审查",
+    );
   } finally { fx.cleanup(); }
 });
 
@@ -3019,7 +3612,11 @@ test("specs freshness：specs 未变化时审查保持 accepted 不误伤", () =
     acceptAllProposeJobs(fx);
 
     const snap = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot);
-    assert.equal(snap.accepted_jobs.length, 1, "specs 未变化不应误判 stale");
+    assert.equal(
+      snap.accepted_jobs.filter(job => job.created_from_transition === "propose-ready").length,
+      1,
+      "specs 未变化不应误判 stale",
+    );
   } finally { fx.cleanup(); }
 });
 

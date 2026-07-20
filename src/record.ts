@@ -41,12 +41,26 @@ import { EXPLORE_DISCOVERY_REVIEW_GATE, PROPOSE_FINAL_REVIEW_GATE, type ReviewGa
 import { RecordInputDecodingError, readRecordInputFile } from "./record_input.ts";
 import { currentExploreRoundId } from "./explore_round.ts";
 import {
+  currentProposeOpenQuestion,
+  currentProposeQuestionContent,
+  currentProposeRoundId,
+} from "./propose_round.ts";
+import {
   discoveryOpenQuestionDisplayText,
   discoveryQuestionContextFingerprint,
+  discoveryQuestionDecisionBasisDigest,
   discoveryOpenQuestionScope,
+  legacyDiscoveryOpenQuestionScope,
   EXPLORE_OPEN_QUESTION_SCOPE_PREFIX,
   parseDiscoveryOpenQuestions,
+  proposeOpenQuestionDisplayText,
+  proposeOpenQuestionScope,
+  proposeQuestionContextFingerprint,
+  proposeQuestionDecisionBasisDigest,
+  legacyProposeOpenQuestionScope,
+  PROPOSE_OPEN_QUESTION_SCOPE_PREFIX,
   type DiscoveryOpenQuestion,
+  type ProposeQuestion,
 } from "./format.ts";
 import type { CodeReviewResultKind, Event, RecordResult, Job, JobPacket, JobRole, JobState } from "./types.ts";
 
@@ -117,7 +131,7 @@ function previousRejectionInstruction(job: Job): string {
   const identityRule = job.role === "code-reviewer"
     ? "同一问题仍存在时复用原 finding ID；legacy finding 没有 ID 时沿用原始语义并补一个稳定 ID；"
     : "已解决或已由等价证据闭环的问题不要重复报告，不得通过更换标题或措辞重复同一问题；";
-  return `${reason}本轮是修复复核：逐项判断本工作项附带的上一次同角色 finding 是否仍成立。Finding 中的 recommendation 只是非绑定建议，不是需求或验收标准；先独立核对 underlying problem、直接证据和本次验收，不得因原建议指定了某种架构就要求照做。${identityRule}默认只复核历史 finding；新 blocker 仅允许是本次修正直接引入的回归，并必须说明“修正动作 → 新问题”的因果链，不得展开无关的故障模型、消费者或架构议题。`;
+  return `${reason}本轮是修复复核：逐项判断本工作项附带的上一次同角色 finding 是否仍成立。Finding 中的 recommendation 只是非绑定建议，不是需求或验收标准；先独立核对 underlying problem、直接证据和本次验收，不得因原建议指定了某种架构就要求照做。修正不得通过缩小已确认范围、改写用户决定或删除验收来让 finding 字面消失；这类偏离属于本次修正直接引入的回归。${identityRule}默认只复核历史 finding；新 blocker 仅允许是本次修正直接引入的回归，并必须说明“修正动作 → 新问题”的因果链，不得展开无关的故障模型、消费者或架构议题。`;
 }
 
 function reviewScopeForJob(job: Job): { reviewTargets: string[]; readOnlyRefs: string[] } {
@@ -181,11 +195,32 @@ function currentDiscoveryOpenQuestion(projectRoot: string, change: string): Disc
   return parseDiscoveryOpenQuestions(readFileSync(discoveryPath, "utf8"))[0] ?? null;
 }
 
-function latestAcceptedExploreOpenQuestionDecision(events: Event[], scope: string): Event | null {
+function latestAcceptedExploreOpenQuestionDecision(
+  events: Event[],
+  scopes: readonly string[],
+  identity: { roundId: string; questionId: string; questionOrdinal: number; decisionBasisDigest: string },
+): Event | null {
   return [...events].reverse().find(event => {
     if (event.event_type !== "user_decision_recorded") return false;
-    const payload = event.payload as { scope?: unknown; accepted?: unknown };
-    return payload.accepted !== false && payload.scope === scope;
+    const payload = event.payload as {
+      scope?: unknown;
+      accepted?: unknown;
+      explore_open_question?: {
+        round_id?: unknown;
+        question_id?: unknown;
+        question_ordinal?: unknown;
+        decision_basis_digest?: unknown;
+      };
+    };
+    if (payload.accepted === false) return false;
+    const recorded = payload.explore_open_question;
+    if (recorded && typeof recorded.decision_basis_digest === "string") {
+      return recorded.round_id === identity.roundId &&
+        recorded.question_id === identity.questionId &&
+        (!identity.questionId.startsWith("item-") || recorded.question_ordinal === identity.questionOrdinal) &&
+        recorded.decision_basis_digest === identity.decisionBasisDigest;
+    }
+    return typeof payload.scope === "string" && scopes.includes(payload.scope);
   }) ?? null;
 }
 
@@ -231,6 +266,78 @@ function invalidExploreOpenQuestionResult(
       : reason === "explore_open_question_already_recorded"
         ? "这件事已有已登记答复，请先回写 discovery.md 后重新执行 next"
       : "需要确认的事项已变化或已完成，请重新执行 next 获取当前事项",
+  };
+}
+
+function latestAcceptedProposeOpenQuestionDecision(
+  events: Event[],
+  scopes: readonly string[],
+  identity: { roundId: string; path: string; questionId: string; questionOrdinal: number; decisionBasisDigest: string },
+): Event | null {
+  return [...events].reverse().find(event => {
+    if (event.event_type !== "user_decision_recorded") return false;
+    const payload = event.payload as {
+      scope?: unknown;
+      accepted?: unknown;
+      propose_open_question?: {
+        round_id?: unknown;
+        path?: unknown;
+        question_id?: unknown;
+        question_ordinal?: unknown;
+        decision_basis_digest?: unknown;
+      };
+    };
+    if (payload.accepted === false) return false;
+    const recorded = payload.propose_open_question;
+    if (recorded && typeof recorded.decision_basis_digest === "string") {
+      return recorded.round_id === identity.roundId &&
+        recorded.path === identity.path &&
+        recorded.question_id === identity.questionId &&
+        (!identity.questionId.startsWith("item-") || recorded.question_ordinal === identity.questionOrdinal) &&
+        recorded.decision_basis_digest === identity.decisionBasisDigest;
+    }
+    return typeof payload.scope === "string" && scopes.includes(payload.scope);
+  }) ?? null;
+}
+
+function isProposeOpenQuestionScope(scope: string): boolean {
+  return scope.startsWith(PROPOSE_OPEN_QUESTION_SCOPE_PREFIX);
+}
+
+function isWellFormedProposeOpenQuestionScope(scope: string): boolean {
+  return /^propose_open_question:sha256:[a-f0-9]{64}:(?:DEC-[A-Za-z0-9][A-Za-z0-9_-]*|item-[1-9]\d*)$/.test(scope);
+}
+
+function invalidProposeOpenQuestionResult(
+  projectRoot: string,
+  change: string,
+  inputDigest: string,
+  existing: Event | undefined,
+  decision: { scope: string; answer: string },
+  reason:
+    | "invalid_propose_open_question_scope"
+    | "stale_propose_open_question_scope"
+    | "propose_open_question_already_recorded",
+): RecordResult {
+  const existingPayload = existing?.payload as { accepted?: unknown; reason?: unknown } | undefined;
+  if (existingPayload?.accepted === false && existingPayload.reason === reason) {
+    return { event_type: "user_decision_recorded", accepted: false, message: "幂等返回：同一无效设计决定答复已登记" };
+  }
+  appendEvent(projectRoot, change, makeEvent(change, "user_decision_recorded", {
+    accepted: false,
+    scope: decision.scope,
+    answer: decision.answer,
+    reason,
+    input_digest: inputDigest,
+  }));
+  return {
+    event_type: "user_decision_recorded",
+    accepted: false,
+    message: reason === "invalid_propose_open_question_scope"
+      ? "设计决定的内部标识无效，请重新执行 next 获取当前事项"
+      : reason === "propose_open_question_already_recorded"
+        ? "这项设计决定已有答复，请先回写计划材料后重新执行 next"
+        : "需要确认的设计决定已变化或已完成，请重新执行 next 获取当前事项",
   };
 }
 
@@ -877,10 +984,12 @@ function recordUserDecisionLoaded(
   }
   // Explore 的用户答复只能绑定当前文档顺序中的第一项。这里不判断答案是否
   // “正确”，只机械校验当前项、Discovery 决策上下文和 Explore 轮次仍与 next
-  // 返回时一致，防止旧问题在材料改写或重新探索后被错误登记为新问题的决定。
+  // 返回时一致。决定身份绑定问题项中明确写出的 basis；其它文档内容不参与当前
+  // scope，避免无关材料编辑触发重复提问。
   let exploreOpenQuestion: DiscoveryOpenQuestion | null = null;
   let exploreOpenQuestionRoundId: string | null = null;
   let exploreOpenQuestionContextFingerprint: string | null = null;
+  let exploreOpenQuestionBasisDigest: string | null = null;
   if (isExploreOpenQuestionScope(decision.scope)) {
     if (!isWellFormedExploreOpenQuestionScope(decision.scope)) {
       return invalidExploreOpenQuestionResult(
@@ -893,8 +1002,11 @@ function recordUserDecisionLoaded(
       );
     }
     const current = currentDiscoveryOpenQuestion(projectRoot, change);
-    const expectedScope = current ? discoveryOpenQuestionScope(current, currentExploreRoundId(events)) : null;
-    if (!expectedScope || decision.scope !== expectedScope) {
+    const exploreRoundId = currentExploreRoundId(events);
+    const expectedScopes = current
+      ? [discoveryOpenQuestionScope(current, exploreRoundId), legacyDiscoveryOpenQuestionScope(current, exploreRoundId)]
+      : [];
+    if (!expectedScopes.includes(decision.scope)) {
       return invalidExploreOpenQuestionResult(
         projectRoot,
         change,
@@ -904,7 +1016,13 @@ function recordUserDecisionLoaded(
         "stale_explore_open_question_scope",
       );
     }
-    const acceptedForCurrentScope = latestAcceptedExploreOpenQuestionDecision(events, decision.scope);
+    const currentBasisDigest = current ? discoveryQuestionDecisionBasisDigest(current) : "";
+    const acceptedForCurrentScope = latestAcceptedExploreOpenQuestionDecision(events, expectedScopes, {
+      roundId: exploreRoundId,
+      questionId: current!.id,
+      questionOrdinal: current!.ordinal,
+      decisionBasisDigest: currentBasisDigest,
+    });
     if (acceptedForCurrentScope) {
       const previousAnswer = (acceptedForCurrentScope.payload as { answer?: unknown }).answer;
       if (previousAnswer === decision.answer) {
@@ -924,11 +1042,74 @@ function recordUserDecisionLoaded(
       );
     }
     exploreOpenQuestion = current;
-    exploreOpenQuestionRoundId = currentExploreRoundId(events);
+    exploreOpenQuestionRoundId = exploreRoundId;
     const discoveryPath = join(openspecChangeRoot(projectRoot, change), ".superspec", "artifacts", "discovery.md");
     exploreOpenQuestionContextFingerprint = current
       ? discoveryQuestionContextFingerprint(readFileSync(discoveryPath, "utf8"), current)
       : null;
+    exploreOpenQuestionBasisDigest = currentBasisDigest;
+  }
+
+  let proposeOpenQuestion: ProposeQuestion | null = null;
+  let proposeOpenQuestionRoundId: string | null = null;
+  let proposeOpenQuestionContextFingerprint: string | null = null;
+  let proposeOpenQuestionBasisDigest: string | null = null;
+  if (isProposeOpenQuestionScope(decision.scope)) {
+    if (!isWellFormedProposeOpenQuestionScope(decision.scope)) {
+      return invalidProposeOpenQuestionResult(
+        projectRoot,
+        change,
+        inputDigest,
+        existing,
+        { scope: decision.scope, answer: decision.answer },
+        "invalid_propose_open_question_scope",
+      );
+    }
+    const changeRoot = openspecChangeRoot(projectRoot, change);
+    const current = currentProposeOpenQuestion(changeRoot);
+    const proposeRoundId = currentProposeRoundId(events);
+    const expectedScopes = current
+      ? [proposeOpenQuestionScope(current, proposeRoundId), legacyProposeOpenQuestionScope(current, proposeRoundId)]
+      : [];
+    if (!expectedScopes.includes(decision.scope)) {
+      return invalidProposeOpenQuestionResult(
+        projectRoot,
+        change,
+        inputDigest,
+        existing,
+        { scope: decision.scope, answer: decision.answer },
+        "stale_propose_open_question_scope",
+      );
+    }
+    const currentBasisDigest = current ? proposeQuestionDecisionBasisDigest(current) : "";
+    const acceptedForCurrentScope = latestAcceptedProposeOpenQuestionDecision(events, expectedScopes, {
+      roundId: proposeRoundId,
+      path: current!.path,
+      questionId: current!.id,
+      questionOrdinal: current!.ordinal,
+      decisionBasisDigest: currentBasisDigest,
+    });
+    if (acceptedForCurrentScope) {
+      const previousAnswer = (acceptedForCurrentScope.payload as { answer?: unknown }).answer;
+      if (previousAnswer === decision.answer) {
+        return { event_type: "user_decision_recorded", accepted: true, message: "幂等返回：同一用户决策已登记" };
+      }
+      return invalidProposeOpenQuestionResult(
+        projectRoot,
+        change,
+        inputDigest,
+        existing,
+        { scope: decision.scope, answer: decision.answer },
+        "propose_open_question_already_recorded",
+      );
+    }
+    const content = current ? currentProposeQuestionContent(changeRoot, current) : null;
+    proposeOpenQuestion = current;
+    proposeOpenQuestionRoundId = proposeRoundId;
+    proposeOpenQuestionContextFingerprint = current && content
+      ? proposeQuestionContextFingerprint(content, current)
+      : null;
+    proposeOpenQuestionBasisDigest = currentBasisDigest;
   }
 
   let phaseConfirmation: PhaseConfirmation | null = null;
@@ -1212,6 +1393,8 @@ function recordUserDecisionLoaded(
       ? phaseConfirmation.ask.question
       : exploreOpenQuestion
         ? discoveryOpenQuestionDisplayText(exploreOpenQuestion)
+        : proposeOpenQuestion
+          ? proposeOpenQuestionDisplayText(proposeOpenQuestion)
         : typeof decision.question === "string" ? decision.question : "",
     answer: phaseAction
       ? phaseAction.label
@@ -1220,13 +1403,25 @@ function recordUserDecisionLoaded(
     ...(reviewRejectionDecisionSource ? { decision_source: reviewRejectionDecisionSource } : {}),
     ...(reviewRejectionOverride ? { review_rejection_override: reviewRejectionOverride } : {}),
     ...(codeReviewDecisionReference ? { code_review_decision: codeReviewDecisionReference } : {}),
-    ...(exploreOpenQuestion && exploreOpenQuestionRoundId && exploreOpenQuestionContextFingerprint ? {
+    ...(exploreOpenQuestion && exploreOpenQuestionRoundId && exploreOpenQuestionContextFingerprint && exploreOpenQuestionBasisDigest ? {
       explore_open_question: {
         round_id: exploreOpenQuestionRoundId,
         question_id: exploreOpenQuestion.id,
         question_ordinal: exploreOpenQuestion.ordinal,
         document_fingerprint: exploreOpenQuestion.documentFingerprint,
         context_fingerprint: exploreOpenQuestionContextFingerprint,
+        decision_basis_digest: exploreOpenQuestionBasisDigest,
+      },
+    } : {}),
+    ...(proposeOpenQuestion && proposeOpenQuestionRoundId && proposeOpenQuestionContextFingerprint && proposeOpenQuestionBasisDigest ? {
+      propose_open_question: {
+        round_id: proposeOpenQuestionRoundId,
+        path: proposeOpenQuestion.path,
+        question_id: proposeOpenQuestion.id,
+        question_ordinal: proposeOpenQuestion.ordinal,
+        document_fingerprint: proposeOpenQuestion.documentFingerprint,
+        context_fingerprint: proposeOpenQuestionContextFingerprint,
+        decision_basis_digest: proposeOpenQuestionBasisDigest,
       },
     } : {}),
     ...(phaseAction ? {

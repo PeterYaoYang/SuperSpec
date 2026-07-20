@@ -2183,6 +2183,7 @@ test("code-reviewer：spec 问题必须经用户决策才能 reopen propose", ()
     assert.deepEqual((commit?.payload as { planning_validation_profile?: unknown }).planning_validation_profile, {
       version: 2,
       openspec: { mode: "disabled" },
+      design: { schema_version: 1 },
     });
 
     writeFileSync(join(fx.changeRoot, "tasks.md"), [

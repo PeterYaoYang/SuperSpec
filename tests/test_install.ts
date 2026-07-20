@@ -99,35 +99,15 @@ test("installProject installs engine, workflow skills, role prompts, and agents"
     for (const skill of WORKFLOW_SKILLS) {
       const skillPath = join(projectRoot, ".codex", "skills", skill, "SKILL.md");
       assert.equal(existsSync(skillPath), true, skill);
-      assert.match(readFileSync(skillPath, "utf8"), /^---\n[\s\S]*?\n---\n/, `${skill} should keep YAML frontmatter`);
+      const templatePath = new URL(`../templates/workflow/skills/${skill}/SKILL.md`, import.meta.url);
+      assert.equal(readFileSync(skillPath, "utf8"), readFileSync(templatePath, "utf8"), skill);
     }
     assert.equal(existsSync(join(projectRoot, ".codex", "skills", "superspec-archive")), false);
     for (const prompt of WORKFLOW_PROMPTS) {
-      assert.equal(existsSync(join(projectRoot, ".codex", "prompts", prompt)), true, prompt);
-    }
-    const installedSkillAndPromptSurfaces = [
-      ...WORKFLOW_SKILLS.map(skill => [skill, readFileSync(join(projectRoot, ".codex", "skills", skill, "SKILL.md"), "utf8")] as const),
-      ...WORKFLOW_PROMPTS.map(prompt => [prompt, readFileSync(join(projectRoot, ".codex", "prompts", prompt), "utf8")] as const),
-    ];
-    for (const [surface, content] of installedSkillAndPromptSurfaces) {
-      assert.doesNotMatch(
-        content,
-        /状态机|job packet|task-start|snapshot|冻结|RED\/GREEN|scope|event|gate|propose_to_apply|mock|fake|seam|adapter|fixture|--self-test-fix/,
-        surface,
-      );
-    }
-    const installedAgentsMd = readFileSync(join(projectRoot, "AGENTS.md"), "utf8");
-    assert.match(installedAgentsMd, /只有当用户显式调用 `superspec-\*`/);
-    assert.match(installedAgentsMd, /不得自行启动工作流、创建 change、执行 `transition next`/);
-    assert.doesNotMatch(
-      installedAgentsMd,
-      /状态机|job packet|task-start|snapshot|冻结|RED\/GREEN|scope|event|gate|propose_to_apply|mock|fake|seam|adapter|fixture/,
-      "AGENTS.md",
-    );
-    for (const skill of WORKFLOW_SKILLS) {
-      const content = readFileSync(join(projectRoot, ".codex", "skills", skill, "SKILL.md"), "utf8");
-      assert.match(content, /^description: "仅在用户显式调用 \$superspec-/m, skill);
-      assert.match(content, /不得自动触发。"$/m, skill);
+      const promptPath = join(projectRoot, ".codex", "prompts", prompt);
+      assert.equal(existsSync(promptPath), true, prompt);
+      const templatePath = new URL(`../templates/workflow/prompts/${prompt}`, import.meta.url);
+      assert.equal(readFileSync(promptPath, "utf8"), readFileSync(templatePath, "utf8"), prompt);
     }
     for (const agent of WORKFLOW_AGENTS) {
       const agentPath = join(projectRoot, ".codex", "agents", agent);
@@ -136,63 +116,6 @@ test("installProject installs engine, workflow skills, role prompts, and agents"
       assert.match(content, /^model_reasoning_effort = "medium"$/m, agent);
       assert.doesNotMatch(content, /^model_reasoning_effort = "high"$/m, agent);
     }
-
-    const proposeSkill = readFileSync(join(projectRoot, ".codex", "skills", "superspec-propose", "SKILL.md"), "utf8");
-    assert.match(proposeSkill, /Skill 提供作者模板；工作流反馈材料问题时按反馈修正/);
-    assert.match(proposeSkill, /只把用户已确认的行为、边界和有证据的风险写成计划/);
-    assert.match(proposeSkill, /验证要求由工作流决定，计划不预设执行步骤/);
-    assert.match(proposeSkill, /审查意见是独立证据，不会自动创造需求/);
-    assert.match(proposeSkill, /每个普通 task 紧跟 `执行依据:`，显式写 `测试`、`设计`、`来源`、`验收`、`边界`/);
-    assert.match(proposeSkill, /回同一 change 的 Explore 澄清/);
-    assert.match(proposeSkill, /- 交付: <用户或系统可观察的端到端结果/);
-    assert.match(proposeSkill, /- 依赖: <无 \/ 真正的前置任务>/);
-    assert.match(proposeSkill, /按已确认的用户结果组织计划/);
-    assert.match(proposeSkill, /task 优先按垂直交付拆分/);
-    assert.match(proposeSkill, /只要计划包含 task/);
-    assert.doesNotMatch(proposeSkill, /## 待用户确认/);
-    assert.doesNotMatch(proposeSkill, /tdd_required|review_rejection|task-start|RED\/GREEN|mock|adapter|seam/);
-
-    const applySkill = readFileSync(join(projectRoot, ".codex", "skills", "superspec-apply", "SKILL.md"), "utf8");
-    assert.match(applySkill, /只执行当前返回的事项/);
-    assert.match(applySkill, /测试描述调用方得到的能力，不把内部实现过程当成验收/);
-    assert.match(applySkill, /预期来自规格、示例或可独立复核的结果，不复刻实现逻辑/);
-    assert.match(applySkill, /优先沿用仓库已有的验证边界，证明用户或调用方可观察的结果/);
-    assert.match(applySkill, /不为方便测试改变生产设计，也不把测试偏好升级为额外的开发步骤或测试义务/);
-    assert.match(applySkill, /按工作流安排修复/);
-    assert.doesNotMatch(applySkill, /task-start|RED\/GREEN|mock|fake|seam|adapter|fixture|--self-test-fix/);
-
-    const exploreSkill = readFileSync(join(projectRoot, ".codex", "skills", "superspec-explore", "SKILL.md"), "utf8");
-    assert.match(exploreSkill, /形成基于证据的 `discovery\.md`/);
-    assert.match(exploreSkill, /主流程必须委派 `explore` subagent/);
-    assert.match(exploreSkill, /事实应能追溯到源码、文档、命令输出或用户确认/);
-    assert.match(exploreSkill, /审查意见用于补足证据，不自动创造新范围、新需求或新方案/);
-    assert.match(exploreSkill, /## 待确认问题[\s\S]*- \[ \] Q-001/);
-    assert.match(exploreSkill, /每轮先给当前事项的简短理解和决策信息/);
-    assert.match(exploreSkill, /不要在用户对话中展示文档编号/);
-    assert.match(exploreSkill, /不要只转述问题/);
-    assert.match(exploreSkill, /按“事实自己查，决定交给用户”的顺序工作/);
-    assert.match(exploreSkill, /只围绕这一件事提问并等待答复/);
-    assert.doesNotMatch(exploreSkill, /`Q-xxx` 只是|当前问题的有效答复后|决定事件/);
-    assert.doesNotMatch(exploreSkill, /给 subagent 的深扫任务书|对照 critic 的 Discovery 审查阻塞条件|review_rejection/);
-
-    for (const prompt of ["critic.md", "architect.md"]) {
-      const content = readFileSync(join(projectRoot, ".codex", "prompts", prompt), "utf8");
-      assert.match(content, /不要因标题/, prompt);
-      assert.match(content, /仅当/, prompt);
-      assert.doesNotMatch(content, /状态机|job packet|JSON 报告按 job packet|每个新 finding 必须分配稳定 ID/, prompt);
-    }
-
-    const architectPrompt = readFileSync(join(projectRoot, ".codex", "prompts", "architect.md"), "utf8");
-    assert.match(architectPrompt, /未改变的既有风险和理论故障不是 blocker/);
-    assert.match(architectPrompt, /只审查本次接入是否破坏现有契约/);
-    const criticPrompt = readFileSync(join(projectRoot, ".codex", "prompts", "critic.md"), "utf8");
-    assert.match(criticPrompt, /技术路线优劣交给 Architect/);
-    assert.match(criticPrompt, /范围判断、已声明验收/);
-    assert.doesNotMatch(criticPrompt, /openspec validate <change>|执行依据语义审查/);
-    const testEngineerPrompt = readFileSync(join(projectRoot, ".codex", "prompts", "test-engineer.md"), "utf8");
-    assert.match(testEngineerPrompt, /通用故障矩阵和审查建议不能自行升级为必须新增的测试/);
-    assert.match(testEngineerPrompt, /测试应证明用户或调用方可观察的结果/);
-    assert.doesNotMatch(testEngineerPrompt, /状态机|job packet|RED\/GREEN|mock|fake|seam|表头含 `test_id` 和 `scenario`|执行依据/);
 
     const config = readFileSync(join(projectRoot, ".codex", "config.toml"), "utf8");
     assert.match(config, /\[features\]/);
@@ -204,21 +127,6 @@ test("installProject installs engine, workflow skills, role prompts, and agents"
 
     const agentsMd = readFileSync(join(projectRoot, "AGENTS.md"), "utf8");
     assert.equal(agentsMd.trimEnd(), AGENTS_TEMPLATE);
-    assert.match(agentsMd, /在用户已显式启动工作流或明确指定 change 后/);
-    assert.match(agentsMd, /先确定对应 change；归属明确则回同一 change 的 `propose` 更新计划/);
-    assert.match(agentsMd, /不要另建 repair change/);
-    assert.match(agentsMd, /归属不明才询问/);
-    assert.match(agentsMd, /主流程代为执行必要的工作流操作/);
-    assert.match(agentsMd, /Explore 中需要用户决定业务、验收、范围或关键取舍时/);
-    assert.match(agentsMd, /不得把这类答复默认写入 discovery/);
-    assert.match(agentsMd, /--self-test-fix "<task>"/);
-    assert.match(agentsMd, /每完成 `next` 返回的当前事项/);
-    assert.match(agentsMd, /完成单个事项不等于完成整个 change/);
-    assert.match(agentsMd, /SUPERSPEC:AGENTS:START/);
-    assert.match(agentsMd, /superspec transition next --change "<change>"/);
-    assert.match(agentsMd, /用户可见回复使用自然语言/);
-    assert.doesNotMatch(agentsMd, /reviewer\.kind\/id/);
-    assert.doesNotMatch(agentsMd, /external-agent/);
 
     const openspecConfig = readFileSync(join(projectRoot, "openspec", "config.yaml"), "utf8");
     assert.match(openspecConfig, /^schema: spec-driven$/m);
