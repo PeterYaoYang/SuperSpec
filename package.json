@@ -24,6 +24,12 @@
     "build": "node build.js",
     "typecheck": "tsc --noEmit",
     "test": "node --test tests/*.ts",
+    "eval:probe": "node evals/probe.mjs",
+    "eval:dynamic": "node evals/probe.mjs --scenario evals/scenarios/probe-dynamic-accepted.json",
+    "eval:m2": "node evals/m2.mjs",
+    "eval:m2:validate": "node evals/m2.mjs --validate-faults",
+    "eval:arena": "node evals/arena.mjs",
+    "eval:delegation": "node evals/delegation-probe.mjs",
     "prepack": "npm run build",
     "prepublishOnly": "npm run build"
   },

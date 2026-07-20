@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "id": "probe-dynamic-accepted",
+  "description": "A state-driven simulated user reads each real workflow boundary and advances an explicitly activated SuperSpec documentation task to accepted without prewritten resume prompts.",
+  "fixture": {
+    "change": "clarify-export-guide",
+    "workflow_mode": "minimal",
+    "initial_state": "init",
+    "discovery_exists": false,
+    "files": {
+      "README.md": "# Export Guide Fixture\n\nThis repository documents a small command-line export tool.\n",
+      "docs/export.md": "# Exporting reports\n\nRun `report-tool export --format csv`. The guide does not currently say where the generated file is written.\n",
+      "docs/cli-reference.md": "# CLI reference\n\n`report-tool export --format <csv|json>` writes to `./output/report.<format>` unless `--output` is supplied.\n"
+    }
+  },
+  "initial_prompt": "$superspec-explore change `clarify-export-guide`。这是一个纯文档需求：调查现有导出指南与 CLI 参考之间的差异；最终指南必须明确支持 CSV/JSON、默认路径 `./output/report.<format>`，以及 `--output` 覆盖默认位置，同时界定不修改 CLI 行为的范围。请使用 SuperSpec 工作流持续推进；每次遇到需要用户决定的问题时，清楚报告问题并停止，不替用户回答。每次 SuperSpec CLI 调用必须单独执行。",
+  "session_mode": "dynamic_user",
+  "simulated_user": {
+    "mode": "ai",
+    "model": "gpt-5.6-terra",
+    "reasoning": "high",
+    "persona": {
+      "role": "产品负责人",
+      "goal": "在不修改 CLI 行为的前提下完成准确、可执行的导出文档",
+      "risk_attitude": "计划与已确认范围一致时可以推进；出现新业务语义或范围扩张时要求真人决定"
+    },
+    "known_facts": {
+      "approved_formats": ["CSV", "JSON"],
+      "approved_default_path": "./output/report.<format>",
+      "output_override": "--output 覆盖默认位置",
+      "runtime_changes_allowed": false
+    },
+    "auto_confirm_scope_prefixes": [
+      "phase_confirmation:"
+    ],
+    "answers_by_scope_prefix": {}
+  },
+  "stop": {
+    "snapshot_state": "accepted",
+    "final_path": "done"
+  },
+  "budget": {
+    "max_worker_turns": 12
+  },
+  "assertions": {
+    "required_files": [
+      "openspec/changes/clarify-export-guide/.superspec/artifacts/discovery.md",
+      "openspec/changes/clarify-export-guide/proposal.md",
+      "openspec/changes/clarify-export-guide/design.md",
+      "openspec/changes/clarify-export-guide/tasks.md",
+      "openspec/changes/clarify-export-guide/.superspec/artifacts/test-contract.md",
+      "docs/export.md"
+    ],
+    "required_file_contains": {
+      "docs/export.md": ["CSV", "JSON", "./output/report.<format>", "--output"]
+    },
+    "allowed_worker_changes": [
+      "openspec/changes/clarify-export-guide/.superspec/artifacts/discovery.md",
+      "openspec/changes/clarify-export-guide/proposal.md",
+      "openspec/changes/clarify-export-guide/design.md",
+      "openspec/changes/clarify-export-guide/tasks.md",
+      "openspec/changes/clarify-export-guide/.superspec/artifacts/test-contract.md",
+      "openspec/changes/clarify-export-guide/specs/**",
+      ".superspec/changes/clarify-export-guide/**",
+      "docs/export.md"
+    ],
+    "forbidden_worker_commands": [
+      {
+        "family": "superspec_transition_except",
+        "allowed_subcommands": ["next", "explore", "propose-ready", "start-apply", "task-start", "task-complete", "review-ready", "reopen", "accept"]
+      }
+    ],
+    "forbidden_director_command_patterns": ["superspec transition", "superspec record"]
+  }
+}

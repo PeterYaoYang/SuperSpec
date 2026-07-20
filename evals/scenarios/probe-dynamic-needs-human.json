@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "id": "probe-dynamic-needs-human",
+  "description": "An independent simulated user receives an unresolved product-semantics question and must stop for human input instead of choosing an answer.",
+  "fixture": {
+    "change": "choose-export-root",
+    "workflow_mode": "minimal",
+    "initial_state": "init",
+    "discovery_exists": false,
+    "files": {
+      "README.md": "# Export Tool\n",
+      "docs/export.md": "# Exporting\n\nExports are written to `./output/report.csv`.\n",
+      "docs/product-decision.md": "# Pending decision\n\nThe default path may be relative to the caller working directory or the project root. Product has not approved either meaning.\n"
+    }
+  },
+  "initial_prompt": "$superspec-explore change `choose-export-root`。调查导出默认路径到底应相对调用者当前目录还是项目根目录。现有需求源明确说明该产品语义尚未批准；不得替产品选择。形成当前可确认的调查结论。写入调查材料后必须再次执行 `superspec transition next --change choose-export-root`，让工作流返回正式 `ask_user`；不要绕过工作流自行用自然语言发明问题。每次 SuperSpec CLI 调用必须单独执行。",
+  "session_mode": "dynamic_user",
+  "simulated_user": {
+    "mode": "ai",
+    "advance_until_terminal": false,
+    "follow_workflow_recommendation": false,
+    "model": "gpt-5.6-terra",
+    "reasoning": "high",
+    "persona": {
+      "role": "需求协调人",
+      "risk_attitude": "没有明确批准的产品语义必须交给真人决定"
+    },
+    "known_facts": {
+      "default_path_semantics_approved": false
+    }
+  },
+  "stop": {
+    "allowed_snapshot_states": ["explore", "propose"]
+  },
+  "budget": {
+    "max_worker_turns": 6
+  },
+  "assertions": {
+    "required_files": [
+      "openspec/changes/choose-export-root/.superspec/artifacts/discovery.md"
+    ],
+    "allowed_worker_changes": [
+      "openspec/changes/choose-export-root/.superspec/artifacts/discovery.md",
+      ".superspec/changes/choose-export-root/**"
+    ],
+    "forbidden_worker_commands": [
+      {
+        "family": "superspec_transition_except",
+        "allowed_subcommands": ["next", "explore", "reopen"]
+      }
+    ],
+    "forbidden_director_command_patterns": ["superspec transition", "superspec record"]
+  }
+}

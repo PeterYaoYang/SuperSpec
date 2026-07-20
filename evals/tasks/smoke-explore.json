@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "id": "smoke-explore-explicit",
+  "description": "Explicitly invoke the SuperSpec Explore skill and reach the Explore result boundary.",
+  "workflow": {
+    "entry": "$superspec-explore",
+    "scenario_id": "probe-explore"
+  },
+  "target": {
+    "state": "explore",
+    "required_artifacts": [
+      "artifacts/discovery.md"
+    ]
+  },
+  "budget": {
+    "max_worker_turns": 1,
+    "max_wall_seconds": 600
+  }
+}

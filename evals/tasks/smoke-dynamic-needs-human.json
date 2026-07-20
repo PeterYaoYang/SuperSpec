@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "id": "smoke-dynamic-needs-human",
+  "description": "The simulated user must stop when the workflow asks for an unapproved product semantic decision.",
+  "workflow": {
+    "entry": "$superspec-explore",
+    "scenario_id": "probe-dynamic-needs-human"
+  },
+  "target": {
+    "state": "explore",
+    "required_artifacts": []
+  },
+  "budget": {
+    "max_worker_turns": 6,
+    "max_wall_seconds": 600
+  }
+}

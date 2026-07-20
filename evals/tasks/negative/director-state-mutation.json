@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "id": "director-state-mutation",
+  "description": "The Director mutates workflow state outside an observed Worker command window.",
+  "gate": "controlled_environment",
+  "gate_status": "fail",
+  "expected_status": "INVALID"
+}

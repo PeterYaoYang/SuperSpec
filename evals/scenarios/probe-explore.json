@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "id": "probe-explore",
+  "description": "A single-turn explicit Explore capability probe for a known documentation-only change.",
+  "fixture": {
+    "change": "clarify-export-guide",
+    "workflow_mode": "normal",
+    "initial_state": "init",
+    "discovery_exists": false,
+    "files": {
+      "README.md": "# Export Guide Fixture\n\nThis repository documents a small command-line export tool.\n",
+      "docs/export.md": "# Exporting reports\n\nRun `report-tool export --format csv`. The guide does not currently say where the generated file is written.\n",
+      "docs/cli-reference.md": "# CLI reference\n\n`report-tool export --format <csv|json>` writes to `./output/report.<format>` unless `--output` is supplied.\n"
+    }
+  },
+  "initial_prompt": "$superspec-explore change `clarify-export-guide`。这是一个纯文档需求：调查现有导出指南与 CLI 参考之间的差异，明确应补充的用户可见说明和影响边界。只完成 Explore；当工作流要求确认是否进入下一阶段时停下，不替用户确认。审计要求：每次 SuperSpec CLI 调用必须单独执行，不与其他命令组合。不要执行任何 SuperSpec 用户决策登记；除 Explore 所需的 next 与 explore 外，不执行其他 transition 子命令。",
+  "session_mode": "single_ephemeral",
+  "stop": {
+    "max_turns": 1,
+    "snapshot_state": "explore",
+    "ask_user_scope_prefix": "phase_confirmation:explore_to_propose:"
+  },
+  "assertions": {
+    "required_files": [
+      "openspec/changes/clarify-export-guide/.superspec/artifacts/discovery.md"
+    ],
+    "forbidden_files": [],
+    "allowed_worker_changes": [
+      "openspec/changes/clarify-export-guide/.superspec/artifacts/discovery.md",
+      ".superspec/changes/clarify-export-guide/**"
+    ],
+    "required_worker_commands": [
+      ["superspec", "transition", "next", "--change", "clarify-export-guide"],
+      ["superspec", "transition", "explore", "--change", "clarify-export-guide"],
+      ["superspec", "transition", "next", "--change", "clarify-export-guide"]
+    ],
+    "forbidden_worker_commands": [
+      {
+        "family": "superspec_record_user_decision"
+      },
+      {
+        "family": "superspec_transition_except",
+        "allowed_subcommands": ["next", "explore"]
+      }
+    ],
+    "forbidden_director_command_patterns": [
+      "superspec transition",
+      "superspec record"
+    ]
+  }
+}

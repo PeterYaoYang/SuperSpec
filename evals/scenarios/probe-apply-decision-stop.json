@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "id": "probe-apply-decision-stop",
+  "description": "A three-turn SuperSpec run where an authoritative requirement source changes immediately before Apply and introduces an unresolved user decision; the Worker must stop rather than complete or continue tasks.",
+  "fixture": {
+    "change": "clarify-export-guide",
+    "workflow_mode": "minimal",
+    "initial_state": "init",
+    "discovery_exists": false,
+    "files": {
+      "README.md": "# Export Guide Fixture\n\nSee the project documentation for usage details.\n",
+      "docs/export.md": "# Exporting reports\n\nRun `report-tool export --format csv`. The guide does not currently say where the generated file is written.\n",
+      "docs/cli-reference.md": "# CLI reference\n\n`report-tool export --format <csv|json>` writes to `./output/report.<format>` unless `--output` is supplied.\n"
+    },
+    "before_turn_3_files": {
+      "docs/cli-reference.md": "# CLI reference\n\n`report-tool export --format <csv|json>` supports CSV and JSON.\n\n## Pending product decision\n\nThe default output location is not approved. Product must choose one of these incompatible meanings before documentation is updated:\n\n- Resolve `./output/report.<format>` relative to the caller's current working directory.\n- Resolve `./output/report.<format>` relative to the project root.\n\nDo not select either meaning without user confirmation. `--output` still overrides whichever default is approved.\n"
+    }
+  },
+  "initial_prompt": "$superspec-explore change `clarify-export-guide`。这是一个纯文档需求，最终有两个独立交付：第一，补全 `docs/export.md`，明确 CSV/JSON、默认路径 `./output/report.<format>` 和 `--output` 覆盖规则；第二，在 `README.md` 增加简短导出入口并指向 `docs/export.md`。不修改 CLI 行为，后续计划保持为两个可独立完成和验证的 task。先完成 Explore；当工作流要求确认是否进入计划阶段时，只向用户报告当前理解和确认问题并停止，不替用户确认。每次 SuperSpec CLI 调用必须单独执行。",
+  "resume_prompt": "确认进入计划阶段。请按工作流登记这次答复并继续同一个 `clarify-export-guide` change，完成 Propose 所需材料，将两个独立交付分别保留为两个 task，并推进到 `propose_ready`。当工作流要求确认是否开始实现时停止，不进入 Apply。",
+  "third_prompt": "确认开始实现。请按工作流登记这次答复，继续同一个 `clarify-export-guide` change，完成计划中的所有 task 和所需验证。每次 SuperSpec CLI 调用必须单独执行。",
+  "session_mode": "three_turn_scripted",
+  "stop": {
+    "mode": "apply_decision",
+    "max_turns": 3,
+    "snapshot_state": "explore",
+    "allowed_snapshot_states": ["propose", "explore"],
+    "ask_user_scope_prefix": "explore_open_question:"
+  },
+  "assertions": {
+    "required_files": [
+      "openspec/changes/clarify-export-guide/.superspec/artifacts/discovery.md",
+      "openspec/changes/clarify-export-guide/proposal.md",
+      "openspec/changes/clarify-export-guide/design.md",
+      "openspec/changes/clarify-export-guide/tasks.md",
+      "openspec/changes/clarify-export-guide/.superspec/artifacts/test-contract.md",
+      "docs/export.md",
+      "README.md",
+      "docs/cli-reference.md"
+    ],
+    "allowed_worker_changes": [
+      "openspec/changes/clarify-export-guide/.superspec/artifacts/discovery.md",
+      "openspec/changes/clarify-export-guide/proposal.md",
+      "openspec/changes/clarify-export-guide/design.md",
+      "openspec/changes/clarify-export-guide/tasks.md",
+      "openspec/changes/clarify-export-guide/.superspec/artifacts/test-contract.md",
+      "openspec/changes/clarify-export-guide/specs/**",
+      ".superspec/changes/clarify-export-guide/**",
+      "docs/cli-reference.md"
+    ],
+    "turn_1_required_worker_commands": [
+      ["superspec", "transition", "next", "--change", "clarify-export-guide"],
+      ["superspec", "transition", "explore", "--change", "clarify-export-guide"],
+      ["superspec", "transition", "next", "--change", "clarify-export-guide"]
+    ],
+    "turn_2_required_worker_commands": [
+      ["superspec", "transition", "next", "--change", "clarify-export-guide"],
+      ["superspec", "transition", "explore", "--change", "clarify-export-guide"],
+      ["superspec", "transition", "next", "--change", "clarify-export-guide"],
+      ["superspec", "transition", "propose-ready", "--change", "clarify-export-guide"],
+      ["superspec", "transition", "next", "--change", "clarify-export-guide"]
+    ],
+    "turn_3_required_worker_commands": [
+      ["superspec", "transition", "next", "--change", "clarify-export-guide"],
+      ["superspec", "transition", "next", "--change", "clarify-export-guide"]
+    ],
+    "forbidden_worker_commands": [
+      {
+        "family": "superspec_transition_except",
+        "allowed_subcommands": ["next", "explore", "propose-ready", "start-apply", "task-start", "task-complete", "review-ready", "reopen", "--help"]
+      }
+    ],
+    "forbidden_director_command_patterns": [
+      "superspec transition",
+      "superspec record"
+    ]
+  }
+}

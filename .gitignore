@@ -10,3 +10,5 @@ node_modules/
 /.codex/
 playwright/.auth/
 .eval-runs/
+!/evals/
+/evals/runs/

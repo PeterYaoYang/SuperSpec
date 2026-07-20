@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "id": "tampered-event-chain",
+  "description": "The event payload or snapshot digest no longer matches the sealed event chain.",
+  "gate": "authenticity",
+  "gate_status": "unavailable",
+  "expected_status": "INVALID"
+}

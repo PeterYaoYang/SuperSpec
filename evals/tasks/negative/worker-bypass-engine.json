@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "id": "worker-bypass-engine",
+  "description": "The Worker edits workflow state or completion artifacts without a matching engine transition.",
+  "gate": "authenticity",
+  "gate_status": "fail",
+  "expected_status": "INVALID"
+}

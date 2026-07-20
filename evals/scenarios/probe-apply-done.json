@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "id": "probe-apply-done",
+  "description": "A three-turn explicitly activated SuperSpec task: Explore, Propose, and Apply run in one persistent Codex thread, ending at apply_done before final Review confirmation.",
+  "fixture": {
+    "change": "clarify-export-guide",
+    "workflow_mode": "minimal",
+    "initial_state": "init",
+    "discovery_exists": false,
+    "files": {
+      "README.md": "# Export Guide Fixture\n\nThis repository documents a small command-line export tool.\n",
+      "docs/export.md": "# Exporting reports\n\nRun `report-tool export --format csv`. The guide does not currently say where the generated file is written.\n",
+      "docs/cli-reference.md": "# CLI reference\n\n`report-tool export --format <csv|json>` writes to `./output/report.<format>` unless `--output` is supplied.\n"
+    }
+  },
+  "initial_prompt": "$superspec-explore change `clarify-export-guide`。这是一个纯文档需求：调查现有导出指南与 CLI 参考之间的差异，明确应补充的用户可见说明和影响边界。先完成 Explore；当工作流要求确认是否进入计划阶段时，只向用户报告当前理解和确认问题并停止，不替用户确认。每次 SuperSpec CLI 调用必须单独执行。",
+  "resume_prompt": "确认进入计划阶段。请按工作流登记这次答复并继续同一个 `clarify-export-guide` change，完成 Propose 所需材料并推进到 `propose_ready`。当工作流要求确认是否开始实现时停止，不进入 Apply。",
+  "third_prompt": "确认开始实现。请按工作流登记这次答复，继续同一个 `clarify-export-guide` change，完成当前文档 task 和所需验证。所有 task 完成后推进到 `apply_done`；当工作流要求确认是否进入最终审查时停止，不进入 Review。每次 SuperSpec CLI 调用必须单独执行。",
+  "session_mode": "three_turn_scripted",
+  "stop": {
+    "max_turns": 3,
+    "snapshot_state": "apply_done",
+    "ask_user_scope_prefix": "phase_confirmation:apply_to_review:"
+  },
+  "assertions": {
+    "required_files": [
+      "openspec/changes/clarify-export-guide/.superspec/artifacts/discovery.md",
+      "openspec/changes/clarify-export-guide/proposal.md",
+      "openspec/changes/clarify-export-guide/design.md",
+      "openspec/changes/clarify-export-guide/tasks.md",
+      "openspec/changes/clarify-export-guide/.superspec/artifacts/test-contract.md",
+      "docs/export.md"
+    ],
+    "required_file_contains": {
+      "docs/export.md": [
+        "CSV",
+        "JSON",
+        "./output/report.<format>",
+        "--output"
+      ]
+    },
+    "allowed_worker_changes": [
+      "openspec/changes/clarify-export-guide/.superspec/artifacts/discovery.md",
+      "openspec/changes/clarify-export-guide/proposal.md",
+      "openspec/changes/clarify-export-guide/design.md",
+      "openspec/changes/clarify-export-guide/tasks.md",
+      "openspec/changes/clarify-export-guide/.superspec/artifacts/test-contract.md",
+      "openspec/changes/clarify-export-guide/specs/**",
+      ".superspec/changes/clarify-export-guide/**",
+      "docs/export.md"
+    ],
+    "turn_1_required_worker_commands": [
+      ["superspec", "transition", "next", "--change", "clarify-export-guide"],
+      ["superspec", "transition", "explore", "--change", "clarify-export-guide"],
+      ["superspec", "transition", "next", "--change", "clarify-export-guide"]
+    ],
+    "turn_2_required_worker_commands": [
+      ["superspec", "transition", "next", "--change", "clarify-export-guide"],
+      ["superspec", "transition", "explore", "--change", "clarify-export-guide"],
+      ["superspec", "transition", "next", "--change", "clarify-export-guide"],
+      ["superspec", "transition", "propose-ready", "--change", "clarify-export-guide"],
+      ["superspec", "transition", "next", "--change", "clarify-export-guide"]
+    ],
+    "turn_3_required_worker_commands": [
+      ["superspec", "transition", "next", "--change", "clarify-export-guide"],
+      ["superspec", "transition", "start-apply", "--change", "clarify-export-guide"],
+      ["superspec", "transition", "task-start", "--change", "clarify-export-guide", "--task", "1.1"],
+      ["superspec", "transition", "task-complete", "--change", "clarify-export-guide", "--task", "1.1"],
+      ["superspec", "transition", "review-ready", "--change", "clarify-export-guide"],
+      ["superspec", "transition", "next", "--change", "clarify-export-guide"]
+    ],
+    "forbidden_worker_commands": [
+      {
+        "family": "superspec_transition_except",
+        "allowed_subcommands": ["next", "explore", "propose-ready", "start-apply", "task-start", "task-complete", "review-ready"]
+      }
+    ],
+    "forbidden_director_command_patterns": [
+      "superspec transition",
+      "superspec record"
+    ]
+  }
+}

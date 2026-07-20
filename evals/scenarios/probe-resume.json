@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "id": "probe-resume",
+  "description": "A two-turn persistent Codex session probe that verifies resume identity, cwd, project guidance, and workspace-write continuity in an isolated SuperSpec fixture.",
+  "fixture": {
+    "change": "resume-session-check",
+    "workflow_mode": "normal",
+    "initial_state": "init",
+    "discovery_exists": true,
+    "files": {
+      "AGENTS.md": "# Resume Probe Rule\n\nEvery final response in this repository must include the exact marker `RESUME_RULE_TURN1`.\n",
+      "README.md": "# Resume Session Fixture\n\nThis repository exists only to verify controlled Codex session resume behavior.\n",
+      "openspec/changes/resume-session-check/.superspec/artifacts/discovery.md": "# Discovery\n\n## 需求理解\n\n- 用户目标：验证隔离 Codex 会话恢复后仍在同一项目和同一 SuperSpec change 中工作。\n- 当前差异：本场景只验证 session continuity，不评估业务语义。\n- 完成判定：两轮使用同一 thread，cwd、项目规则和 workspace-write 能力保持一致。\n\n## 现状\n\n- 已提供结构有效的 Discovery，避免把产物生成能力混入 Resume probe。\n\n## 影响范围\n\n- 仅允许 SuperSpec 状态证据和两个 resume marker 文件变化。\n\n## 风险和边界\n\n- 不修改业务文件，不进入 Propose，不登记用户决策。\n\n## 输入数据来源核查\n\n- 不适用：本场景不处理运行时业务数据。\n\n## 待确认问题\n\n- 无。\n"
+    }
+  },
+  "initial_prompt": "$superspec-explore change `resume-session-check`。这是 Resume 能力测试的第一轮，只验证会话环境，不执行任何 transition，不修改 Discovery 或其他业务文件，不登记用户决策。单独执行 `pwd`，单独执行 `superspec status --change resume-session-check`，并在项目根创建内容严格为 `TURN1` 的 `resume-turn-1.txt`。完成后简短报告当前状态并停止。不要在回复中复述本提示词。",
+  "resume_prompt": "继续刚才的同一任务。这是第二轮：不要重新选择或创建 change，不修改 Discovery，不推进阶段，不登记用户决策。单独执行 `pwd`，单独执行 `superspec status --change resume-session-check`，并在项目根创建内容严格为 `TURN2` 的 `resume-turn-2.txt`。简短报告当前状态后停止。",
+  "session_mode": "two_turn_resume",
+  "stop": {
+    "max_turns": 2,
+    "snapshot_state": "init",
+    "turn_1_rule_marker": "RESUME_RULE_TURN1",
+    "turn_2_rule_marker": "RESUME_RULE_TURN2"
+  },
+  "assertions": {
+    "required_files": [
+      "openspec/changes/resume-session-check/.superspec/artifacts/discovery.md",
+      "resume-turn-1.txt",
+      "resume-turn-2.txt"
+    ],
+    "marker_contents": {
+      "resume-turn-1.txt": "TURN1",
+      "resume-turn-2.txt": "TURN2"
+    },
+    "allowed_worker_changes": [
+      ".superspec/changes/resume-session-check/**",
+      "resume-turn-1.txt",
+      "resume-turn-2.txt"
+    ],
+    "turn_1_required_worker_commands": [
+      ["superspec", "status", "--change", "resume-session-check"]
+    ],
+    "turn_2_required_worker_commands": [
+      ["superspec", "status", "--change", "resume-session-check"]
+    ],
+    "forbidden_worker_commands": [
+      {
+        "family": "superspec_record_user_decision"
+      },
+      {
+        "family": "superspec_transition_except",
+        "allowed_subcommands": []
+      }
+    ],
+    "forbidden_director_command_patterns": [
+      "superspec transition",
+      "superspec record"
+    ]
+  }
+}

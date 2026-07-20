@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "id": "smoke-dynamic-accepted",
+  "description": "A state-driven simulated user advances real workflow confirmation boundaries and completes the documentation workflow through accepted.",
+  "workflow": {
+    "entry": "$superspec-explore",
+    "scenario_id": "probe-dynamic-accepted"
+  },
+  "target": {
+    "state": "accepted",
+    "required_artifacts": [
+      "artifacts/files/openspec/changes/clarify-export-guide/.superspec/artifacts/discovery.md",
+      "artifacts/files/openspec/changes/clarify-export-guide/.superspec/artifacts/test-contract.md",
+      "artifacts/files/openspec/changes/clarify-export-guide/proposal.md",
+      "artifacts/files/openspec/changes/clarify-export-guide/design.md",
+      "artifacts/files/openspec/changes/clarify-export-guide/tasks.md",
+      "artifacts/files/docs/export.md"
+    ]
+  },
+  "budget": {
+    "max_worker_turns": 12,
+    "max_wall_seconds": 1200
+  }
+}

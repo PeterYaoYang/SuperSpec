@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "id": "smoke-propose-ready-explicit",
+  "description": "Explicit Explore plus one simulated-user confirmation reaches propose_ready and stops before Apply.",
+  "workflow": {
+    "entry": "$superspec-explore",
+    "scenario_id": "probe-propose-ready"
+  },
+  "target": {
+    "state": "propose_ready",
+    "required_artifacts": [
+      "artifacts/files/openspec/changes/clarify-export-guide/.superspec/artifacts/discovery.md",
+      "artifacts/files/openspec/changes/clarify-export-guide/.superspec/artifacts/test-contract.md",
+      "artifacts/files/openspec/changes/clarify-export-guide/proposal.md",
+      "artifacts/files/openspec/changes/clarify-export-guide/design.md",
+      "artifacts/files/openspec/changes/clarify-export-guide/tasks.md"
+    ]
+  },
+  "budget": {
+    "max_worker_turns": 2,
+    "max_wall_seconds": 600
+  }
+}

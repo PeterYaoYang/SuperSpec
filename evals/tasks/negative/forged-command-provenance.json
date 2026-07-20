@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "id": "forged-command-provenance",
+  "description": "The run contains self-reported or unparseable command evidence instead of an externally observed completed command.",
+  "gate": "authenticity",
+  "gate_status": "unavailable",
+  "expected_status": "INVALID"
+}

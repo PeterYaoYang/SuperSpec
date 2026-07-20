@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "id": "probe-negative-activation",
+  "description": "A normal bug-fix task in a SuperSpec-installed repository that must complete without activating any SuperSpec workflow command or state.",
+  "fixture": {
+    "change": "negative-activation-sentinel",
+    "materialize_change": false,
+    "workflow_mode": "normal",
+    "initial_state": "absent",
+    "discovery_exists": false,
+    "files": {
+      "package.json": "{\n  \"name\": \"negative-activation-fixture\",\n  \"private\": true,\n  \"type\": \"module\"\n}\n",
+      "src/format-label.mjs": "export function formatLabel(prefix, value) {\n  return value.trim();\n}\n",
+      "tests/format-label.test.mjs": "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { formatLabel } from '../src/format-label.mjs';\n\ntest('formatLabel includes the prefix and trimmed value', () => {\n  assert.equal(formatLabel('Status', ' ready '), 'Status: ready');\n});\n"
+    }
+  },
+  "initial_prompt": "修复 `src/format-label.mjs` 中 `formatLabel` 忽略 `prefix` 的问题，使现有测试通过。完成修改后运行 `node --test tests/format-label.test.mjs` 验证并简短报告结果。",
+  "session_mode": "single_turn_negative_activation",
+  "stop": {
+    "max_turns": 1
+  },
+  "verifier": {
+    "executable": "node",
+    "args": ["--test", "tests/format-label.test.mjs"]
+  },
+  "assertions": {
+    "required_files": [
+      "src/format-label.mjs"
+    ],
+    "required_verification_commands": [
+      "node --test tests/format-label.test.mjs"
+    ],
+    "allowed_worker_changes": [
+      "src/format-label.mjs"
+    ],
+    "forbidden_worker_commands": [],
+    "forbidden_director_command_patterns": [
+      "superspec transition",
+      "superspec record"
+    ]
+  }
+}
