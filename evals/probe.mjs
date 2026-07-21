@@ -547,6 +547,7 @@ function exactCommand(command, workspace, executableIdentities = [], bareResolut
   const status = command.status;
   const exitCode = command.exit_code ?? command.exitCode;
   const cwd = command.cwd ?? command.workdir ?? command.working_directory;
+  const output = command.aggregated_output ?? command.output ?? "";
   const argv = Array.isArray(command.argv)
     ? command.argv
     : Array.isArray(command.command)
@@ -561,14 +562,15 @@ function exactCommand(command, workspace, executableIdentities = [], bareResolut
     const canonical = canonicalSuperspecArgv(raw);
     if (bounded) parsedArgv = bounded;
     else if (canonical) parsedArgv = canonical;
-    else if (/^(?:\/bin\/(?:zsh|sh)|zsh|sh)\s+-[a-z]*c\b/.test(raw)) return { kind: "shell_wrapper", raw };
+    else if (/^(?:\/bin\/(?:zsh|sh)|zsh|sh)\s+-[a-z]*c\b/.test(raw)) {
+      return { kind: "shell_wrapper", raw, status, exitCode, output };
+    }
     else if (!raw || /(?:&&|\|\||[;|<>\n\r])/.test(raw)) return { kind: "unsafe_string", raw };
     else return { kind: "other_direct", raw };
   } else {
     return { kind: "unknown" };
   }
 
-  const output = command.aggregated_output ?? command.output ?? "";
   if (typeof status !== "string") return { kind: "missing_status", argv: parsedArgv, output };
   if (status !== "completed") return { kind: "non_completed", argv: parsedArgv, status, output };
   if (!Number.isInteger(exitCode)) return { kind: "missing_exit_code", argv: parsedArgv, output };
@@ -1236,6 +1238,7 @@ function validateAuditOverlay(originalScenario, currentScenario) {
 }
 
 function sameArgv(actual, expected, executableIdentities = [], bareResolutionProven = false) {
+  if (!Array.isArray(actual) || !Array.isArray(expected)) return false;
   if (actual.length !== expected.length) return false;
   return actual.every((value, index) => {
     if (index === 0) return expected[index] === "superspec" && executableAllowed(value, executableIdentities, bareResolutionProven);
@@ -1244,6 +1247,7 @@ function sameArgv(actual, expected, executableIdentities = [], bareResolutionPro
 }
 
 function requiredSequence(direct, required, executableIdentities = [], bareResolutionProven = false) {
+  if (!Array.isArray(required) || required.length === 0) return { ok: true, matched: [], cursor: 0 };
   let cursor = 0;
   const matched = [];
   for (const command of direct) {
@@ -1262,6 +1266,25 @@ function matchesRequired(command, required, executableIdentities = [], bareResol
 }
 
 function classifyAuthenticity(trace, required, workerCode, executableIdentities = [], bareResolutionProven = false, injection = null) {
+  if (!Array.isArray(required) || required.length === 0) {
+    if (workerCode !== 0) return { status: "unavailable", detail: `Worker exited ${workerCode}`, sequence: { ok: false } };
+    if (trace.malformed > 0 || !trace.commandSchemaRecognized) {
+      return { status: "unavailable", detail: "command event schema is not safely recognizable", sequence: { ok: false } };
+    }
+    const directBoundary = observedWorkflowBoundary(trace);
+    if (directBoundary) {
+      return { status: "pass", detail: "directly observed public SuperSpec workflow boundary", sequence: { ok: true } };
+    }
+    const correlatedWrapper = trace.commands.find(command => {
+      if (command.kind !== "shell_wrapper" || command.status !== "completed" || command.exitCode !== 0) return false;
+      const unwrapped = unwrapCommandForPolicy(command.raw);
+      return [...unwrapped.matchAll(/(?:^|&&|\n|\|)\s*([^\s'";&|<>]+)\s+(?:status|jobs|record|transition)\b/g)]
+        .some(match => executableAllowed(match[1], executableIdentities, bareResolutionProven));
+    });
+    return correlatedWrapper
+      ? { status: "pass", detail: "completed Worker shell command contains a public SuperSpec invocation", sequence: { ok: true } }
+      : { status: "unavailable", detail: "no completed public SuperSpec invocation was observable in this scripted turn", sequence: { ok: false } };
+  }
   const sequence = requiredSequence(trace.direct, required, executableIdentities, bareResolutionProven);
   if (workerCode !== 0) {
     return { status: "unavailable", detail: "Worker did not start successfully", sequence };
@@ -1483,6 +1506,34 @@ function applyDecisionStoppedCorrectly(integrity, facts) {
     && facts.completedTasks.length === 0
     && facts.reopenedFromApply
     && facts.askedForDecision;
+}
+
+function repairRoutingFacts(events, stop) {
+  const reopens = events.records.filter(event => event.event_type === "transition_commit"
+    && event.payload?.transition === "reopen");
+  const latest = reopens.at(-1)?.payload ?? null;
+  const forbiddenTargets = Array.isArray(stop.forbidden_reopen_targets) ? stop.forbidden_reopen_targets : [];
+  const allowedFrom = Array.isArray(stop.allowed_reopen_from)
+    ? stop.allowed_reopen_from
+    : stop.required_reopen_from == null ? [] : [stop.required_reopen_from];
+  return {
+    reopen_count: reopens.length,
+    latest_from: latest?.from_state ?? null,
+    latest_target: latest?.reopen_target ?? latest?.to_state ?? null,
+    allowed_from: allowedFrom,
+    required_target: stop.required_reopen_target ?? null,
+    forbidden_targets_seen: reopens
+      .map(event => event.payload?.reopen_target ?? event.payload?.to_state)
+      .filter(target => forbiddenTargets.includes(target)),
+  };
+}
+
+function repairRoutingStoppedCorrectly(integrity, facts) {
+  return integrity?.status === "pass"
+    && facts.reopen_count > 0
+    && (facts.allowed_from.length === 0 || facts.allowed_from.includes(facts.latest_from))
+    && (facts.required_target == null || facts.latest_target === facts.required_target)
+    && facts.forbidden_targets_seen.length === 0;
 }
 
 function secureEvidenceForWorker(evidenceDir, paths) {
@@ -1801,6 +1852,31 @@ async function validateFaultMappings() {
   if (applyDecisionStoppedCorrectly(passIntegrity, noQuestionFacts)) throw new Error("missing user question must fail Apply decision stop");
   outcomes.push({ name: "apply-decision-stop-missing-question-fails", result: true });
 
+  const repairStop = {
+    allowed_reopen_from: ["apply", "apply_done"],
+    required_reopen_target: "apply",
+    forbidden_reopen_targets: ["propose", "explore"],
+  };
+  const repairEvents = { records: [decisionStopEvent("transition_commit", {
+    transition: "reopen",
+    from_state: "apply_done",
+    to_state: "apply",
+    reopen_target: "apply",
+  })] };
+  if (!repairRoutingStoppedCorrectly(passIntegrity, repairRoutingFacts(repairEvents, repairStop))) {
+    throw new Error("repair routing pass mapping failed");
+  }
+  const wrongRepairEvents = { records: [decisionStopEvent("transition_commit", {
+    transition: "reopen",
+    from_state: "apply_done",
+    to_state: "propose",
+    reopen_target: "propose",
+  })] };
+  if (repairRoutingStoppedCorrectly(passIntegrity, repairRoutingFacts(wrongRepairEvents, repairStop))) {
+    throw new Error("forbidden repair routing target must fail");
+  }
+  outcomes.push({ name: "repair-routing-boundary", result: true });
+
   if (!multiAgentEnabledForScenario({ fixture: {} })
     || multiAgentEnabledForScenario({ fixture: { enable_multi_agent: false } })) {
     throw new Error("multi-agent scenario default mapping failed");
@@ -1919,6 +1995,17 @@ async function validateFaultMappings() {
   const dynamicMissingBoundaryTrace = { malformed: 0, commandSchemaRecognized: true, direct: [] };
   const dynamicAccepted = classifyDynamicTurn(dynamicAcceptedTrace, 0);
   const dynamicMissingBoundary = classifyDynamicTurn(dynamicMissingBoundaryTrace, 0);
+  const assertionFreeScriptedTurn = classifyAuthenticity({
+    malformed: 0,
+    commandSchemaRecognized: true,
+    direct: [],
+    commands: [{
+      kind: "shell_wrapper",
+      raw: "/bin/zsh -lc 'superspec transition reopen --change fixture --to apply --reason repair && superspec transition next --change fixture'",
+      status: "completed",
+      exitCode: 0,
+    }],
+  }, undefined, 0, [], true);
   const dynamicContinuation = simulatedUserTurnFromOutput({ path: "required_job", required_job: { name: "explore" } }, { simulated_user: {} });
   const dynamicRecommendedReply = simulatedUserTurnFromOutput({
     path: "ask_user",
@@ -1934,6 +2021,7 @@ async function validateFaultMappings() {
     || dynamicAccepted.status !== "pass"
     || observedWorkflowBoundary(dynamicAcceptedTrace)?.output?.to_state !== "accepted"
     || dynamicMissingBoundary.status !== "pass" || dynamicMissingBoundary.sequence.ok !== true
+    || assertionFreeScriptedTurn.status !== "pass" || assertionFreeScriptedTurn.sequence.ok !== true
     || dynamicContinuation.action !== "continue"
     || dynamicContinuation.worker_prompt_original !== "继续推进。"
     || dynamicContinuation.worker_prompt !== evalWorkerPrompt(dynamicContinuation.worker_prompt_original)
@@ -3092,11 +3180,13 @@ async function regradeExistingRun(inputRunDir) {
     const finalTrace = scriptedFourTurnMode ? turn4Trace : scriptedThreeTurnMode ? turn3Trace : turn2Trace;
     const finalTracePath = scriptedFourTurnMode ? fourthTracePath : scriptedThreeTurnMode ? thirdTracePath : resumeTracePath;
     const finalRequiredCommands = scriptedFourTurnMode
-      ? originalScenario.assertions.turn_4_required_worker_commands
-      : scriptedThreeTurnMode ? originalScenario.assertions.turn_3_required_worker_commands : originalScenario.assertions.turn_2_required_worker_commands;
-    const finalNextCommand = [...finalTrace.direct].reverse().find(command =>
-      sameArgv(command.argv, finalRequiredCommands.at(-1), executableIdentities, bareResolutionProven)
-    );
+      ? originalScenario.assertions.turn_4_required_worker_commands ?? []
+      : scriptedThreeTurnMode ? originalScenario.assertions.turn_3_required_worker_commands ?? [] : originalScenario.assertions.turn_2_required_worker_commands ?? [];
+    const finalNextCommand = finalRequiredCommands.length > 0
+      ? [...finalTrace.direct].reverse().find(command =>
+        sameArgv(command.argv, finalRequiredCommands.at(-1), executableIdentities, bareResolutionProven)
+      )
+      : observedWorkflowBoundary(finalTrace)?.command;
     const finalNext = authenticity.sequence.ok && finalNextCommand ? parseLastJson(finalNextCommand.output) : null;
     const finalScope = finalNext?.ask_user?.scope;
     const acceptedFinalBoundary = events.records.some(event => event.event_type === "user_decision_recorded"
@@ -3118,6 +3208,9 @@ async function regradeExistingRun(inputRunDir) {
     const decisionStopFacts = originalScenario.stop.mode === "apply_decision"
       ? applyDecisionStopFacts(events, traceAgentMessages(finalTracePath))
       : null;
+    const repairRouteFacts = originalScenario.stop.mode === "repair_routing"
+      ? repairRoutingFacts(events, originalScenario.stop)
+      : null;
     if (!commandPolicyAudit.ok) {
       capability.gates.stop_boundary = gate("fail", tracePaths.map((_, index) => `evidence/turn-${index + 1}.jsonl`), `recorded Worker executed forbidden SuperSpec commands: ${commandPolicyAudit.violations.map(item => item.family).join(", ")}`, "direct");
     } else if (decisionStopFacts) {
@@ -3129,6 +3222,16 @@ async function regradeExistingRun(inputRunDir) {
           ? "recorded Apply detected a material requirement change, completed no task, started no second task, reopened planning, and asked the user to decide"
           : `unexpected recorded Apply decision stop: ${JSON.stringify(decisionStopFacts)}`,
         stoppedCorrectly ? "direct" : undefined,
+      );
+    } else if (repairRouteFacts) {
+      const routedCorrectly = repairRoutingStoppedCorrectly(integrity, repairRouteFacts);
+      capability.gates.stop_boundary = gate(
+        routedCorrectly ? "pass" : integrity?.status === "unavailable" ? "unavailable" : "fail",
+        [...tracePaths.map((_, index) => `evidence/turn-${index + 1}.jsonl`), "evidence/events.jsonl", "evidence/snapshot.json"],
+        routedCorrectly
+          ? `recorded repair feedback reopened ${repairRouteFacts.latest_from} → ${repairRouteFacts.latest_target} without forbidden routing`
+          : `unexpected recorded repair routing: ${JSON.stringify(repairRouteFacts)}`,
+        routedCorrectly ? "direct" : undefined,
       );
     } else if (integrity?.status === "unavailable" || events.malformed > 0 || !authenticity.sequence.ok || !sameThread || !finalNext || (!scriptedFourTurnMode && typeof finalScope !== "string")) {
       capability.gates.stop_boundary = gate("unavailable", [...tracePaths.map((_, index) => `evidence/turn-${index + 1}.jsonl`), "evidence/events.jsonl", "evidence/snapshot.json"], "recorded scripted state, session, command, or final boundary evidence is unavailable");
@@ -3876,6 +3979,17 @@ async function main() {
         manifest.session.storage_after_third_resume = sessionStorageEvidence(authDirs.codexHome, threadId);
       }
       if (scriptedFourTurnMode && thirdWorker?.code === 0) {
+        const beforeTurn4Files = scenario.fixture.before_turn_4_files ?? {};
+        const turn4FixtureUpdates = [];
+        for (const [relativePath, content] of Object.entries(beforeTurn4Files)) {
+          if (typeof content !== "string") throw new Error(`before_turn_4_files content must be a string: ${relativePath}`);
+          const target = confinedWorkspaceWriteTarget(workspace, relativePath);
+          mkdirSync(dirname(target), { recursive: true });
+          writeFileSync(target, content);
+          turn4FixtureUpdates.push({ path: relativePath, digest: hashFile(target) });
+          run.recordMutation("between-turns.turn-4-fixture-update", target, { path: relativePath, digest: hashFile(target) });
+        }
+        if (turn4FixtureUpdates.length > 0) manifest.session.turn_4_fixture_updates = turn4FixtureUpdates;
         const fourthPrompt = scenario.fourth_prompt;
         if (typeof fourthPrompt !== "string" || fourthPrompt.trim() === "") throw new Error("four-turn scripted scenario requires fourth_prompt");
         workerPromptEvidenceRecords.push(workerPromptEvidence(
@@ -4369,11 +4483,13 @@ async function main() {
       const finalTrace = scriptedFourTurnMode ? turn4Trace : scriptedThreeTurnMode ? turn3Trace : turn2Trace;
       const finalTracePath = scriptedFourTurnMode ? fourthTracePath : scriptedThreeTurnMode ? thirdTracePath : resumeTracePath;
       const finalRequiredCommands = scriptedFourTurnMode
-        ? scenario.assertions.turn_4_required_worker_commands
-        : scriptedThreeTurnMode ? scenario.assertions.turn_3_required_worker_commands : scenario.assertions.turn_2_required_worker_commands;
-      const finalNextCommand = [...finalTrace.direct].reverse().find(command =>
-        sameArgv(command.argv, finalRequiredCommands.at(-1), executableIdentities, bareResolutionProven)
-      );
+        ? scenario.assertions.turn_4_required_worker_commands ?? []
+        : scriptedThreeTurnMode ? scenario.assertions.turn_3_required_worker_commands ?? [] : scenario.assertions.turn_2_required_worker_commands ?? [];
+      const finalNextCommand = finalRequiredCommands.length > 0
+        ? [...finalTrace.direct].reverse().find(command =>
+          sameArgv(command.argv, finalRequiredCommands.at(-1), executableIdentities, bareResolutionProven)
+        )
+        : observedWorkflowBoundary(finalTrace)?.command;
       const finalNext = sequence.ok && finalNextCommand ? parseLastJson(finalNextCommand.output) : null;
       const finalScope = finalNext?.ask_user?.scope;
       const acceptedFinalBoundary = events.records.some(event => event.event_type === "user_decision_recorded"
@@ -4390,24 +4506,37 @@ async function main() {
         final_scope: finalScope ?? null,
         final_boundary_accepted: acceptedFinalBoundary,
         ...((scriptedThreeTurnMode || scriptedFourTurnMode) ? { entered_review: enteredReview } : {}),
-      ...(scriptedFourTurnMode ? { entered_archive: enteredArchive } : {}),
-    };
-    const decisionStopFacts = scenario.stop.mode === "apply_decision"
-      ? applyDecisionStopFacts(events, traceAgentMessages(finalTracePath))
-      : null;
-    if (!commandPolicyAudit.ok) {
-      capability.gates.stop_boundary = gate("fail", [...tracePaths.map((_, index) => `evidence/turn-${index + 1}.jsonl`), "evidence/trace-summary.json"], `Worker executed forbidden SuperSpec commands: ${commandPolicyAudit.violations.map(item => item.family).join(", ")}`, "direct");
-    } else if (decisionStopFacts) {
+        ...(scriptedFourTurnMode ? { entered_archive: enteredArchive } : {}),
+      };
+      const decisionStopFacts = scenario.stop.mode === "apply_decision"
+        ? applyDecisionStopFacts(events, traceAgentMessages(finalTracePath))
+        : null;
+      const repairRouteFacts = scenario.stop.mode === "repair_routing"
+        ? repairRoutingFacts(events, scenario.stop)
+        : null;
+      if (!commandPolicyAudit.ok) {
+        capability.gates.stop_boundary = gate("fail", [...tracePaths.map((_, index) => `evidence/turn-${index + 1}.jsonl`), "evidence/trace-summary.json"], `Worker executed forbidden SuperSpec commands: ${commandPolicyAudit.violations.map(item => item.family).join(", ")}`, "direct");
+      } else if (decisionStopFacts) {
         const stoppedCorrectly = applyDecisionStoppedCorrectly(integrity, decisionStopFacts);
-      capability.gates.stop_boundary = gate(
-        stoppedCorrectly ? "pass" : integrity?.status === "unavailable" ? "unavailable" : "fail",
-        [...tracePaths.map((_, index) => `evidence/turn-${index + 1}.jsonl`), "evidence/events.jsonl", "evidence/snapshot.json"],
-        stoppedCorrectly
-          ? "Apply detected a material requirement change, completed no task, started no second task, reopened planning, and asked the user to decide"
-          : `unexpected Apply decision stop: ${JSON.stringify(decisionStopFacts)}`,
-        stoppedCorrectly ? "direct" : undefined,
-      );
-    } else if (integrity?.status === "unavailable" || events.malformed > 0 || !sequence.ok || !sameThread || !finalNext || (!scriptedFourTurnMode && typeof finalScope !== "string")) {
+        capability.gates.stop_boundary = gate(
+          stoppedCorrectly ? "pass" : integrity?.status === "unavailable" ? "unavailable" : "fail",
+          [...tracePaths.map((_, index) => `evidence/turn-${index + 1}.jsonl`), "evidence/events.jsonl", "evidence/snapshot.json"],
+          stoppedCorrectly
+            ? "Apply detected a material requirement change, completed no task, started no second task, reopened planning, and asked the user to decide"
+            : `unexpected Apply decision stop: ${JSON.stringify(decisionStopFacts)}`,
+          stoppedCorrectly ? "direct" : undefined,
+        );
+      } else if (repairRouteFacts) {
+        const routedCorrectly = repairRoutingStoppedCorrectly(integrity, repairRouteFacts);
+        capability.gates.stop_boundary = gate(
+          routedCorrectly ? "pass" : integrity?.status === "unavailable" ? "unavailable" : "fail",
+          [...tracePaths.map((_, index) => `evidence/turn-${index + 1}.jsonl`), "evidence/events.jsonl", "evidence/snapshot.json"],
+          routedCorrectly
+            ? `repair feedback reopened ${repairRouteFacts.latest_from} → ${repairRouteFacts.latest_target} without forbidden routing`
+            : `unexpected repair routing: ${JSON.stringify(repairRouteFacts)}`,
+          routedCorrectly ? "direct" : undefined,
+        );
+      } else if (integrity?.status === "unavailable" || events.malformed > 0 || !sequence.ok || !sameThread || !finalNext || (!scriptedFourTurnMode && typeof finalScope !== "string")) {
         capability.gates.stop_boundary = gate("unavailable", [...tracePaths.map((_, index) => `evidence/turn-${index + 1}.jsonl`), "evidence/events.jsonl", "evidence/snapshot.json"], "scripted state, session, command, or final boundary evidence is unavailable");
       } else if (scriptedFourTurnMode
         ? integrity.status === "fail" || finalNext.to_state !== "accepted" || enteredArchive

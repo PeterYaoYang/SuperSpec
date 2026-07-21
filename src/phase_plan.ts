@@ -160,16 +160,16 @@ function requiredArtifact(
   changeRoot: string,
   state: State,
   kind: WorkflowArtifactKind,
-  fileName: string,
+  canonicalPath: string,
   risk: ReviewRisk,
 ): NextStepPlan {
-  const artifactPath = relative(projectRoot, join(changeRoot, ".superspec", "artifacts", fileName)).replaceAll("\\", "/");
+  const artifactPath = relative(projectRoot, join(changeRoot, canonicalPath)).replaceAll("\\", "/");
   return {
     kind: "artifact_required",
     state,
     artifact: { kind, path: artifactPath, operation: "create_or_update" },
     resume: { argv: nextArgv(change, risk) },
-    reason: `${fileName} 不存在`,
+    reason: `${canonicalPath.split("/").at(-1)} 不存在`,
   };
 }
 
@@ -417,6 +417,17 @@ export function proposalDocsBaseline(changeRoot: string): Record<string, string>
     baseline[doc] = docRef(changeRoot, doc).sha;
   }
   return baseline;
+}
+
+export function applyPlanningBaseline(changeRoot: string): Record<string, string> {
+  const baseline = proposalDocsBaseline(changeRoot);
+  delete baseline["tasks.md"];
+  return baseline;
+}
+
+export function applyPlanningDocsChangedSinceBaseline(changeRoot: string, baseline: Record<string, string>): boolean {
+  const current = applyPlanningBaseline(changeRoot);
+  return Object.entries(baseline).some(([path, digest]) => current[path] !== digest);
 }
 
 export function discoveryDocsBaseline(changeRoot: string): Record<string, string> {
@@ -668,6 +679,23 @@ export function pendingTaskStatusForApply(changeRoot: string, events: Event[]): 
   };
 }
 
+function isPostApplyPlanOnlyRepair(changeRoot: string, events: Event[]): boolean {
+  // Propose 返工发生在新 Apply round 之前，旧 round 的 task_completed 不能覆盖
+  // 当前计划明确重新打开的 checkbox；这里以当前 tasks.md 为准。
+  if (pendingTaskIds(changeRoot).length > 0) return false;
+  const roundId = currentProposeRoundId(events);
+  const roundEvent = events.find(event => event.event_id === roundId);
+  if (roundEvent?.event_type !== "transition_commit") return false;
+  const payload = roundEvent.payload as {
+    transition?: unknown;
+    reopen_target?: unknown;
+    reopen_source?: unknown;
+  };
+  return payload.transition === "reopen"
+    && payload.reopen_target === "propose"
+    && ["apply", "apply_done", "review", "accepted"].includes(String(payload.reopen_source));
+}
+
 export function formatPendingTaskMessage(ids: string[], action: string): string {
   return `尚有未完成任务：${ids.join(", ")}；${action}`;
 }
@@ -733,7 +761,7 @@ export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
       }
       const discoveryPath = join(changeRoot, ".superspec", "artifacts", "discovery.md");
       if (!existsSync(discoveryPath)) {
-        return requiredArtifact(projectRoot, change, changeRoot, "explore", "discovery", "discovery.md", mode.risk);
+        return requiredArtifact(projectRoot, change, changeRoot, "explore", "discovery", ".superspec/artifacts/discovery.md", mode.risk);
       }
       const discoveryCheck = validateDiscovery(changeRoot);
       if (!discoveryCheck.ok) {
@@ -824,7 +852,11 @@ export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
 
       const testContractPath = join(changeRoot, ".superspec", "artifacts", "test-contract.md");
       if (!existsSync(testContractPath)) {
-        return requiredArtifact(projectRoot, change, changeRoot, "propose", "test_contract", "test-contract.md", mode.risk);
+        return requiredArtifact(projectRoot, change, changeRoot, "propose", "test_contract", ".superspec/artifacts/test-contract.md", mode.risk);
+      }
+
+      if (!existsSync(join(changeRoot, "tasks.md"))) {
+        return requiredArtifact(projectRoot, change, changeRoot, "propose", "tasks", "tasks.md", mode.risk);
       }
 
       const planningProfile = planningValidationProfileForPendingProposeRound(events);
@@ -865,7 +897,8 @@ export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
         return requiredJobs("propose_ready", proposalReviewJobs, `有 ${proposalReviewJobs.length} 个待完成 proposal 审查工作项`);
       }
       const startApplyPlan = planStartApplyTransition(context, false);
-      if (startApplyPlan.kind === "advance") {
+      const planOnlyRepair = isPostApplyPlanOnlyRepair(changeRoot, events);
+      if (startApplyPlan.kind === "advance" && !planOnlyRepair) {
         const confirmation = phaseConfirmationStep(context, "propose_to_apply", "计划阶段完成，等待用户确认开始实现");
         if (confirmation) return confirmation;
       }
@@ -879,7 +912,12 @@ export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
         };
         return { kind: "ask_user", state: "propose_ready", ask, reason: startApplyPlan.message };
       }
-      return { kind: "run_transition", state: "propose_ready", transition: "start-apply", reason: "计划就绪，开始执行" };
+      return {
+        kind: "run_transition",
+        state: "propose_ready",
+        transition: "start-apply",
+        reason: planOnlyRepair ? "计划材料已修正且没有待实施任务，跳过重复的 Apply 确认" : "计划就绪，开始执行",
+      };
     }
 
     case "apply":
@@ -1352,10 +1390,12 @@ function planStartApplyTransition(
     };
   }
 
+  const planOnlyRepair = isPostApplyPlanOnlyRepair(changeRoot, events);
   const acceptedConfirmation = enforceConfirmation
+    && !planOnlyRepair
     ? acceptedProposeToApplyConfirmation(context, risk)
     : null;
-  if (enforceConfirmation && !acceptedConfirmation) {
+  if (enforceConfirmation && !acceptedConfirmation && !planOnlyRepair) {
     const confirmation = phaseConfirmationForBoundary(projectRoot, events, snapshot, "propose_to_apply", risk);
     return {
       kind: "skip",
@@ -1367,7 +1407,7 @@ function planStartApplyTransition(
     kind: "advance",
     fromState: "propose_ready",
     toState: "apply",
-    reason: "进入执行阶段",
+    reason: planOnlyRepair ? "计划材料修正完成且没有待实施任务" : "进入执行阶段",
     payload: {
       apply_start_head: gitHead.head,
       apply_start_head_reason: gitHead.reason,
@@ -1379,6 +1419,7 @@ function planStartApplyTransition(
         review_risk: risk,
         requires_verifier: risk !== "minimal",
       },
+      apply_planning_baseline: applyPlanningBaseline(changeRoot),
       ...(acceptedConfirmation ? phaseConfirmationCommitPayload(
         acceptedConfirmation.confirmation,
         acceptedConfirmation.decision,

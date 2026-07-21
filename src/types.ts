@@ -277,6 +277,8 @@ export interface TransitionCommitPayload {
     review_risk?: "minimal" | "normal" | "strict";
   };
   accepted_baseline_docs?: Record<string, string>;
+  /** Apply 开始时冻结的计划材料摘要；tasks.md 由状态机维护，不参与冻结。 */
+  apply_planning_baseline?: Record<string, string>;
   /** Propose-ready / start-apply 写入的本轮 workflow mode，后续阶段只读该快照。 */
   workflow_mode?: "minimal" | "normal" | "strict";
   /** v2 起所有普通任务必须有五字段执行依据；缺失表示旧 change，沿用旧规则回放。 */
@@ -406,7 +408,7 @@ export interface AcceptedMaterialFollowupContinuation {
   plan_docs_changed_since_accept: boolean | null;
 }
 
-export type WorkflowArtifactKind = "discovery" | "test_contract";
+export type WorkflowArtifactKind = "discovery" | "test_contract" | "tasks";
 
 export interface RequiredWorkflowArtifact {
   kind: WorkflowArtifactKind;
@@ -425,10 +427,10 @@ export interface MaterialUpdateRequiredResume {
 
 export interface TestEvidenceAction {
   kind: "test_run";
-  test_id?: string;
+  test_id: string;
   record_argv: string[];
   record_input: {
-    test_id?: string;
+    test_id: string;
     attempt_id: string;
     command: null;
     cwd: null;

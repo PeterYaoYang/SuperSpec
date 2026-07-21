@@ -947,8 +947,10 @@ test("normal/minimal 的普通 task 与审查修复都由 task-start 编译为 G
     });
     assert.deepEqual(started.details?.evidence_actions, [{
       kind: "test_run",
+      test_id: "REVIEW-FIX-JOB-1#F1",
       record_argv: ["superspec", "record", "test-run", "--change", reviewFixFx.change, "--input", "-"],
       record_input: {
+        test_id: "REVIEW-FIX-JOB-1#F1",
         attempt_id: attemptId,
         command: null,
         cwd: null,
@@ -1516,6 +1518,15 @@ test("执行依据模式：自测 Fix Task 复用冻结 mode，并携带可追�
       assert.deepEqual((started.details?.fix as { source?: string; parent_task_id?: string } | undefined), {
         ...fix,
       });
+      assert.deepEqual(
+        started.details?.evidence_actions,
+        expectedEvidenceActions(
+          fx.change,
+          attemptId,
+          [String(fix?.fix_id)],
+          risk === "strict" ? ["expected_failure", "expected_success"] : ["expected_success"],
+        ),
+      );
 
       if (risk === "strict") {
         assert.equal(recordTestRunContent(fx.projectRoot, fx.change, JSON.stringify({

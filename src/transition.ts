@@ -58,6 +58,7 @@ import {
 } from "./format.ts";
 import {
   applyRequirementModeForCurrentRound,
+  applyPlanningDocsChangedSinceBaseline,
   executionRequirementVersionForCurrentRound,
   blockingJobsForApplyDone,
   executionPolicyForCurrentRound,
@@ -299,19 +300,20 @@ function compileRequiredEvidence(
 function evidenceActionsForAttempt(
   change: string,
   attemptId: string,
+  fallbackTestId: string,
   required: EffectiveEvidencePlan,
 ): TestEvidenceAction[] {
-  const testIds: Array<string | undefined> = required.test_ids.length > 0 ? required.test_ids : [undefined];
+  const testIds = required.test_ids.length > 0 ? required.test_ids : [fallbackTestId];
   const statuses: TestEvidenceAction["record_input"]["semantic_status"][] = [];
   if (required.red_required) statuses.push("expected_failure");
   if (required.green_required) statuses.push(required.accepted_green_statuses[0] ?? "expected_success");
 
   return testIds.flatMap(testId => statuses.map(semanticStatus => ({
     kind: "test_run" as const,
-    ...(testId ? { test_id: testId } : {}),
+    test_id: testId,
     record_argv: ["superspec", "record", "test-run", "--change", change, "--input", "-"],
     record_input: {
-      ...(testId ? { test_id: testId } : {}),
+      test_id: testId,
       attempt_id: attemptId,
       command: null,
       cwd: null,
@@ -1031,6 +1033,9 @@ export function taskStart(projectRoot: string, change: string, changeRoot: strin
     decide: (snapshot) => {
       if (snapshot.state !== "apply") return { skip: true, message: `当前状态 ${snapshot.state}，需要 apply` };
       const events = readEvents(projectRoot, change);
+      if (applyPlanningMaterialsChanged(changeRoot, events)) {
+        return { skip: true, message: "Apply 期间计划材料已变化；请回到 Propose 核对并重新批准计划后再继续任务" };
+      }
       const tasksContent = readFileSync(join(changeRoot, "tasks.md"), "utf8");
       const lines = tasksContent.split("\n");
       const taskLineIdx = findTaskLine(lines, taskId);
@@ -1103,7 +1108,7 @@ export function taskStart(projectRoot: string, change: string, changeRoot: strin
         ...boundarySnapshotPayload(projectRoot),
       };
       const evidenceActions = requiredEvidence
-        ? evidenceActionsForAttempt(change, attempt.attempt_id, requiredEvidence)
+        ? evidenceActionsForAttempt(change, attempt.attempt_id, taskId, requiredEvidence)
         : null;
 
       return {
@@ -1150,6 +1155,39 @@ function invalidateOpenJobs(snapshot: Snapshot, to: State, reason: string): NonN
       reason: `reopen --to ${to}：${reason}`,
     },
   }));
+}
+
+function latestApplyPlanningBaseline(events: Event[]): Record<string, string> | null {
+  for (let index = events.length - 1; index >= 0; index--) {
+    const event = events[index];
+    if (event.event_type !== "transition_commit") continue;
+    const payload = event.payload as { transition?: unknown; apply_planning_baseline?: unknown };
+    if (payload.transition !== "start-apply") continue;
+    const baseline = payload.apply_planning_baseline;
+    if (!baseline || typeof baseline !== "object" || Array.isArray(baseline)) return null;
+    const entries = Object.entries(baseline as Record<string, unknown>);
+    return entries.every(([, digest]) => typeof digest === "string")
+      ? Object.fromEntries(entries) as Record<string, string>
+      : null;
+  }
+  return null;
+}
+
+function applyPlanningMaterialsChanged(changeRoot: string, events: Event[]): boolean {
+  const baseline = latestApplyPlanningBaseline(events);
+  return baseline != null && applyPlanningDocsChangedSinceBaseline(changeRoot, baseline);
+}
+
+function proposalReopenBaseline(changeRoot: string, events: Event[], source: State): {
+  baseline: Record<string, string>;
+  source: "apply" | "reopen_fallback";
+} {
+  const applyBaseline = ["apply", "apply_done", "review"].includes(source)
+    ? latestApplyPlanningBaseline(events)
+    : null;
+  return applyBaseline
+    ? { baseline: { ...proposalDocsBaseline(changeRoot), ...applyBaseline }, source: "apply" }
+    : { baseline: proposalDocsBaseline(changeRoot), source: "reopen_fallback" };
 }
 
 function planningReopenExtraEvents(snapshot: Snapshot, to: "explore" | "propose", reason: string): NonNullable<Decision["extraEvents"]> {
@@ -1224,6 +1262,9 @@ export function reopen(
       if (opts.reviewFix) {
         if (to !== "apply") return { skip: true, message: "--review-fix 只能用于回到实现阶段（reopen --to apply）" };
         if (snapshot.state !== "apply_done") return { skip: true, message: `当前状态 ${snapshot.state}，不能通过代码审查修复回到实现阶段` };
+        if (applyPlanningMaterialsChanged(changeRoot, events)) {
+          return { skip: true, message: "计划材料已变化，不能作为纯实现问题回到 Apply；请 reopen --to propose" };
+        }
         const ref = parseCodeReviewFindingRef(opts.reviewFix);
         if (!ref) return { skip: true, message: "--review-fix 必须是 <job_id>#<finding_id>" };
         const found = findReviewFailedFinding(events, ref);
@@ -1262,6 +1303,9 @@ export function reopen(
         }
 
         const parentTaskId = opts.selfTestFix.trim();
+        if (applyPlanningMaterialsChanged(changeRoot, events)) {
+          return { skip: true, message: "计划材料已变化，不能作为纯实现问题创建 self-test 修复；请 reopen --to propose" };
+        }
         const parentTask = parseTasksMd(readFileSync(join(changeRoot, "tasks.md"), "utf8"))
           .find(task => task.taskId === parentTaskId);
         if (!parentTask) return { skip: true, message: `自测修复关联的 task ${parentTaskId} 不存在` };
@@ -1339,12 +1383,13 @@ export function reopen(
         // 的摘要，并用 reopen 当刻的摘要补齐缺项，确保本轮之后对任一审查目标的修改都能被检测。
         const baselineNeedsBackfill = acceptedBaseline !== null && Object.keys(currentBaseline)
           .some(path => !Object.prototype.hasOwnProperty.call(acceptedBaseline, path));
+        const applyReopenBaseline = acceptedBaseline ? null : proposalReopenBaseline(changeRoot, events, snapshot.state);
         const baselineDocs = acceptedBaseline
           ? Object.fromEntries(Object.entries(currentBaseline).map(([path, digest]) => [
             path,
             Object.prototype.hasOwnProperty.call(acceptedBaseline, path) ? acceptedBaseline[path] : digest,
           ]))
-          : currentBaseline;
+          : applyReopenBaseline!.baseline;
         return {
           fromState: snapshot.state,
           toState: "propose",
@@ -1353,7 +1398,9 @@ export function reopen(
           commitPayload: {
             reopen_target: "propose",
             reopen_source: snapshot.state,
-            baseline_source: acceptedBaseline ? (baselineNeedsBackfill ? "accepted_backfill" : "accepted") : "reopen_fallback",
+            baseline_source: acceptedBaseline
+              ? (baselineNeedsBackfill ? "accepted_backfill" : "accepted")
+              : applyReopenBaseline!.source,
             baseline_docs: baselineDocs,
             planning_validation_version: 2,
             planning_validation_profile: planningValidationProfileForNewRound(projectRoot),
@@ -1365,6 +1412,9 @@ export function reopen(
       if (to !== "apply") return { skip: true, message: `reopen 当前只支持 --to explore、--to propose 或 --to apply，不支持 ${to}` };
       if (snapshot.state !== "apply_done" && snapshot.state !== "review") {
         return { skip: true, message: `当前状态 ${snapshot.state}，不能 reopen 到 apply` };
+      }
+      if (applyPlanningMaterialsChanged(changeRoot, events)) {
+        return { skip: true, message: "计划材料已变化，不能直接回到 Apply；请 reopen --to propose" };
       }
 
       const pending = pendingTaskStatusForApply(changeRoot, events).pending;
@@ -1391,6 +1441,10 @@ export function reviewReady(projectRoot: string, change: string, changeRoot: str
       const policy = storedPolicy ?? reviewPolicyForRisk(risk);
       const policyPayload = storedPolicy ? {} : { review_policy: policy };
       const currentEvidenceDigest = reviewEvidenceDigest(events);
+
+      if (snapshot.state === "apply" && applyPlanningMaterialsChanged(changeRoot, events)) {
+        return { skip: true, message: "Apply 期间计划材料已变化，不能进入 Review；请回到 Propose 核对并重新批准计划" };
+      }
 
       // 检查是否所有任务已完成
       const pending = pendingTaskStatusForApply(changeRoot, events).pending;
@@ -1497,9 +1551,14 @@ export function taskComplete(projectRoot: string, change: string, changeRoot: st
       const attempt = snapshot.active_task_attempts?.find(a => a.task_id === taskId && a.state === "active");
       if (!attempt) return { skip: true, message: `任务 ${taskId} 无活跃执行尝试` };
 
+      const events = readEvents(projectRoot, change);
+      if (applyPlanningMaterialsChanged(changeRoot, events)) {
+        return { skip: true, message: "Apply 期间计划材料已变化，不能完成当前任务；请回到 Propose 核对并重新批准计划" };
+      }
+
       const readiness = taskEvidenceReadiness(projectRoot, change, changeRoot, attempt);
       if (!readiness.ready) return { skip: true, message: `任务 ${taskId} 无法完成：${readiness.reason}` };
-      const taskStartBoundary = boundarySnapshotForTaskAttempt(readEvents(projectRoot, change), attempt.attempt_id);
+      const taskStartBoundary = boundarySnapshotForTaskAttempt(events, attempt.attempt_id);
 
       const completedPayload: Record<string, unknown> = {
         task_id: taskId,

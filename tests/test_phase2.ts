@@ -1644,6 +1644,31 @@ test("next 在 propose 缺 test-contract 时返回 canonical artifact_required",
   } finally { fx.cleanup(); }
 });
 
+test("next 在 propose 缺 tasks 时返回 canonical artifact_required", () => {
+  const fx = setupPropose();
+  try {
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.equal(transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal").to_state, "propose");
+    writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "test-contract.md"), "# Test Contract\n");
+    rmSync(join(fx.changeRoot, "tasks.md"));
+
+    const result = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.deepEqual(result, {
+      state: "propose",
+      path: "artifact_required",
+      artifact: {
+        kind: "tasks",
+        path: "openspec/changes/test-change/tasks.md",
+        operation: "create_or_update",
+      },
+      resume: {
+        argv: ["superspec", "transition", "next", "--change", "test-change"],
+      },
+      reason: "tasks.md 不存在",
+    });
+  } finally { fx.cleanup(); }
+});
+
 test("next 在 propose 宣称计划就绪前复用 propose-ready 预检", () => {
   const fx = setupPropose();
   try {

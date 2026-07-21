@@ -16,7 +16,7 @@ import { latestReviewHistoryForGateRole, reviewEvidenceDigest } from "../src/rev
 import { REVIEW_FINAL_VERIFIER_GATE } from "../src/review_job_gates.ts";
 import { codeFileContentSha, dirtyCodeFiles } from "../src/git_state.ts";
 import { phaseConfirmationForCurrentState, type PhaseDecisionAction } from "../src/phase_confirmation.ts";
-import { latestAcceptedProposalBaseline } from "../src/phase_plan.ts";
+import { applyPlanningBaseline, latestAcceptedProposalBaseline } from "../src/phase_plan.ts";
 import type { Job, JobRole, State } from "../src/types.ts";
 import { confirmCurrentPhase } from "./phase_confirmation_support.ts";
 
@@ -50,6 +50,7 @@ function setupApplyWithDoneTask(): { projectRoot: string; change: string; change
     appendEvent(projectRoot, change, makeEvent(change, "transition_commit", {
       transition: t, from_state: f, to_state: to,
       outcome: "advanced", created_job_ids: [], reason: t,
+      ...(t === "start-apply" ? { apply_planning_baseline: applyPlanningBaseline(changeRoot) } : {}),
     }, { transitionId: `T-${t}`, idempotencyKey: `${t}-key` }));
   }
   return {
@@ -528,7 +529,7 @@ test("reopen：无 pending task 时不能直回 apply；但可回 propose 重新
   } finally { archiveFx.cleanup(); }
 });
 
-test("reopen：review 可以回 propose，且必须更新计划材料后才能重新开始 apply", () => {
+test("reopen：review 回 propose 修正计划且无 pending task 时跳过重复 Apply 确认", () => {
   const fx = setupApplyWithDoneTask();
   try {
     advanceApplyToReview(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
@@ -565,8 +566,13 @@ test("reopen：review 可以回 propose，且必须更新计划材料后才能�
     assert.match(unchanged.message, /至少一个计划文档必须变化/);
 
     writeFileSync(join(fx.changeRoot, "proposal.md"), "# P\n\n补充非全天借调的验收规则\n");
-    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    const resume = next(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    assert.equal(resume.path, "next_command");
+    if (resume.path === "next_command") assert.match(resume.next_command, /start-apply/);
     assert.equal(startApply(fx.projectRoot, fx.change, fx.changeRoot).to_state, "apply");
+    const finishEmptyApply = next(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    assert.equal(finishEmptyApply.path, "next_command");
+    if (finishEmptyApply.path === "next_command") assert.match(finishEmptyApply.next_command, /review-ready/);
   } finally { fx.cleanup(); }
 });
 
@@ -1823,6 +1829,85 @@ test("self-test-fix：已完成实现可直接回 apply，不进入 proposal 审
       parent_task_id: "TASK-001",
       reason: "自测发现空输入仍会抛错",
     });
+  } finally { fx.cleanup(); }
+});
+
+test("Apply 计划材料冻结：遗漏修正必须回 Propose，且复用 Apply 起始基线", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    const frozen = applyPlanningBaseline(fx.changeRoot);
+    writeFileSync(join(fx.changeRoot, "design.md"), "# D\n\n补充遗漏的公开接口约束\n");
+
+    const selfTestRepair = reopen(fx.projectRoot, fx.change, fx.changeRoot, "apply", "计划遗漏了公开接口", {
+      selfTestFix: "TASK-001",
+    });
+    assert.equal(selfTestRepair.events_written, 0);
+    assert.doesNotMatch(readFileSync(join(fx.changeRoot, "tasks.md"), "utf8"), /FIX-SELFTEST-/);
+
+    const review = reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    assert.equal(review.events_written, 0);
+    assert.equal(rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot).state, "apply");
+
+    const reopened = reopen(fx.projectRoot, fx.change, fx.changeRoot, "propose", "补齐计划遗漏");
+    assert.equal(reopened.to_state, "propose");
+    const commit = readEvents(fx.projectRoot, fx.change).findLast(event =>
+      event.event_type === "transition_commit" &&
+      (event.payload as { transition?: unknown }).transition === "reopen"
+    );
+    const payload = commit?.payload as { baseline_source?: unknown; baseline_docs?: Record<string, string> };
+    assert.equal(payload.baseline_source, "apply");
+    assert.equal(payload.baseline_docs?.["design.md"], frozen["design.md"]);
+
+    assert.equal(proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal").to_state, "propose_ready");
+    assert.equal(startApply(fx.projectRoot, fx.change, fx.changeRoot).to_state, "apply");
+    const nextResult = next(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    assert.equal(nextResult.path, "next_command");
+    if (nextResult.path === "next_command") assert.match(nextResult.next_command, /review-ready/);
+  } finally { fx.cleanup(); }
+});
+
+test("Apply 计划材料冻结：活跃任务不能在计划材料变化后完成", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    writeFileSync(join(fx.changeRoot, "tasks.md"), "# Tasks\n\n- [ ] TASK-001 Pending\n");
+    assert.equal(taskStart(fx.projectRoot, fx.change, fx.changeRoot, "TASK-001").to_state, "apply");
+    writeFileSync(join(fx.changeRoot, "proposal.md"), "# P\n\n扩大交付范围\n");
+
+    const completed = taskComplete(fx.projectRoot, fx.change, fx.changeRoot, "TASK-001");
+    assert.equal(completed.events_written, 0);
+    assert.equal(rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot).active_task_attempts.length, 1);
+
+    assert.equal(reopen(fx.projectRoot, fx.change, fx.changeRoot, "propose", "计划范围已变化").to_state, "propose");
+    assert.equal(rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot).active_task_attempts.length, 0);
+  } finally { fx.cleanup(); }
+});
+
+test("Propose 返工：重新打开既有 task 时保留新的 Apply 确认", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    assert.equal(reopen(fx.projectRoot, fx.change, fx.changeRoot, "propose", "调整已批准需求").to_state, "propose");
+    writeFileSync(join(fx.changeRoot, "design.md"), "# D\n\n默认路径调整为新位置\n");
+    writeFileSync(join(fx.changeRoot, "tasks.md"), [
+      "# Tasks", "",
+      "- [ ] TASK-001 Update the new default path",
+      "  执行依据:",
+      "  - 测试:",
+      "  - 设计: design.md#D",
+      "  - 来源: proposal.md#P",
+      "  - 验收: 文档使用新的默认路径",
+      "  - 边界: 不改变其他参数语义",
+      "",
+    ].join("\n"));
+
+    assert.equal(proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal").to_state, "propose_ready");
+    const waiting = next(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    assert.equal(waiting.path, "ask_user");
+
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    assert.equal(startApply(fx.projectRoot, fx.change, fx.changeRoot).to_state, "apply");
+    const nextResult = next(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    assert.equal(nextResult.path, "next_command");
+    if (nextResult.path === "next_command") assert.match(nextResult.next_command, /task-start.*TASK-001/);
   } finally { fx.cleanup(); }
 });
 
@@ -3265,7 +3350,6 @@ test("accepted：受控 reopen 只能回到 propose，并记录计划材料基�
     assert.match(unchanged.message, /至少一个计划文档必须变化/);
 
     writeFileSync(join(fx.changeRoot, "design.md"), "# D\n\n新增验收设计\n");
-    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
     assert.equal(startApply(fx.projectRoot, fx.change, fx.changeRoot).to_state, "apply");
   } finally { fx.cleanup(); }
 });
@@ -3345,8 +3429,6 @@ test("accepted reopen：reopen 前已有计划材料变化时复用 accept basel
     const reopened = reopen(fx.projectRoot, fx.change, fx.changeRoot, "propose", "补充设计约束");
     assert.equal(reopened.to_state, "propose");
     assert.equal(proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal").to_state, "propose_ready");
-    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
-
     const applied = startApply(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(applied.to_state, "apply");
   } finally { fx.cleanup(); }
@@ -3381,7 +3463,6 @@ test("accepted reopen：新 minimal planning round 不复用历史 proposal 审�
     writeFileSync(join(fx.changeRoot, "design.md"), "# D\n\nchanged after accepted reopen\n");
 
     assert.equal(proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal").to_state, "propose_ready");
-    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
     const applied = startApply(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(applied.outcome, "advanced");
     assert.equal(applied.to_state, "apply");
