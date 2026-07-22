@@ -535,8 +535,8 @@ function fixDescriptorForTask(events: Event[], taskId: string): FixDescriptor | 
     : null;
 }
 
-function isFreshOpenCodeReviewerJob(job: Job, projectRoot: string, currentWorkingPaths?: string[]): boolean {
-  return codeReviewJobStaleReason(projectRoot, job, currentWorkingPaths) == null;
+function isFreshOpenCodeReviewerJob(job: Job, projectRoot: string, events: Event[], currentWorkingPaths?: string[]): boolean {
+  return codeReviewJobStaleReason(projectRoot, job, currentWorkingPaths, events) == null;
 }
 
 function hasFrozenCodeReviewCurrentHead(scope: CodeReviewScope | undefined): scope is CodeReviewScope {
@@ -557,7 +557,7 @@ function evaluateApplyDoneCodeReviewGate(input: {
   const facts = collectCodeReviewGateFacts(input.events);
   if (scan.hasCodeChanges) {
     const currentWorkingPaths = currentCodeReviewWorkingPaths(input.projectRoot, input.events);
-    const freshOpenJobs = facts.openJobs.filter(job => isFreshOpenCodeReviewerJob(job, input.projectRoot, currentWorkingPaths));
+    const freshOpenJobs = facts.openJobs.filter(job => isFreshOpenCodeReviewerJob(job, input.projectRoot, input.events, currentWorkingPaths));
     if (freshOpenJobs.length > 0) {
       return {
         blocked: true,
@@ -569,7 +569,7 @@ function evaluateApplyDoneCodeReviewGate(input: {
     const latest = facts.latestTerminal;
     if (latest?.state === "accepted") {
       const acceptedScope = latest.job.packet_context?.code_review_scope;
-      const staleReason = codeReviewJobStaleReason(input.projectRoot, latest.job, currentWorkingPaths);
+      const staleReason = codeReviewJobStaleReason(input.projectRoot, latest.job, currentWorkingPaths, input.events);
       if (staleReason || !hasFrozenCodeReviewCurrentHead(acceptedScope)) {
         const { job, scanReason } = createCodeReviewerJob(input.change, input.projectRoot, input.changeRoot, input.events);
         return {
@@ -599,7 +599,7 @@ function evaluateApplyDoneCodeReviewGate(input: {
       };
     }
     if (latest?.state === "rejected" && latest.result_kind === "review_failed") {
-      const staleReason = codeReviewJobStaleReason(input.projectRoot, latest.job, currentWorkingPaths);
+      const staleReason = codeReviewJobStaleReason(input.projectRoot, latest.job, currentWorkingPaths, input.events);
       if (staleReason) {
         const { job, scanReason } = createCodeReviewerJob(input.change, input.projectRoot, input.changeRoot, input.events);
         return {

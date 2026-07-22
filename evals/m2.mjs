@@ -24,11 +24,13 @@ const REPO_ROOT = resolve(EVAL_ROOT, "..");
 const RUNS_ROOT = join(EVAL_ROOT, "runs");
 const PROVIDER_ALLOWED_KEYS = new Set(["name", "base_url", "env_key", "wire_api", "requires_openai_auth"]);
 const REASONING_LEVELS = new Set(["none", "low", "medium", "high", "xhigh", "max"]);
-const REVIEW_TRANSCRIPT_LIMIT = 500;
+const REVIEW_TRANSCRIPT_LIMIT = 50;
 const REVIEW_CHUNK_CHARS = 8_000;
 const REVIEW_ARTIFACT_CHUNKS = 4;
 const REVIEW_DIFF_CHUNKS = 8;
-const REVIEW_TEST_OUTPUT_CHARS = 12_000;
+const REVIEW_CHANGED_FILE_LIMIT = 80;
+const REVIEW_CHANGED_FILE_CHUNKS = 1;
+const REVIEW_TEST_OUTPUT_CHARS = 3_000;
 
 function parseArgs(argv) {
   const result = {
@@ -256,35 +258,61 @@ function parseAgentJson(jsonl) {
 
 async function runReviewer({ id, codex, profile, model, reasoning, cwd, prompt, tracePath, stderrPath }) {
   const isolated = isolatedModelEnvironment(id, profile);
-  const args = [
-    "exec", "--json", "--ephemeral", "--ignore-user-config", "--strict-config",
-    "--sandbox", "read-only", "-m", model,
-    ...profile.cli_args,
-    "-c", `model_reasoning_effort=${tomlLiteral(reasoning)}`,
-    "-c", "approval_policy=\"never\"",
-    "--disable", "multi_agent",
-    "-C", cwd,
-    "-",
-  ];
   try {
-    const result = await new Promise((resolvePromise, reject) => {
-      const child = spawn(codex, args, { cwd, env: isolated.env, shell: false, stdio: ["pipe", "pipe", "pipe"] });
-      const stdout = [];
-      const stderr = [];
-      const timeout = setTimeout(() => child.kill("SIGTERM"), 600_000);
-      child.stdout.on("data", chunk => stdout.push(chunk));
-      child.stderr.on("data", chunk => stderr.push(chunk));
-      child.stdin.end(prompt);
-      child.on("error", reject);
-      child.on("close", code => {
-        clearTimeout(timeout);
-        resolvePromise({ code, stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8") });
-      });
+    const catalogPath = join(isolated.codexHome, "model-catalog.json");
+    const catalog = spawnSync(codex, ["debug", "models"], {
+      cwd,
+      env: process.env,
+      encoding: "utf8",
+      maxBuffer: 4 * 1024 * 1024,
     });
-    writeFileSync(tracePath, result.stdout, { mode: 0o600 });
-    writeFileSync(stderrPath, result.stderr, { mode: 0o600 });
-    if (result.code !== 0) throw new Error(`reviewer ${id} exited ${result.code}: ${result.stderr.trim()}`);
-    return parseAgentJson(result.stdout);
+    if (catalog.status !== 0) throw new Error(`reviewer ${id} model catalog unavailable: ${catalog.stderr.trim()}`);
+    let catalogJson;
+    try { catalogJson = JSON.parse(catalog.stdout); } catch { throw new Error(`reviewer ${id} model catalog is malformed`); }
+    if (!Array.isArray(catalogJson?.models) || !catalogJson.models.some(item => item?.slug === model)) {
+      throw new Error(`reviewer ${id} model is absent from the local Codex catalog: ${model}`);
+    }
+    writeFileSync(catalogPath, `${JSON.stringify(catalogJson)}\n`, { mode: 0o600 });
+    const args = [
+      "exec", "--json", "--ephemeral", "--ignore-user-config", "--strict-config",
+      "--sandbox", "read-only", "-m", model,
+      ...profile.cli_args,
+      "-c", `model_catalog_json=${tomlLiteral(catalogPath)}`,
+      "-c", `model_reasoning_effort=${tomlLiteral(reasoning)}`,
+      "-c", "approval_policy=\"never\"",
+      "--enable", "multi_agent",
+      "-C", cwd,
+      "-",
+    ];
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const result = await new Promise((resolvePromise, reject) => {
+        const child = spawn(codex, args, { cwd, env: isolated.env, shell: false, stdio: ["pipe", "pipe", "pipe"] });
+        const stdout = [];
+        const stderr = [];
+        const timeout = setTimeout(() => child.kill("SIGTERM"), 600_000);
+        child.stdout.on("data", chunk => stdout.push(chunk));
+        child.stderr.on("data", chunk => stderr.push(chunk));
+        child.stdin.end(prompt);
+        child.on("error", reject);
+        child.on("close", code => {
+          clearTimeout(timeout);
+          resolvePromise({ code, stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8") });
+        });
+      });
+      const attemptSuffix = attempt === 1 ? ".attempt-1" : "";
+      writeFileSync(`${tracePath}${attemptSuffix}`, result.stdout, { mode: 0o600 });
+      writeFileSync(`${stderrPath}${attemptSuffix}`, result.stderr, { mode: 0o600 });
+      if (result.code === 0) {
+        if (attempt === 1) {
+          writeFileSync(tracePath, result.stdout, { mode: 0o600 });
+          writeFileSync(stderrPath, result.stderr, { mode: 0o600 });
+        }
+        return parseAgentJson(result.stdout);
+      }
+      const transient = /stream disconnected|stream closed before response\.completed|timed out/iu.test(`${result.stderr}\n${result.stdout}`);
+      if (!transient || attempt === 2) throw new Error(`reviewer ${id} exited ${result.code} after ${attempt} attempt(s): ${result.stderr.trim()}`);
+    }
+    throw new Error(`reviewer ${id} exhausted its retry budget`);
   } finally {
     rmSync(isolated.home, { recursive: true, force: true });
     rmSync(isolated.codexHome, { recursive: true, force: true });
@@ -419,6 +447,10 @@ function boundedTestOutput(output) {
   return `${output.slice(0, headChars)}\n...[${omitted} chars omitted]...\n${output.slice(-tailChars)}`;
 }
 
+function isGeneratedReviewPath(path) {
+  return /(?:^|\/)(?:target|build|dist|out|coverage|node_modules)(?:\/|$)/u.test(path);
+}
+
 function testEvidenceFromRun(runRoot) {
   const evidenceRoot = join(runRoot, "evidence");
   if (!existsSync(evidenceRoot)) return [];
@@ -544,8 +576,13 @@ function buildReviewBundle({ task, capability, capabilityFile, outcome, transcri
     } catch { limitations.push("workspace changes evidence malformed"); }
   }
   const changedFiles = {};
-  for (const change of workspaceChangeRecords) {
-    if (typeof change?.path !== "string" || change.after?.type !== "file" || change.path.startsWith(".superspec/changes/")) continue;
+  const reviewableChanges = workspaceChangeRecords.filter(change =>
+    typeof change?.path === "string"
+    && change.after?.type === "file"
+    && !change.path.startsWith(".superspec/changes/")
+    && !isGeneratedReviewPath(change.path)
+  );
+  for (const change of reviewableChanges.slice(0, REVIEW_CHANGED_FILE_LIMIT)) {
     if (Object.hasOwn(artifacts, `artifacts/files/${change.path}`)) continue;
     const primaryPath = join(runRoot, "artifacts", "changed-files", change.path);
     const fallbackPath = join(runRoot, "artifacts", "files", change.path);
@@ -560,10 +597,13 @@ function buildReviewBundle({ task, capability, capabilityFile, outcome, transcri
       path: change.path,
       content: readFileSync(frozenPath, "utf8"),
       refPrefix: `changed-file:${change.path}`,
-      maxChunks: REVIEW_ARTIFACT_CHUNKS,
+      maxChunks: REVIEW_CHANGED_FILE_CHUNKS,
     });
     changedFiles[change.path] = source;
     if (source.truncated) limitations.push(`changed file truncated: ${change.path}`);
+  }
+  if (reviewableChanges.length > REVIEW_CHANGED_FILE_LIMIT) {
+    limitations.push(`changed file content omitted: ${reviewableChanges.length - REVIEW_CHANGED_FILE_LIMIT} file(s) beyond review bundle limit`);
   }
   const gitAfterPath = join(runRoot, "evidence", "git-after.json");
   if (safeRegularWithin(gitAfterPath, runRoot)) {

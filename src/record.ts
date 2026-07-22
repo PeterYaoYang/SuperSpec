@@ -161,7 +161,7 @@ function reviewScopeInstruction(job: Job, reviewTargets: string[], readOnlyRefs:
 
 function genericReviewCoverageInstruction(job: Job): string {
   if (!requiresReviewScope(job)) return "";
-  return "完整审查全部 boundFiles，不因发现第一个 blocker 停止；read_only_refs 只在核对本次问题与上下游一致性时读取。review_scope.checked_paths 必须回执已浏览的全部 boundFiles，但该回执不能代替语义审查，也不扩大可报告问题的范围。";
+  return "完整审查全部 boundFiles，不因发现第一个 blocker 停止；read_only_refs 只在核对本次问题与上下游一致性时读取。review_scope.checked_paths 只填写本次实际浏览并完成语义审查的绑定文件，不能根据 packet 预填；未检查项如实写入 unchecked。覆盖回执不能代替语义审查，也不扩大可报告问题的范围。";
 }
 
 function proposalIncrementalReviewInstruction(job: Job): string {
@@ -441,6 +441,9 @@ function validateCodeReviewScope(
       if (!checkedPaths.has(bound.path) && !uncheckedPaths.has(bound.path)) {
         checks.push(`代码审查报告未说明是否检查了 ${bound.path}`);
       }
+    }
+    if (obj.verdict === "pass" && uncheckedPaths.size > 0) {
+      checks.push("代码审查结论为 pass 时不能包含未检查的绑定文件");
     }
   }
 }
@@ -1352,7 +1355,7 @@ function recordUserDecisionLoaded(
       ? status.findings.find(item => item.id === ref.findingId && (item.type === "spec" || item.type === "mixed"))
       : null;
     const staleReason = status && ref && status.terminal.job.job_id === ref.jobId
-      ? codeReviewJobStaleReason(projectRoot, status.terminal.job, currentCodeReviewWorkingPaths(projectRoot, events))
+      ? codeReviewJobStaleReason(projectRoot, status.terminal.job, currentCodeReviewWorkingPaths(projectRoot, events), events)
       : null;
     if (!ref || snapshot.state !== "apply_done" || !status || !finding || staleReason) {
       const reason = !ref
@@ -1621,7 +1624,7 @@ export function jobsPacket(
           (requiresReviewer(job.role) ? `必须由独立 ${recommendedAgentForRole(job.role)} 审查角色执行，并在审查者来源字段（reviewer.kind/id）中记录来源，` : "") +
           `产出 JSON 报告内容并优先通过 --report - 从 stdin 登记；文件路径模式仅作备用。${recordInputInstruction(job)}协议字段含义见 packet 顶层“字段说明”，普通对话不要原样复述 JSON。` +
           (isCodeReviewer
-            ? `最小格式：{"role":"code-reviewer","verdict":"pass","review_scope":{"job_id":"${job.job_id}","packet_digest":"${job.packet_digest}","checked_paths":${JSON.stringify(job.boundFiles.map(f => f.path))},"checked_docs":${JSON.stringify(REVIEW_DOC_PATHS)},"unchecked":[]},"findings":[],"reviewer":{"kind":"codex-subagent","id":"<thread-or-agent-id>"}}。verdict 只能为 pass 或 fail；审查覆盖范围（review_scope）用来说明本次审查覆盖了哪些文件和文档，已检查路径（checked_paths）与未检查项（unchecked）必须合起来覆盖全部绑定文件（boundFiles），unchecked 条目格式为 {"path":"<path>","reason":"<reason>"}。`
+            ? `格式骨架：{"role":"code-reviewer","verdict":"pass","review_scope":{"job_id":"${job.job_id}","packet_digest":"${job.packet_digest}","checked_paths":[],"checked_docs":[],"unchecked":[]},"findings":[],"reviewer":{"kind":"codex-subagent","id":"<thread-or-agent-id>"}}。提交前按真实审查结果填写数组；不得从 boundFiles 自动复制 checked_paths。verdict 只能为 pass 或 fail；审查覆盖范围（review_scope）用来说明本次审查覆盖了哪些文件和文档，已检查路径（checked_paths）与未检查项（unchecked）必须合起来覆盖全部绑定文件（boundFiles），unchecked 条目格式为 {"path":"<path>","reason":"<reason>"}；pass 不允许仍有未检查的绑定文件。`
               + `报告结论为 fail 时，问题列表（findings）至少包含一个可处理、可追溯的阻塞问题，字段为 {"id":"<stable-id>","blocking":true,"type":"implementation|spec|mixed","description":"<what>","evidence":"<why>","source_refs":["<path:line>"],"impact":"<impact>","suggested_action":"apply|propose"}。问题类型（type）中 implementation 表示纯代码实现问题，spec 表示方案/需求文档问题，mixed 表示需要使用者判断的混合问题。`
               + (packetContext?.task_execution_index
                 ? `本工作项带任务执行索引（task_execution_index）：按 task 对照其执行依据快照（contract）审查——实现路线对照 design 引用原文、累计 diff 对照 guard 边界、测试断言对照 tests 声明的 scenario；每项的 required_evidence 是 task-start 冻结的证据口径，red_required/green_required 分别说明是否需要 RED/GREEN；fix 非空表示状态机创建的实现修复，source、parent_task_id 和 reason 说明其归属，code_review 来源还需核对 review_finding；每项的 scope_note 是执行者登记的范围扩大说明，判断其合理性与验证充分性；changed_paths 是归属线索不是结论（null 表示未知）；unattributed_paths 中的无主改动逐个判断合理性；coverage_exemption_refs 解释未绑定 task 的 TEST 豁免。`

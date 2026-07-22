@@ -1020,7 +1020,7 @@ export function blockingJobsForApplyDone(
   const currentWorkingPaths = currentCodeReviewWorkingPaths(projectRoot, events);
   const freshCodeReviewJobIds = new Set(
     facts.openJobs
-      .filter(job => codeReviewJobStaleReason(projectRoot, job, currentWorkingPaths) == null)
+      .filter(job => codeReviewJobStaleReason(projectRoot, job, currentWorkingPaths, events) == null)
       .map(job => job.job_id),
   );
   return snapshot.open_jobs.filter(job =>
@@ -1050,7 +1050,7 @@ function planApplyDoneNext(context: PhasePlanContext): NextStepPlan {
 
   const latest = facts.latestTerminal;
   if (latest?.state === "rejected" && latest.result_kind === "review_failed") {
-    const staleReason = codeReviewJobStaleReason(context.projectRoot, latest.job, currentWorkingPaths);
+    const staleReason = codeReviewJobStaleReason(context.projectRoot, latest.job, currentWorkingPaths, events);
     if (staleReason) {
       return {
         kind: "run_transition",
@@ -1158,7 +1158,7 @@ function planApplyDoneNext(context: PhasePlanContext): NextStepPlan {
     : undefined;
   const acceptedCurrentHead = acceptedScope?.current_head;
   const acceptedReviewReady = latest?.state === "accepted" &&
-    codeReviewJobStaleReason(context.projectRoot, latest.job, currentWorkingPaths) == null && (
+    codeReviewJobStaleReason(context.projectRoot, latest.job, currentWorkingPaths, events) == null && (
     acceptedCurrentHead === null ||
     (typeof acceptedCurrentHead === "string" && acceptedCurrentHead.trim() !== "")
   );

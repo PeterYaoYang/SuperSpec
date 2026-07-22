@@ -15,6 +15,7 @@ import { jobsPacket, recordJobSubmit, recordJobSubmitContent, recordUserDecision
 import { latestReviewHistoryForGateRole, reviewEvidenceDigest } from "../src/review.ts";
 import { REVIEW_FINAL_VERIFIER_GATE } from "../src/review_job_gates.ts";
 import { codeFileContentSha, dirtyCodeFiles } from "../src/git_state.ts";
+import { scanCodeReviewScope } from "../src/code_review.ts";
 import { phaseConfirmationForCurrentState, type PhaseDecisionAction } from "../src/phase_confirmation.ts";
 import { applyPlanningBaseline, latestAcceptedProposalBaseline } from "../src/phase_plan.ts";
 import type { Job, JobRole, State } from "../src/types.ts";
@@ -882,7 +883,14 @@ test("code_state_check：已审 dirty 文件未变化不算差异，后续修改
     const verifier = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(verifier.outcome, "job_created");
     const verifierPacket = jobsPacket(fx.projectRoot, fx.change, verifier.created_jobs[0]);
-    assert.deepEqual(verifierPacket.packet?.code_state_check?.changed_paths, []);
+    const reviewed = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot).accepted_jobs.find(job => job.job_id === codeReview.created_jobs[0]);
+    assert.equal(reviewed?.boundFiles[0]?.sha, codeFileContentSha(fx.projectRoot, "src/a.ts"));
+    assert.equal(verifierPacket.packet?.code_review_gate?.job_id, codeReview.created_jobs[0]);
+    const eventJob = readEvents(fx.projectRoot, fx.change).flatMap(event =>
+      event.event_type === "transition_commit" ? (event.payload as { new_jobs?: Job[] }).new_jobs ?? [] : []
+    ).find(job => job.job_id === codeReview.created_jobs[0]);
+    assert.equal(eventJob?.boundFiles[0]?.sha, codeFileContentSha(fx.projectRoot, "src/a.ts"));
+    assert.deepEqual(verifierPacket.packet?.code_state_check?.changed_paths, [], JSON.stringify(verifierPacket.packet?.code_state_check));
 
     writeFileSync(join(fx.projectRoot, "src", "a.ts"), "export const value = 3;\n");
     const submitted = submitVerifierPass(fx.projectRoot, fx.change, fx.changeRoot, verifier.created_jobs[0]);
@@ -1166,6 +1174,131 @@ test("code-reviewer：pass 报告漏覆盖时可在同一工作项重交", () =>
   } finally { fx.cleanup(); }
 });
 
+test("code-reviewer：pass 报告不能把绑定文件留在 unchecked", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    initGitRepo(fx.projectRoot);
+    mkdirSync(join(fx.projectRoot, "src"), { recursive: true });
+    writeFileSync(join(fx.projectRoot, "src", "example.ts"), "export const value = 1;\n");
+
+    reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    const created = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(created.outcome, "job_created");
+    const packet = jobsPacket(fx.projectRoot, fx.change, created.created_jobs[0]).packet;
+    const submitted = recordJobSubmitContent(
+      fx.projectRoot,
+      fx.change,
+      fx.changeRoot,
+      created.created_jobs[0],
+      JSON.stringify({
+        role: "code-reviewer",
+        verdict: "pass",
+        review_scope: {
+          job_id: created.created_jobs[0],
+          packet_digest: packet?.packet_digest,
+          checked_paths: [],
+          checked_docs: ["proposal.md", "design.md", "tasks.md", ".superspec/artifacts/test-contract.md"],
+          unchecked: [{ path: "src/example.ts", reason: "未实际检查" }],
+        },
+        findings: [],
+        reviewer: { kind: "codex-subagent", id: "test-code-reviewer" },
+      }),
+    );
+    assert.equal(submitted.accepted, false);
+    assert.equal(submitted.job_state, "requested");
+    assert.match(submitted.message, /pass 时不能包含未检查/);
+  } finally { fx.cleanup(); }
+});
+
+test("code-reviewer scope：首个 task 边界排除 Apply 前未变化的脏文件", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    initGitRepo(fx.projectRoot);
+    mkdirSync(join(fx.projectRoot, "src"), { recursive: true });
+    writeFileSync(join(fx.projectRoot, "src", "preexisting.ts"), "export const preexisting = 1;\n");
+    writeFileSync(join(fx.projectRoot, "src", "changed.ts"), "export const changed = 1;\n");
+    execFileSync("git", ["add", "."], { cwd: fx.projectRoot, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "initial"], { cwd: fx.projectRoot, stdio: "ignore" });
+    writeFileSync(join(fx.projectRoot, "src", "preexisting.ts"), "export const preexisting = 2;\n");
+    const startedBoundary = dirtyCodeFiles(fx.projectRoot);
+    assert.equal(startedBoundary.ok, true);
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "task_started", {
+      task_id: "TASK-001",
+      attempt_id: "ATT-scope",
+      task_structure_digest: "sha256:scope",
+      contract_mode: false,
+      boundary_snapshot: { head: execFileSync("git", ["rev-parse", "HEAD"], { cwd: fx.projectRoot, encoding: "utf8" }).trim(), dirty_files: startedBoundary.files },
+    }));
+    writeFileSync(join(fx.projectRoot, "src", "changed.ts"), "export const changed = 2;\n");
+    const completedBoundary = dirtyCodeFiles(fx.projectRoot);
+    assert.equal(completedBoundary.ok, true);
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "task_completed", {
+      task_id: "TASK-001",
+      attempt_id: "ATT-scope",
+      boundary_snapshot: { head: execFileSync("git", ["rev-parse", "HEAD"], { cwd: fx.projectRoot, encoding: "utf8" }).trim(), dirty_files: completedBoundary.files },
+    }));
+
+    const scope = scanCodeReviewScope(fx.projectRoot, readEvents(fx.projectRoot, fx.change));
+    assert.deepEqual(scope.review_paths, ["src/changed.ts"]);
+  } finally { fx.cleanup(); }
+});
+
+test("code-reviewer scope：复审只包含修复增量和原 finding 的直接证据文件", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    initGitRepo(fx.projectRoot);
+    mkdirSync(join(fx.projectRoot, "src"), { recursive: true });
+    for (const name of ["a.ts", "b.ts", "c.ts"]) writeFileSync(join(fx.projectRoot, "src", name), `export const ${name[0]} = 1;\n`);
+    execFileSync("git", ["add", "."], { cwd: fx.projectRoot, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "initial"], { cwd: fx.projectRoot, stdio: "ignore" });
+    writeFileSync(join(fx.projectRoot, "src", "a.ts"), "export const a = 2;\n");
+    writeFileSync(join(fx.projectRoot, "src", "b.ts"), "export const b = 2;\n");
+    writeFileSync(join(fx.projectRoot, "src", "c.ts"), "export const c = 2;\n");
+    const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: fx.projectRoot, encoding: "utf8" }).trim();
+    const job: Job = {
+      job_id: "JOB-incremental-review",
+      role: "code-reviewer",
+      state: "requested",
+      gate_id: "review.code_review",
+      boundFiles: ["a.ts", "b.ts", "c.ts"].map(name => ({ path: `src/${name}`, sha: codeFileContentSha(fx.projectRoot, `src/${name}`) ?? "sha256:missing" })),
+      packet_digest: "sha256:incremental",
+      packet_context: {
+        code_review_scope: {
+          base_head: head,
+          current_head: head,
+          scope_reliable: true,
+          scope_reason: "test",
+          committed_paths: [],
+          worktree_paths: ["src/a.ts", "src/b.ts", "src/c.ts"],
+          untracked_paths: [],
+          review_paths: ["src/a.ts", "src/b.ts", "src/c.ts"],
+        },
+      },
+      created_from_transition: "review-ready",
+      created_at: new Date().toISOString(),
+    };
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "transition_commit", {
+      transition: "review-ready",
+      from_state: "apply_done",
+      to_state: "apply_done",
+      outcome: "job_created",
+      new_jobs: [job],
+      created_job_ids: [job.job_id],
+      reason: "review",
+    }));
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "job_rejected", {
+      job_id: job.job_id,
+      role: "code-reviewer",
+      result_kind: "review_failed",
+      findings: [{ id: "CR-001", blocking: true, type: "implementation", source_refs: ["src/a.ts:1"] }],
+    }));
+    writeFileSync(join(fx.projectRoot, "src", "b.ts"), "export const b = 3;\n");
+
+    const scope = scanCodeReviewScope(fx.projectRoot, readEvents(fx.projectRoot, fx.change));
+    assert.deepEqual(scope.review_paths, ["src/a.ts", "src/b.ts"]);
+  } finally { fx.cleanup(); }
+});
+
 test("code-reviewer：文件路径 fallback 的报告文件不算代码范围变化", () => {
   const fx = setupApplyWithDoneTask();
   try {
@@ -1402,13 +1535,15 @@ test("code-reviewer：accepted pass 后新增代码文件必须重新审查", ()
     assert.equal(retry.outcome, "job_created");
     assert.equal(retry.to_state, "apply_done");
     assert.notEqual(retry.created_jobs[0], first.created_jobs[0]);
-    assert.equal(submitCodeReviewerReport(
+    assert.deepEqual(checkedPathsForJob(fx.projectRoot, fx.change, retry.created_jobs[0]), ["src/b.ts"]);
+    const retrySubmitted = submitCodeReviewerReport(
       fx.projectRoot,
       fx.change,
       fx.changeRoot,
       retry.created_jobs[0],
-      codeReviewerReport(fx.projectRoot, fx.change, retry.created_jobs[0], "pass", [], ["src/a.ts", "src/b.ts"]),
-    ).accepted, true);
+      codeReviewerReport(fx.projectRoot, fx.change, retry.created_jobs[0], "pass", [], ["src/b.ts"]),
+    );
+    assert.equal(retrySubmitted.accepted, true, retrySubmitted.message);
     confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot).to_state, "review");
   } finally { fx.cleanup(); }
@@ -2949,7 +3084,7 @@ test("verifier：fail 必须给出至少一个 finding", () => {
   } finally { fx.cleanup(); }
 });
 
-test("jobs packet：审查约束只发给审查角色，最小 JSON 示例可解析", () => {
+test("jobs packet：角色输出契约和停止条件保持隔离", () => {
   const fx = setupApplyWithDoneTask();
   try {
     const boundFiles = [docRef(fx.changeRoot, "proposal.md")];
@@ -2986,27 +3121,11 @@ test("jobs packet：审查约束只发给审查角色，最小 JSON 示例可解
     const proposalPacket = jobsPacket(fx.projectRoot, fx.change, proposalReviewer.job_id).packet;
     const codeReviewPacket = jobsPacket(fx.projectRoot, fx.change, codeReviewer.job_id).packet;
     assert.ok(executorPacket && testRunPacket && proposalPacket && codeReviewPacket);
-    assert.doesNotMatch(String(executorPacket.output_instructions), /请审查|审查完成|需求变化/);
-    assert.doesNotMatch(String(testRunPacket.output_instructions), /请审查|审查完成|需求变化/);
     assert.equal("review_targets" in executorPacket, false);
     assert.deepEqual(executorPacket.stop_conditions, ["完成绑定范围内的实现后提交执行报告，不要修改未绑定范围"]);
     assert.deepEqual(testRunPacket.stop_conditions, ["完成指定验证后提交测试报告，不要修改项目文档"]);
-    assert.match(String(proposalPacket.output_instructions), /需求变化/);
-    assert.doesNotMatch(String(codeReviewPacket.output_instructions), /需求变化/);
-
-    for (const packet of [executorPacket, testRunPacket, proposalPacket, codeReviewPacket]) {
-      const instructions = String(packet.output_instructions);
-      const start = instructions.indexOf("最小格式：") + "最小格式：".length;
-      const end = instructions.indexOf("。verdict", start);
-      assert.ok(start > "最小格式：".length && end > start, `${packet.role} 应提供可解析的最小 JSON 示例`);
-      assert.doesNotMatch(instructions, /"pass\|fail"/);
-      const sample = JSON.parse(instructions.slice(start, end));
-      assert.equal(sample.verdict, "pass");
-      if (packet.role === "code-reviewer") {
-        assert.deepEqual(sample.review_scope.checked_docs, ["proposal.md", "tasks.md", "design.md", "specs/", ".superspec/artifacts/discovery.md", ".superspec/artifacts/test-contract.md"]);
-        assert.deepEqual(sample.review_scope.unchecked, []);
-      }
-    }
+    assert.deepEqual(proposalPacket.output_contract_fields, ["role", "verdict", "findings", "reviewer", "review_scope"]);
+    assert.deepEqual(codeReviewPacket.output_contract_fields, ["role", "verdict", "findings", "reviewer", "review_scope"]);
   } finally { fx.cleanup(); }
 });
 

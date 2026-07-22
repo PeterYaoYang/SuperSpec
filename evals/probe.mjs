@@ -696,15 +696,22 @@ function workerPromptEvidence(turn, originalPrompt, effectivePrompt, source, add
 }
 
 function observedWorkflowBoundary(trace) {
-  const command = [...trace.direct].reverse().find(item =>
+  const isDirectBoundary = item =>
     Array.isArray(item.argv)
     && item.executable_allowed === true
     && item.argv[1] === "transition"
-    && ["next", "accept"].includes(item.argv[2])
-  );
+    && ["next", "accept"].includes(item.argv[2]);
+  const isShellBoundary = item => {
+    const completedWrapper = item.kind === "shell_wrapper" && item.status === "completed" && item.exitCode === 0;
+    if (!completedWrapper && item.executable_allowed !== true) return false;
+    if (typeof item.raw !== "string") return false;
+    return /(?:^|[;&|\n]\s*)superspec\s+transition\s+(?:next|accept)\b/.test(unwrapCommandForPolicy(item.raw));
+  };
+  const candidates = Array.isArray(trace.commands) && trace.commands.length > 0 ? trace.commands : trace.direct;
+  const command = [...candidates].reverse().find(item => isDirectBoundary(item) || isShellBoundary(item));
   if (!command) return null;
   const output = parseLastJson(command.output);
-  return { command, output };
+  return { command, output, observation: isDirectBoundary(command) ? "direct" : "completed_shell_command" };
 }
 
 function classifyDynamicTurn(trace, workerCode) {
@@ -714,7 +721,10 @@ function classifyDynamicTurn(trace, workerCode) {
   }
   const boundary = observedWorkflowBoundary(trace);
   if (!boundary) return { status: "pass", detail: "Worker turn completed without a directly observed workflow boundary; resume the same thread", sequence: { ok: true, boundary: false } };
-  return { status: "pass", detail: `directly observed ${boundary.command.argv.slice(1, 3).join(" ")} boundary`, sequence: { ok: true, boundary: true } };
+  const label = Array.isArray(boundary.command.argv)
+    ? boundary.command.argv.slice(1, 3).join(" ")
+    : "completed shell workflow";
+  return { status: "pass", detail: `directly observed ${label} boundary`, sequence: { ok: true, boundary: true } };
 }
 
 function dynamicExecutionStop(turn, classification) {
@@ -833,9 +843,29 @@ function simulatedUserTurnFromOutput(nextOutput, scenario) {
   };
 }
 
+function agentMessageRequestsUserReply(tracePath) {
+  const message = traceAgentMessages(tracePath).at(-1)?.trim() ?? "";
+  if (message === "") return null;
+  const requestsReply = /(?:请|需要|等待|等你|由你).{0,32}(?:回复|答复|选择|确认|决定)|(?:回复|答复|选择|确认)[：:]|请选择|(?:please|need you to|waiting for you to).{0,48}(?:reply|respond|choose|confirm|decide)/iu.test(message);
+  return requestsReply ? message : null;
+}
+
 function simulatedUserTurnFromTrace(tracePath, workspace, executableIdentities, bareResolutionProven, scenario) {
   const trace = parseTrace(tracePath, workspace, null, executableIdentities, bareResolutionProven, null);
   const boundary = observedWorkflowBoundary(trace);
+  if (!boundary && scenario.simulated_user?.mode === "ai") {
+    const question = agentMessageRequestsUserReply(tracePath);
+    if (question != null) {
+      return simulatedUserTurnFromOutput({
+        path: "ask_user",
+        ask_user: {
+          question,
+          scope: "agent_message:explicit_user_reply",
+          allowed_answers: [],
+        },
+      }, scenario);
+    }
+  }
   return simulatedUserTurnFromOutput(boundary?.output ?? null, scenario);
 }
 
@@ -1108,6 +1138,20 @@ function isSafeSuperspecStdinPayload(command, candidate) {
   try { JSON.parse(match[1]); return true; } catch { return false; }
 }
 
+function stripSafeSuperspecJsonPayloads(command) {
+  return command.replace(
+    /printf\s+'%s(?:\\n)?'\s+'(\{[^']*\}|\[[^']*\])'\s*\|\s*(?:(?:[^\s'"]*\/)?superspec)\s+record\s+(?:user-decision|job-submit|test-run)\b/g,
+    (match, payload) => {
+      try {
+        JSON.parse(payload);
+        return match.replace(payload, "{}");
+      } catch {
+        return match;
+      }
+    },
+  );
+}
+
 function isAwkRegexLiteral(command, candidate) {
   if (!/^(?:(?:[^\s'"]*\/)?awk)\s/.test(command.trim())) return false;
   const quotedProgram = /awk\s+(?:-[^\s]+\s+)*(['"])(.*?)\1/.exec(command);
@@ -1149,7 +1193,8 @@ function traceEnvironmentAudit(events, {
       if (referencesSensitiveEnvironment || inspectsEnvironment || /(?:^|[\s'"=(])~(?:\/|\s|$)/.test(raw)) {
         violations.push({ reason: "controlled_home_reference", command: raw });
       }
-      const absolutePaths = [...raw.matchAll(/(?:^|[\s'"=(])((?:\/[A-Za-z0-9._@+,=:\-]+){2,})/g)].map(match => match[1]);
+      const auditRaw = stripSafeSuperspecJsonPayloads(unwrapped);
+      const absolutePaths = [...auditRaw.matchAll(/(?:^|[\s'"=(])((?:\/[A-Za-z0-9._@+,=:\-]+){2,})/g)].map(match => match[1]);
       for (const candidate of absolutePaths) {
         const cleaned = candidate.replace(/[),;]+$/, "");
         if (isLeadingSearchPattern(unwrapped, cleaned)
@@ -1324,11 +1369,40 @@ function parseLastJson(text) {
   const trimmed = String(text ?? "").trim();
   if (!trimmed) return null;
   try { return JSON.parse(trimmed); } catch {}
-  const lines = trimmed.split("\n");
-  for (let start = 0; start < lines.length; start++) {
-    try { return JSON.parse(lines.slice(start).join("\n")); } catch {}
+
+  let last = null;
+  let start = -1;
+  let depth = 0;
+  let quote = false;
+  let escaped = false;
+  for (let index = 0; index < trimmed.length; index++) {
+    const char = trimmed[index];
+    if (start < 0) {
+      if (char === "{" || char === "[") {
+        start = index;
+        depth = 1;
+        quote = false;
+        escaped = false;
+      }
+      continue;
+    }
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') quote = false;
+      continue;
+    }
+    if (char === '"') {
+      quote = true;
+      continue;
+    }
+    if (char === "{" || char === "[") depth++;
+    else if (char === "}" || char === "]") depth--;
+    if (depth !== 0) continue;
+    try { last = JSON.parse(trimmed.slice(start, index + 1)); } catch {}
+    start = -1;
   }
-  return null;
+  return last;
 }
 
 function directStatusResult(trace, expectedArgv, executableIdentities, bareResolutionProven) {
@@ -1992,8 +2066,35 @@ async function validateFaultMappings() {
     commandSchemaRecognized: true,
     direct: [{ argv: ["superspec", "transition", "accept", "--change", "fixture"], executable_allowed: true, output: JSON.stringify({ to_state: "accepted" }) }],
   };
+  const dynamicChainedBoundaryTrace = {
+    malformed: 0,
+    commandSchemaRecognized: true,
+    direct: [{
+      argv: ["/bin/zsh", "-lc", "superspec record job-submit --change fixture --job JOB-1 --report -; superspec transition next --change fixture"],
+      executable_allowed: true,
+      raw: "/bin/zsh -lc 'superspec record job-submit --change fixture --job JOB-1 --report -; superspec transition next --change fixture'",
+      output: `${JSON.stringify({ accepted: true })}\n${JSON.stringify({ path: "ask_user", ask_user: { question: "是否继续？", scope: "phase_confirmation:test", allowed_answers: ["确认继续"] } })}`,
+    }],
+  };
+  const dynamicChainedTerminalTrace = {
+    malformed: 0,
+    commandSchemaRecognized: true,
+    direct: [{
+      argv: ["superspec", "transition", "next", "--change", "fixture"],
+      executable_allowed: true,
+      output: JSON.stringify({ state: "review", path: "next_command", next_command: "superspec transition accept --change fixture" }),
+    }, {
+      argv: ["/bin/zsh", "-lc", "superspec transition accept --change fixture && superspec transition next --change fixture && git status --short"],
+      executable_allowed: true,
+      raw: "/bin/zsh -lc 'superspec transition accept --change fixture && superspec transition next --change fixture && git status --short'",
+      output: `${JSON.stringify({ to_state: "accepted" }, null, 2)}\n${JSON.stringify({ state: "accepted", path: "done" }, null, 2)}\n M src/example.ts`,
+    }],
+  };
   const dynamicMissingBoundaryTrace = { malformed: 0, commandSchemaRecognized: true, direct: [] };
   const dynamicAccepted = classifyDynamicTurn(dynamicAcceptedTrace, 0);
+  const dynamicChainedBoundary = observedWorkflowBoundary(dynamicChainedBoundaryTrace);
+  const dynamicChainedReply = simulatedUserTurnFromOutput(dynamicChainedBoundary?.output, { simulated_user: {} });
+  const dynamicChainedTerminal = observedWorkflowBoundary(dynamicChainedTerminalTrace);
   const dynamicMissingBoundary = classifyDynamicTurn(dynamicMissingBoundaryTrace, 0);
   const assertionFreeScriptedTurn = classifyAuthenticity({
     malformed: 0,
@@ -2015,11 +2116,18 @@ async function validateFaultMappings() {
     path: "ask_user",
     ask_user: { question: "选择业务语义", scope: "business:meaning", allowed_answers: ["A", "B"] },
   }, { simulated_user: {} });
+  const explicitReplyTrace = join(fixtureRoot, "explicit-user-reply.jsonl");
+  const completedMessageTrace = join(fixtureRoot, "completed-agent-message.jsonl");
+  writeFileSync(explicitReplyTrace, `${JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "请明确回复是否确认进入下一阶段。" } })}\n`);
+  writeFileSync(completedMessageTrace, `${JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "本轮工作已经完成。" } })}\n`);
   let invalidBudgetRejected = false;
   try { dynamicTurnLimit({ budget: { max_worker_turns: 0 } }); } catch { invalidBudgetRejected = true; }
   if (dynamicTurnLimit({ budget: { max_worker_turns: 17 } }) !== 17
     || dynamicAccepted.status !== "pass"
     || observedWorkflowBoundary(dynamicAcceptedTrace)?.output?.to_state !== "accepted"
+    || dynamicChainedBoundary?.observation !== "completed_shell_command"
+    || dynamicChainedReply.action !== "reply" || dynamicChainedReply.answer !== "确认继续"
+    || dynamicChainedTerminal?.output?.path !== "done"
     || dynamicMissingBoundary.status !== "pass" || dynamicMissingBoundary.sequence.ok !== true
     || assertionFreeScriptedTurn.status !== "pass" || assertionFreeScriptedTurn.sequence.ok !== true
     || dynamicContinuation.action !== "continue"
@@ -2030,6 +2138,8 @@ async function validateFaultMappings() {
     || dynamicRecommendedReply.worker_prompt !== dynamicRecommendedReply.worker_prompt_original
     || evalWorkerPrompt("真实用户短提示") !== "真实用户短提示"
     || dynamicNeedsHuman.action !== "needs_human"
+    || agentMessageRequestsUserReply(explicitReplyTrace) == null
+    || agentMessageRequestsUserReply(completedMessageTrace) != null
     || !invalidBudgetRejected) {
     throw new Error("dynamic arbitrary-turn boundary validation failed");
   }
@@ -2243,11 +2353,12 @@ async function validateFaultMappings() {
   if (!pipedRgRegexAudit.ok) throw new Error("piped rg regex literals must not be misclassified as absolute host paths");
   const reviewPayloadPathAudit = traceEnvironmentAudit([
     { type: "item.completed", item: { type: "command_execution", status: "completed", command: "/bin/zsh -lc \"printf '%s' '{\\\"reviewer\\\":{\\\"id\\\":\\\"/root/critic\\\"},\\\"route\\\":\\\"/2ndparty/api/getPersonalLimit\\\"}' | superspec record job-submit --change x --job j --report -\"" } },
+    { type: "item.completed", item: { type: "command_execution", status: "completed", command: "/bin/zsh -lc \"printf '%s\\\\n' '{\\\"reviewer\\\":{\\\"id\\\":\\\"/root/critic-rerun\\\"}}' | superspec record job-submit --change x --job j --report -; superspec transition next --change x\"" } },
   ], {
     workspace: "/controlled/workspace", packageRoot: "/controlled/package", binRoot: "/controlled/bin",
     controlledHome: "/controlled/home", controlledCodexHome: "/controlled/codex", controlledZdotdir: "/controlled/zdot",
   });
-  if (!reviewPayloadPathAudit.ok) throw new Error("review payload path literals must not be treated as host access");
+  if (!reviewPayloadPathAudit.ok) throw new Error(`review payload path literals must not be treated as host access: ${JSON.stringify(reviewPayloadPathAudit.violations)}`);
   const embeddedNodePathAudit = traceEnvironmentAudit([
     { type: "item.completed", item: { type: "command_execution", status: "completed", command: "/bin/zsh -lc \"node -e 'require(\\\"fs\\\").readFileSync(\\\"/outside/secret.json\\\")'\"" } },
     { type: "item.completed", item: { type: "command_execution", status: "completed", command: "/bin/zsh -lc 'tool --config=/outside/config.json'" } },
@@ -3117,30 +3228,44 @@ async function regradeExistingRun(inputRunDir) {
     const sameThread = threadId != null
       && turnIds.every(ids => ids.length === 1 && ids[0] === threadId)
       && originalManifest.session?.same_thread === true;
-    const finalTrace = dynamicTurnTraces.at(-1);
-    const finalBoundary = finalTrace ? observedWorkflowBoundary(finalTrace) : null;
+    const observedBoundaries = dynamicTurnTraces
+      .map((trace, index) => ({ turn: index + 1, boundary: observedWorkflowBoundary(trace) }))
+      .filter(item => item.boundary?.output != null);
+    const terminalBoundary = [...observedBoundaries].reverse().find(item =>
+      item.boundary.output.path === "done" || item.boundary.output.to_state === "accepted"
+    ) ?? null;
+    const finalBoundary = terminalBoundary?.boundary ?? observedBoundaries.at(-1)?.boundary ?? null;
     const simulatedTurnsPath = join(evidenceDir, "simulated-user-turns.json");
     const simulatedTurns = safeRegularWithin(simulatedTurnsPath, evidenceDir).ok ? json(simulatedTurnsPath) : [];
     const recordedStop = originalManifest.simulated_user?.stop
       ?? [...simulatedTurns].reverse().find(turn => ["complete", "needs_human", "budget_exhausted", "invalid_execution", "worker_failed"].includes(turn?.action))
       ?? null;
-    const finalOutput = finalBoundary?.output ?? recordedStop?.next_output ?? null;
+    const effectiveStop = terminalBoundary && integrity?.derivedState === "accepted"
+      ? {
+          action: "complete",
+          after_worker_turn: terminalBoundary.turn,
+          reason: "recorded trace reached the declared terminal workflow result",
+          next_output: terminalBoundary.boundary.output,
+        }
+      : recordedStop;
+    const finalOutput = finalBoundary?.output ?? effectiveStop?.next_output ?? null;
     const enteredArchive = events.records.some(event => event.event_type === "transition_commit" && event.payload?.to_state === "archive");
     capability.dynamic_user = {
       same_thread: sameThread,
       worker_turn_count: workerCodes.length,
+      ...(terminalBoundary ? { terminal_worker_turn: terminalBoundary.turn } : {}),
       final_state: integrity?.derivedState ?? null,
       final_output: finalOutput,
-      stop: recordedStop,
+      stop: effectiveStop,
     };
     const stopEvidence = [...tracePaths.map((_, index) => `evidence/turn-${index + 1}.jsonl`), "evidence/simulated-user-turns.json", "evidence/events.jsonl", "evidence/snapshot.json"];
     if (!commandPolicyAudit.ok) {
       capability.gates.stop_boundary = gate("fail", stopEvidence, `recorded Worker executed forbidden SuperSpec commands: ${commandPolicyAudit.violations.map(item => item.family).join(", ")}`, "direct");
-    } else if (["budget_exhausted", "invalid_execution"].includes(recordedStop?.action)) {
-      capability.gates.stop_boundary = gate("fail", stopEvidence, recordedStop.reason, "direct");
-    } else if (integrity?.status === "unavailable" || events.malformed > 0 || !authenticity.sequence.ok || !sameThread || !finalOutput || !recordedStop) {
+    } else if (["budget_exhausted", "invalid_execution"].includes(effectiveStop?.action)) {
+      capability.gates.stop_boundary = gate("fail", stopEvidence, effectiveStop.reason, "direct");
+    } else if (integrity?.status === "unavailable" || events.malformed > 0 || !authenticity.sequence.ok || !sameThread || !finalOutput || !effectiveStop) {
       capability.gates.stop_boundary = gate("unavailable", stopEvidence, "recorded dynamic workflow state, session, command, or stop evidence is unavailable");
-    } else if (recordedStop.action === "needs_human") {
+    } else if (effectiveStop.action === "needs_human") {
       const scope = String(finalOutput.ask_user?.scope ?? "");
       const decisionRecorded = events.records.some(event => event.event_type === "user_decision_recorded"
         && event.payload?.accepted === true
@@ -3152,7 +3277,7 @@ async function regradeExistingRun(inputRunDir) {
         stoppedCorrectly ? "recorded dynamic simulated user stopped at an unauthorized business decision" : "recorded needs-human stop did not preserve the unanswered workflow boundary",
         "direct",
       );
-    } else if (recordedStop.action === "complete") {
+    } else if (effectiveStop.action === "complete") {
       const completed = integrity.status !== "fail"
         && integrity.derivedState === "accepted"
         && (finalOutput.path === "done" || finalOutput.to_state === "accepted")
@@ -3164,7 +3289,7 @@ async function regradeExistingRun(inputRunDir) {
         "direct",
       );
     } else {
-      capability.gates.stop_boundary = gate("fail", stopEvidence, `unsupported recorded dynamic stop action: ${recordedStop.action}`, "direct");
+      capability.gates.stop_boundary = gate("fail", stopEvidence, `unsupported recorded dynamic stop action: ${effectiveStop.action}`, "direct");
     }
   } else if (scriptedMode) {
     const turn1Ids = traceThreadIds(tracePath);

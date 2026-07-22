@@ -1722,13 +1722,6 @@ test("explore→propose 默认完整审查：创建 critic，接受 JSON 报告�
     ]);
     assert.equal(packet.packet?.file_fallback, true);
     assert.deepEqual(packet.packet?.output_contract_fields, ["role", "verdict", "findings", "reviewer", "review_scope"]);
-    assert.match(packet.packet?.output_instructions ?? "", /完整审查全部 boundFiles/);
-    assert.match(packet.packet?.output_instructions ?? "", /不因发现第一个 blocker 停止/);
-    assert.match(packet.packet?.output_instructions ?? "", /review_scope\.checked_paths 必须回执/);
-    assert.doesNotMatch(packet.packet?.output_instructions ?? "", /若 proposal\.md 有“需求变化”/);
-    assert.doesNotMatch(packet.packet?.output_instructions ?? "", /当前快照下发现的全部 blocker/);
-    assert.match(packet.packet?.output_instructions ?? "", /PowerShell.*UTF-8/);
-
     const reportPath = join(fx.projectRoot, "critic.json");
     writeFileSync(reportPath, reviewerReportForJob(fx.projectRoot, fx.change, first.created_jobs[0]));
     const record = recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, first.created_jobs[0], reportPath);

@@ -38,7 +38,7 @@ export function invalidReasonForSnapshot(input: {
   currentReviewEvidenceDigest: string;
 }): string | null {
   if (input.job.role === "code-reviewer") {
-    return codeReviewJobStaleReason(input.projectRoot, input.job, currentCodeReviewWorkingPaths(input.projectRoot, input.events));
+    return codeReviewJobStaleReason(input.projectRoot, input.job, currentCodeReviewWorkingPaths(input.projectRoot, input.events), input.events);
   }
   const invalidReviewReadyVerifier = reviewReadyVerifierWithoutEvidenceReason(input.job);
   if (invalidReviewReadyVerifier) return invalidReviewReadyVerifier;
@@ -54,7 +54,10 @@ export function invalidReasonForSubmittedReport(
       ...(context.ignoredCodePaths ?? []),
       ...(context.reportPath ? [context.reportPath] : []),
     ]);
-    return codeReviewJobStaleReason(context.projectRoot, job, currentPaths);
+    return codeReviewJobStaleReason(context.projectRoot, job, currentPaths, context.events, [
+      ...(context.ignoredCodePaths ?? []),
+      ...(context.reportPath ? [context.reportPath] : []),
+    ]);
   }
 
   const invalidReviewReadyVerifier = reviewReadyVerifierWithoutEvidenceReason(job);

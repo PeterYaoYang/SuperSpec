@@ -8,6 +8,7 @@ import {
   codeFileContentSha,
   currentGitHead,
   diffFingerprints,
+  dirtyCodeFiles,
   dirtyCodePaths,
   gitLines,
   isCodeLikePath,
@@ -148,28 +149,100 @@ function firstStartApplyHead(events: Event[]): { present: boolean; head: string 
   return { present: false, head: null, reason: "没有 apply_start_head" };
 }
 
-function latestReviewedHead(events: Event[]): { head: string | null; present: boolean } {
+interface CodeReviewBase {
+  base_head: string | null;
+  kind: "reviewed" | "task_start" | "start_apply" | "empty_tree" | "history_missing";
+  reason: string;
+  dirty_files?: DirtyFileFingerprint[];
+  reviewed_files?: Ref[];
+  required_recheck_paths?: string[];
+}
+
+function latestReviewAttemptBase(events: Event[]): CodeReviewBase | null {
+  const jobs = new Map<string, Job>();
+  let latest: CodeReviewBase | null = null;
+  let startIndex = 0;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i];
+    if (ev.event_type === "transition_commit" && (ev.payload as { transition?: unknown }).transition === "start-apply") {
+      startIndex = i;
+      break;
+    }
+  }
+  for (let i = startIndex; i < events.length; i++) {
+    const ev = events[i];
+    if (ev.event_type === "transition_commit") {
+      for (const job of (ev.payload as { new_jobs?: Job[] }).new_jobs ?? []) {
+        if (isCodeReviewerJob(job)) jobs.set(job.job_id, job);
+      }
+      const gate = (ev.payload as { code_review_gate?: { decision?: unknown; current_head?: unknown; head?: unknown } }).code_review_gate;
+      if (gate?.decision === "skipped" && typeof gate.head === "string" && gate.head.trim() !== "") {
+        latest = { base_head: gate.head, kind: "reviewed", reason: "latest_code_review_gate" };
+      }
+      continue;
+    }
+    if (ev.event_type !== "job_accepted" && ev.event_type !== "job_rejected") continue;
+    const payload = ev.payload as { job_id?: unknown; result_kind?: unknown };
+    if (typeof payload.job_id !== "string") continue;
+    const job = jobs.get(payload.job_id);
+    const scope = job?.packet_context?.code_review_scope;
+    if (!job || !scope || !("current_head" in scope)) continue;
+    const reusable = ev.event_type === "job_accepted" || payload.result_kind === "review_failed";
+    if (!reusable) continue;
+    const findings = (ev.payload as { findings?: unknown }).findings;
+    const requiredRecheckPaths = Array.isArray(findings)
+      ? findings.flatMap(raw => {
+        if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+        const refs = (raw as { source_refs?: unknown }).source_refs;
+        if (!Array.isArray(refs)) return [];
+        return refs.flatMap(ref => {
+          if (typeof ref !== "string") return [];
+          const match = /^(.+?)(?::\d+(?::\d+)?)?$/.exec(ref.trim());
+          return match && isCodeLikePath(match[1]) ? [normalizeKnownPath(match[1])] : [];
+        });
+      })
+      : [];
+    latest = {
+      base_head: scope.current_head ?? null,
+      kind: "reviewed",
+      reason: "latest_code_review_attempt",
+      reviewed_files: job.boundFiles,
+      required_recheck_paths: uniqSorted(requiredRecheckPaths),
+    };
+  }
+  return latest;
+}
+
+function firstTaskBoundaryInCurrentApply(events: Event[]): BoundarySnapshot | null {
+  let startIndex = -1;
   for (let i = events.length - 1; i >= 0; i--) {
     const ev = events[i];
     if (ev.event_type !== "transition_commit") continue;
-    const payload = ev.payload as { code_review_gate?: unknown };
-    const gate = payload.code_review_gate as { decision?: unknown; current_head?: unknown; head?: unknown } | undefined;
-    if (!gate) continue;
-    if (gate.decision === "passed") {
-      if (typeof gate.current_head !== "string" || gate.current_head.trim() === "") continue;
-      return { present: true, head: gate.current_head };
-    }
-    if (gate.decision === "skipped") {
-      if (typeof gate.head !== "string" || gate.head.trim() === "") continue;
-      return { present: true, head: gate.head };
+    if ((ev.payload as { transition?: unknown }).transition === "start-apply") {
+      startIndex = i;
+      break;
     }
   }
-  return { present: false, head: null };
+  for (let i = startIndex + 1; i < events.length; i++) {
+    if (events[i].event_type !== "task_started") continue;
+    const boundary = boundaryFromPayload(events[i].payload);
+    if (boundary) return boundary;
+  }
+  return null;
 }
 
-export function selectCodeReviewBase(events: Event[]): { base_head: string | null; kind: "reviewed" | "start_apply" | "empty_tree" | "history_missing"; reason: string } {
-  const reviewed = latestReviewedHead(events);
-  if (reviewed.present) return { base_head: reviewed.head, kind: "reviewed", reason: "latest_code_review_gate" };
+export function selectCodeReviewBase(events: Event[]): CodeReviewBase {
+  const reviewed = latestReviewAttemptBase(events);
+  if (reviewed) return reviewed;
+  const taskBoundary = firstTaskBoundaryInCurrentApply(events);
+  if (taskBoundary) {
+    return {
+      base_head: taskBoundary.head,
+      kind: "task_start",
+      reason: "first_task_boundary",
+      dirty_files: taskBoundary.dirty_files,
+    };
+  }
   const firstStart = firstStartApplyHead(events);
   if (!firstStart.present) return { base_head: null, kind: "history_missing", reason: firstStart.reason };
   if (firstStart.head == null) return { base_head: null, kind: "empty_tree", reason: firstStart.reason };
@@ -178,7 +251,7 @@ export function selectCodeReviewBase(events: Event[]): { base_head: string | nul
 
 function scanCodeReviewScopeFromBase(
   projectRoot: string,
-  base: { base_head: string | null; kind: "reviewed" | "start_apply" | "empty_tree" | "history_missing"; reason: string },
+  base: CodeReviewBase,
   ignoredPaths: Set<string> = new Set(),
 ): CodeReviewScope {
   const currentHead = currentGitHead(projectRoot);
@@ -206,18 +279,50 @@ function scanCodeReviewScopeFromBase(
     }
   }
 
-  const staged = gitLines(projectRoot, ["diff", "--name-only", "--cached"]);
-  const unstaged = gitLines(projectRoot, ["diff", "--name-only"]);
-  const untracked = gitLines(projectRoot, ["ls-files", "--others", "--exclude-standard"]);
-  if (!staged.ok || !unstaged.ok || !untracked.ok) {
-    scopeReliable = false;
-    scopeReason = [scopeReason, !staged.ok ? staged.reason : "", !unstaged.ok ? unstaged.reason : "", !untracked.ok ? untracked.reason : ""]
-      .filter(Boolean)
-      .join("; ");
+  let worktreePaths: string[];
+  let untrackedPaths: string[];
+  if (base.dirty_files) {
+    const dirty = dirtyCodeFiles(projectRoot);
+    if (!dirty.ok) {
+      scopeReliable = false;
+      scopeReason = [scopeReason, dirty.reason].filter(Boolean).join("; ");
+      worktreePaths = [];
+    } else {
+      worktreePaths = excludeKnownPaths(uniqSorted(diffFingerprints(base.dirty_files, dirty.files)), ignoredPaths);
+    }
+    untrackedPaths = [];
+  } else if (base.reviewed_files) {
+    const dirty = dirtyCodePaths(projectRoot);
+    if (!dirty.ok) {
+      scopeReliable = false;
+      scopeReason = [scopeReason, dirty.reason].filter(Boolean).join("; ");
+      worktreePaths = [];
+    } else {
+      const reviewed = new Map(base.reviewed_files.map(file => [file.path, file.sha]));
+      const changedReviewed = base.reviewed_files
+        .filter(file => (codeFileContentSha(projectRoot, file.path) ?? "sha256:missing") !== file.sha)
+        .map(file => file.path);
+      const newlyChanged = dirty.paths.filter(path => !reviewed.has(path));
+      worktreePaths = excludeKnownPaths(uniqSorted([
+        ...changedReviewed,
+        ...newlyChanged,
+        ...(base.required_recheck_paths ?? []),
+      ]), ignoredPaths);
+    }
+    untrackedPaths = [];
+  } else {
+    const staged = gitLines(projectRoot, ["diff", "--name-only", "--cached"]);
+    const unstaged = gitLines(projectRoot, ["diff", "--name-only"]);
+    const untracked = gitLines(projectRoot, ["ls-files", "--others", "--exclude-standard"]);
+    if (!staged.ok || !unstaged.ok || !untracked.ok) {
+      scopeReliable = false;
+      scopeReason = [scopeReason, !staged.ok ? staged.reason : "", !unstaged.ok ? unstaged.reason : "", !untracked.ok ? untracked.reason : ""]
+        .filter(Boolean)
+        .join("; ");
+    }
+    worktreePaths = excludeKnownPaths(uniqSorted([...(staged.ok ? staged.lines : []), ...(unstaged.ok ? unstaged.lines : [])]), ignoredPaths);
+    untrackedPaths = excludeKnownPaths(uniqSorted(untracked.ok ? untracked.lines : []), ignoredPaths);
   }
-
-  const worktreePaths = excludeKnownPaths(uniqSorted([...(staged.ok ? staged.lines : []), ...(unstaged.ok ? unstaged.lines : [])]), ignoredPaths);
-  const untrackedPaths = excludeKnownPaths(uniqSorted(untracked.ok ? untracked.lines : []), ignoredPaths);
   const fallbackPaths = projectHasReadableDirectory(projectRoot)
     ? excludeKnownPaths(walkCodeFiles(projectRoot).sort(), ignoredPaths)
     : [];
@@ -243,7 +348,8 @@ export function scanCodeReviewScope(projectRoot: string, events: Event[]): CodeR
 
 export function scanCodeChangesForReview(projectRoot: string, events: Event[]): CodeChangeScan {
   const scope = scanCodeReviewScope(projectRoot, events);
-  const hasCodeChanges = !scope.scope_reliable ||
+  const hasReviewHistory = collectCodeReviewGateFacts(events).jobs.length > 0;
+  const hasCodeChanges = hasReviewHistory || !scope.scope_reliable ||
     scope.committed_paths == null ||
     scope.committed_paths.length > 0 ||
     scope.worktree_paths.length > 0 ||
@@ -267,7 +373,29 @@ function samePathSet(left: string[], right: string[]): boolean {
   return a.length === b.length && a.every((path, index) => path === b[index]);
 }
 
-export function codeReviewJobStaleReason(projectRoot: string, job: Job, currentPaths?: string[]): string | null {
+function currentPathsForFrozenCodeReview(
+  projectRoot: string,
+  events: Event[],
+  job: Job,
+  extraIgnoredPaths: string[] = [],
+): string[] {
+  const creationIndex = events.findIndex(ev =>
+    ev.event_type === "transition_commit" &&
+    ((ev.payload as { new_jobs?: Job[] }).new_jobs ?? []).some(candidate => candidate.job_id === job.job_id)
+  );
+  const priorEvents = creationIndex >= 0 ? events.slice(0, creationIndex) : events;
+  const ignored = knownCodeReviewReportPaths(projectRoot, events);
+  for (const path of extraIgnoredPaths) ignored.add(normalizeKnownPath(path));
+  return scanCodeReviewScopeFromBase(projectRoot, selectCodeReviewBase(priorEvents), ignored).review_paths;
+}
+
+export function codeReviewJobStaleReason(
+  projectRoot: string,
+  job: Job,
+  currentPaths?: string[],
+  events?: Event[],
+  extraIgnoredPaths: string[] = [],
+): string | null {
   if (!isCodeReviewerJob(job)) return null;
   const frozenScope = job.packet_context?.code_review_scope;
   if (frozenScope) {
@@ -275,10 +403,14 @@ export function codeReviewJobStaleReason(projectRoot: string, job: Job, currentP
     if (frozenScope.current_head !== currentHead.head) {
       return `代码审查创建后的 HEAD 已变化（原记录：${frozenScope.current_head ?? "<none>"}；当前：${currentHead.head ?? "<none>"}）`;
     }
-    const currentWorkingPaths = currentPaths ?? scanCodeChanges(projectRoot).paths;
-    const frozenWorkingPaths = uniqSorted([...frozenScope.worktree_paths, ...frozenScope.untracked_paths]);
-    if (!samePathSet(frozenWorkingPaths, currentWorkingPaths)) {
-      return `代码审查范围已变化：工作区范围已变化（原范围：${frozenWorkingPaths.join(", ") || "<none>"}；当前范围：${currentWorkingPaths.join(", ") || "<none>"}）`;
+    const currentScopePaths = events
+      ? currentPathsForFrozenCodeReview(projectRoot, events, job, extraIgnoredPaths)
+      : currentPaths ?? scanCodeChanges(projectRoot).paths;
+    const frozenScopePaths = events
+      ? frozenScope.review_paths
+      : uniqSorted([...frozenScope.worktree_paths, ...frozenScope.untracked_paths]);
+    if (!samePathSet(frozenScopePaths, currentScopePaths)) {
+      return `代码审查范围已变化：工作区范围已变化（原范围：${frozenScopePaths.join(", ") || "<none>"}；当前范围：${currentScopePaths.join(", ") || "<none>"}）`;
     }
     for (const bound of job.boundFiles) {
       const currentSha = codeFileContentSha(projectRoot, bound.path) ?? "sha256:missing";
