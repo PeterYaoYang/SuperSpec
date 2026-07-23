@@ -1845,7 +1845,7 @@ test("code-reviewer：fail 报告混入不可处理阻塞项时整体要求重�
   } finally { fx.cleanup(); }
 });
 
-test("code-reviewer：实现问题可 reopen apply 并追加审查修复 task", () => {
+test("code-reviewer：无效复审重试保留未闭环 finding，并在新计划周期截断", () => {
   const fx = setupApplyWithDoneTask();
   try {
     reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
@@ -1862,19 +1862,32 @@ test("code-reviewer：实现问题可 reopen apply 并追加审查修复 task", 
       impact: "用户提交空输入时流程中断",
       suggested_action: "apply",
     };
+    const siblingFinding = {
+      id: "CR-002",
+      type: "implementation",
+      blocking: true,
+      description: "兼容调用仍会绕过空输入修复",
+      evidence: "src/example.ts:20 旧入口未复用当前边界处理",
+      source_refs: ["src/example.ts:20"],
+      impact: "旧调用方仍可能遇到相同异常",
+      suggested_action: "apply",
+    };
     const rejected = submitCodeReviewerReport(
       fx.projectRoot,
       fx.change,
       fx.changeRoot,
       jobId,
-      codeReviewerReport(fx.projectRoot, fx.change, jobId, "fail", [finding]),
+      codeReviewerReport(fx.projectRoot, fx.change, jobId, "fail", [finding, siblingFinding]),
     );
     assert.equal(rejected.accepted, false);
     const rejectedEvent = readEvents(fx.projectRoot, fx.change).findLast(e => e.event_type === "job_rejected");
     assert.equal((rejectedEvent?.payload as { result_kind?: unknown }).result_kind, "review_failed");
     assert.equal((rejectedEvent?.payload as { raw_kind?: unknown }).raw_kind, "review-reports");
     const rawLines = readFileSync(rawFile(fx.projectRoot, fx.change, "review-reports"), "utf8").trim().split("\n");
-    assert.equal(JSON.parse(rawLines.at(-1) ?? "{}").findings[0].id, "CR-001");
+    assert.deepEqual(
+      JSON.parse(rawLines.at(-1) ?? "{}").findings.map((item: { id?: string }) => item.id),
+      ["CR-001", "CR-002"],
+    );
 
     const nextResult = next(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(nextResult.path, "next_command");
@@ -1888,6 +1901,119 @@ test("code-reviewer：实现问题可 reopen apply 并追加审查修复 task", 
     assert.match(tasks, new RegExp(`REVIEW-FIX-${jobId}#CR-001`));
     assert.match(tasks, new RegExp(`review_fix_of:${jobId}#CR-001`));
     assert.doesNotMatch(tasks, /tdd_required:true/);
+
+    const fixTaskId = `REVIEW-FIX-${jobId}#CR-001`;
+    const started = taskStart(fx.projectRoot, fx.change, fx.changeRoot, fixTaskId);
+    assert.equal(started.outcome, "advanced");
+    const fixAttempt = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot).active_task_attempts[0];
+    appendTestRunEvent(fx.projectRoot, fx.change, {
+      test_id: fixTaskId,
+      attempt_id: fixAttempt.attempt_id,
+      task_structure_digest: fixAttempt.task_structure_digest,
+      semantic_status: "expected_failure",
+      exit_code: 1,
+    });
+    appendTestRunEvent(fx.projectRoot, fx.change, {
+      test_id: fixTaskId,
+      attempt_id: fixAttempt.attempt_id,
+      task_structure_digest: fixAttempt.task_structure_digest,
+      semantic_status: "expected_success",
+      exit_code: 0,
+    });
+    const scopeNote = {
+      scope_note: {
+        reason: "现有公共入口是两个真实消费者共享的兼容边界，局部复制会造成行为分叉",
+        changed_area: "src/example.ts:10 保留现有公共入口",
+        plan_alignment: "保持已批准行为和兼容语义，不增加新能力",
+        verification: ["两个现有消费者均通过同一入口完成回归验证"],
+      },
+    };
+    const completed = taskComplete(
+      fx.projectRoot,
+      fx.change,
+      fx.changeRoot,
+      fixTaskId,
+      JSON.stringify(scopeNote),
+    );
+    assert.equal(completed.outcome, "advanced");
+
+    const completedTasks = readFileSync(join(fx.changeRoot, "tasks.md"), "utf8");
+    assert.ok(completedTasks.includes(`- [x] ${fixTaskId} `));
+    const applyDone = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(applyDone.to_state, "apply_done", applyDone.message);
+    const rereview = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(rereview.outcome, "job_created");
+    const packet = jobsPacket(fx.projectRoot, fx.change, rereview.created_jobs[0]);
+    const executionIndex = packet.packet?.task_execution_index as Array<{
+      task_id?: string;
+      fix?: { review_finding?: { job_id?: string; finding_id?: string } };
+      scope_note?: Record<string, unknown> | null;
+    }>;
+    const fixEntry = executionIndex.find(entry => entry.task_id === fixTaskId);
+    assert.equal(fixEntry?.fix?.review_finding?.job_id, jobId);
+    assert.equal(fixEntry?.fix?.review_finding?.finding_id, "CR-001");
+    assert.deepEqual(fixEntry?.scope_note, scopeNote.scope_note);
+    const previous = packet.packet?.previous_rejection as { findings?: Array<{ id?: string }> };
+    assert.deepEqual(previous.findings?.map(item => item.id), ["CR-001", "CR-002"]);
+
+    const rereviewJobId = rereview.created_jobs[0];
+    const checkedPaths = ((packet.packet?.boundFiles ?? []) as Array<{ path?: unknown }>)
+      .map(item => item.path)
+      .filter((path): path is string => typeof path === "string");
+    submitCodeReviewerReport(
+      fx.projectRoot,
+      fx.change,
+      fx.changeRoot,
+      rereviewJobId,
+      codeReviewerReport(fx.projectRoot, fx.change, rereviewJobId, "fail", [], checkedPaths),
+    );
+    const retryReview = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(retryReview.outcome, "job_created");
+    const retryJobId = retryReview.created_jobs[0];
+    const retryPacket = jobsPacket(fx.projectRoot, fx.change, retryJobId);
+    const retryPrevious = retryPacket.packet?.previous_rejection as { findings?: Array<{ id?: string }> };
+    assert.deepEqual(retryPrevious.findings?.map(item => item.id), ["CR-001", "CR-002"]);
+    const retryCheckedPaths = ((retryPacket.packet?.boundFiles ?? []) as Array<{ path?: unknown }>)
+      .map(item => item.path)
+      .filter((path): path is string => typeof path === "string");
+    submitCodeReviewerReport(
+      fx.projectRoot,
+      fx.change,
+      fx.changeRoot,
+      retryJobId,
+      codeReviewerReport(fx.projectRoot, fx.change, retryJobId, "fail", [{
+        id: "CR-SPEC-NEW",
+        type: "spec",
+        blocking: true,
+        description: "当前计划需要重新确定兼容边界",
+        evidence: "design.md 的兼容策略不足以支持正确实现",
+        source_refs: ["design.md"],
+        impact: "继续 Apply 会沿用已经失效的方案",
+        suggested_action: "propose",
+      }], retryCheckedPaths),
+    );
+    const ask = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(ask.path, "ask_user");
+    if (ask.path !== "ask_user") throw new Error("expected code review decision");
+    assert.equal(recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({
+      scope: `code_review_decision:${retryJobId}#CR-SPEC-NEW`,
+      question: ask.ask_user.question,
+      answer: "回到计划阶段",
+      reason: "兼容边界需要重新规划",
+    })).accepted, true);
+    assert.equal(reopen(fx.projectRoot, fx.change, fx.changeRoot, "propose", "重新规划兼容边界", {
+      reviewFinding: `${retryJobId}#CR-SPEC-NEW`,
+    }).to_state, "propose");
+
+    writeFileSync(join(fx.changeRoot, "design.md"), "# D\n\n## 新计划周期\n\n重新确认兼容边界。\n");
+    assert.equal(proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal").to_state, "propose_ready");
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    assert.equal(startApply(fx.projectRoot, fx.change, fx.changeRoot).to_state, "apply");
+    assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot).to_state, "apply_done");
+    const newCycleReview = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(newCycleReview.outcome, "job_created");
+    const newCyclePacket = jobsPacket(fx.projectRoot, fx.change, newCycleReview.created_jobs[0]);
+    assert.equal(newCyclePacket.packet?.previous_rejection, undefined);
   } finally { fx.cleanup(); }
 });
 

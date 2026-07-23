@@ -129,7 +129,7 @@ function previousRejectionInstruction(job: Job): string {
     return `${reason}上一轮没有可复核的历史 finding；请按当前 gate 的完整范围独立审查，不要把拒绝原因当作需求或验收标准，`;
   }
   const identityRule = job.role === "code-reviewer"
-    ? "同一问题仍存在时复用原 finding ID；legacy finding 没有 ID 时沿用原始语义并补一个稳定 ID；"
+    ? "逐项核对修复 task 的代码变化、scope_note 和验证证据；实现者用可核实证据说明被质疑实现确有必要时，独立验证后关闭原问题。证据不能支撑必要性且问题仍存在时复用原 finding ID；legacy finding 没有 ID 时沿用原始语义并补一个稳定 ID；"
     : "已解决或已由等价证据闭环的问题不要重复报告，不得通过更换标题或措辞重复同一问题；";
   return `${reason}本轮是修复复核：逐项判断本工作项附带的上一次同角色 finding 是否仍成立。Finding 中的 recommendation 只是非绑定建议，不是需求或验收标准；先独立核对 underlying problem、直接证据和本次验收，不得因原建议指定了某种架构就要求照做。修正不得通过缩小已确认范围、改写用户决定或删除验收来让 finding 字面消失；这类偏离属于本次修正直接引入的回归。${identityRule}默认只复核历史 finding；新 blocker 仅允许是本次修正直接引入的回归，并必须说明“修正动作 → 新问题”的因果链，不得展开无关的故障模型、消费者或架构议题。`;
 }
@@ -1560,7 +1560,7 @@ function packetFieldDescriptions(): Record<string, string> {
     test_id: "测试契约里的 TEST ID。",
     semantic_status: "测试语义状态：RED 预期失败、GREEN 预期成功或特征化（characterization）通过。",
     covers_task_ids: "回归测试覆盖了哪些已完成任务（task）。",
-    scope_note: "范围扩大说明；任务（task）实现超出执行依据边界时填写。",
+    scope_note: "实施范围说明；任务（task）实现超出执行依据边界，或代码审查修复保留被质疑实现时，填写原因、影响区域、计划一致性和验证依据。",
   };
 }
 
@@ -1627,7 +1627,7 @@ export function jobsPacket(
             ? `格式骨架：{"role":"code-reviewer","verdict":"pass","review_scope":{"job_id":"${job.job_id}","packet_digest":"${job.packet_digest}","checked_paths":[],"checked_docs":[],"unchecked":[]},"findings":[],"reviewer":{"kind":"codex-subagent","id":"<thread-or-agent-id>"}}。提交前按真实审查结果填写数组；不得从 boundFiles 自动复制 checked_paths。verdict 只能为 pass 或 fail；审查覆盖范围（review_scope）用来说明本次审查覆盖了哪些文件和文档，已检查路径（checked_paths）与未检查项（unchecked）必须合起来覆盖全部绑定文件（boundFiles），unchecked 条目格式为 {"path":"<path>","reason":"<reason>"}；pass 不允许仍有未检查的绑定文件。`
               + `报告结论为 fail 时，问题列表（findings）至少包含一个可处理、可追溯的阻塞问题，字段为 {"id":"<stable-id>","blocking":true,"type":"implementation|spec|mixed","description":"<what>","evidence":"<why>","source_refs":["<path:line>"],"impact":"<impact>","suggested_action":"apply|propose"}。问题类型（type）中 implementation 表示纯代码实现问题，spec 表示方案/需求文档问题，mixed 表示需要使用者判断的混合问题。`
               + (packetContext?.task_execution_index
-                ? `本工作项带任务执行索引（task_execution_index）：按 task 对照其执行依据快照（contract）审查——实现路线对照 design 引用原文、累计 diff 对照 guard 边界、测试断言对照 tests 声明的 scenario；每项的 required_evidence 是 task-start 冻结的证据口径，red_required/green_required 分别说明是否需要 RED/GREEN；fix 非空表示状态机创建的实现修复，source、parent_task_id 和 reason 说明其归属，code_review 来源还需核对 review_finding；每项的 scope_note 是执行者登记的范围扩大说明，判断其合理性与验证充分性；changed_paths 是归属线索不是结论（null 表示未知）；unattributed_paths 中的无主改动逐个判断合理性；coverage_exemption_refs 解释未绑定 task 的 TEST 豁免。`
+                ? `本工作项带任务执行索引（task_execution_index）：按 task 对照其执行依据快照（contract）审查——实现路线对照 design 引用原文、累计 diff 对照 guard 边界、测试断言对照 tests 声明的 scenario；每项的 required_evidence 是 task-start 冻结的证据口径，red_required/green_required 分别说明是否需要 RED/GREEN；fix 非空表示状态机创建的实现修复，source、parent_task_id 和 reason 说明其归属，code_review 来源还需核对 review_finding；scope_note 既可能解释必要的范围扩大，也可能说明代码审查修复为何保留原实现，均需结合 Diff、调用链和验证证据独立判断；changed_paths 是归属线索不是结论（null 表示未知）；unattributed_paths 中的无主改动逐个判断合理性；coverage_exemption_refs 解释未绑定 task 的 TEST 豁免。`
                 : "")
             : job.role === "verifier"
             ? `最小格式：{"role":"verifier","verdict":"pass","findings":[]${hasReviewScope ? `,"review_scope":{"checked_paths":${JSON.stringify(job.boundFiles.map(file => file.path))}}` : ""}}。verdict 只能为 pass 或 fail；核对代码审查记录（code_review_gate）：passed 必须能追溯到已接受的代码审查工作项，skipped 必须能证明本次没有代码类改动。核对修复闭环：task_execution_index.fix.source=code_review 时必须核对 review_finding 对应问题是否关闭；source=self_test 时必须核对 parent_task_id、记录的自测原因、本次 attempt 验证和最新代码审查是否共同闭环。方案/混合问题必须有用户决策或后续修复证据。按 task_execution_index 的 required_evidence 核对测试证据：red_required 时需要同一 TEST 的 RED（expected_failure）后 GREEN；green_required 时每个声明 TEST 都需要允许的 GREEN 语义状态；测试运行证据应包含测试 ID（test_id）、命令（command）、工作目录（cwd）、退出码（exit_code）、语义状态（semantic_status）。修复 task 的回归测试运行可用回归覆盖任务列表（covers_task_ids）说明覆盖了哪些已完成任务；缺少任务尝试 ID（attempt_id）的旧证据只能弱引用。` +

@@ -82,7 +82,7 @@ import {
 } from "./phase_confirmation.ts";
 import { currentGitHead, dirtyCodeFiles, stageProductionJavaFilesSince } from "./git_state.ts";
 import { workflowRiskForProject } from "./workflow_config.ts";
-import type { CodeReviewScope, Event, Snapshot, State, Job, JobRole, TransitionResult, Ref, TaskAttempt, BoundarySnapshot, EffectiveEvidencePlan, ExecutionPolicy, FixDescriptor, TestEvidenceAction } from "./types.ts";
+import type { CodeReviewScope, Event, Snapshot, State, Job, JobRole, TransitionResult, Ref, TaskAttempt, BoundarySnapshot, EffectiveEvidencePlan, ExecutionPolicy, FixDescriptor, ReviewPreviousRejection, TestEvidenceAction } from "./types.ts";
 
 let transitionSeq = 0;
 function newTransitionId(): string { return `T-${Date.now()}-${++transitionSeq}`; }
@@ -339,6 +339,69 @@ function hasRejectedReviewReadyVerifier(events: Event[]): boolean {
   );
 }
 
+function repairedCodeReviewPreviousRejection(
+  events: Event[],
+  packetContext: ReturnType<typeof codeReviewPacketContext>,
+): ReviewPreviousRejection | undefined {
+  const eventOrder = new Map(events.map((event, index) => [event.event_id, index]));
+  const codeReviewJobIds = new Set<string>();
+  for (const event of events) {
+    if (event.event_type !== "transition_commit") continue;
+    for (const job of (event.payload as { new_jobs?: Job[] }).new_jobs ?? []) {
+      if (job.role === "code-reviewer") codeReviewJobIds.add(job.job_id);
+    }
+  }
+  const latestAcceptedIndex = events.findLastIndex(event =>
+    event.event_type === "job_accepted" &&
+    codeReviewJobIds.has(String((event.payload as { job_id?: unknown }).job_id ?? ""))
+  );
+  const latestStartApplyIndex = events.findLastIndex(event =>
+    event.event_type === "transition_commit" &&
+    (event.payload as { transition?: unknown }).transition === "start-apply"
+  );
+  const historyBoundary = Math.max(latestAcceptedIndex, latestStartApplyIndex);
+  const repairedEntries = [...(packetContext.task_execution_index ?? [])]
+    .filter(entry =>
+      entry.fix?.source === "code_review" &&
+      entry.fix.review_finding &&
+      (eventOrder.get(entry.task_completed_event_ref) ?? -1) > historyBoundary
+    )
+    .sort((left, right) =>
+      (eventOrder.get(right.task_completed_event_ref) ?? -1) -
+      (eventOrder.get(left.task_completed_event_ref) ?? -1)
+    );
+  const latestRef = repairedEntries[0]?.fix?.review_finding;
+  if (!latestRef) return undefined;
+
+  const rejection = events.findLast(event =>
+    event.event_type === "job_rejected" &&
+    (event.payload as { job_id?: unknown }).job_id === latestRef.job_id
+  );
+  const payload = rejection?.payload as { findings?: unknown; reason?: unknown } | undefined;
+  const findings = Array.isArray(payload?.findings)
+    ? payload.findings.filter(item => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+      const finding = item as { id?: unknown; blocking?: unknown };
+      if (finding.blocking !== true || typeof finding.id !== "string") return false;
+      return latestCodeReviewDecision(
+        events,
+        codeReviewDecisionScope(latestRef.job_id, finding.id),
+      )?.answer !== "dismiss";
+    })
+    : [];
+  if (findings.length === 0) return undefined;
+
+  return {
+    result_kind: "review_failed",
+    reason: typeof payload?.reason === "string" && payload.reason.trim()
+      ? payload.reason
+      : "复核已执行的代码审查修复",
+    job_id: latestRef.job_id,
+    findings_job_id: latestRef.job_id,
+    findings,
+  };
+}
+
 function createCodeReviewerJob(
   change: string,
   projectRoot: string,
@@ -351,6 +414,7 @@ function createCodeReviewerJob(
   const facts = collectCodeReviewGateFacts(events);
   const latestRejected = facts.latestRejected;
   const reviewFailedStatus = latestCodeReviewFailedStatus(events);
+  const repairedPreviousRejection = repairedCodeReviewPreviousRejection(events, packetContext);
   const previousRejection = latestRejected && latestRejected.state === "rejected"
     ? {
       result_kind: latestRejected.result_kind ?? "invalid_report",
@@ -358,8 +422,16 @@ function createCodeReviewerJob(
         ? dismissedCodeReviewSummary(reviewFailedStatus)
         : latestRejected.reason ?? "缺少拒绝原因",
       job_id: latestRejected.job.job_id,
+      ...(
+        latestRejected.result_kind !== "review_failed" && repairedPreviousRejection?.findings?.length
+          ? {
+            findings: repairedPreviousRejection.findings,
+            findings_job_id: repairedPreviousRejection.findings_job_id,
+          }
+          : {}
+      ),
     }
-    : undefined;
+    : repairedPreviousRejection;
   const packetInput = {
     role: "code-reviewer" as const,
     gate_id: REVIEW_CODE_REVIEW_GATE_ID,
