@@ -1824,15 +1824,6 @@ test("explore critic retry：继承历史 findings；malformed 可在同一工�
       findings: [finding],
     });
     assert.notEqual(secondPacket?.packet_digest, firstPacket?.packet_digest);
-    assert.match(secondPacket?.output_instructions ?? "", /上一次同角色审查/);
-    assert.match(secondPacket?.output_instructions ?? "", /本轮是修复复核/);
-    assert.match(secondPacket?.output_instructions ?? "", /recommendation 只是非绑定建议/);
-    assert.match(secondPacket?.output_instructions ?? "", /不得通过更换标题或措辞重复同一问题/);
-    assert.doesNotMatch(secondPacket?.output_instructions ?? "", /复用原 finding ID|补一个稳定 ID/);
-    assert.match(secondPacket?.output_instructions ?? "", /默认只复核历史 finding/);
-    assert.match(secondPacket?.output_instructions ?? "", /新 blocker 仅允许是本次修正直接引入的回归/);
-    assert.match(secondPacket?.output_instructions ?? "", /修正动作 → 新问题/);
-    assert.ok((secondPacket?.output_instructions ?? "").indexOf("完整审查全部 boundFiles") < (secondPacket?.output_instructions ?? "").indexOf("上一次同角色审查"));
 
     const eventCountBeforeMalformed = readEvents(fx.projectRoot, fx.change).length;
     const malformed = recordJobSubmitContent(

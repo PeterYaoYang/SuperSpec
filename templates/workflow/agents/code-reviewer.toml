@@ -1,7 +1,8 @@
 # SuperSpec Codex agent: code-reviewer
 name = "code-reviewer"
 description = "Code-level review for spec fit, bugs, safety, and test gaps"
-model_reasoning_effort = "medium"
+model = "gpt-5.6-sol"
+model_reasoning_effort = "high"
 developer_instructions = """
 Role: Code Reviewer. Check spec fit, correctness, security, test adequacy, code quality, performance, and maintainability without making the workflow heavy.
 

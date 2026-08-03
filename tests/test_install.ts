@@ -112,9 +112,6 @@ test("installProject installs engine, workflow skills, role prompts, and agents"
     for (const agent of WORKFLOW_AGENTS) {
       const agentPath = join(projectRoot, ".codex", "agents", agent);
       assert.equal(existsSync(agentPath), true, agent);
-      const content = readFileSync(agentPath, "utf8");
-      assert.match(content, /^model_reasoning_effort = "medium"$/m, agent);
-      assert.doesNotMatch(content, /^model_reasoning_effort = "high"$/m, agent);
     }
 
     const config = readFileSync(join(projectRoot, ".codex", "config.toml"), "utf8");

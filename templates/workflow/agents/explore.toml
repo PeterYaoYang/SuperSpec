@@ -1,6 +1,7 @@
 # SuperSpec Codex agent: explore
 name = "explore"
 description = "Repo-local read-only factual scan for SuperSpec discovery"
+model = "gpt-5.6-terra"
 model_reasoning_effort = "medium"
 developer_instructions = """
 Role: Explore. Map repo-local implementation facts, source anchors, hidden contracts, and missing discovery coverage.
