@@ -31,6 +31,22 @@ const REVIEW_DIFF_CHUNKS = 8;
 const REVIEW_CHANGED_FILE_LIMIT = 80;
 const REVIEW_CHANGED_FILE_CHUNKS = 1;
 const REVIEW_TEST_OUTPUT_CHARS = 3_000;
+const activeReviewerChildren = new Set();
+
+function killProcessTree(child, signal) {
+  if (!child?.pid) return;
+  if (process.platform !== "win32") {
+    try { process.kill(-child.pid, signal); return; } catch {}
+  }
+  try { child.kill(signal); } catch {}
+}
+
+function terminateReviewers(signal = "SIGTERM") {
+  for (const child of activeReviewerChildren) killProcessTree(child, signal);
+}
+
+process.once("SIGINT", () => terminateReviewers("SIGTERM"));
+process.once("SIGTERM", () => terminateReviewers("SIGTERM"));
 
 function parseArgs(argv) {
   const result = {
@@ -42,6 +58,7 @@ function parseArgs(argv) {
     reviewerBModel: "gpt-5.6-terra",
     reviewerBReasoning: "high",
     validateFaults: false,
+    output: null,
   };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--task") result.task = argv[++i] ?? null;
@@ -61,6 +78,7 @@ function parseArgs(argv) {
     else if (argv[i] === "--reviewer-b-model") result.reviewerBModel = argv[++i] ?? "";
     else if (argv[i] === "--reviewer-a-reasoning") result.reviewerAReasoning = argv[++i] ?? "";
     else if (argv[i] === "--reviewer-b-reasoning") result.reviewerBReasoning = argv[++i] ?? "";
+    else if (argv[i] === "--output") result.output = argv[++i] ?? null;
     else if (argv[i] === "--validate-faults") result.validateFaults = true;
     else throw new Error(`unknown argument: ${argv[i]}`);
   }
@@ -90,6 +108,13 @@ function writeJson(path, value) {
 
 function hashFile(path) {
   return sha256(readFileSync(path));
+}
+
+function evaluatorSourceDigest() {
+  return sha256(JSON.stringify({
+    probe: hashFile(join(EVAL_ROOT, "probe.mjs")),
+    spawn: hashFile(join(EVAL_ROOT, "lib", "spawn.mjs")),
+  }));
 }
 
 function withinRoot(path, root) {
@@ -286,16 +311,29 @@ async function runReviewer({ id, codex, profile, model, reasoning, cwd, prompt, 
     ];
     for (let attempt = 1; attempt <= 2; attempt++) {
       const result = await new Promise((resolvePromise, reject) => {
-        const child = spawn(codex, args, { cwd, env: isolated.env, shell: false, stdio: ["pipe", "pipe", "pipe"] });
+        const child = spawn(codex, args, {
+          cwd,
+          env: isolated.env,
+          shell: false,
+          detached: process.platform !== "win32",
+          stdio: ["pipe", "pipe", "pipe"],
+        });
+        activeReviewerChildren.add(child);
         const stdout = [];
         const stderr = [];
-        const timeout = setTimeout(() => child.kill("SIGTERM"), 600_000);
+        let killTimer = null;
+        const timeout = setTimeout(() => {
+          killProcessTree(child, "SIGTERM");
+          killTimer = setTimeout(() => killProcessTree(child, "SIGKILL"), 2_000);
+        }, 600_000);
         child.stdout.on("data", chunk => stdout.push(chunk));
         child.stderr.on("data", chunk => stderr.push(chunk));
         child.stdin.end(prompt);
         child.on("error", reject);
         child.on("close", code => {
           clearTimeout(timeout);
+          if (killTimer) clearTimeout(killTimer);
+          activeReviewerChildren.delete(child);
           resolvePromise({ code, stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8") });
         });
       });
@@ -320,13 +358,51 @@ async function runReviewer({ id, codex, profile, model, reasoning, cwd, prompt, 
 }
 
 function preferredCapability(runRoot) {
+  const original = join(runRoot, "capability.json");
+  const sealPath = join(runRoot, "evidence-seal.json");
+  let seal = null;
+  let sealDigest = null;
+  try {
+    if (existsSync(sealPath)) {
+      seal = json(sealPath);
+      sealDigest = hashFile(sealPath);
+    }
+  } catch {
+    seal = null;
+  }
+  const sourceDigest = existsSync(original) ? hashFile(original) : null;
   const regraded = join(runRoot, "capability.regraded.json");
   const manifest = join(runRoot, "regrade-manifest.json");
-  if (existsSync(regraded) && existsSync(manifest)) {
-    const metadata = json(manifest);
-    if (resolve(metadata.source_run ?? "") === runRoot && metadata.worker_reexecuted === false) return { path: regraded, value: json(regraded) };
+  if (seal && sourceDigest && seal.files?.["capability.json"] === sourceDigest
+    && existsSync(regraded) && existsSync(manifest)) {
+    try {
+      const metadata = json(manifest);
+      const evidenceDigests = metadata.raw_evidence_digests;
+      const evidenceMatchesSeal = metadata.formal_grading_performed === true
+        && evidenceDigests && typeof evidenceDigests === "object"
+        && JSON.stringify(Object.keys(evidenceDigests).sort()) === JSON.stringify(Object.entries(seal.files ?? {})
+          .filter(([path, digest]) => path !== "capability.json" && digest !== null)
+          .map(([path]) => path)
+          .sort())
+        && Object.entries(evidenceDigests).every(([path, digest]) => seal.files?.[path] === digest);
+      if (metadata.schema_version === 1
+        && resolve(metadata.source_run ?? "") === runRoot
+        && metadata.worker_reexecuted === false
+        && metadata.evaluator_source_digest === evaluatorSourceDigest()
+        && metadata.source_capability_digest === sourceDigest
+        && metadata.evidence_seal_digest === sealDigest
+        && metadata.capability_digest === hashFile(regraded)
+        && evidenceMatchesSeal) {
+        const value = json(regraded);
+        if (value?.schema_version !== 1) return { path: original, value: json(original), integrity: { source: "sealed_original", reason: "regrade capability schema is unsupported" } };
+        return { path: regraded, value, integrity: { source: "verified_regrade" } };
+      }
+    } catch {
+      // Fall back to the sealed original capability below. Arena/M2 hard
+      // grading remains governed by the immutable source evidence.
+    }
   }
-  return { path: join(runRoot, "capability.json"), value: json(join(runRoot, "capability.json")) };
+  return { path: original, value: json(original), integrity: { source: "sealed_original" } };
 }
 
 function hardOutcome(capability, arenaOutcome, dynamicStop = null, metadata = {}) {
@@ -334,19 +410,19 @@ function hardOutcome(capability, arenaOutcome, dynamicStop = null, metadata = {}
     && dynamicStop.source === "configured_stop_scope"
     && typeof metadata.target_state === "string"
     && capability.dynamic_user?.final_state === metadata.target_state;
-  if (dynamicStop?.action === "needs_human" && !reachedConfiguredTargetBoundary) {
-    return { status: "NEEDS_HUMAN", reason: dynamicStop.reason };
-  }
   if (metadata.injection) return { status: "INVALID", reason: `development injection present: ${metadata.injection}` };
   const invalidGates = ["process", "controlled_environment", "authenticity"].filter(name => ["fail", "unavailable"].includes(capability.gates?.[name]?.status));
   if (invalidGates.length > 0) return { status: "INVALID", reason: `invalid hard gates: ${invalidGates.join(", ")}` };
-  if (arenaOutcome.status === "UNKNOWN") return { status: "UNKNOWN", reason: arenaOutcome.reasons.join("; ") };
+  if (!arenaOutcome || arenaOutcome.status === "UNKNOWN") return { status: "UNKNOWN", reason: arenaOutcome?.reasons?.join("; ") ?? "Arena result unavailable" };
   if (arenaOutcome.status !== "PROVISIONAL_DONE") return { status: "NOT_DONE", reason: arenaOutcome.reasons.join("; ") };
   const resultGates = ["scope", "artifact", "state", "stop_boundary"];
   const unavailableGates = resultGates.filter(name => capability.gates?.[name]?.status === "unavailable");
   if (unavailableGates.length > 0) return { status: "UNKNOWN", reason: `result evidence unavailable: ${unavailableGates.join(", ")}` };
   const incompleteGates = resultGates.filter(name => capability.gates?.[name]?.status !== "pass");
   if (incompleteGates.length > 0) return { status: "NOT_DONE", reason: `incomplete gates: ${incompleteGates.join(", ")}` };
+  if (dynamicStop?.action === "needs_human" && !reachedConfiguredTargetBoundary) {
+    return { status: "NEEDS_HUMAN", reason: dynamicStop.reason };
+  }
   return { status: "DONE", reason: "result and authenticity layers passed" };
 }
 
@@ -921,7 +997,22 @@ function validateFaultMappings() {
   const invalid = hardOutcome({ gates: gates({ authenticity: { status: "fail" } }) }, { status: "PROVISIONAL_DONE", reasons: [] });
   const notDone = hardOutcome({ gates: gates({ artifact: { status: "fail" } }) }, { status: "NOT_DONE", reasons: ["artifact missing"] });
   const unknown = hardOutcome({ gates: gates({ artifact: { status: "unavailable" } }) }, { status: "PROVISIONAL_DONE", reasons: [] });
-  const human = hardOutcome({ gates: gates({}) }, { status: "NOT_DONE", reasons: [] }, { action: "needs_human", reason: "business decision" });
+  const human = hardOutcome({ gates: gates({}) }, { status: "PROVISIONAL_DONE", reasons: [] }, { action: "needs_human", reason: "business decision" });
+  const invalidHuman = hardOutcome(
+    { gates: gates({ authenticity: { status: "unavailable" } }) },
+    { status: "PROVISIONAL_DONE", reasons: [] },
+    { action: "needs_human", reason: "business decision" },
+  );
+  const unknownHuman = hardOutcome(
+    { gates: gates({}) },
+    { status: "UNKNOWN", reasons: ["arena evidence unavailable"] },
+    { action: "needs_human", reason: "business decision" },
+  );
+  const notDoneHuman = hardOutcome(
+    { gates: gates({}) },
+    { status: "NOT_DONE", reasons: ["result incomplete"] },
+    { action: "needs_human", reason: "business decision" },
+  );
   const targetBoundary = hardOutcome(
     { gates: gates({}), dynamic_user: { final_state: "propose_ready" } },
     { status: "PROVISIONAL_DONE", reasons: [] },
@@ -934,7 +1025,7 @@ function validateFaultMappings() {
     throw new Error("M2 semantic review invocation policy failed");
   }
   const injected = hardOutcome({ gates: gates({}) }, { status: "PROVISIONAL_DONE", reasons: [] }, null, { injection: "forbidden-path" });
-  if (done.status !== "DONE" || invalid.status !== "INVALID" || notDone.status !== "NOT_DONE" || unknown.status !== "UNKNOWN" || human.status !== "NEEDS_HUMAN" || targetBoundary.status !== "DONE" || injected.status !== "INVALID") {
+  if (done.status !== "DONE" || invalid.status !== "INVALID" || notDone.status !== "NOT_DONE" || unknown.status !== "UNKNOWN" || human.status !== "NEEDS_HUMAN" || invalidHuman.status !== "INVALID" || unknownHuman.status !== "UNKNOWN" || notDoneHuman.status !== "NOT_DONE" || targetBoundary.status !== "DONE" || injected.status !== "INVALID") {
     throw new Error("M2 hard outcome mapping failed");
   }
   const refs = new Set(["transcript:1"]);
@@ -1036,7 +1127,9 @@ async function main() {
   const task = json(taskPath);
   const taskDigest = hashFile(taskPath);
   const runId = `m2-${task.id}-${new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}-${process.pid}`;
-  const outputRoot = join(RUNS_ROOT, runId);
+  const outputRoot = args.output ? resolve(REPO_ROOT, args.output) : join(RUNS_ROOT, runId);
+  if (!withinRoot(outputRoot, RUNS_ROOT)) throw new Error("M2 output path escapes eval runs root");
+  if (existsSync(outputRoot) && readdirSync(outputRoot).length > 0) throw new Error(`M2 output already exists and is not empty: ${outputRoot}`);
   mkdirSync(outputRoot, { recursive: true });
 
   const dynamicTurnsPath = join(replayRoot, "evidence", "simulated-user-turns.json");

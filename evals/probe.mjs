@@ -180,7 +180,7 @@ function controlledProviderProfile(provider, options = {}) {
 }
 
 function isoForPath() {
-  return new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
+  return new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 17);
 }
 
 function sha256(data) {
@@ -2584,6 +2584,14 @@ async function validateFaultMappings() {
   const sealRun = createDirectorSpawner(sealActionLog);
   createEvidenceSeal({ runRoot: frozenRun, packageRoot: frozenPackage, actionLog: sealActionLog, run: sealRun });
   if (!verifyEvidenceSeal({ runRoot: frozenRun, packageRoot: frozenPackage, actionLog: sealActionLog }).ok) throw new Error("valid evidence seal rejected");
+  const frozenSealPath = join(frozenRun, "evidence-seal.json");
+  const validFrozenSeal = json(frozenSealPath);
+  chmodSync(frozenSealPath, 0o600);
+  writeJson(frozenSealPath, { ...validFrozenSeal, evaluator_source_digest: "sha256:stale-evaluator" });
+  if (verifyEvidenceSeal({ runRoot: frozenRun, packageRoot: frozenPackage, actionLog: sealActionLog }).ok) throw new Error("stale evaluator seal was accepted");
+  writeJson(frozenSealPath, validFrozenSeal);
+  chmodSync(frozenSealPath, 0o400);
+  outcomes.push({ name: "evaluator-provenance-boundary", result: true });
   for (const path of [
     join(frozenEvidence, "turn-1.jsonl"),
     join(frozenEvidence, "git.diff"),
@@ -2825,26 +2833,33 @@ function sealInputPaths(runRoot) {
     "evidence/workspace-before.json", "evidence/workspace-after.json", "evidence/workspace-changes.json",
     "evidence/git-before.json", "evidence/git-after.json", "evidence/git.diff",
     "evidence/events.jsonl", "evidence/snapshot.json",
-    "scenario.json", "manifest.json",
+    "scenario.json", "manifest.json", "capability.json",
   ];
   const evidenceRoot = join(runRoot, "evidence");
   if (existsSync(evidenceRoot)) {
-    for (const name of readdirSync(evidenceRoot).sort()) {
-      if (/^(?:turn|user-turn)-\d+\.(?:jsonl|stderr\.log)$/.test(name) || ["simulated-user-turns.json", "worker-prompts.json"].includes(name)) {
-        const relativePath = `evidence/${name}`;
-        if (!paths.includes(relativePath)) paths.push(relativePath);
-      }
+    // Seal every collected evidence file except the action log, whose prefix is
+    // anchored separately by the final seal-created action. Keeping this
+    // discovery-based means new evidence (including absent markers) cannot be
+    // silently left outside the seal.
+    for (const entry of walk(evidenceRoot)) {
+      if (!["file", "symlink"].includes(entry.type) || entry.path === "director-actions.jsonl") continue;
+      const relativePath = `evidence/${entry.path}`;
+      if (!paths.includes(relativePath)) paths.push(relativePath);
     }
   }
-  if (existsSync(join(runRoot, "evidence/verifier.json"))) paths.push("evidence/verifier.json");
+  if (existsSync(join(runRoot, "evidence/verifier.json")) && !paths.includes("evidence/verifier.json")) {
+    paths.push("evidence/verifier.json");
+  }
   const artifactsRoot = join(runRoot, "artifacts");
   if (existsSync(artifactsRoot)) {
     for (const entry of walk(artifactsRoot)) {
-      if (entry.type === "file") paths.push(`artifacts/${entry.path}`);
+      if (["file", "symlink"].includes(entry.type)) paths.push(`artifacts/${entry.path}`);
     }
   }
-  if (existsSync(join(runRoot, "evidence/resume-turn-2-AGENTS.md"))) paths.push("evidence/resume-turn-2-AGENTS.md");
-  return paths.map(relativePath => ({ relativePath, absolutePath: join(runRoot, relativePath) }));
+  if (existsSync(join(runRoot, "evidence/resume-turn-2-AGENTS.md")) && !paths.includes("evidence/resume-turn-2-AGENTS.md")) {
+    paths.push("evidence/resume-turn-2-AGENTS.md");
+  }
+  return [...new Set(paths)].map(relativePath => ({ relativePath, absolutePath: join(runRoot, relativePath) }));
 }
 
 function createEvidenceSeal({ runRoot, packageRoot, actionLog, run }) {
@@ -2885,6 +2900,7 @@ function verifyEvidenceSeal({ runRoot, packageRoot, actionLog }) {
   if (seal.schema_version !== 1 || seal.actor !== "director" || typeof seal.evaluator_source_digest !== "string") {
     return { ok: false, reason: "evidence seal metadata invalid" };
   }
+  const evaluatorSourceDigestMatch = seal.evaluator_source_digest === currentEvaluatorDigest();
   if (JSON.stringify(sealedPaths) !== JSON.stringify(expectedPaths)) return { ok: false, reason: "evidence seal file set mismatch" };
   const actionContent = readFileSync(actionLog, "utf8");
   const actionLines = actionContent.split("\n").filter(Boolean);
@@ -2906,7 +2922,7 @@ function verifyEvidenceSeal({ runRoot, packageRoot, actionLog }) {
     }
   }
   if (frozenPackageDigest(packageRoot) !== seal.isolated_package_digest) return { ok: false, reason: "sealed package digest mismatch" };
-  return { ok: true, seal };
+  return { ok: true, seal, seal_digest: hashFile(sealPath), evaluator_source_digest_match: evaluatorSourceDigestMatch };
 }
 
 async function validateFrozenDiscovery(artifactPath, packageRoot) {
@@ -2937,9 +2953,12 @@ function rejectedRegrade(runRoot, scenarioId, reason, metadata = {}) {
     worker_reexecuted: false,
     formal_grading_performed: false,
     rejection_reason: reason,
+    source_capability_digest: existsSync(join(runRoot, "capability.json")) ? hashFile(join(runRoot, "capability.json")) : null,
+    evidence_seal_digest: existsSync(join(runRoot, "evidence-seal.json")) ? hashFile(join(runRoot, "evidence-seal.json")) : null,
     ...metadata,
   };
   writeJson(join(runRoot, "capability.regraded.json"), capability);
+  manifest.capability_digest = hashFile(join(runRoot, "capability.regraded.json"));
   writeJson(join(runRoot, "regrade-manifest.json"), manifest);
   process.stdout.write(`${JSON.stringify({ run: runRoot, capability, regrade_manifest: "regrade-manifest.json" }, null, 2)}\n`);
   return capability.exit_code;
@@ -3468,7 +3487,7 @@ async function regradeExistingRun(inputRunDir) {
     spawn: hashFile(join(EVAL_ROOT, "lib", "spawn.mjs")),
   }));
   const rawEvidenceFiles = [
-    "turn-1.jsonl", "turn-1.stderr.log", "director-actions.jsonl", "trace-summary.json",
+    "turn-1.jsonl", "turn-1.stderr.log", "trace-summary.json",
     "workspace-before.json", "workspace-after.json", "workspace-changes.json",
     "git-before.json", "git-after.json", "git.diff", "events.jsonl", "snapshot.json",
   ];
@@ -3503,14 +3522,19 @@ async function regradeExistingRun(inputRunDir) {
     prompt_difference_policy: "audit-only restrictions; limitation applied when current policy audit passes",
     formal_grading_performed: sealVerification.ok,
     evidence_seal: sealVerification,
+    source_capability_digest: existsSync(join(runRoot, "capability.json")) ? hashFile(join(runRoot, "capability.json")) : null,
+    evidence_seal_digest: sealVerification.seal_digest ?? null,
     audit_overlay: overlay,
     provisional_assessment: provisionalAssessment,
-    raw_evidence_digests: {
-      ...Object.fromEntries(rawEvidenceFiles.filter(name => existsSync(join(evidenceDir, name))).map(name => [`evidence/${name}`, hashFile(join(evidenceDir, name))])),
-      ...frozenArtifactDigests,
-      "manifest.json": hashFile(join(runRoot, "manifest.json")),
-      "scenario.json": hashFile(join(runRoot, "scenario.json")),
-    },
+    raw_evidence_digests: sealVerification.ok
+      ? Object.fromEntries(Object.entries(sealVerification.seal.files)
+        .filter(([name, digest]) => name !== "capability.json" && digest !== null))
+      : {
+          ...Object.fromEntries(rawEvidenceFiles.filter(name => existsSync(join(evidenceDir, name))).map(name => [`evidence/${name}`, hashFile(join(evidenceDir, name))])),
+          ...frozenArtifactDigests,
+          "manifest.json": hashFile(join(runRoot, "manifest.json")),
+          "scenario.json": hashFile(join(runRoot, "scenario.json")),
+        },
     isolated_package: {
       expected_digest: originalManifest.package.isolated_digest,
       actual_digest: frozen.actualPackageDigest,
@@ -3521,6 +3545,7 @@ async function regradeExistingRun(inputRunDir) {
     trace_audits: { controlled_environment: environmentAudit, worker_command_policy: commandPolicyAudit },
   };
   writeJson(join(runRoot, "capability.regraded.json"), capability);
+  regradeManifest.capability_digest = hashFile(join(runRoot, "capability.regraded.json"));
   writeJson(join(runRoot, "regrade-manifest.json"), regradeManifest);
   process.stdout.write(`${JSON.stringify({ run: runRoot, capability, regrade_manifest: "regrade-manifest.json" }, null, 2)}\n`);
   return capability.exit_code;
@@ -3580,6 +3605,7 @@ async function main() {
   let workerStartedAt = null;
   let signalReceived = null;
   let evidenceSecured = false;
+  let evidenceCollectionReady = false;
   let manifestSourceRepository = null;
   const protectedEvidencePaths = dynamicUserMode
     ? [actionLog, ...dynamicTracePaths(evidenceDir, dynamicMaxTurns).flatMap((path, index) => [path, turnStderrPath(evidenceDir, index + 1)]), simulatedUserPath, ...simulatedUserModelPaths]
@@ -4360,7 +4386,10 @@ async function main() {
         },
       } : {}),
     });
-    createEvidenceSeal({ runRoot, packageRoot, actionLog, run });
+    // Capability grading is completed below. The seal is created only after
+    // capability.json has been written so the hard result itself is covered by
+    // the same immutable evidence boundary.
+    evidenceCollectionReady = true;
     const turn1Trace = persistentMode ? parseTrace(tracePath, workspace, null, executableIdentities, bareResolutionProven, null) : trace;
     const turn2Trace = persistentMode ? parseTrace(resumeTracePath, workspace, null, executableIdentities, bareResolutionProven, null) : null;
     const turn3Trace = scriptedThreeTurnMode || scriptedFourTurnMode ? parseTrace(thirdTracePath, workspace, null, executableIdentities, bareResolutionProven, null) : null;
@@ -4766,6 +4795,19 @@ async function main() {
     }
     normalizeEvidencePaths(capability, runRoot);
     writeJson(capabilityPath, capability);
+    if (evidenceCollectionReady) {
+      try {
+        createEvidenceSeal({ runRoot, packageRoot, actionLog, run });
+      } catch (error) {
+        // Keep a useful capability artifact when sealing itself cannot be
+        // completed; callers must treat the run as unsealed/UNKNOWN.
+        capability.limitations.push(`evidence seal creation failed: ${error instanceof Error ? error.message : String(error)}`);
+        capability.gates.controlled_environment = gate("unavailable", ["evidence/director-actions.jsonl"], capability.limitations.at(-1));
+        finalizeCapability(capability);
+        try { chmodSync(capabilityPath, 0o600); } catch {}
+        writeJson(capabilityPath, capability);
+      }
+    }
     process.stdout.write(`${JSON.stringify({ run: runRoot, capability }, null, 2)}\n`);
   }
   return capability.exit_code;

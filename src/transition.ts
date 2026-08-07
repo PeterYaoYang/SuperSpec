@@ -1628,6 +1628,14 @@ export function taskComplete(projectRoot: string, change: string, changeRoot: st
         return { skip: true, message: "Apply 期间计划材料已变化，不能完成当前任务；请回到 Propose 核对并重新批准计划" };
       }
 
+      // task_completed 与 tasks.md 的完成标记必须作为一个可重试的提交边界；
+      // 先确认目标仍是实际 checkbox 任务，避免契约模式只凭 attempt 记录完成事件。
+      const taskLines = readFileSync(join(changeRoot, "tasks.md"), "utf8").split("\n");
+      const taskLine = findTaskLine(taskLines, taskId);
+      if (taskLine < 0) {
+        return { skip: true, message: `tasks.md 中找不到任务 ${taskId}，未登记完成事件` };
+      }
+
       const readiness = taskEvidenceReadiness(projectRoot, change, changeRoot, attempt);
       if (!readiness.ready) return { skip: true, message: `任务 ${taskId} 无法完成：${readiness.reason}` };
       const taskStartBoundary = boundarySnapshotForTaskAttempt(events, attempt.attempt_id);
@@ -1646,24 +1654,22 @@ export function taskComplete(projectRoot: string, change: string, changeRoot: st
         reason: `任务 ${taskId} 完成`,
         extraEvents: [{ type: "task_completed", payload: completedPayload }],
         postCommit: (pr: string, _ch: string, cr: string) => {
-          completedPayload.java_staging = stageProductionJavaFilesSince(pr, taskStartBoundary);
           const lines = readFileSync(join(cr, "tasks.md"), "utf8").split("\n");
           const idx = findTaskLine(lines, taskId);
           if (idx < 0) {
-            completedPayload.checkbox_update = { status: "failed", reason: `找不到 ${taskId} 的任务行` };
-            return;
+            throw new Error(`任务 ${taskId} 完成失败：tasks.md 中找不到任务行，未写入完成事件`);
           }
           if (lines[idx].match(/- \[[xX]\]/)) {
             completedPayload.checkbox_update = { status: "applied" };
-            return;
+          } else {
+            if (!lines[idx].match(/- \[ \]/)) {
+              throw new Error(`任务 ${taskId} 完成失败：tasks.md 中找不到可勾选复选框，未写入完成事件`);
+            }
+            lines[idx] = lines[idx].replace(/- \[ \]/, "- [x]");
+            writeFileSync(join(cr, "tasks.md"), lines.join("\n"));
+            completedPayload.checkbox_update = { status: "applied" };
           }
-          if (!lines[idx].match(/- \[ \]/)) {
-            completedPayload.checkbox_update = { status: "failed", reason: `找不到 ${taskId} 的未完成复选框` };
-            return;
-          }
-          lines[idx] = lines[idx].replace(/- \[ \]/, "- [x]");
-          writeFileSync(join(cr, "tasks.md"), lines.join("\n"));
-          completedPayload.checkbox_update = { status: "applied" };
+          completedPayload.java_staging = stageProductionJavaFilesSince(pr, taskStartBoundary);
         },
       };
     },

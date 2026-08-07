@@ -12,7 +12,7 @@ Scenario
   → Report
 ```
 
-当前状态：M1 和 M2 已完成；批量稳定性回归、版本基线对比和发布门属于后续 M3。
+当前状态：M1 和 M2 已完成；M3 的批量 Runner、重复运行统计、负向门禁、基线报告和 Git ref 自动对比已实现。发布门默认执行两次重复运行，Provider、模型和推理档位也有默认值；需要对照或复现实验时再显式指定。
 
 ## 核心原则
 
@@ -30,10 +30,12 @@ evals/
   probe.mjs                 # 隔离运行、证据采集、硬门禁与 regrade
   arena.mjs                 # 密封运行的确定性只读回放
   m2.mjs                    # 正式结果、双模型审查、合并与归因
+  regression.mjs            # M3 批量回归、稳定性统计与基线报告
+  regression-suite.json     # 正式绿任务、停止边界和负向任务清单
   delegation-probe.mjs      # 独立的 Codex multi-agent transport 诊断
   scenarios/                # Worker 考场定义
   tasks/                    # Arena/M2 的目标与成功标准
-  tasks/negative/           # 作弊和篡改检测用例
+  tasks/negative/           # 硬门禁映射自校验输入（不等同真实作弊运行）
   runs/                     # Arena/M2 输出
   docs/                     # Eval 架构与实施计划
 
@@ -57,7 +59,7 @@ node evals/arena.mjs --validate-faults
 npm run eval:m2:validate
 ```
 
-它们验证硬结果映射、证据密封、篡改检测、动态用户边界、Review Bundle v2 和负向作弊用例。
+它们验证硬结果映射、证据密封、篡改检测、动态用户边界和 Review Bundle v2。负向部分是确定性门禁映射自校验，不宣称已经执行真实 Worker 作弊场景。
 
 ### 2. 运行一个 Probe
 
@@ -114,6 +116,70 @@ npm run eval:m2 -- \
 当硬结果为 `UNKNOWN` 或 `NEEDS_HUMAN` 时，M2 不调用语义 Reviewer。`INVALID` 仍可在 Review Bundle 证据完整时执行内容审查，用于把产物问题与环境、隔离或真实性问题分开归因；语义结论不会覆盖硬结果。
 
 如果某个 Reviewer 因 Provider 或模型运行时失败，M2 会保留另一名 Reviewer 的成功结果并记录失败原因，不再让整个评测无报告退出。硬结果不是 `DONE` 时仍保持该硬状态；硬结果为 `DONE` 但双审不完整时，最终语义结论为 `UNKNOWN`。
+
+### 5. 运行 M3 回归集
+
+M3 使用正式回归集重复运行绿任务和用户停止边界，并同步执行评测器的负向硬门禁映射自校验。该负向校验是确定性 fault-mapping 检查，不等同于启动真实 Worker 的作弊场景；真实反作弊场景应单独配置密封 fixture。默认只执行 Probe + Arena 硬结果层；需要在每次运行后做双模型语义复盘时增加 --with-m2。
+
+先检查回归集和评测器：
+
+~~~bash
+npm run eval:m3:validate
+npm run eval:m3 -- --dry-run
+~~~
+
+执行一次回归：
+
+~~~bash
+npm run eval:m3 -- \
+  --provider localproxy \
+  --model gpt-5.6-terra \
+  --reasoning high
+~~~
+
+作为发布门执行至少两次重复运行：
+
+~~~bash
+npm run eval:m3 -- \
+  --provider localproxy \
+  --model gpt-5.6-terra \
+  --reasoning high \
+  --repetitions 2 \
+  --release-gate
+~~~
+
+回归输出位于 evals/runs/m3-*/，包含每个任务的通过率、稳定性、平均 Worker 回合数、用户确认次数、审查工作项数量和可观测 Token 汇总；同时保留任务、场景和 Arena/M2 回放副本。任务声明的 `budget.max_wall_seconds` 会限制一次 Probe→Arena→M2 attempt 的总墙钟时间；watchdog 超时的 attempt 标为 `UNKNOWN`，不会被计为通过。Provider 没有在 Codex 轨迹中提供标准 usage 字段时，Token 指标会明确标记为不可用，不会估算。
+
+归档中的 `archive_paths`、以及 Arena/M2 派生报告里的 `task_path`/`source_run` 使用归档内相对路径，便于复制后定位材料；报告同时保留原始绝对路径作为 provenance，不应把它当作可移植的工作区路径。Arena 还会核对密封文件集合，运行结束后新增未密封的证据（包括符号链接）会被判为 `UNKNOWN`。
+
+回归输入会在被测仓库根下创建唯一的隐藏临时目录 `.m3-inputs-*`，以满足 Arena/M2 对仓库内 task 路径的隔离校验；本次回归结束后会清理，并由 `.gitignore` 防止中断遗留目录进入 Git。
+
+### 6. 对比两个版本的回归报告
+
+先分别在基线版本和候选版本运行 M3，再比较两份 regression-result.json：
+
+~~~bash
+node evals/regression.mjs \
+  --compare-baseline evals/runs/baseline/regression-result.json \
+  --compare-candidate evals/runs/candidate/regression-result.json
+~~~
+
+对比报告会列出通过率、Worker 回合数、用户确认次数、审查工作项和可观测 Token 的变化，并在稳定绿任务退化时返回 REGRESSION。
+
+如果两个版本已经有可检出的 Git ref，可以让 Runner 自动创建临时 detached worktree、分别运行回归并比较结果：
+
+~~~bash
+node evals/regression.mjs \
+  --baseline-ref <baseline-ref> \
+  --candidate-ref <candidate-ref> \
+  --provider localproxy \
+  --model gpt-5.6-terra \
+  --reasoning high \
+  --repetitions 2 \
+  --release-gate
+~~~
+
+命令结束后会删除临时 worktree；结果目录包含 `baseline/`、`candidate/` 和 `comparison/` 下的 `comparison.json`。对照使用当前固定 Runner、Probe/Arena/M2、构建脚本和测试套件契约，Git ref 只替换被测 SuperSpec 源码，因此基线版本即使尚未包含 M3 Runner 文件也可以被比较。每个 `--with-m2` attempt 同时归档 Probe 和 M2 审查证据，便于复核。该 worktree 只属于 Eval 的版本隔离，不改变日常开发或发布流程对 worktree 的约定。
 
 ## 场景目录
 
@@ -228,7 +294,7 @@ Probe 运行结束后会生成并密封以下核心证据：
 
 Prompt 账本在所有 Worker 回合结束后才写入，因此不会被 Worker 枚举。Scenario 的初始需求按原文发送；工作流问题只回复模拟用户选择，非用户边界只发送简短的“继续推进”。隔离、停止边界和真实性约束由 Runner 机制保证，不写入 Worker Prompt。Arena 和 M2 优先使用账本中的 effective Prompt；历史运行没有该文件时使用旧证据回退。
 
-证据密封后，Arena、M2 和 regrade 都只读消费原始运行。任何 seal 所声明证据的删除或内容变化都会使验证失败。
+证据密封后，Arena、M2 和 regrade 都只读消费原始运行。任何 seal 所声明证据的删除或内容变化都会使验证失败。`evaluator_source_digest` 记录生成该 seal 的评测器 provenance；Arena/M2 可以回放结构仍兼容的历史 seal，但会在来源中标出与当前评测器是否一致。只有正式 regrade 才要求 manifest 绑定当前 evaluator digest；旧 seal 不得被无标记地当作当前版本正式结果。
 
 ## 硬门禁
 
@@ -295,7 +361,7 @@ Probe 不评价最终业务内容质量，`semantic_quality` 保持 `ungraded`�
 | `DONE_BUT_FLAWED` | 硬结果真实完成，但 Reviewer 提出问题或优化建议 |
 | `NOT_DONE` | 未达到 Task 声明的目标状态或产物要求 |
 | `NEEDS_HUMAN` | 工作流遇到模拟用户无权决定的真实问题 |
-| `INVALID` | 真实性、隔离或作弊检测失败 |
+| `INVALID` | 真实性、隔离或硬门禁证据失败 |
 | `UNKNOWN` | 关键证据不足，无法下结论 |
 
 双模型 requirement fit、问题列表和归因属于语义评审结果，不能把硬门禁失败改成成功。
@@ -372,4 +438,4 @@ npm run eval:delegation
 - Eval 不保证模型多次运行产生完全相同的路径或文本；稳定性需要通过后续 M3 重复运行统计。
 - Reviewer 只能评价 Review Bundle 中的密封材料；coverage 有限制时，报告会明确显示。
 - 临时本地 Scenario、Task 和运行目录不是 Eval 核心逻辑，不应因为一次业务发现持续加入 Git。
-- 下一阶段是 M3：正式回归集、重复运行、版本 baseline 对比和发布门。
+- M3 当前已提供正式回归集、重复运行、负向门禁、基线报告和自动从 Git ref 物化两套版本的封装。

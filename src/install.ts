@@ -302,7 +302,6 @@ function ensureWorkflowConfig(projectRoot: string): string {
   mkdirSync(dirname(configPath), { recursive: true });
   if (!existsSync(configPath)) {
     // install/update 是显式迁移动作：为以后各轮写入 normal 默认值。
-    // 未执行安装的旧项目仍由 workflowRiskForProject 保守回放 strict。
     writeFileSync(configPath, JSON.stringify({ workflow: { mode: DEFAULT_WORKFLOW_RISK } }, null, 2) + "\n");
   }
   return WORKFLOW_CONFIG_PATH;

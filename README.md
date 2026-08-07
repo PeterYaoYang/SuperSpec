@@ -4,194 +4,49 @@
 [![Node.js](https://img.shields.io/badge/node-%3E%3D20.19.0-brightgreen?style=flat-square)](https://nodejs.org)
 [![OpenSpec](https://img.shields.io/badge/OpenSpec-compatible-6f42c1?style=flat-square)](https://github.com/Fission-AI/OpenSpec)
 
-> SuperSpec 是一套“先想清楚，再动手”的工作流。
-
-它解决的是一个很常见的问题：AI 编程工具写代码很快，但有时候还没搞清楚需求、现有代码和测试边界，就已经开始改文件了。
-
-SuperSpec 会把一次需求变更拆成 4 个阶段：
+SuperSpec 是一套面向 AI 编程代理的需求变更工作流。它在 OpenSpec 材料之上增加阶段控制、审查和验证记录，帮助 AI 从需求理解推进到可回放的交付结果。
 
 ```text
-探索需求 -> 写方案 -> 做实现 -> 代码审查与最终验证 -> accepted
+Explore → Propose → Apply → Review → Accepted
 ```
 
-这样做的目的很简单：
+SuperSpec 适合跨模块、涉及接口或需要方案审查的变更。简单的单文件修改不必强行使用完整工作流。普通请求也不会自动进入 SuperSpec，只有明确调用对应入口或继续已有 change 时才会启动。
 
-- 改代码前先弄清楚现状
-- 写实现前先有方案和任务
-- 任务完成前先有测试或验证记录
-- 宣布完成前先经过审查
-- 进入 accepted 时保留关键过程记录
+## 安装
 
-## 适合谁
-
-适合已经在用 AI 编程工具或命令行代理做项目开发，并希望流程更稳一点的团队或个人。
-
-如果你遇到过这些情况，SuperSpec 会有帮助：
-
-- 需求还没说清楚，AI 就开始写代码
-- 方案写得很粗，后面实现时靠猜
-- 测试只跑了命令，但没人说明它证明了什么
-- 代码写完后缺少真正的审查
-- 过几天想回看当时为什么这么改，却找不到过程记录
-
-如果你只是想让 AI 快速改一个很小的文件，且不需要完整方案、审查和记录，那 SuperSpec 可能会显得偏重。
-
-## 和 OpenSpec 有什么区别
-
-一句话区别：
-
-```text
-OpenSpec 管“这次要改什么”。
-SuperSpec 管“AI 应该怎样把这次改动做稳”。
-```
-
-更具体一点：
-
-| 问题 | OpenSpec 主要负责 | SuperSpec 额外补上 |
-|---|---|---|
-| 这次变更是什么 | 方案、规格、设计、任务和归档 | 要求 AI 在写方案前先调查现状 |
-| 方案怎么写 | 提供标准的变更文档结构 | 要求方案前后有范围、风险、业务约束和测试思路 |
-| 代码怎么做 | 记录任务清单和完成状态 | 要求按任务实现，并留下测试或验证记录 |
-| 做完怎么算稳 | 可以校验规格和归档 | 增加代码审查、架构审查、反方审查和最终验证 |
-| 以后怎么追溯 | 保留 OpenSpec 的变更文档 | 额外保留探索、测试和审查记录 |
-
-举个例子：
-
-OpenSpec 会帮你记录“要增加登录功能、需要哪些规格、设计和任务”。
-SuperSpec 会进一步要求 AI 先看看现有登录/权限代码在哪里、哪些业务规则不能破坏、哪些场景必须测试、实现后要经过哪些审查，最终进入 accepted 完成本轮流程。
-
-所以 SuperSpec 不是 OpenSpec 的替代品。它更像是 OpenSpec 外面的一层执行纪律，专门约束 AI 编程工具不要跳过关键步骤。
-
-## 快速开始
-
-### 1. 安装
+要求 Node.js `>=20.19.0`。
 
 ```bash
 npm install -g @peterxiaoyang/superspec@latest
-```
-
-需要 Node.js `>= 20.19.0`。
-
-### 2. 初始化当前项目
-
-进入你的项目根目录，然后运行：
-
-```bash
+cd <your-project>
 superspec install
 ```
 
-这条命令的意思是：把 SuperSpec 当前可用的工作流入口安装到项目里。
-安装前会检查全局 `openspec` CLI；缺失或版本不一致时，会自动执行 `npm install -g @fission-ai/openspec@1.4.1`，确保后续工作流能调用 OpenSpec。
-当前 beta 会安装 `.superspec/` 引擎目录、`.codex/skills/superspec-*` 阶段入口、`.codex/prompts/*.md` 角色 prompt、`.codex/agents/*.toml` 子智能体配置，补齐 `.codex/config.toml` 的多 agent 开关，并在项目根 `AGENTS.md` 中维护 SuperSpec 轻量门禁片段。`superspec init --scope project` 仍作为兼容别名可用。
+`superspec install` 会把工作流入口、角色配置和运行时目录同步到当前项目，并准备 OpenSpec 依赖。`superspec init --scope project` 是兼容别名。
 
-Windows PowerShell 如果拦截 npm 的 `.ps1` 脚本，请改用：
-
-```powershell
-superspec.cmd install
-```
-
-### 3. 按步骤使用
-
-在你使用的 AI 编程工具或 CLI 里，按下面的阶段入口推进。不同工具的触发方式可以不同，但入口名和顺序保持一致。
-
-开始时先探索需求：
-
-```text
-使用 superspec-explore，帮我梳理这个需求：……
-```
-
-探索完成后，写正式方案：
-
-```text
-使用 superspec-propose，把刚才的探索结果整理成方案。
-```
-
-方案确认后，开始实现：
-
-```text
-使用 superspec-apply，按任务实现。
-```
-
-实现完成后，代码审查与最终验证：
-
-```text
-使用 superspec-review，完成代码审查、问题处理和最终验证。
-```
-
-审查通过并进入 `accepted` 后，本轮工作流完成。如果之后需要补充或修改需求、方案或验收内容，直接用自然语言告诉 Agent；Agent 会按引擎返回的内部 continuation 自动回到计划阶段并重新完成后续审查。
-
-## 四个入口分别做什么
-
-| 入口 | 什么时候用 | 它会要求做什么 |
-|---|---|---|
-| `superspec-explore` | 需求刚开始时 | 读代码、查现状、整理范围和风险；这一步不改业务代码 |
-| `superspec-propose` | 需求已经清楚后 | 写正式方案、规格、设计和任务，并提前规划测试 |
-| `superspec-apply` | 方案通过后 | 按任务实现代码，记录测试或验证结果 |
-| `superspec-review` | 实现完成后 | 检查代码实现是否符合方案，处理审查问题，并完成最终验证 |
-
-你日常主要记住这四个入口就够了。
-
-工作流档位由项目配置统一控制，不通过命令行临时指定。探索阶段会按配置创建相应审查工作项；计划阶段按同一档位创建 `critic`、`architect`、`test-engineer` 等必要审查后再进入实现准备。
-
-## 它会多保存哪些记录
-
-SuperSpec 会在每次变更下面保存一些辅助记录，方便后续追溯。
-
-主要包括：
-
-- 探索记录：这次需求是什么、当前代码是什么情况、有哪些风险
-- 业务约束：哪些业务规则不能被改坏
-- 测试约定：哪些场景必须验证
-- 实现记录：每个任务怎么验证通过
-- 审查记录：谁检查了什么、发现了什么、最后为什么通过或退回
-
-这些记录默认放在：
-
-```text
-openspec/changes/<变更ID>/.superspec/
-```
-
-这里的 `<变更ID>` 就是一次需求变更的名字。
-
-## 重要边界
-
-SuperSpec 能让流程更规范，但它不是安全锁。
-
-它能帮助你：
-
-- 减少 AI 还没想清楚就改代码的情况
-- 让测试、审查和用户确认留下记录
-- 在进入下一步前提醒缺少什么
-- 让一次变更之后更容易回看原因
-
-它不能保证：
-
-- 阻止人手动绕过流程直接改文件
-- 阻止人删除过程记录
-- 阻止恶意伪造记录
-- 替代正式的安全审计、合规审计或法律证明
-
-也就是说，SuperSpec 目前是“流程纪律 + 审计辅助工具”，不是“强制安全系统”。默认 hook 只增强子智能体活动的可见性；显式/manual `PreToolUse` 才会进入保守写入策略，但仍然不能替代正式的安全控制。
-
-## 常用命令
-
-查看当前 SuperSpec CLI 版本：
+检查安装：
 
 ```bash
-superspec --version
+superspec version
+superspec status
 ```
 
-安装到当前项目：
+## 工作流入口
 
-```bash
-superspec install
-```
+在 Codex 中显式调用对应 Skill。新需求通常从 `$superspec-explore` 开始；已有 change 则从当前阶段继续。
 
-`superspec init --scope project` 是兼容别名，也会执行同一套安装逻辑。
+| Skill | 作用 |
+| --- | --- |
+| `$superspec-explore` | 调查现状，确认事实和待决策事项 |
+| `$superspec-propose` | 生成规格、设计和可执行任务 |
+| `$superspec-apply` | 按已批准任务修改代码并验证 |
+| `$superspec-review` | 审查实现并完成最终验证 |
 
-`superspec install` 会创建缺失的 `openspec/config.yaml`，或在没有顶层 `context` 时追加这段官方中文 context。如果文件已经有顶层 `context`，SuperSpec 不会覆盖它。
+工作流会根据问题性质留在当前阶段修复，或回到计划阶段重新确认需求、验收和技术取舍。
 
-它还会创建项目级 `.superspec/config.json`，用于统一设置整个工作流的默认档位：
+## 配置
+
+项目级配置位于 `.superspec/config.json`。未创建配置或未声明模式时，默认使用 `normal`：
 
 ```json
 {
@@ -201,75 +56,21 @@ superspec install
 }
 ```
 
-可选值为 `minimal`、`normal`、`strict`。`next`、Explore、Propose、进入 Apply 和 Review 都读取此配置；`--risk` 不再是用户可用的工作流入口。已启动的 task attempt 和已经建立的审查策略仍按其事件快照执行，不会被中途改配置追溯改写。
+可选模式为 `minimal`、`normal` 和 `strict`。模式主要影响计划阶段的审查强度；最终代码审查和验证仍由 Review 阶段负责。
 
-可以用下面的命令检查生成的 instructions 是否包含语言上下文：
+## 与 OpenSpec 的关系
 
-```bash
-openspec instructions proposal --change <change>
-```
-
-检查当前项目的 OpenSpec 探测结果：
-
-```bash
-superspec status
-```
-
-同步当前项目的 SuperSpec 工作流入口：
-
-```bash
-superspec update
-```
-
-这条命令会先检查 npm 上的 latest 版本；如果有新版，会自动执行全局升级并用新版 CLI 重新同步项目入口。随后会把全局 OpenSpec CLI 拉齐到 `@fission-ai/openspec@1.4.1`。同步内容包括补齐 `.superspec/changes` 运行时目录，把当前 CLI 内置的 `.codex/skills/superspec-*`、`.codex/prompts/*.md`、`.codex/agents/*.toml` 同步到项目里，并更新 `AGENTS.md` 中 marker 包裹的 SuperSpec 轻量门禁片段。
-
-## 进阶信息
-
-以当前内置的 Codex 适配器为例，初始化后项目里会出现这些入口文件：
+OpenSpec 负责变更材料和规格结构；SuperSpec 负责组织 AI 的探索、计划、实现、审查与证据记录。两者互补：
 
 ```text
-.codex/
-  skills/superspec-explore/
-  skills/superspec-propose/
-  skills/superspec-apply/
-  skills/superspec-review/
-  prompts/architect.md
-  prompts/code-reviewer.md
-  prompts/critic.md
-  prompts/executor.md
-  prompts/explore.md
-  prompts/test-engineer.md
-  prompts/test-runner.md
-  prompts/verifier.md
-  agents/architect.toml
-  agents/code-reviewer.toml
-  agents/critic.toml
-  agents/executor.toml
-  agents/explore.toml
-  agents/test-engineer.toml
-  agents/test-runner.toml
-  agents/verifier.toml
-  config.toml
+OpenSpec：这次要改变什么
+SuperSpec：如何在边界内把它交付
 ```
 
-当前 beta 的阶段入口由 `superspec transition next --change <变更ID>` 驱动，不再提供旧版 `superspec check ...` surface。
+## 设计边界
 
-如果你要开发 SuperSpec 本身：
+SuperSpec 是流程和审计辅助工具，不是安全隔离或发布审批系统。它不能替代代码审计、权限控制、合规检查和人工判断。
 
-```bash
-npm run build
-npm run typecheck
-npm test
-npm pack --dry-run
-```
-
-更多细节见：
-
-- `docs/plans/SUPERSPEC_TRANSITION_ENGINE_SPEC_LITE.md`：transition engine 设计
-- `templates/workflow/skills/superspec-*/SKILL.md`：当前 Codex 适配器使用的阶段入口说明
-
-## 致谢与灵感来源
+## 致谢
 
 - [OpenSpec](https://github.com/Fission-AI/OpenSpec)
-- [oh-my-codex](https://github.com/Yeachan-Heo/oh-my-codex)
-- [Superpowers](https://github.com/obra/superpowers)

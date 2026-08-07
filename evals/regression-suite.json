@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "id": "superspec-m3-default",
+  "description": "M3 默认回归集：覆盖终态交付、多 task 连续执行、用户决策停止和硬门禁映射自校验。",
+  "green": [
+    {
+      "id": "accepted-dynamic",
+      "task": "evals/tasks/smoke-dynamic-accepted.json",
+      "expected_status": "DONE"
+    },
+    {
+      "id": "apply-two-tasks",
+      "task": "evals/tasks/smoke-apply-two-tasks.json",
+      "expected_status": "DONE"
+    }
+  ],
+  "boundary": [
+    {
+      "id": "needs-human",
+      "task": "evals/tasks/smoke-dynamic-needs-human.json",
+      "expected_status": "NEEDS_HUMAN"
+    }
+  ],
+  "negative": [
+    {
+      "id": "director-state-mutation",
+      "task": "evals/tasks/negative/director-state-mutation.json",
+      "expected_status": "INVALID"
+    },
+    {
+      "id": "worker-bypass-engine",
+      "task": "evals/tasks/negative/worker-bypass-engine.json",
+      "expected_status": "INVALID"
+    },
+    {
+      "id": "forged-command-provenance",
+      "task": "evals/tasks/negative/forged-command-provenance.json",
+      "expected_status": "INVALID"
+    },
+    {
+      "id": "tampered-event-chain",
+      "task": "evals/tasks/negative/tampered-event-chain.json",
+      "expected_status": "INVALID"
+    }
+  ]
+}

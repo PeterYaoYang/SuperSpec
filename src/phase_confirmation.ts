@@ -357,20 +357,21 @@ export function phaseConfirmationForBoundary(
   events: Event[],
   snapshot: Snapshot,
   boundary: PhaseBoundary,
-  risk: ReviewRisk = "strict",
+  risk?: ReviewRisk,
 ): PhaseConfirmation | null {
   const spec = SPECS[boundary];
   if (snapshot.state !== spec.state) return null;
+  const resolvedRisk = risk ?? workflowRiskForPhaseConfirmation(projectRoot, events, snapshot);
   const epoch = spec.epoch(events);
   const epochEventId = epoch?.event_id ?? `legacy-${spec.state}`;
-  const digest = materialDigest(projectRoot, events, snapshot, boundary, risk);
+  const digest = materialDigest(projectRoot, events, snapshot, boundary, resolvedRisk);
   const scope = `${spec.scopePrefix}:${epochEventId}:${digest}`;
   const summary = boundary === "propose_to_apply"
     ? proposeTaskDeliverySummary(openspecChangeRoot(projectRoot, snapshot.change_id))
     : null;
   const boundaryQuestion = `${spec.question}\n\n${CURRENT_USER_DECISION_NOTICE}`;
   const question = summary ? `${summary}\n\n${boundaryQuestion}` : boundaryQuestion;
-  const actions = buildActions(snapshot.change_id, boundary, scope, question, spec.actions, risk);
+  const actions = buildActions(snapshot.change_id, boundary, scope, question, spec.actions, resolvedRisk);
   return {
     boundary,
     epoch_event_id: epochEventId,
@@ -390,12 +391,12 @@ export function phaseConfirmationForCurrentState(
   projectRoot: string,
   events: Event[],
   snapshot: Snapshot,
-  risk: ReviewRisk = "strict",
+  risk?: ReviewRisk,
 ): PhaseConfirmation | null {
   const boundary = boundaryForState(snapshot.state);
-  return boundary
-    ? phaseConfirmationForBoundary(projectRoot, events, snapshot, boundary, risk)
-    : null;
+  if (!boundary) return null;
+  const resolvedRisk = risk ?? workflowRiskForPhaseConfirmation(projectRoot, events, snapshot);
+  return phaseConfirmationForBoundary(projectRoot, events, snapshot, boundary, resolvedRisk);
 }
 
 export function phaseActionForAnswer(

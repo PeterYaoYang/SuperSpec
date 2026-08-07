@@ -28,6 +28,8 @@
     "eval:dynamic": "node evals/probe.mjs --scenario evals/scenarios/probe-dynamic-accepted.json",
     "eval:m2": "node evals/m2.mjs",
     "eval:m2:validate": "node evals/m2.mjs --validate-faults",
+    "eval:m3": "node evals/regression.mjs",
+    "eval:m3:validate": "node evals/regression.mjs --validate-faults",
     "eval:arena": "node evals/arena.mjs",
     "eval:delegation": "node evals/delegation-probe.mjs",
     "prepack": "npm run build",

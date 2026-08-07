@@ -960,13 +960,17 @@ export function pendingTasksInContent(content: string): ParsedTask[] {
 
 /** 在 tasks.md 中按 taskId 精确查找任务（词边界，不误判子串） */
 export function findTaskInLines(lines: string[], taskId: string): number {
+  const escaped = taskId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // 回退匹配也必须停留在顶格 checkbox 任务行内；否则上一任务的
+  // “依赖/边界/验收”文本提到该 ID 时，会被误当成目标任务行。
+  const taskIdAtLineStart = new RegExp(`^${escaped}(?=\\s|$|[.,:;!?)\\]])`);
   for (let i = 0; i < lines.length; i++) {
     // 精确匹配行内的 taskId token
     const m = lines[i].match(TASK_LINE_RE);
     if (m && m[3] === taskId) return i;
-    // 回退：用转义正则匹配（兼容 taskId 后跟标点的情况）
-    const escaped = taskId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    if (new RegExp("(?:^|\\s)" + escaped + "(?:\\s|$|[.,:;!?)\\]])").test(lines[i])) return i;
+    // 回退：兼容 taskId 后跟标点的任务行，但不扫描普通说明文本。
+    const taskLine = lines[i].match(/^-\s+\[[ xX]\]\s+(.+)$/);
+    if (taskLine && taskIdAtLineStart.test(taskLine[1])) return i;
   }
   return -1;
 }

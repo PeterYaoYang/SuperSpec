@@ -12,3 +12,4 @@ playwright/.auth/
 .eval-runs/
 !/evals/
 /evals/runs/
+/.m3-inputs-*/

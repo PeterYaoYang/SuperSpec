@@ -280,7 +280,7 @@ test("review-ready：apply → apply_done（所有任务完成）", () => {
       e.event_type === "transition_commit" && (e.payload as { transition?: string }).transition === "review-ready"
     );
     assert.deepEqual((commit?.payload as { review_policy?: unknown }).review_policy, {
-      review_risk: "strict",
+      review_risk: "normal",
       requires_verifier: true,
     });
   } finally { fx.cleanup(); }

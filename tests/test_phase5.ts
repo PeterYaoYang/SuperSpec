@@ -107,6 +107,8 @@ test("CLI：工作流 mode 只能由项目配置控制，不接受 --risk", () =
 test("项目工作流配置：读取 mode，调用方不能临时覆盖", () => {
   const projectRoot = mkdtempSync(join(tmpdir(), "superspec-workflow-config-"));
   try {
+    assert.equal(workflowRiskForProject(projectRoot), "normal");
+
     mkdirSync(join(projectRoot, ".superspec"), { recursive: true });
     writeFileSync(join(projectRoot, ".superspec", "config.json"), JSON.stringify({ workflow: { mode: "normal" } }));
     assert.equal(workflowRiskForProject(projectRoot), "normal");

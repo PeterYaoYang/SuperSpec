@@ -6,6 +6,7 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -42,6 +43,46 @@ function hashFile(path) {
   return sha256(readFileSync(path));
 }
 
+function treeDigest(root) {
+  const entries = [];
+  const visit = (current, rel) => {
+    for (const name of readdirSync(current).sort()) {
+      const childRel = rel ? `${rel}/${name}` : name;
+      const full = join(current, name);
+      const stat = lstatSync(full);
+      if (stat.isSymbolicLink()) {
+        let target = null;
+        try { target = realpathSync(full); } catch {}
+        entries.push({ path: childRel, type: "symlink", ...(target ? { target } : {}) });
+      } else if (stat.isDirectory()) {
+        entries.push({ path: childRel, type: "directory" });
+        visit(full, childRel);
+      } else if (stat.isFile()) {
+        entries.push({ path: childRel, type: "file", digest: hashFile(full) });
+      } else {
+        entries.push({ path: childRel, type: "other" });
+      }
+    }
+  };
+  visit(root, "");
+  return sha256(JSON.stringify(entries));
+}
+
+function frozenPackageDigest(packageRoot) {
+  return sha256(JSON.stringify({
+    dist: treeDigest(join(packageRoot, "dist")),
+    templates: treeDigest(join(packageRoot, "templates")),
+    package: hashFile(join(packageRoot, "package.json")),
+  }));
+}
+
+function evaluatorSourceDigest() {
+  return sha256(JSON.stringify({
+    probe: hashFile(join(EVAL_ROOT, "probe.mjs")),
+    spawn: hashFile(join(EVAL_ROOT, "lib", "spawn.mjs")),
+  }));
+}
+
 function writeJson(path, value) {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
@@ -64,6 +105,33 @@ function safeRegularWithin(path, root) {
   }
 }
 
+function sealedInputPaths(runRoot) {
+  const paths = [
+    "evidence/turn-1.jsonl", "evidence/turn-1.stderr.log",
+    "evidence/workspace-before.json", "evidence/workspace-after.json", "evidence/workspace-changes.json",
+    "evidence/git-before.json", "evidence/git-after.json", "evidence/git.diff",
+    "evidence/events.jsonl", "evidence/snapshot.json",
+    "scenario.json", "manifest.json", "capability.json",
+  ];
+  const collectFiles = (root, prefix) => {
+    if (!existsSync(root)) return;
+    const visit = (current, relativePrefix) => {
+      for (const name of readdirSync(current).sort()) {
+        const absolute = join(current, name);
+        const relativePath = relativePrefix ? `${relativePrefix}/${name}` : name;
+        const stat = lstatSync(absolute);
+        if (stat.isDirectory()) visit(absolute, relativePath);
+        else paths.push(`${prefix}/${relativePath}`);
+      }
+    };
+    visit(root, "");
+  };
+  collectFiles(join(runRoot, "evidence"), "evidence");
+  const evidenceAction = "evidence/director-actions.jsonl";
+  collectFiles(join(runRoot, "artifacts"), "artifacts");
+  return [...new Set(paths.filter(path => path !== evidenceAction))].sort();
+}
+
 function verifySeal(runRoot) {
   const sealPath = join(runRoot, "evidence-seal.json");
   const actionPath = join(runRoot, "evidence", "director-actions.jsonl");
@@ -72,10 +140,17 @@ function verifySeal(runRoot) {
   }
   let seal;
   try { seal = json(sealPath); } catch { return { ok: false, reason: "evidence seal malformed" }; }
-  if (seal.schema_version !== 1 || seal.actor !== "director" || typeof seal.director_log_prefix_digest !== "string") {
+  if (seal.schema_version !== 1 || seal.actor !== "director" || typeof seal.director_log_prefix_digest !== "string"
+    || typeof seal.evaluator_source_digest !== "string" || typeof seal.isolated_package_digest !== "string") {
     return { ok: false, reason: "evidence seal metadata invalid" };
   }
-  for (const required of ["scenario.json", "manifest.json", "evidence/turn-1.jsonl"]) {
+  const evaluatorSourceDigestMatch = seal.evaluator_source_digest === evaluatorSourceDigest();
+  const expectedPaths = sealedInputPaths(runRoot);
+  const sealedPaths = Object.keys(seal.files ?? {}).sort();
+  if (JSON.stringify(sealedPaths) !== JSON.stringify(expectedPaths)) {
+    return { ok: false, reason: "evidence seal file set mismatch" };
+  }
+  for (const required of ["scenario.json", "manifest.json", "capability.json", "evidence/turn-1.jsonl"]) {
     if (!Object.hasOwn(seal.files ?? {}, required) || seal.files[required] === null) return { ok: false, reason: `required sealed evidence unavailable: ${required}` };
   }
   for (const [relativePath, digest] of Object.entries(seal.files ?? {})) {
@@ -97,7 +172,73 @@ function verifySeal(runRoot) {
   }
   const prefix = `${actionLines.slice(0, -1).join("\n")}\n`;
   if (sha256(prefix) !== seal.director_log_prefix_digest) return { ok: false, reason: "director action prefix digest mismatch" };
-  return { ok: true, seal_digest: hashFile(sealPath), evaluator_source_digest: seal.evaluator_source_digest, sealed_paths: Object.keys(seal.files ?? {}).sort() };
+  try {
+    if (frozenPackageDigest(join(runRoot, "package")) !== seal.isolated_package_digest) {
+      return { ok: false, reason: "sealed package digest mismatch" };
+    }
+  } catch {
+    return { ok: false, reason: "sealed package unavailable" };
+  }
+  return {
+    ok: true,
+    seal,
+    seal_digest: hashFile(sealPath),
+    evaluator_source_digest: seal.evaluator_source_digest,
+    evaluator_source_digest_match: evaluatorSourceDigestMatch,
+    capability_digest: seal.files["capability.json"],
+    sealed_paths: Object.keys(seal.files ?? {}).sort(),
+  };
+}
+
+function verifiedRegrade(runRoot, seal) {
+  const regradedPath = join(runRoot, "capability.regraded.json");
+  const manifestPath = join(runRoot, "regrade-manifest.json");
+  if (!safeRegularWithin(regradedPath, runRoot) || !safeRegularWithin(manifestPath, runRoot)) {
+    return { accepted: false, reason: "regrade output unavailable" };
+  }
+  let metadata;
+  try { metadata = json(manifestPath); } catch { return { accepted: false, reason: "regrade manifest malformed" }; }
+  if (metadata.schema_version !== 1 || resolve(metadata.source_run ?? "") !== runRoot || metadata.worker_reexecuted !== false) {
+    return { accepted: false, reason: "regrade source or execution mode is invalid" };
+  }
+  if (metadata.evidence_seal_digest !== seal.seal_digest) {
+    return { accepted: false, reason: "regrade does not identify the sealed source run" };
+  }
+  if (metadata.formal_grading_performed !== true
+    || metadata.evaluator_source_digest !== evaluatorSourceDigest()) {
+    return { accepted: false, reason: "regrade formal-grading provenance is invalid" };
+  }
+  if (metadata.source_capability_digest !== seal.capability_digest) {
+    return { accepted: false, reason: "regrade source capability digest does not match the seal" };
+  }
+  const capabilityDigest = hashFile(regradedPath);
+  if (metadata.capability_digest !== capabilityDigest) {
+    return { accepted: false, reason: "regrade capability digest mismatch" };
+  }
+  const evidenceDigests = metadata.raw_evidence_digests;
+  if (!evidenceDigests || typeof evidenceDigests !== "object") {
+    return { accepted: false, reason: "regrade evidence digest map unavailable" };
+  }
+  const sealedSourcePaths = Object.entries(seal.seal?.files ?? {})
+    .filter(([path, digest]) => path !== "capability.json" && digest !== null)
+    .map(([path]) => path)
+    .sort();
+  const regradeSourcePaths = Object.keys(evidenceDigests).sort();
+  if (JSON.stringify(sealedSourcePaths) !== JSON.stringify(regradeSourcePaths)) {
+    return { accepted: false, reason: "regrade evidence digest set is incomplete" };
+  }
+  for (const [path, digest] of Object.entries(evidenceDigests)) {
+    if (typeof digest !== "string" || seal.seal?.files?.[path] !== digest) {
+      return { accepted: false, reason: `regrade evidence digest is not sealed: ${path}` };
+    }
+  }
+  try {
+    const value = json(regradedPath);
+    if (value?.schema_version !== 1) return { accepted: false, reason: "regrade capability schema is unsupported" };
+    return { accepted: true, path: regradedPath, value };
+  } catch {
+    return { accepted: false, reason: "regrade capability malformed" };
+  }
 }
 
 function readJsonl(path) {
@@ -379,7 +520,7 @@ function reportMarkdown({ task, sourceRun, outcome, capability, capabilitySource
     `- Source run: \`${sourceRun}\``,
     `- Workflow entry: \`${task.workflow.entry}\``,
     `- M1 outcome: **${outcome.status}**`,
-    `- Probe capability (informational, post-seal): **${capability?.scenario_result ?? "UNKNOWN"} / ${capability?.capability_verdict ?? "UNKNOWN"}**`,
+    `- Probe capability (sealed source or verified regrade): **${capability?.scenario_result ?? "UNKNOWN"} / ${capability?.capability_verdict ?? "UNKNOWN"}**`,
     `- Probe capability source: \`${capabilitySource}\``,
     `- Evidence seal: **${seal.ok ? "verified" : "invalid"}**`,
     `- Transcript records: ${transcript.records.length}`,
@@ -471,6 +612,100 @@ function validateFaultMappings() {
       || !dynamicTranscript.records.some(record => record.content === "effective-2" && record.original_content === "original-2")) {
       throw new Error("arena arbitrary dynamic transcript mapping failed");
     }
+    const sealPathFixture = join(root, "seal-paths");
+    mkdirSync(join(sealPathFixture, "evidence"), { recursive: true });
+    writeFileSync(join(sealPathFixture, "evidence", "turn-2.jsonl"), "{}\n");
+    if (!sealedInputPaths(sealPathFixture).includes("evidence/turn-2.jsonl")) {
+      throw new Error("new evidence files must be included in the expected seal set");
+    }
+    // Verify the actual seal boundary, not only the path enumerator: any
+    // evidence/artifact file created after sealing must invalidate the run
+    // before transcript or grading can consume it.
+    const sealedRun = join(root, "sealed-run");
+    const sealedEvidence = join(sealedRun, "evidence");
+    const sealedPackage = join(sealedRun, "package");
+    mkdirSync(sealedEvidence, { recursive: true });
+    mkdirSync(join(sealedPackage, "dist"), { recursive: true });
+    mkdirSync(join(sealedPackage, "templates"), { recursive: true });
+    for (const name of [
+      "turn-1.jsonl", "turn-1.stderr.log", "workspace-before.json", "workspace-after.json",
+      "workspace-changes.json", "git-before.json", "git-after.json", "git.diff", "events.jsonl", "snapshot.json",
+    ]) writeFileSync(join(sealedEvidence, name), "{}\n");
+    for (const [path, content] of [
+      ["scenario.json", "{\"id\":\"fixture\"}\n"],
+      ["manifest.json", "{}\n"],
+      ["capability.json", "{\"schema_version\":1}\n"],
+    ]) writeFileSync(join(sealedRun, path), content);
+    writeFileSync(join(sealedPackage, "dist", "format.js"), "export {};\n");
+    writeFileSync(join(sealedPackage, "package.json"), "{}\n");
+    const sealedFiles = Object.fromEntries(sealedInputPaths(sealedRun).map(relativePath => [
+      relativePath,
+      existsSync(join(sealedRun, relativePath)) ? hashFile(join(sealedRun, relativePath)) : null,
+    ]));
+    const sealedEvidenceSeal = {
+      schema_version: 1,
+      actor: "director",
+      evaluator_source_digest: evaluatorSourceDigest(),
+      files: sealedFiles,
+      director_log_prefix_digest: sha256("{\"phase\":\"pre-seal\"}\n"),
+      isolated_package_digest: frozenPackageDigest(sealedPackage),
+    };
+    const sealedEvidenceSealPath = join(sealedRun, "evidence-seal.json");
+    writeJson(sealedEvidenceSealPath, sealedEvidenceSeal);
+    const sealedActionPath = join(sealedEvidence, "director-actions.jsonl");
+    const sealPrefix = "{\"phase\":\"pre-seal\"}\n";
+    const sealAction = `${sealPrefix}{\"phase\":\"post-collection.evidence-seal-created\",\"detail\":{\"seal_digest\":${JSON.stringify(hashFile(sealedEvidenceSealPath))}}}\n`;
+    writeFileSync(sealedActionPath, sealAction);
+    const validSeal = verifySeal(sealedRun);
+    if (!validSeal.ok) throw new Error(`valid evidence seal fixture rejected: ${validSeal.reason}`);
+    writeFileSync(join(sealedEvidence, "post-seal.jsonl"), "late evidence\n");
+    const lateEvidenceSeal = verifySeal(sealedRun);
+    if (lateEvidenceSeal.ok || lateEvidenceSeal.reason !== "evidence seal file set mismatch") {
+      throw new Error("post-seal evidence was not rejected by the evidence boundary");
+    }
+    rmSync(join(sealedEvidence, "post-seal.jsonl"));
+    mkdirSync(join(sealedRun, "artifacts"), { recursive: true });
+    writeFileSync(join(sealedRun, "artifacts", "post-seal.md"), "late artifact\n");
+    const lateArtifactSeal = verifySeal(sealedRun);
+    if (lateArtifactSeal.ok || lateArtifactSeal.reason !== "evidence seal file set mismatch") {
+      throw new Error("post-seal artifact was not rejected by the evidence boundary");
+    }
+    const regradeRoot = join(root, "regrade");
+    mkdirSync(regradeRoot, { recursive: true });
+    const regradedPath = join(regradeRoot, "capability.regraded.json");
+    writeJson(regradedPath, { schema_version: 1, scenario_result: "PASS", capability_verdict: "PASS" });
+    const regradeSeal = {
+      seal_digest: "sha256:seal",
+      capability_digest: "sha256:original-capability",
+      seal: {
+        evaluator_source_digest: evaluatorSourceDigest(),
+        files: { "capability.json": "sha256:original-capability", "scenario.json": "sha256:scenario" },
+      },
+    };
+    writeJson(join(regradeRoot, "regrade-manifest.json"), {
+      schema_version: 1,
+      source_run: regradeRoot,
+      worker_reexecuted: false,
+      formal_grading_performed: true,
+      evaluator_source_digest: evaluatorSourceDigest(),
+      evidence_seal_digest: regradeSeal.seal_digest,
+      source_capability_digest: regradeSeal.capability_digest,
+      capability_digest: hashFile(regradedPath),
+      raw_evidence_digests: { "scenario.json": "sha256:scenario" },
+    });
+    const acceptedRegrade = verifiedRegrade(regradeRoot, regradeSeal);
+    if (!acceptedRegrade.accepted) throw new Error(`verified regrade fixture rejected: ${acceptedRegrade.reason}`);
+    writeJson(join(regradeRoot, "regrade-manifest.json"), {
+      ...json(join(regradeRoot, "regrade-manifest.json")),
+      evaluator_source_digest: "sha256:stale-evaluator",
+    });
+    if (verifiedRegrade(regradeRoot, regradeSeal).accepted) throw new Error("stale evaluator provenance was accepted");
+    writeJson(join(regradeRoot, "regrade-manifest.json"), {
+      ...json(join(regradeRoot, "regrade-manifest.json")),
+      evaluator_source_digest: evaluatorSourceDigest(),
+      raw_evidence_digests: {},
+    });
+    if (verifiedRegrade(regradeRoot, regradeSeal).accepted) throw new Error("incomplete regrade evidence was accepted");
     process.stdout.write(`${JSON.stringify({ ok: true, cases: {
       result_complete: done.status,
       wrong_state: wrongState.status,
@@ -478,6 +713,7 @@ function validateFaultMappings() {
       invalid_seal: unknown.status,
       malformed_transcript: malformed.status,
       arbitrary_dynamic_transcript: true,
+      verified_regrade: true,
     } }, null, 2)}\n`);
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -496,16 +732,18 @@ if (!existsSync(sourceRun)) throw new Error(`source run unavailable: ${sourceRun
 const task = json(taskPath);
 const scenario = json(join(sourceRun, "scenario.json"));
 const manifest = json(join(sourceRun, "manifest.json"));
+const seal = verifySeal(sourceRun);
 const originalCapability = json(join(sourceRun, "capability.json"));
 let capability = originalCapability;
 let capabilitySource = "capability.json";
-const regradedCapabilityPath = join(sourceRun, "capability.regraded.json");
-const regradeManifestPath = join(sourceRun, "regrade-manifest.json");
-if (safeRegularWithin(regradedCapabilityPath, sourceRun) && safeRegularWithin(regradeManifestPath, sourceRun)) {
-  const regradeManifest = json(regradeManifestPath);
-  if (resolve(regradeManifest.source_run ?? "") === sourceRun && regradeManifest.worker_reexecuted === false) {
-    capability = json(regradedCapabilityPath);
+let capabilitySourceError = null;
+if (seal.ok) {
+  const regrade = verifiedRegrade(sourceRun, seal);
+  if (regrade.accepted) {
+    capability = regrade.value;
     capabilitySource = "capability.regraded.json";
+  } else if (regrade.reason !== "regrade output unavailable") {
+    capabilitySourceError = regrade.reason;
   }
 }
 if (scenario.id !== task.workflow.scenario_id) throw new Error(`task scenario mismatch: expected ${task.workflow.scenario_id}, got ${scenario.id}`);
@@ -519,7 +757,6 @@ if (outputRoot !== ARENA_RUNS_ROOT && !outputRoot.startsWith(`${ARENA_RUNS_ROOT}
 }
 if (existsSync(outputRoot)) throw new Error(`arena output already exists: ${outputRoot}`);
 mkdirSync(outputRoot, { recursive: true });
-const seal = verifySeal(sourceRun);
 const stateInspection = inspectState(sourceRun);
 const transcript = transcriptFromRun(sourceRun, scenario, manifest);
 const transcriptHealth = {
@@ -537,8 +774,9 @@ writeJson(join(outputRoot, "source.json"), {
   source_run: sourceRun,
   arena_evaluator_digest: hashFile(fileURLToPath(import.meta.url)),
   evidence_seal: seal,
-  source_capability_is_post_seal_informational: true,
+  source_capability_is_post_seal_informational: false,
   source_capability_file: capabilitySource,
+  ...(capabilitySourceError ? { capability_source_error: capabilitySourceError } : {}),
   source_capability: {
     scenario_result: capability.scenario_result,
     capability_verdict: capability.capability_verdict,

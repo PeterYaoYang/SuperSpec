@@ -13,6 +13,7 @@ import { next } from "../src/next.ts";
 import { proposeReady, startApply, taskStart, taskComplete } from "../src/transition.ts";
 import { jobsPacket, recordJobSubmit, recordUserDecisionContent } from "../src/record.ts";
 import { recordTestRun, tasksStructureDigestOf } from "../src/task.ts";
+import { findTaskInLines } from "../src/format.ts";
 import type { PhaseDecisionAction } from "../src/phase_confirmation.ts";
 import type { Job, JobRole, State } from "../src/types.ts";
 import { confirmCurrentPhase } from "./phase_confirmation_support.ts";
@@ -56,6 +57,19 @@ function setupTaskInProgress(): ReturnType<typeof setupApply> & { taskId: string
   if (typeof attemptId !== "string") throw new Error("task-start should return attempt_id");
   return { ...fx, taskId: "TASK-001", attemptId };
 }
+
+test("任务定位：不把前置任务说明中的 task ID 当成任务行", () => {
+  const lines = [
+    "# Tasks",
+    "",
+    "- [ ] 5.9 前置任务",
+    "  - 边界: 后续任务 5.10 负责完整集合",
+    "",
+    "- [ ] 5.10 目标任务",
+  ];
+  assert.equal(findTaskInLines(lines, "5.10"), 5);
+  assert.equal(findTaskInLines(["- [ ] 5.10: 带标点的目标任务"], "5.10"), 0);
+});
 
 function setupPropose(policy: "green_only" | "tdd" = "green_only"): ReturnType<typeof setupApply> {
   const projectRoot = mkdtempSync(join(tmpdir(), "superspec-p3-propose-"));

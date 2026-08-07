@@ -1858,6 +1858,8 @@ test("explore critic retry：继承历史 findings；malformed 可在同一工�
 test("explore stay：修改 discovery 后 strict critic 重新审查", () => {
   const fx = setupPropose();
   try {
+    // strict 是本测试要覆盖的显式项目模式；无 config 的新项目默认走 normal。
+    writeFileSync(join(fx.projectRoot, ".superspec", "config.json"), JSON.stringify({ workflow: { mode: "strict" } }));
     const first = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "strict");
     assert.equal(first.outcome, "job_created");
     const reportPath = join(fx.projectRoot, "critic-stay.json");
@@ -1993,6 +1995,8 @@ test("packet argv 字段保留包含空格和括号的 change/job token", () => 
 test("explore review override：fresh rejected 稳定 blocked，整体裁决后 gate 满足", () => {
   const fx = setupPropose();
   try {
+    // strict 是本测试要覆盖的显式项目模式；无 config 的新项目默认走 normal。
+    writeFileSync(join(fx.projectRoot, ".superspec", "config.json"), JSON.stringify({ workflow: { mode: "strict" } }));
     const created = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "strict");
     const jobId = created.created_jobs[0];
     assert.equal(recordJobSubmitContent(
@@ -2703,7 +2707,7 @@ test("propose-ready --risk normal：基础职责全满足 + critic accepted → 
   }
 });
 
-test("propose-ready 默认完整审查：创建 critic + architect + test 审核工作项", () => {
+test("propose-ready strict 配置：创建 critic + architect + test 审核工作项", () => {
   const projectRoot = mkdtempSync(join(tmpdir(), "superspec-p2strict-"));
   const change = "test-change";
   const changeRoot = join(projectRoot, "openspec", "changes", change);
@@ -2726,6 +2730,7 @@ test("propose-ready 默认完整审查：创建 critic + architect + test 审核
   }
 
   try {
+    writeFileSync(join(projectRoot, ".superspec", "config.json"), JSON.stringify({ workflow: { mode: "strict" } }));
     const result = proposeReady(projectRoot, change, changeRoot);
     assert.equal(result.outcome, "job_created");
     assert.equal(result.created_jobs.length, 3);

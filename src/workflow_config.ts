@@ -7,10 +7,8 @@ import type { ReviewRisk } from "./review.ts";
 import type { Event, State } from "./types.ts";
 
 export const WORKFLOW_CONFIG_PATH = ".superspec/config.json";
-/** 新安装项目写入配置时采用的默认档位。 */
+/** 项目未声明 workflow.mode 时采用的默认档位。 */
 export const DEFAULT_WORKFLOW_RISK: ReviewRisk = "normal";
-/** 未安装项目继续沿用历史 strict 默认，避免无配置的旧项目静默放宽。 */
-const LEGACY_WORKFLOW_RISK: ReviewRisk = "strict";
 
 export class WorkflowConfigError extends Error {
   constructor(message: string) {
@@ -102,12 +100,12 @@ export function workflowRiskForState(events: Event[], state: State, fallback: Re
 }
 
 /**
- * 读取项目默认模式。新安装项目由配置提供 normal；缺少配置的旧项目保留 strict。
+ * 读取项目默认模式。缺少配置或缺少 workflow.mode 时使用 normal。
  * 配置格式：{ "workflow": { "mode": "normal" } }
  */
 export function workflowRiskForProject(projectRoot: string): ReviewRisk {
   const configPath = join(projectRoot, WORKFLOW_CONFIG_PATH);
-  if (!existsSync(configPath)) return LEGACY_WORKFLOW_RISK;
+  if (!existsSync(configPath)) return DEFAULT_WORKFLOW_RISK;
 
   let parsed: unknown;
   try {
