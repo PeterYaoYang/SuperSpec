@@ -1250,6 +1250,26 @@ function applyPlanningMaterialsChanged(changeRoot: string, events: Event[]): boo
   return baseline != null && applyPlanningDocsChangedSinceBaseline(changeRoot, baseline);
 }
 
+/**
+ * self-test-fix 由使用者明确指定已完成的父 task；它可以修复早于当前
+ * Apply round 的实现问题。普通 Apply 仍只消费当前轮完成事件，这个查询
+ * 只用于自测修复的人工关联，不改变任务完成判定。
+ */
+function hasHistoricalTaskCompletion(events: Event[], taskId: string): boolean {
+  return events.some(event => {
+    if (event.event_type !== "task_completed") return false;
+    const payload = event.payload as {
+      task_id?: unknown;
+      attempt_id?: unknown;
+      checkbox_update?: unknown;
+    };
+    if (payload.task_id !== taskId || typeof payload.attempt_id !== "string") return false;
+    const checkboxUpdate = payload.checkbox_update;
+    if (!checkboxUpdate || typeof checkboxUpdate !== "object" || Array.isArray(checkboxUpdate)) return true;
+    return (checkboxUpdate as { status?: unknown }).status !== "failed";
+  });
+}
+
 function proposalReopenBaseline(changeRoot: string, events: Event[], source: State): {
   baseline: Record<string, string>;
   source: "apply" | "reopen_fallback";
@@ -1391,7 +1411,11 @@ export function reopen(
         if (pendingStatus.pending.length > 0 || snapshot.active_task_attempts.some(attempt => attempt.state === "active")) {
           return { skip: true, message: "自测修复只允许在当前 task 全部完成且没有活跃执行尝试后创建" };
         }
-        if (pendingStatus.mode === "contract" && !pendingStatus.completedByEvent.includes(parentTaskId)) {
+        if (
+          pendingStatus.mode === "contract" &&
+          !pendingStatus.completedByEvent.includes(parentTaskId) &&
+          !hasHistoricalTaskCompletion(events, parentTaskId)
+        ) {
           return { skip: true, message: `自测修复关联的 task ${parentTaskId} 缺少完成事件，不能只依赖 checkbox` };
         }
         if (pendingStatus.mode === "legacy" && !parentTask.done) {

@@ -2093,6 +2093,56 @@ test("self-test-fix：已完成实现可直接回 apply，不进入 proposal 审
   } finally { fx.cleanup(); }
 });
 
+test("self-test-fix：契约模式可关联此前 Apply 轮已完成的父 task", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    const tasksContent = readFileSync(join(fx.changeRoot, "tasks.md"), "utf8");
+    const historicalStart = makeEvent(fx.change, "transition_commit", {
+      transition: "start-apply",
+      from_state: "propose_ready",
+      to_state: "apply",
+      outcome: "advanced",
+      created_job_ids: [],
+      reason: "historical contract apply round",
+      apply_contract_mode: true,
+      execution_requirement_version: 2,
+      execution_policy: "green_only",
+    }, { transitionId: "T-historical-contract-apply", idempotencyKey: "historical-contract-apply" });
+    appendEvent(fx.projectRoot, fx.change, historicalStart);
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "task_started", {
+      task_id: "TASK-001",
+      attempt_id: "ATT-TASK-001-HISTORICAL",
+      task_structure_digest: sha256Text(tasksContent.replace(/- \[[xX]\]/g, "- [ ]")),
+      contract_mode: true,
+    }, { transitionId: "T-historical-task-start" }));
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "task_completed", {
+      task_id: "TASK-001",
+      attempt_id: "ATT-TASK-001-HISTORICAL",
+      checkbox_update: { status: "applied" },
+    }, { transitionId: "T-historical-task-complete" }));
+
+    // 新 Apply round 没有再次产生 TASK-001 的完成事件。
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "transition_commit", {
+      transition: "start-apply",
+      from_state: "propose_ready",
+      to_state: "apply",
+      outcome: "advanced",
+      created_job_ids: [],
+      reason: "current contract apply round",
+      apply_contract_mode: true,
+      execution_requirement_version: 2,
+      execution_policy: "green_only",
+    }, { transitionId: "T-current-contract-apply", idempotencyKey: "current-contract-apply" }));
+
+    const reopened = reopen(fx.projectRoot, fx.change, fx.changeRoot, "apply", "自测发现历史实现仍有边界问题", {
+      selfTestFix: "TASK-001",
+    });
+    assert.equal(reopened.to_state, "apply");
+    assert.equal(reopened.events_written, 1);
+    assert.match(readFileSync(join(fx.changeRoot, "tasks.md"), "utf8"), /FIX-SELFTEST-TASK-001-/);
+  } finally { fx.cleanup(); }
+});
+
 test("Apply 计划材料冻结：遗漏修正必须回 Propose，且复用 Apply 起始基线", () => {
   const fx = setupApplyWithDoneTask();
   try {
