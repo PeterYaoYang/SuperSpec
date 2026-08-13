@@ -1,6 +1,6 @@
 ---
 name: superspec-review
-description: "仅在用户显式调用 $superspec-review，或明确要求继续某个 SuperSpec change 的 Review 阶段时使用；普通代码审查、验证或修复请求不得自动触发。"
+description: "仅在用户显式调用 superspec-review 入口，或明确要求继续某个 SuperSpec change 的 Review 阶段时使用；普通代码审查、验证或修复请求不得自动触发。"
 metadata:
   author: SuperSpec
   source: SuperSpec

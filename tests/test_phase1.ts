@@ -330,6 +330,27 @@ test("record job-submit：critic reviewer kind/id 非法会拒绝", () => {
   } finally { fx.cleanup(); }
 });
 
+test("record job-submit：critic reviewer kind=subagent 可通过", () => {
+  const fx = setupFixture("propose");
+  try {
+    const tResult = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    const jobId = tResult.created_jobs[0];
+    const packet = jobsPacket(fx.projectRoot, fx.change, jobId).packet;
+    assert.ok(packet);
+    const reportPath = join(fx.projectRoot, "report.json");
+    writeFileSync(reportPath, JSON.stringify({
+      role: packet.role,
+      findings: [],
+      verdict: "pass",
+      review_scope: { checked_paths: packet.boundFiles.map(file => file.path) },
+      reviewer: { kind: "subagent", id: "omp-critic" },
+    }));
+
+    const rResult = recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, jobId, reportPath);
+    assert.equal(rResult.accepted, true);
+  } finally { fx.cleanup(); }
+});
+
 test("record job-submit：raw append 失败时不写 accepted event", () => {
   const fx = setupFixture("propose");
   try {

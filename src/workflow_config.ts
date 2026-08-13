@@ -1,14 +1,18 @@
 // SuperSpec 项目级工作流配置。所有阶段从同一位置解析默认 mode，
 // 避免 CLI、Explore、Propose、Review 各自保留不同默认值。
 
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import type { ReviewRisk } from "./review.ts";
 import type { Event, State } from "./types.ts";
 
 export const WORKFLOW_CONFIG_PATH = ".superspec/config.json";
 /** 项目未声明 workflow.mode 时采用的默认档位。 */
 export const DEFAULT_WORKFLOW_RISK: ReviewRisk = "normal";
+export const WORKFLOW_HOSTS = ["codex", "omp"] as const;
+export type WorkflowHost = (typeof WORKFLOW_HOSTS)[number];
+/** 未声明 hosts 的旧项目按 Codex 入口处理。 */
+export const DEFAULT_WORKFLOW_HOSTS: WorkflowHost[] = ["codex"];
 
 export class WorkflowConfigError extends Error {
   constructor(message: string) {
@@ -19,6 +23,82 @@ export class WorkflowConfigError extends Error {
 
 function isReviewRisk(value: unknown): value is ReviewRisk {
   return value === "minimal" || value === "normal" || value === "strict";
+}
+
+function isWorkflowHost(value: unknown): value is WorkflowHost {
+  return value === "codex" || value === "omp";
+}
+
+export function normalizeWorkflowHosts(values: readonly string[]): WorkflowHost[] {
+  const hosts = [...new Set(values.filter(isWorkflowHost))];
+  hosts.sort((left, right) => WORKFLOW_HOSTS.indexOf(left) - WORKFLOW_HOSTS.indexOf(right));
+  return hosts;
+}
+
+export function parseWorkflowHostsFlag(raw: string): WorkflowHost[] {
+  const hosts = normalizeWorkflowHosts(raw.split(/[,\s]+/).filter(Boolean));
+  if (hosts.length === 0) {
+    throw new WorkflowConfigError(`hosts 只能是 ${WORKFLOW_HOSTS.join("、")}，至少选一个`);
+  }
+  return hosts;
+}
+
+function readWorkflowConfigObject(projectRoot: string): Record<string, unknown> | null {
+  const configPath = join(projectRoot, WORKFLOW_CONFIG_PATH);
+  if (!existsSync(configPath)) return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(configPath, "utf8"));
+  } catch {
+    throw new WorkflowConfigError(`${WORKFLOW_CONFIG_PATH} 必须是有效 JSON`);
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new WorkflowConfigError(`${WORKFLOW_CONFIG_PATH} 顶层必须是 JSON object`);
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function workflowObject(parsed: Record<string, unknown> | null): Record<string, unknown> | undefined {
+  if (!parsed || parsed.workflow === undefined) return undefined;
+  if (parsed.workflow === null || typeof parsed.workflow !== "object" || Array.isArray(parsed.workflow)) {
+    throw new WorkflowConfigError(`${WORKFLOW_CONFIG_PATH} 的 workflow 必须是 object`);
+  }
+  return parsed.workflow as Record<string, unknown>;
+}
+
+function hostsFromWorkflow(workflow: Record<string, unknown> | undefined): WorkflowHost[] {
+  if (!workflow || workflow.hosts === undefined) return DEFAULT_WORKFLOW_HOSTS;
+  if (!Array.isArray(workflow.hosts)) {
+    throw new WorkflowConfigError(`${WORKFLOW_CONFIG_PATH} 的 workflow.hosts 必须是字符串数组`);
+  }
+  const hosts = normalizeWorkflowHosts(workflow.hosts.filter((item): item is string => typeof item === "string"));
+  if (hosts.length === 0) {
+    throw new WorkflowConfigError(`${WORKFLOW_CONFIG_PATH} 的 workflow.hosts 只能包含 ${WORKFLOW_HOSTS.join("、")}，至少一项`);
+  }
+  return hosts;
+}
+
+/** 读取项目已选宿主。缺少配置或缺少 workflow.hosts 时默认 Codex。 */
+export function workflowHostsForProject(projectRoot: string): WorkflowHost[] {
+  return hostsFromWorkflow(workflowObject(readWorkflowConfigObject(projectRoot)));
+}
+
+export function persistWorkflowHosts(projectRoot: string, hosts: WorkflowHost[]): string {
+  const configPath = join(projectRoot, WORKFLOW_CONFIG_PATH);
+  mkdirSync(dirname(configPath), { recursive: true });
+  const parsed = readWorkflowConfigObject(projectRoot) ?? {};
+  const workflow = workflowObject(parsed) ?? {};
+  if (workflow.mode === undefined) workflow.mode = DEFAULT_WORKFLOW_RISK;
+  workflow.hosts = normalizeWorkflowHosts(hosts);
+  parsed.workflow = workflow;
+  writeFileSync(configPath, `${JSON.stringify(parsed, null, 2)}\n`);
+  return WORKFLOW_CONFIG_PATH;
+}
+
+export function workflowHostsDeclared(projectRoot: string): boolean {
+  const workflow = workflowObject(readWorkflowConfigObject(projectRoot));
+  return workflow !== undefined && workflow.hosts !== undefined;
 }
 
 function workflowModeFromPayload(payload: Record<string, unknown>): ReviewRisk | null {
@@ -104,24 +184,9 @@ export function workflowRiskForState(events: Event[], state: State, fallback: Re
  * 配置格式：{ "workflow": { "mode": "normal" } }
  */
 export function workflowRiskForProject(projectRoot: string): ReviewRisk {
-  const configPath = join(projectRoot, WORKFLOW_CONFIG_PATH);
-  if (!existsSync(configPath)) return DEFAULT_WORKFLOW_RISK;
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(readFileSync(configPath, "utf8"));
-  } catch {
-    throw new WorkflowConfigError(`${WORKFLOW_CONFIG_PATH} 必须是有效 JSON`);
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new WorkflowConfigError(`${WORKFLOW_CONFIG_PATH} 顶层必须是 JSON object`);
-  }
-  const workflow = (parsed as { workflow?: unknown }).workflow;
-  if (workflow === undefined) return DEFAULT_WORKFLOW_RISK;
-  if (!workflow || typeof workflow !== "object" || Array.isArray(workflow)) {
-    throw new WorkflowConfigError(`${WORKFLOW_CONFIG_PATH} 的 workflow 必须是 object`);
-  }
-  const mode = (workflow as { mode?: unknown }).mode;
+  const workflow = workflowObject(readWorkflowConfigObject(projectRoot));
+  if (!workflow) return DEFAULT_WORKFLOW_RISK;
+  const mode = workflow.mode;
   if (mode === undefined) return DEFAULT_WORKFLOW_RISK;
   if (!isReviewRisk(mode)) {
     throw new WorkflowConfigError(`${WORKFLOW_CONFIG_PATH} 的 workflow.mode 只能是 minimal、normal 或 strict`);

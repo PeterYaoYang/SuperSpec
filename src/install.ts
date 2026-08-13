@@ -1,7 +1,14 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { SUPERSPEC_VERSION } from "./version.ts";
-import { DEFAULT_WORKFLOW_RISK, WORKFLOW_CONFIG_PATH } from "./workflow_config.ts";
+import {
+  DEFAULT_WORKFLOW_HOSTS,
+  persistWorkflowHosts,
+  workflowHostsDeclared,
+  workflowHostsForProject,
+  type WorkflowHost,
+} from "./workflow_config.ts";
 
 export const WORKFLOW_SKILLS = [
   "superspec-explore",
@@ -34,14 +41,33 @@ export const WORKFLOW_AGENTS = [
   "verifier.toml",
 ] as const;
 
+export const WORKFLOW_MARKDOWN_AGENTS = [
+  "architect.md",
+  "code-reviewer.md",
+  "critic.md",
+  "executor.md",
+  "explore.md",
+  "test-engineer.md",
+  "test-runner.md",
+  "verifier.md",
+] as const;
+
+export interface OmpInstallResult {
+  dest: string | null;
+  agents: string[];
+  skipped: string | null;
+}
+
 export interface InstallResult {
   ok: boolean;
   message: string;
   installed: {
     engine_dir: string;
+    hosts: WorkflowHost[];
     skills: string[];
     prompts: string[];
     agents: string[];
+    omp: OmpInstallResult;
     config: string;
     workflow_config: string;
     agents_md: string;
@@ -52,6 +78,8 @@ export interface InstallResult {
 export interface InstallOptions {
   templateRoot?: string;
   allowLegacyState?: boolean;
+  hosts?: WorkflowHost[];
+  ompHome?: string;
 }
 
 function defaultTemplateRoot(): string {
@@ -82,6 +110,10 @@ function assertWorkflowTemplates(templateRoot: string): void {
   }
   for (const agent of WORKFLOW_AGENTS) {
     const file = join(templateRoot, "agents", agent);
+    if (!existsSync(file)) missing.push(file);
+  }
+  for (const agent of WORKFLOW_MARKDOWN_AGENTS) {
+    const file = join(templateRoot, "agents-md", agent);
     if (!existsSync(file)) missing.push(file);
   }
   const agentsMdTemplate = join(templateRoot, "AGENTS.md");
@@ -297,14 +329,46 @@ function ensureOpenSpecChineseContext(projectRoot: string): string {
   return OPENSPEC_CONFIG_PATH;
 }
 
-function ensureWorkflowConfig(projectRoot: string): string {
-  const configPath = join(projectRoot, WORKFLOW_CONFIG_PATH);
-  mkdirSync(dirname(configPath), { recursive: true });
-  if (!existsSync(configPath)) {
-    // install/update 是显式迁移动作：为以后各轮写入 normal 默认值。
-    writeFileSync(configPath, JSON.stringify({ workflow: { mode: DEFAULT_WORKFLOW_RISK } }, null, 2) + "\n");
+function copyOmpAgents(templateRoot: string, dest: string): string[] {
+  const agentsDest = join(dest, "agents");
+  const installedAgents: string[] = [];
+  for (const agent of WORKFLOW_MARKDOWN_AGENTS) {
+    const src = join(templateRoot, "agents-md", agent);
+    writeBundledFile(src, join(agentsDest, agent));
+    installedAgents.push(agent);
   }
-  return WORKFLOW_CONFIG_PATH;
+  return installedAgents;
+}
+
+function existingDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function resolveOmpAgentHome(explicitHome?: string): { dest: string | null; skipped: string | null } {
+  if (explicitHome) {
+    return existingDirectory(explicitHome)
+      ? { dest: explicitHome, skipped: null }
+      : { dest: null, skipped: `OMP 用户目录不存在：${explicitHome}` };
+  }
+
+  const profile = (process.env.OMP_PROFILE ?? process.env.PI_PROFILE ?? "").trim();
+  const dest = profile && profile !== "default"
+    ? join(homedir(), ".omp", "profiles", profile, "agent")
+    : join(homedir(), ".omp", "agent");
+  if (!existingDirectory(dest)) {
+    return { dest: null, skipped: `OMP 用户目录不存在：${dest}。先启动一次 omp，或用 --omp-home 指定已有目录。` };
+  }
+  return { dest, skipped: null };
+}
+
+function installOmpAgents(templateRoot: string, ompHome?: string): OmpInstallResult {
+  const resolved = resolveOmpAgentHome(ompHome);
+  if (!resolved.dest) return { dest: null, agents: [], skipped: resolved.skipped };
+  return { dest: resolved.dest, agents: copyOmpAgents(templateRoot, resolved.dest), skipped: null };
 }
 
 const AGENTS_MD_PATH = "AGENTS.md";
@@ -356,6 +420,10 @@ export function installProject(projectRoot: string, options: InstallOptions = {}
   const templateRoot = options.templateRoot ?? defaultTemplateRoot();
   assertWorkflowTemplates(templateRoot);
   const agentsMdTemplate = readAgentsMdTemplate(templateRoot);
+  const hosts = options.hosts
+    ?? (workflowHostsDeclared(projectRoot) ? workflowHostsForProject(projectRoot) : DEFAULT_WORKFLOW_HOSTS);
+  const wantsCodex = hosts.includes("codex");
+  const wantsOmp = hosts.includes("omp");
 
   const engineDir = join(projectRoot, ".superspec");
   mkdirSync(join(engineDir, "changes"), { recursive: true });
@@ -363,16 +431,22 @@ export function installProject(projectRoot: string, options: InstallOptions = {}
   if (!existsSync(gitignorePath)) writeFileSync(gitignorePath, "changes/\n*.log\n*.tmp\n");
   migrateLegacyManagedHooks(projectRoot);
 
+  const omp = wantsOmp
+    ? installOmpAgents(templateRoot, options.ompHome)
+    : { dest: null, agents: [], skipped: null };
+
   return {
     ok: true,
     message: `SuperSpec ${SUPERSPEC_VERSION} 已安装`,
     installed: {
       engine_dir: ".superspec/",
+      hosts,
       skills: copySkills(templateRoot, projectRoot),
-      prompts: copyPrompts(templateRoot, projectRoot),
-      agents: copyAgents(templateRoot, projectRoot),
-      config: ensureCodexConfig(projectRoot),
-      workflow_config: ensureWorkflowConfig(projectRoot),
+      prompts: wantsCodex ? copyPrompts(templateRoot, projectRoot) : [],
+      agents: wantsCodex ? copyAgents(templateRoot, projectRoot) : [],
+      omp,
+      config: wantsCodex ? ensureCodexConfig(projectRoot) : "",
+      workflow_config: persistWorkflowHosts(projectRoot, hosts),
       agents_md: ensureAgentsMd(projectRoot, agentsMdTemplate),
       openspec_config: ensureOpenSpecChineseContext(projectRoot),
     },

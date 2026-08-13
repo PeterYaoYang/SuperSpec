@@ -33,14 +33,14 @@ superspec status
 
 ## 工作流入口
 
-在 Codex 中显式调用对应 Skill。新需求通常从 `$superspec-explore` 开始；已有 change 则从当前阶段继续。
+在 Codex 中显式调用对应 Skill。新需求通常从 `superspec-explore` 开始；已有 change 则从当前阶段继续。
 
 | Skill | 作用 |
 | --- | --- |
-| `$superspec-explore` | 调查现状，确认事实和待决策事项 |
-| `$superspec-propose` | 生成规格、设计和可执行任务 |
-| `$superspec-apply` | 按已批准任务修改代码并验证 |
-| `$superspec-review` | 审查实现并完成最终验证 |
+| `superspec-explore` | 调查现状，确认事实和待决策事项 |
+| `superspec-propose` | 生成规格、设计和可执行任务 |
+| `superspec-apply` | 按已批准任务修改代码并验证 |
+| `superspec-review` | 审查实现并完成最终验证 |
 
 工作流会根据问题性质留在当前阶段修复，或回到计划阶段重新确认需求、验收和技术取舍。
 
@@ -51,7 +51,8 @@ superspec status
 ```json
 {
   "workflow": {
-    "mode": "normal"
+    "mode": "normal",
+    "hosts": ["codex"]
   }
 }
 ```

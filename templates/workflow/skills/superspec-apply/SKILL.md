@@ -1,6 +1,6 @@
 ---
 name: superspec-apply
-description: "仅在用户显式调用 $superspec-apply，或明确要求继续某个 SuperSpec change 的 Apply 阶段时使用；普通开发、修复或测试请求不得自动触发。"
+description: "仅在用户显式调用 superspec-apply 入口，或明确要求继续某个 SuperSpec change 的 Apply 阶段时使用；普通开发、修复或测试请求不得自动触发。"
 metadata:
   author: SuperSpec
   source: SuperSpec

@@ -5,7 +5,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { installProject, WORKFLOW_AGENTS, WORKFLOW_PROMPTS, WORKFLOW_SKILLS } from "../src/install.ts";
+import { installProject, WORKFLOW_AGENTS, WORKFLOW_MARKDOWN_AGENTS, WORKFLOW_PROMPTS, WORKFLOW_SKILLS } from "../src/install.ts";
 
 const PACKAGE_VERSION = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version as string;
 const OPENSPEC_REQUIRED_VERSION = "1.4.1";
@@ -82,6 +82,8 @@ test("installProject installs engine, workflow skills, role prompts, and agents"
     assert.deepEqual(result.installed.skills, [...WORKFLOW_SKILLS]);
     assert.deepEqual(result.installed.prompts, [...WORKFLOW_PROMPTS]);
     assert.deepEqual(result.installed.agents, [...WORKFLOW_AGENTS]);
+    assert.deepEqual(result.installed.hosts, ["codex"]);
+    assert.deepEqual(result.installed.omp, { dest: null, agents: [], skipped: null });
     assert.deepEqual(
       result.installed.agents.filter(agent => /-review\.toml$/.test(agent)),
       [],
@@ -92,7 +94,7 @@ test("installProject installs engine, workflow skills, role prompts, and agents"
     assert.equal(result.installed.openspec_config, "openspec/config.yaml");
     assert.equal(existsSync(join(projectRoot, ".superspec", "changes")), true);
     assert.deepEqual(JSON.parse(readFileSync(join(projectRoot, ".superspec", "config.json"), "utf8")), {
-      workflow: { mode: "normal" },
+      workflow: { mode: "normal", hosts: ["codex"] },
     });
     assert.equal(readFileSync(join(projectRoot, ".superspec", ".gitignore"), "utf8"), "changes/\n*.log\n*.tmp\n");
 
@@ -310,6 +312,7 @@ test("CLI init 交互选择 no 时继续当前版本安装", () => {
       env: testEnv({
         SUPERSPEC_TEST_ASSUME_TTY: "1",
         SUPERSPEC_TEST_PROMPT_ANSWER: "no",
+        SUPERSPEC_TEST_HOSTS_ANSWER: "codex",
         SUPERSPEC_TEST_LATEST_VERSION: "99.0.0",
       }),
     });
@@ -342,6 +345,7 @@ test("CLI init 交互默认 yes 时升级并递归运行新版 CLI", () => {
       env: testEnv({
         SUPERSPEC_TEST_ASSUME_TTY: "1",
         SUPERSPEC_TEST_PROMPT_ANSWER: "",
+        SUPERSPEC_TEST_HOSTS_ANSWER: "codex",
         SUPERSPEC_TEST_LATEST_VERSION: "99.0.0",
         SUPERSPEC_TEST_SKIP_GLOBAL_INSTALL: "1",
         SUPERSPEC_TEST_CLI_VERSION: "99.0.0",
@@ -407,6 +411,7 @@ exit 1
         SUPERSPEC_TEST_PLATFORM: "win32",
         SUPERSPEC_TEST_ASSUME_TTY: "1",
         SUPERSPEC_TEST_PROMPT_ANSWER: "",
+        SUPERSPEC_TEST_HOSTS_ANSWER: "codex",
         PATH: `${binDir}:${process.env.PATH ?? ""}`,
       }),
     });
@@ -422,11 +427,11 @@ exit 1
     assert.match(log, /^cmd\.exe \/d \/s \/c npm\.cmd view @peterxiaoyang\/superspec version$/m);
     assert.match(log, /^cmd\.exe \/d \/s \/c npm\.cmd install -g @peterxiaoyang\/superspec@latest$/m);
     assert.match(log, /^cmd\.exe \/d \/s \/c superspec\.cmd --version$/m);
-    assert.match(log, /^cmd\.exe \/d \/s \/c superspec\.cmd init --scope project --skip-self-update$/m);
+    assert.match(log, /^cmd\.exe \/d \/s \/c superspec\.cmd init --scope project --skip-self-update --hosts codex$/m);
     assert.match(log, /^npm\.cmd view @peterxiaoyang\/superspec version$/m);
     assert.match(log, /^npm\.cmd install -g @peterxiaoyang\/superspec@latest$/m);
     assert.match(log, /^superspec\.cmd --version$/m);
-    assert.match(log, /^superspec\.cmd init --scope project --skip-self-update$/m);
+    assert.match(log, /^superspec\.cmd init --scope project --skip-self-update --hosts codex$/m);
   });
 });
 
@@ -434,6 +439,7 @@ test("CLI init latest 查询失败时提示 stderr 并继续安装", () => {
   withTempProject(projectRoot => {
     const run = runCli(["init", "--scope", "project"], projectRoot, testEnv({
       SUPERSPEC_TEST_ASSUME_TTY: "1",
+      SUPERSPEC_TEST_HOSTS_ANSWER: "codex",
       SUPERSPEC_TEST_NPM_VIEW_ERROR: "registry offline",
     }));
     const result = JSON.parse(run.stdout);
@@ -531,6 +537,11 @@ test("installProject rejects AGENTS.md workflow template without SuperSpec marke
     }
     for (const agent of WORKFLOW_AGENTS) {
       const dir = join(templateRoot, "agents");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, agent), "# Agent\n");
+    }
+    for (const agent of WORKFLOW_MARKDOWN_AGENTS) {
+      const dir = join(templateRoot, "agents-md");
       mkdirSync(dir, { recursive: true });
       writeFileSync(join(dir, agent), "# Agent\n");
     }
@@ -641,11 +652,11 @@ exit 1
     assert.match(log, /^cmd\.exe \/d \/s \/c npm\.cmd view @peterxiaoyang\/superspec version$/m);
     assert.match(log, /^cmd\.exe \/d \/s \/c npm\.cmd install -g @peterxiaoyang\/superspec@latest$/m);
     assert.match(log, /^cmd\.exe \/d \/s \/c superspec\.cmd --version$/m);
-    assert.match(log, /^cmd\.exe \/d \/s \/c superspec\.cmd update --skip-self-update$/m);
+    assert.match(log, /^cmd\.exe \/d \/s \/c superspec\.cmd update --skip-self-update --hosts codex$/m);
     assert.match(log, /^npm\.cmd view @peterxiaoyang\/superspec version$/m);
     assert.match(log, /^npm\.cmd install -g @peterxiaoyang\/superspec@latest$/m);
     assert.match(log, /^superspec\.cmd --version$/m);
-    assert.match(log, /^superspec\.cmd update --skip-self-update$/m);
+    assert.match(log, /^superspec\.cmd update --skip-self-update --hosts codex$/m);
   });
 });
 
@@ -1070,5 +1081,108 @@ test("installProject ignores commented and nested context when ensuring OpenSpec
     assert.match(config, /^  context: nested$/m);
     assert.equal(countTopLevelContext(config), 1);
     assert.match(config, /语言：中文（简体）/);
+  });
+});
+
+test("installProject writes OMP markdown agents only into an existing user home", () => {
+  withTempProject(projectRoot => {
+    const ompHome = join(projectRoot, "omp-home");
+    mkdirSync(ompHome);
+
+    const result = installProject(projectRoot, { hosts: ["omp"], ompHome });
+
+    assert.deepEqual(result.installed.hosts, ["omp"]);
+    assert.equal(result.installed.config, "");
+    assert.deepEqual(result.installed.agents, []);
+    assert.deepEqual(result.installed.omp, {
+      dest: ompHome,
+      agents: [...WORKFLOW_MARKDOWN_AGENTS],
+      skipped: null,
+    });
+    assert.equal(existsSync(join(projectRoot, ".codex", "skills", "superspec-explore", "SKILL.md")), true);
+    assert.equal(existsSync(join(projectRoot, ".codex", "agents", "explore.toml")), false);
+    assert.equal(existsSync(join(projectRoot, ".codex", "config.toml")), false);
+    assert.equal(existsSync(join(projectRoot, ".omp")), false);
+    for (const agent of WORKFLOW_MARKDOWN_AGENTS) {
+      assert.equal(
+        readFileSync(join(ompHome, "agents", agent), "utf8"),
+        readFileSync(new URL(`../templates/workflow/agents-md/${agent}`, import.meta.url), "utf8"),
+        agent,
+      );
+    }
+    assert.deepEqual(JSON.parse(readFileSync(join(projectRoot, ".superspec", "config.json"), "utf8")), {
+      workflow: { mode: "normal", hosts: ["omp"] },
+    });
+  });
+});
+
+test("installProject skips OMP agents when the user home is missing", () => {
+  withTempProject(projectRoot => {
+    const ompHome = join(projectRoot, "missing-omp-home");
+    const result = installProject(projectRoot, { hosts: ["omp"], ompHome });
+
+    assert.deepEqual(result.installed.hosts, ["omp"]);
+    assert.equal(result.installed.omp.dest, null);
+    assert.deepEqual(result.installed.omp.agents, []);
+    assert.match(result.installed.omp.skipped ?? "", /OMP 用户目录不存在/);
+    assert.equal(existsSync(join(projectRoot, ".omp")), false);
+    assert.equal(existsSync(join(projectRoot, ".codex", "skills", "superspec-explore", "SKILL.md")), true);
+  });
+});
+
+test("CLI update refreshes persisted OMP hosts without creating project .omp", () => {
+  withTempProject(projectRoot => {
+    const ompHome = join(projectRoot, "omp-home");
+    mkdirSync(join(ompHome, "agents"), { recursive: true });
+    installProject(projectRoot, { hosts: ["codex", "omp"], ompHome });
+    const explorePath = join(ompHome, "agents", "explore.md");
+    writeFileSync(explorePath, "stale omp agent\n");
+
+    const output = execFileSync(process.execPath, [cliPath(), "update", "--skip-self-update", "--omp-home", ompHome], {
+      cwd: projectRoot,
+      encoding: "utf8",
+      env: testEnv(),
+    });
+    const result = JSON.parse(output);
+
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.installed.hosts, ["codex", "omp"]);
+    assert.equal(result.installed.omp.dest, ompHome);
+    assert.equal(
+      readFileSync(explorePath, "utf8"),
+      readFileSync(new URL("../templates/workflow/agents-md/explore.md", import.meta.url), "utf8"),
+    );
+    assert.equal(existsSync(join(projectRoot, ".codex", "agents", "explore.toml")), true);
+    assert.equal(existsSync(join(projectRoot, ".omp")), false);
+    assert.deepEqual(JSON.parse(readFileSync(join(projectRoot, ".superspec", "config.json"), "utf8")).workflow.hosts, [
+      "codex",
+      "omp",
+    ]);
+  });
+});
+
+test("CLI install --hosts omp writes selected host and does not prompt", () => {
+  withTempProject(projectRoot => {
+    const ompHome = join(projectRoot, "omp-home");
+    mkdirSync(ompHome);
+    const output = execFileSync(process.execPath, [
+      cliPath(),
+      "install",
+      "--skip-self-update",
+      "--hosts",
+      "omp",
+      "--omp-home",
+      ompHome,
+    ], {
+      cwd: projectRoot,
+      encoding: "utf8",
+      env: testEnv(),
+    });
+    const result = JSON.parse(output);
+
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.installed.hosts, ["omp"]);
+    assert.equal(existsSync(join(ompHome, "agents", "critic.md")), true);
+    assert.equal(existsSync(join(projectRoot, ".codex", "agents", "critic.toml")), false);
   });
 });

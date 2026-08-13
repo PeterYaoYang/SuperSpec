@@ -15,7 +15,15 @@ import { recordTestRun, recordTestRunContent } from "./task.ts";
 import { RecordInputDecodingError, decodeRecordInput } from "./record_input.ts";
 import { probeOpenSpec, openspecStatus, changeRoot } from "./openspec.ts";
 import { SUPERSPEC_VERSION } from "./version.ts";
-import { WorkflowConfigError, workflowRiskForProject } from "./workflow_config.ts";
+import {
+  DEFAULT_WORKFLOW_HOSTS,
+  parseWorkflowHostsFlag,
+  WorkflowConfigError,
+  workflowHostsDeclared,
+  workflowHostsForProject,
+  workflowRiskForProject,
+  type WorkflowHost,
+} from "./workflow_config.ts";
 
 const PACKAGE_NAME = "@peterxiaoyang/superspec";
 const OPENSPEC_PACKAGE_NAME = "@fission-ai/openspec";
@@ -548,6 +556,51 @@ async function askToUpdateSelfIfNeeded(projectRoot: string, rerunArgs: string[])
   }
 }
 
+function parseSelectedHosts(raw: string | undefined): WorkflowHost[] {
+  if (!raw) return DEFAULT_WORKFLOW_HOSTS;
+  return parseWorkflowHostsFlag(raw);
+}
+
+function parseHostPromptAnswer(raw: string): WorkflowHost[] {
+  const tokens = raw.toLowerCase().split(/[,\s]+/).filter(Boolean);
+  if (tokens.length === 0) return DEFAULT_WORKFLOW_HOSTS;
+  const selected: WorkflowHost[] = [];
+  for (const token of tokens) {
+    if (token === "1" || token === "codex") selected.push("codex");
+    else if (token === "2" || token === "omp") selected.push("omp");
+    else if (token === "both" || token === "all") selected.push("codex", "omp");
+    else throw new WorkflowConfigError(`无法识别的宿主选项：${token}。可用 1/codex、2/omp，或 both`);
+  }
+  return parseWorkflowHostsFlag(selected.join(","));
+}
+
+async function resolveInstallHosts(projectRoot: string, opts: Record<string, string>, mode: "install" | "update"): Promise<WorkflowHost[]> {
+  if (opts.hosts) return parseSelectedHosts(opts.hosts);
+  if (mode === "update" || workflowHostsDeclared(projectRoot)) return workflowHostsForProject(projectRoot);
+
+  const assumeTty = testEnv("SUPERSPEC_TEST_ASSUME_TTY") === "1";
+  if (!assumeTty && (!process.stdin.isTTY || !process.stdout.isTTY)) return DEFAULT_WORKFLOW_HOSTS;
+
+  const testAnswer = testEnv("SUPERSPEC_TEST_HOSTS_ANSWER");
+  if (testAnswer !== undefined) return parseHostPromptAnswer(testAnswer);
+
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = await rl.question("选择 SuperSpec 入口宿主：1) Codex  2) OMP。可多选，例如 1,2；直接回车默认 Codex。 ");
+    return parseHostPromptAnswer(answer);
+  } finally {
+    rl.close();
+  }
+}
+
+function installOptionsFromCli(opts: Record<string, string>, hosts: WorkflowHost[], allowLegacyState = false) {
+  return {
+    hosts,
+    allowLegacyState,
+    ...(opts["omp-home"] ? { ompHome: opts["omp-home"] } : {}),
+  };
+}
+
 // ===== 初始化 transition init =====
 
 // ===== init/explore 现在在 transition.ts 中（走统一锁内路径）=====
@@ -564,9 +617,9 @@ function topLevelHelp(): string {
   transition <子命令> --change <C>  状态流转（见下）
   record <子命令> --change <C>      登记证据（见下）
   jobs <子命令> --change <C>        工作项管理（见下）
-  install                           安装项目工作流入口
+  install [--hosts codex,omp]       安装项目工作流入口
   init --scope project              install 的兼容别名
-  update                            升级 CLI 到 npm latest 并同步项目工作流模板
+  update [--hosts codex,omp]        升级 CLI 到 npm latest 并同步已选宿主入口
   version                           版本号
 
 transition 子命令：
@@ -656,10 +709,13 @@ async function main(argv: string[]): Promise<number> {
     }
 
     try {
+      const hosts = await resolveInstallHosts(projectRoot, opts, "install");
       if (opts["skip-self-update"] !== "true") {
+        const hostArgs = ["--hosts", hosts.join(",")];
+        if (opts["omp-home"]) hostArgs.push("--omp-home", opts["omp-home"]);
         const rerunArgs = command === "init"
-          ? ["init", "--scope", "project", "--skip-self-update"]
-          : ["install", "--skip-self-update"];
+          ? ["init", "--scope", "project", "--skip-self-update", ...hostArgs]
+          : ["install", "--skip-self-update", ...hostArgs];
         const selfUpdate = await askToUpdateSelfIfNeeded(projectRoot, rerunArgs);
         if (selfUpdate.updated) {
           const rerun = updatedCliOutput(selfUpdate.output, selfUpdate.latest);
@@ -669,7 +725,7 @@ async function main(argv: string[]): Promise<number> {
       }
       const openspec = ensureOpenSpecCli();
       console.log(JSON.stringify({
-        ...installProject(projectRoot),
+        ...installProject(projectRoot, installOptionsFromCli(opts, hosts)),
         openspec,
       }));
       return 0;
@@ -678,14 +734,19 @@ async function main(argv: string[]): Promise<number> {
         ? selfUpdateFailurePayload(err)
         : err instanceof OpenSpecDependencyError
           ? openSpecDependencyFailurePayload(err)
+          : err instanceof WorkflowConfigError
+            ? { ok: false, message: err.message }
         : { ok: false, message: commandErrorMessage(err) }));
       return 1;
     }
   }
   if (command === "update") {
     try {
+      const hosts = await resolveInstallHosts(projectRoot, opts, "update");
       if (opts["skip-self-update"] !== "true") {
-        const selfUpdate = updateSelfIfNeeded(projectRoot, ["update", "--skip-self-update"]);
+        const hostArgs = ["--hosts", hosts.join(",")];
+        if (opts["omp-home"]) hostArgs.push("--omp-home", opts["omp-home"]);
+        const selfUpdate = updateSelfIfNeeded(projectRoot, ["update", "--skip-self-update", ...hostArgs]);
         if (selfUpdate.updated) {
           const rerun = updatedCliOutput(selfUpdate.output, selfUpdate.latest);
           console.log(rerun.text);
@@ -693,7 +754,7 @@ async function main(argv: string[]): Promise<number> {
         }
       }
       const openspec = ensureOpenSpecCli();
-      const result = installProject(projectRoot, { allowLegacyState: true });
+      const result = installProject(projectRoot, installOptionsFromCli(opts, hosts, true));
       console.log(JSON.stringify({
         ...result,
         openspec,
@@ -705,6 +766,8 @@ async function main(argv: string[]): Promise<number> {
         ? selfUpdateFailurePayload(err)
         : err instanceof OpenSpecDependencyError
           ? openSpecDependencyFailurePayload(err)
+          : err instanceof WorkflowConfigError
+            ? { ok: false, message: err.message }
         : { ok: false, message: commandErrorMessage(err) }));
       return 1;
     }

@@ -66,7 +66,7 @@ import type { CodeReviewResultKind, Event, RecordResult, Job, JobPacket, JobRole
 
 const REVIEW_REPORT_REQUIRED_FIELDS = ["role", "verdict", "findings"] as const;
 const REVIEW_REPORT_OPTIONAL_FIELDS = ["summary", "evidence_refs", "risks", "open_questions"] as const;
-const REVIEWER_KINDS = new Set(["codex-subagent", "human", "external-agent"]);
+const REVIEWER_KINDS = new Set(["subagent", "codex-subagent", "human", "external-agent"]);
 const CODE_REVIEW_FINDING_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 
 function isReviewRole(role: JobRole): boolean {
@@ -1624,7 +1624,7 @@ export function jobsPacket(
           (requiresReviewer(job.role) ? `必须由独立 ${recommendedAgentForRole(job.role)} 审查角色执行，并在审查者来源字段（reviewer.kind/id）中记录来源，` : "") +
           `产出 JSON 报告内容并优先通过 --report - 从 stdin 登记；文件路径模式仅作备用。${recordInputInstruction(job)}协议字段含义见 packet 顶层“字段说明”，普通对话不要原样复述 JSON。` +
           (isCodeReviewer
-            ? `格式骨架：{"role":"code-reviewer","verdict":"pass","review_scope":{"job_id":"${job.job_id}","packet_digest":"${job.packet_digest}","checked_paths":[],"checked_docs":[],"unchecked":[]},"findings":[],"reviewer":{"kind":"codex-subagent","id":"<thread-or-agent-id>"}}。提交前按真实审查结果填写数组；不得从 boundFiles 自动复制 checked_paths。verdict 只能为 pass 或 fail；审查覆盖范围（review_scope）用来说明本次审查覆盖了哪些文件和文档，已检查路径（checked_paths）与未检查项（unchecked）必须合起来覆盖全部绑定文件（boundFiles），unchecked 条目格式为 {"path":"<path>","reason":"<reason>"}；pass 不允许仍有未检查的绑定文件。`
+            ? `格式骨架：{"role":"code-reviewer","verdict":"pass","review_scope":{"job_id":"${job.job_id}","packet_digest":"${job.packet_digest}","checked_paths":[],"checked_docs":[],"unchecked":[]},"findings":[],"reviewer":{"kind":"subagent","id":"<thread-or-agent-id>"}}。提交前按真实审查结果填写数组；不得从 boundFiles 自动复制 checked_paths。verdict 只能为 pass 或 fail；审查覆盖范围（review_scope）用来说明本次审查覆盖了哪些文件和文档，已检查路径（checked_paths）与未检查项（unchecked）必须合起来覆盖全部绑定文件（boundFiles），unchecked 条目格式为 {"path":"<path>","reason":"<reason>"}；pass 不允许仍有未检查的绑定文件。`
               + `报告结论为 fail 时，问题列表（findings）至少包含一个可处理、可追溯的阻塞问题，字段为 {"id":"<stable-id>","blocking":true,"type":"implementation|spec|mixed","description":"<what>","evidence":"<why>","source_refs":["<path:line>"],"impact":"<impact>","suggested_action":"apply|propose"}。问题类型（type）中 implementation 表示纯代码实现问题，spec 表示方案/需求文档问题，mixed 表示需要使用者判断的混合问题。`
               + (packetContext?.task_execution_index
                 ? `本工作项带任务执行索引（task_execution_index）：按 task 对照其执行依据快照（contract）审查——实现路线对照 design 引用原文、累计 diff 对照 guard 边界、测试断言对照 tests 声明的 scenario；每项的 required_evidence 是 task-start 冻结的证据口径，red_required/green_required 分别说明是否需要 RED/GREEN；fix 非空表示状态机创建的实现修复，source、parent_task_id 和 reason 说明其归属，code_review 来源还需核对 review_finding；scope_note 既可能解释必要的范围扩大，也可能说明代码审查修复为何保留原实现，均需结合 Diff、调用链和验证证据独立判断；changed_paths 是归属线索不是结论（null 表示未知）；unattributed_paths 中的无主改动逐个判断合理性；coverage_exemption_refs 解释未绑定 task 的 TEST 豁免。当前 packet 的 boundFiles 是本轮冻结的审查范围；若它来自前一轮审查后的增量，只复核本轮变化及其直接影响链路，不要求重复审查未变化文件，但仍要判断批准行为是否完整闭合。`
@@ -1635,7 +1635,7 @@ export function jobsPacket(
                 ? `本工作项带代码状态检查（code_state_check），它是创建 packet 时的快照：验证期间若代码状态已变化，不要提交该报告；主流程会通过 next 创建携带最新事实的验证工作项。`
                 : "")
             : isReviewer
-            ? `最小格式：{"role":"${job.role}","verdict":"pass","findings":[]${hasReviewScope ? `,"review_scope":{"checked_paths":${JSON.stringify(job.boundFiles.map(file => file.path))}}` : ""},"reviewer":{"kind":"codex-subagent","id":"<thread-or-agent-id>"}}。verdict 只能为 pass 或 fail。`
+            ? `最小格式：{"role":"${job.role}","verdict":"pass","findings":[]${hasReviewScope ? `,"review_scope":{"checked_paths":${JSON.stringify(job.boundFiles.map(file => file.path))}}` : ""},"reviewer":{"kind":"subagent","id":"<thread-or-agent-id>"}}。verdict 只能为 pass 或 fail。`
             : `最小格式：{"role":"${job.role}","verdict":"pass","findings":[]}。verdict 只能为 pass 或 fail。`),
         stop_conditions: isReviewer
           ? ["完成审查后提交报告，不要修改文档"]

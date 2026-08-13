@@ -1,6 +1,6 @@
 ---
 name: superspec-propose
-description: "仅在用户显式调用 $superspec-propose，或明确要求继续某个 SuperSpec change 的 Propose 阶段时使用；普通需求讨论、方案或设计请求不得自动触发。"
+description: "仅在用户显式调用 superspec-propose 入口，或明确要求继续某个 SuperSpec change 的 Propose 阶段时使用；普通需求讨论、方案或设计请求不得自动触发。"
 metadata:
   author: SuperSpec
   source: SuperSpec
