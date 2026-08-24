@@ -30,6 +30,7 @@ export type ReviewJobGateId =
   | "review.final_verifier";
 
 export type CodeReviewResultKind = "invalid_report" | "non_actionable_report" | "review_failed";
+export type CodeReviewClaimKind = "missing_approved" | "breaks_existing" | "unjustified_addition";
 
 export interface ReviewPreviousRejection {
   result_kind: CodeReviewResultKind;
@@ -90,6 +91,8 @@ export interface FixDescriptor {
   review_finding?: {
     job_id: string;
     finding_id: string;
+    approved_refs?: string[];
+    claim_kind?: CodeReviewClaimKind;
   };
 }
 
@@ -165,6 +168,7 @@ export interface JobPacketContext {
   task_execution_index?: TaskExecutionIndexEntry[];
   unattributed_paths?: string[];
   unknown_attribution_tasks?: string[];
+  added_code_paths?: string[];
   code_state_check?: CodeStateCheck;
 }
 
@@ -185,6 +189,7 @@ export interface JobPacket {
   task_execution_index?: TaskExecutionIndexEntry[];
   unattributed_paths?: string[];
   unknown_attribution_tasks?: string[];
+  added_code_paths?: string[];
   code_state_check?: CodeStateCheck;
   packet_digest: string;
   required_output_kind: string;
@@ -440,10 +445,16 @@ export interface TestEvidenceAction {
   required_fields: Array<"command" | "cwd" | "exit_code">;
 }
 
+/** review-fix 计划附带的原始审查问题上下文；仅供定位代码，不是实现授权。 */
+export interface ReviewFindingContext {
+  evidence: string;
+  note: string;
+}
+
 export type NextOutput = {
   state: State;
 } & (
-  | { path: "next_command"; next_command: string; reason: string; missing_inputs: MissingInput[] }
+  | { path: "next_command"; next_command: string; reason: string; missing_inputs: MissingInput[]; finding_context?: ReviewFindingContext }
   | { path: "required_job"; required_jobs: RequiredJobAction[]; reason: string }
   | { path: "artifact_required"; artifact: RequiredWorkflowArtifact; resume: ArtifactRequiredResume; reason: string }
   | { path: "material_update_required"; errors: string[]; resume: MaterialUpdateRequiredResume; reason: string }

@@ -70,6 +70,7 @@ import type {
   Job,
   JobRole,
   PlanningValidationProfile,
+  ReviewFindingContext,
   WorkflowArtifactKind,
   State,
 } from "./types.ts";
@@ -102,7 +103,7 @@ export interface TransitionPlanContext extends PhasePlanContext {}
 
 export type ReopenNextStep =
   | { to: "apply"; reason: "pending_tasks"; taskIds: string[] }
-  | { to: "apply"; reason: "review_fix"; jobId: string; findingId: string; reopenReason: string }
+  | { to: "apply"; reason: "review_fix"; jobId: string; findingId: string; reopenReason: string; findingContext?: ReviewFindingContext }
   | { to: "propose"; reason: "review_finding"; jobId: string; findingId: string };
 
 export type NextStepPlan =
@@ -123,6 +124,16 @@ export type NextStepPlan =
       reason: string;
       continuation?: AcceptedMaterialFollowupContinuation;
     };
+
+/** 从失败 finding 提取定位上下文：只回传 evidence（位置事实），不回传 description——那是审查建议叙事，不进执行上下文。 */
+function reviewFindingContext(finding: Record<string, unknown> | undefined): ReviewFindingContext | undefined {
+  const evidence = typeof finding?.evidence === "string" ? finding.evidence.trim() : "";
+  if (!evidence) return undefined;
+  return {
+    evidence,
+    note: "非授权上下文：仅用于定位问题代码；实现范围仍以任务行锚定的已批准行为为准",
+  };
+}
 
 export type TransitionDecisionPlan =
   | { kind: "skip"; message: string }
@@ -1086,6 +1097,7 @@ function planApplyDoneNext(context: PhasePlanContext): NextStepPlan {
           jobId: latest.job.job_id,
           findingId,
           reopenReason: `修复代码审查问题 ${findingId}`,
+          findingContext: reviewFindingContext(pendingFinding?.finding),
         },
         reason: `代码审查发现纯代码实现问题 ${findingId}，回到实现阶段修复`,
       };
@@ -1112,6 +1124,7 @@ function planApplyDoneNext(context: PhasePlanContext): NextStepPlan {
             jobId: latest.job.job_id,
             findingId,
             reopenReason: `根据代码审查问题 ${findingId} 回到实现阶段修复`,
+            findingContext: reviewFindingContext(pendingFinding?.finding),
           },
           reason: `使用者已确认问题 ${findingId} 直接回到实现阶段修复`,
         };

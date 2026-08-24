@@ -56,6 +56,7 @@ import {
   parseTestContractEntries,
   type ParsedExecutionRequirement,
 } from "./format.ts";
+import { isCodeReviewClaimKind, reviewFixReason } from "./approved_ref.ts";
 import {
   applyRequirementModeForCurrentRound,
   applyPlanningDocsChangedSinceBaseline,
@@ -478,15 +479,27 @@ function findReviewFailedFinding(events: Event[], ref: CodeReviewFindingRef): { 
 }
 
 function reviewFixDescriptor(ref: CodeReviewFindingRef, finding: Record<string, unknown>): FixDescriptor {
-  const reason = typeof finding.description === "string" && finding.description.trim()
-    ? finding.description.trim().replace(/\s+/g, " ")
-    : `修复代码审查问题 ${ref.findingId}`;
+  const claimKind = isCodeReviewClaimKind(finding.claim_kind) ? finding.claim_kind : null;
+  const approvedRefs = Array.isArray(finding.approved_refs)
+    ? finding.approved_refs.filter((item): item is string => typeof item === "string" && item.trim() !== "")
+    : [];
+  const reason = claimKind && approvedRefs.length > 0
+    ? reviewFixReason(claimKind, approvedRefs).replace(/\s+/g, " ")
+    : typeof finding.description === "string" && finding.description.trim()
+      ? finding.description.trim().replace(/\s+/g, " ")
+      : `修复代码审查问题 ${ref.findingId}`;
+  const reviewFinding: NonNullable<FixDescriptor["review_finding"]> = {
+    job_id: ref.jobId,
+    finding_id: ref.findingId,
+  };
+  if (approvedRefs.length > 0) reviewFinding.approved_refs = approvedRefs;
+  if (claimKind) reviewFinding.claim_kind = claimKind;
   return {
     fix_id: `REVIEW-FIX-${ref.jobId}#${ref.findingId}`,
     source: "code_review",
     parent_task_id: null,
     reason,
-    review_finding: { job_id: ref.jobId, finding_id: ref.findingId },
+    review_finding: reviewFinding,
   };
 }
 

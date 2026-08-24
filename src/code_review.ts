@@ -446,6 +446,37 @@ export function codeReviewPacketDigest(input: {
   return sha256Text(JSON.stringify(input));
 }
 
+export function addedCodePathsForScope(projectRoot: string, scope: CodeReviewScope): string[] {
+  if (!scope.scope_reliable) return [];
+  const added = new Set<string>();
+  let baseHead = scope.base_head;
+  if (!baseHead && scope.current_head) {
+    // 首轮 start-apply 前仓库还没有提交：以空树为基点，让 Apply 期间产生的首个提交也进入新增清单。
+    const emptyTree = gitLines(projectRoot, ["hash-object", "-t", "tree", "/dev/null"]);
+    if (emptyTree.ok) baseHead = emptyTree.lines[0] ?? null;
+  }
+  if (baseHead && scope.current_head) {
+    const committed = gitLines(projectRoot, [
+      "diff", "--no-renames", "--diff-filter=A", "--name-only", `${baseHead}..${scope.current_head}`,
+    ]);
+    if (committed.ok) {
+      for (const path of committed.lines) {
+        if (isCodeLikePath(path)) added.add(path);
+      }
+    }
+  }
+  const dirty = dirtyCodeFiles(projectRoot);
+  if (dirty.ok) {
+    for (const file of dirty.files) {
+      if (file.status === "added" && isCodeLikePath(file.path)) added.add(file.path);
+    }
+  }
+  for (const path of scope.untracked_paths) {
+    if (isCodeLikePath(path)) added.add(path);
+  }
+  return [...added].sort();
+}
+
 export function codeReviewPacketContext(changeRoot: string, projectRoot: string, scope: CodeReviewScope, events: Event[]): JobPacketContext {
   const taskExecutionIndex = taskExecutionIndexFromEvents(projectRoot, events);
   // changed_paths 未知（快照缺失）或不完整（committed 段 diff 失败）的 task
@@ -464,6 +495,7 @@ export function codeReviewPacketContext(changeRoot: string, projectRoot: string,
     task_execution_index: taskExecutionIndex,
     unattributed_paths: scope.review_paths.filter(path => !attributedPaths.has(path)).sort(),
     unknown_attribution_tasks: unknownAttributionTasks,
+    added_code_paths: addedCodePathsForScope(projectRoot, scope),
   };
 }
 

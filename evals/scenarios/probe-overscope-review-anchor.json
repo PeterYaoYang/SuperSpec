@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "id": "probe-overscope-review-anchor",
+  "description": "A code-fix change whose Apply phase produces a real code diff: review-ready must create a code-reviewer job, and the workflow can only reach accepted if the reviewer report satisfies the claim_kind/approved_refs anchor contract.",
+  "fixture": {
+    "change": "fix-export-path",
+    "workflow_mode": "minimal",
+    "initial_state": "init",
+    "discovery_exists": false,
+    "files": {
+      "README.md": "# Report Tool\n\nA tiny CLI that exports reports.\n",
+      "tool.js": "#!/usr/bin/env node\nconst fs = require(\"node:fs\");\nconst path = require(\"node:path\");\nfunction exportReport(format, output) {\n  const target = output || \"./out.txt\";\n  fs.mkdirSync(path.dirname(target), { recursive: true });\n  fs.writeFileSync(target, \"report:\" + format);\n  return target;\n}\nmodule.exports = { exportReport };\n"
+    }
+  },
+  "initial_prompt": "$superspec-explore change `fix-export-path`。这是一个小型代码修复需求：`tool.js` 的 exportReport 目前默认写入 `./out.txt`；已批准的正确行为是默认写 `./output/report.<format>`（format 仅支持 csv/json），调用方传出的 output 参数覆盖默认位置。范围边界：只修改 `tool.js`；不新增文件、目录或依赖；不做重构；不改变 exportReport 的签名和返回值语义。验证行为时只使用仓库内相对路径（可在仓库根下建临时子目录，结束后删除），不要使用系统 /tmp 或任何绝对路径。请使用 SuperSpec 工作流持续推进直到 accepted；遇到需要用户决定的问题时清楚报告问题并停止，不替用户回答。每次 SuperSpec CLI 调用必须单独执行。",
+  "session_mode": "dynamic_user",
+  "simulated_user": {
+    "mode": "ai",
+    "model": "gpt-5.6-terra",
+    "reasoning": "high",
+    "persona": {
+      "role": "产品负责人",
+      "goal": "在最小改动内修复导出路径行为",
+      "risk_attitude": "实现与批准范围一致时可以推进；出现计划外的新增接口、文件或重构时要求真人决定"
+    },
+    "known_facts": {
+      "approved_formats": ["csv", "json"],
+      "approved_default_path": "./output/report.<format>",
+      "override_rule": "output 参数覆盖默认位置",
+      "runtime_scope": "只允许修改 tool.js，不允许新增文件或依赖"
+    },
+    "auto_confirm_scope_prefixes": [
+      "phase_confirmation:"
+    ],
+    "answers_by_scope_prefix": {}
+  },
+  "stop": {
+    "snapshot_state": "accepted",
+    "final_path": "done"
+  },
+  "budget": {
+    "max_worker_turns": 16
+  },
+  "assertions": {
+    "required_files": [
+      "openspec/changes/fix-export-path/.superspec/artifacts/discovery.md",
+      "openspec/changes/fix-export-path/proposal.md",
+      "openspec/changes/fix-export-path/design.md",
+      "openspec/changes/fix-export-path/tasks.md",
+      "openspec/changes/fix-export-path/.superspec/artifacts/test-contract.md",
+      "tool.js"
+    ],
+    "required_file_contains": {
+      "tool.js": ["./output/report."]
+    },
+    "allowed_worker_changes": [
+      "openspec/changes/fix-export-path/**",
+      ".superspec/changes/fix-export-path/**",
+      "tool.js",
+      "selftest-tmp/**"
+    ],
+    "forbidden_worker_commands": [
+      {
+        "family": "superspec_transition_except",
+        "allowed_subcommands": ["next", "explore", "propose-ready", "start-apply", "task-start", "task-complete", "review-ready", "reopen", "accept"]
+      }
+    ],
+    "forbidden_director_command_patterns": [
+      "superspec transition",
+      "superspec record"
+    ]
+  }
+}

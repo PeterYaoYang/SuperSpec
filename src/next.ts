@@ -120,14 +120,17 @@ function toNextOutput(change: string, plan: NextStepPlan): NextOutput {
         resume: { argv: ["superspec", "transition", "next", "--change", change] },
         reason: plan.reason,
       };
-    case "run_transition":
+    case "run_transition": {
+      const findingContext = plan.reopen?.reason === "review_fix" ? plan.reopen.findingContext : undefined;
       return {
         state: plan.state,
         path: "next_command",
         next_command: transitionCommand(change, plan.transition, formatTransitionArgs(plan)),
         reason: plan.reason,
         missing_inputs: [],
+        ...(findingContext ? { finding_context: findingContext } : {}),
       };
+    }
     case "done":
       return {
         state: plan.state,

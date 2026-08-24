@@ -29,6 +29,11 @@ import {
 import { invalidReasonForSubmittedReport } from "./job_validity.ts";
 import { jobSubmitArgv } from "./job_action.ts";
 import {
+  hasBehaviorAnchor,
+  isCodeReviewClaimKind,
+  resolveApprovedRefs,
+} from "./approved_ref.ts";
+import {
   REVIEW_DOC_PATHS,
   REVIEW_REJECTION_OVERRIDE_SCOPE_PREFIX,
   REVIEW_REJECTION_OVERRIDE_ANSWER,
@@ -113,7 +118,7 @@ function roleDescription(role: JobRole): string {
     case "verifier":
       return "验证 proposal、实现状态、任务完成、测试契约和 SuperSpec 证据是否足以支撑完成结论";
     case "code-reviewer":
-      return "审查 apply 后的代码实现质量、健壮性、性能、安全、兼容、边界条件、是否偏离 proposal/design/tasks/test-contract 以及关键测试缺口";
+      return "独立审查实现是否以最小语义影响兑现已批准计划，找出真实缺陷、边界条件、安全/性能/兼容问题与关键测试缺口，并区分漏做与计划或验收没有要求的改动";
     case "executor":
       return "执行受限实现工作项";
     case "test-run":
@@ -470,7 +475,10 @@ function validateReviewScope(
   }
 }
 
-function actionableCodeReviewFindings(findings: unknown): { actionable: Record<string, unknown>[]; reasons: string[] } {
+function actionableCodeReviewFindings(
+  findings: unknown,
+  changeRoot: string,
+): { actionable: Record<string, unknown>[]; reasons: string[] } {
   if (!Array.isArray(findings)) return { actionable: [], reasons: ["报告字段 findings 必须是数组"] };
   const actionable: Record<string, unknown>[] = [];
   const reasons: string[] = [];
@@ -517,6 +525,19 @@ function actionableCodeReviewFindings(findings: unknown): { actionable: Record<s
     }
     if (type === "implementation" && finding.suggested_action !== "apply") {
       findingReasons.push(`纯代码实现问题 ${id} 的 suggested_action 必须是 apply`);
+    }
+    if (!isCodeReviewClaimKind(finding.claim_kind)) {
+      findingReasons.push(`阻塞问题 ${id} 的 claim_kind 必须是 missing_approved|breaks_existing|unjustified_addition`);
+    }
+    const resolved = resolveApprovedRefs(changeRoot, finding.approved_refs);
+    if (!resolved.ok) {
+      findingReasons.push(...resolved.reasons.map((reason: string) => `阻塞问题 ${id} ${reason}`));
+    } else if (
+      finding.claim_kind === "missing_approved"
+      && finding.suggested_action === "apply"
+      && !hasBehaviorAnchor(resolved.values)
+    ) {
+      findingReasons.push(`阻塞问题 ${id} 的 missing_approved 在 suggested_action=apply 时必须引用可解析的 TEST 或 spec Requirement；若缺口属于计划或验收本身的问题，改用 type=mixed 且 suggested_action=propose 交使用者裁决`);
     }
     if (findingReasons.length > 0) {
       reasons.push(...findingReasons);
@@ -801,7 +822,7 @@ function recordJobSubmitLoaded(
     const blockingCount = Array.isArray(findings)
       ? findings.filter(item => asObject(item)?.blocking === true).length
       : 0;
-    const { actionable, reasons } = actionableCodeReviewFindings(findings);
+    const { actionable, reasons } = actionableCodeReviewFindings(findings, changeRoot);
 
     if (verdict === "pass") {
       if (blockingCount > 0) {
@@ -1549,6 +1570,9 @@ function packetFieldDescriptions(): Record<string, string> {
     changed_paths: "与某个任务（task）或代码状态检查相关的改动文件。",
     changed_paths_partial_reason: "该任务（task）的提交段 diff 失败原因；存在时 changed_paths 只包含工作区对比结果，归属可能不完整。",
     unattributed_paths: "代码审查范围中暂时无法归属到某个任务（task）的文件。",
+    added_code_paths: "相对本次代码审查基点新建的代码文件，供判断是否服务已批准行为。",
+    claim_kind: "阻塞问题相对已批准计划的关系：漏做、破坏已有行为、或计划或验收没有要求的改动。",
+    approved_refs: "指向当前 change 已批准材料的引用；引擎只检查能否解析，apply 漏做还需要 TEST 或 spec Requirement。",
     unknown_attribution_tasks: "因为缺少边界快照或提交段 diff 失败而无法完整计算改动归属的任务（task）。",
     coverage_exemption_refs: "测试覆盖豁免引用：说明某个 TEST 为什么没有绑定到任务（task）。",
     code_review_gate: "最终验证读取的代码审查门禁事实：passed 指向已接受的代码审查工作项，skipped 表示本轮没有代码类改动。",
@@ -1599,6 +1623,7 @@ export function jobsPacket(
         ...(packetContext?.task_execution_index ? { task_execution_index: packetContext.task_execution_index } : {}),
         ...(packetContext?.unattributed_paths ? { unattributed_paths: packetContext.unattributed_paths } : {}),
         ...(packetContext?.unknown_attribution_tasks ? { unknown_attribution_tasks: packetContext.unknown_attribution_tasks } : {}),
+        ...(packetContext?.added_code_paths ? { added_code_paths: packetContext.added_code_paths } : {}),
         ...(packetContext?.code_state_check ? { code_state_check: packetContext.code_state_check } : {}),
         packet_digest: job.packet_digest,
         required_output_kind: "job_report_json",
@@ -1625,9 +1650,9 @@ export function jobsPacket(
           `产出 JSON 报告内容并优先通过 --report - 从 stdin 登记；文件路径模式仅作备用。${recordInputInstruction(job)}协议字段含义见 packet 顶层“字段说明”，普通对话不要原样复述 JSON。` +
           (isCodeReviewer
             ? `格式骨架：{"role":"code-reviewer","verdict":"pass","review_scope":{"job_id":"${job.job_id}","packet_digest":"${job.packet_digest}","checked_paths":[],"checked_docs":[],"unchecked":[]},"findings":[],"reviewer":{"kind":"subagent","id":"<thread-or-agent-id>"}}。提交前按真实审查结果填写数组；不得从 boundFiles 自动复制 checked_paths。verdict 只能为 pass 或 fail；审查覆盖范围（review_scope）用来说明本次审查覆盖了哪些文件和文档，已检查路径（checked_paths）与未检查项（unchecked）必须合起来覆盖全部绑定文件（boundFiles），unchecked 条目格式为 {"path":"<path>","reason":"<reason>"}；pass 不允许仍有未检查的绑定文件。`
-              + `报告结论为 fail 时，问题列表（findings）至少包含一个可处理、可追溯的阻塞问题，字段为 {"id":"<stable-id>","blocking":true,"type":"implementation|spec|mixed","description":"<what>","evidence":"<why>","source_refs":["<path:line>"],"impact":"<impact>","suggested_action":"apply|propose"}。问题类型（type）中 implementation 表示纯代码实现问题，spec 表示方案/需求文档问题，mixed 表示需要使用者判断的混合问题。`
+              + `报告结论为 fail 时，问题列表（findings）至少包含一个可处理、可追溯的阻塞问题，字段为 {"id":"<stable-id>","blocking":true,"type":"implementation|spec|mixed","claim_kind":"missing_approved|breaks_existing|unjustified_addition","approved_refs":["TEST-001"],"description":"<what>","evidence":"<why>","source_refs":["<path:line>"],"impact":"<impact>","suggested_action":"apply|propose"}。问题类型（type）中 implementation 表示纯代码实现问题，spec 表示方案/需求文档问题，mixed 表示需要使用者判断的混合问题；claim_kind 与 approved_refs 见字段说明。`
               + (packetContext?.task_execution_index
-                ? `本工作项带任务执行索引（task_execution_index）：按 task 对照其执行依据快照（contract）审查——实现路线对照 design 引用原文、累计 diff 对照 guard 边界、测试断言对照 tests 声明的 scenario；每项的 required_evidence 是 task-start 冻结的证据口径，red_required/green_required 分别说明是否需要 RED/GREEN；fix 非空表示状态机创建的实现修复，source、parent_task_id 和 reason 说明其归属，code_review 来源还需核对 review_finding；scope_note 既可能解释必要的范围扩大，也可能说明代码审查修复为何保留原实现，均需结合 Diff、调用链和验证证据独立判断；changed_paths 是归属线索不是结论（null 表示未知）；unattributed_paths 中的无主改动逐个判断合理性；coverage_exemption_refs 解释未绑定 task 的 TEST 豁免。当前 packet 的 boundFiles 是本轮冻结的审查范围；若它来自前一轮审查后的增量，只复核本轮变化及其直接影响链路，不要求重复审查未变化文件，但仍要判断批准行为是否完整闭合。`
+                ? `本工作项带任务执行索引（task_execution_index）：按 task 对照其执行依据快照（contract）审查——实现路线对照 design 引用原文、累计 diff 对照 guard 边界、测试断言对照 tests 声明的 scenario；每项的 required_evidence 是 task-start 冻结的证据口径，red_required/green_required 分别说明是否需要 RED/GREEN；fix 非空表示状态机创建的实现修复，source、parent_task_id 和 reason 说明其归属，code_review 来源还需核对 review_finding；scope_note 既可能解释必要的范围扩大，也可能说明代码审查修复为何保留原实现，均需结合 Diff、调用链和验证证据独立判断；changed_paths 是归属线索不是结论（null 表示未知）；unattributed_paths 中的无主改动和 added_code_paths 中的新建代码文件，均需判断是否服务已批准行为；coverage_exemption_refs 解释未绑定 task 的 TEST 豁免。当前 packet 的 boundFiles 是本轮冻结的审查范围；若它来自前一轮审查后的增量，只复核本轮变化及其直接影响链路，不要求重复审查未变化文件，但仍要判断批准行为是否完整闭合。`
                 : "")
             : job.role === "verifier"
             ? `最小格式：{"role":"verifier","verdict":"pass","findings":[]${hasReviewScope ? `,"review_scope":{"checked_paths":${JSON.stringify(job.boundFiles.map(file => file.path))}}` : ""}}。verdict 只能为 pass 或 fail；核对代码审查记录（code_review_gate）：passed 必须能追溯到已接受的代码审查工作项，skipped 必须能证明本次没有代码类改动。核对修复闭环：task_execution_index.fix.source=code_review 时必须核对 review_finding 对应问题是否关闭；source=self_test 时必须核对 parent_task_id、记录的自测原因、本次 attempt 验证和最新代码审查是否共同闭环。方案/混合问题必须有用户决策或后续修复证据。按 task_execution_index 的 required_evidence 核对测试证据：red_required 时需要同一 TEST 的 RED（expected_failure）后 GREEN；green_required 时每个声明 TEST 都需要允许的 GREEN 语义状态；测试运行证据应包含测试 ID（test_id）、命令（command）、工作目录（cwd）、退出码（exit_code）、语义状态（semantic_status）。修复 task 的回归测试运行可用回归覆盖任务列表（covers_task_ids）说明覆盖了哪些已完成任务；缺少任务尝试 ID（attempt_id）的旧证据只能弱引用。` +

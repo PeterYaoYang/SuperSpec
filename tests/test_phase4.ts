@@ -168,6 +168,17 @@ function submitCodeReviewerReport(
   return recordJobSubmit(projectRoot, change, changeRoot, jobId, reportPath);
 }
 
+function withLegacyFindingAnchors(finding: unknown): unknown {
+  if (!finding || typeof finding !== "object" || Array.isArray(finding)) return finding;
+  const item = finding as Record<string, unknown>;
+  if (item.blocking !== true || typeof item.id !== "string" || item.id.trim() === "") return finding;
+  return {
+    ...item,
+    claim_kind: item.claim_kind ?? "breaks_existing",
+    approved_refs: item.approved_refs ?? ["design.md#D"],
+  };
+}
+
 function codeReviewerReport(
   projectRoot: string,
   change: string,
@@ -175,7 +186,9 @@ function codeReviewerReport(
   verdict: "pass" | "fail",
   findings: unknown[],
   checkedPaths: string[] = [],
+  options: { fillAnchors?: boolean } = {},
 ): Record<string, unknown> {
+  const fillAnchors = options.fillAnchors !== false;
   return {
     role: "code-reviewer",
     verdict,
@@ -186,7 +199,7 @@ function codeReviewerReport(
       checked_docs: ["proposal.md", "design.md", "tasks.md", ".superspec/artifacts/test-contract.md"],
       unchecked: [],
     },
-    findings,
+    findings: fillAnchors ? findings.map(withLegacyFindingAnchors) : findings,
     reviewer: { kind: "codex-subagent", id: "test-code-reviewer" },
   };
 }
@@ -1900,6 +1913,8 @@ test("code-reviewer：无效复审重试保留未闭环 finding，并在新计�
     const tasks = readFileSync(join(fx.changeRoot, "tasks.md"), "utf8");
     assert.match(tasks, new RegExp(`REVIEW-FIX-${jobId}#CR-001`));
     assert.match(tasks, new RegExp(`review_fix_of:${jobId}#CR-001`));
+    assert.match(tasks, /兑现 D（breaks_existing）/);
+    assert.doesNotMatch(tasks, /修复空输入下的边界错误/);
     assert.doesNotMatch(tasks, /tdd_required:true/);
 
     const fixTaskId = `REVIEW-FIX-${jobId}#CR-001`;
@@ -2507,8 +2522,9 @@ test("code-reviewer：同 id 非阻塞项不能覆盖真正阻塞 finding", () =
     });
     assert.equal(reopened.to_state, "apply");
     const tasks = readFileSync(join(fx.changeRoot, "tasks.md"), "utf8");
-    assert.match(tasks, /真正阻塞的实现问题/);
-    assert.doesNotMatch(tasks, /非阻塞提示不应驱动 reopen tdd_required:true/);
+    assert.match(tasks, /兑现 D（breaks_existing）/);
+    assert.doesNotMatch(tasks, /真正阻塞的实现问题/);
+    assert.doesNotMatch(tasks, /非阻塞提示不应驱动 reopen/);
   } finally { fx.cleanup(); }
 });
 

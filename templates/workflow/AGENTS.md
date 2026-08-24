@@ -23,6 +23,8 @@ Apply 的成功标准是完整兑现已批准行为，并在满足验收的实�
 - 所有 task 已完成后，若问题仍能关联一个已完成 task、且不改变已批准行为和方案，主流程执行 `superspec transition reopen --change "<change>" --to apply --self-test-fix "<task>" --reason "<reason>"`，让工作流创建修复事项；随后继续 `next`，不得手改 tasks。
 - 无法关联既有 task，或需要改变行为、验收、接口、数据语义或实现路线时，才回 propose。
 
+用户明确否定某个不属于已批准行为的实现装置时，同样按上面三条规则恢复已批准行为，但顺序相反：先完成代码上的移除或修复（self-test-fix 的 reason 写恢复了哪条已批准行为，不写撤回或删除），确认能通过后再把这次否决写进 design 的非目标或相关 task 的边界——计划材料一旦先改，self-test-fix 会被计划冻结挡下，只能回 propose。不要为这次否决新增以删除或撤回为验收内容的 task。
+
 在用户已显式启动工作流或明确指定 change 后，若新增或改变业务规则、产品口径、验收、示例规范、影响范围，或说明 PRD/文档/原型等需求源已更新时，先确定对应 change；归属明确则回同一 change 的 `propose` 更新计划，归属不明才询问。不要把这类输入直接当作 apply 授权，也不要另建 repair change。
 
 SuperSpec 创建的独立审查/验证工作项，视为已授权启动对应 subagent；无需再次询问用户。主会话不得自批这些工作项。
