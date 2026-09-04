@@ -39,7 +39,7 @@ function setupApplyWithDoneTask(): { projectRoot: string; change: string; change
     "",
   ].join("\n"));
   writeFileSync(join(changeRoot, "proposal.md"), "# P\n");
-  writeFileSync(join(changeRoot, "design.md"), "# D\n");
+  writeFileSync(join(changeRoot, "design.md"), "# D\n\n## 结构变更清单\n\n无\n");
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "discovery.md"), "# D\n");
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");
   ensureChangeLayout(projectRoot, change);
@@ -2020,7 +2020,7 @@ test("code-reviewer：无效复审重试保留未闭环 finding，并在新计�
       reviewFinding: `${retryJobId}#CR-SPEC-NEW`,
     }).to_state, "propose");
 
-    writeFileSync(join(fx.changeRoot, "design.md"), "# D\n\n## 新计划周期\n\n重新确认兼容边界。\n");
+    writeFileSync(join(fx.changeRoot, "design.md"), "# D\n\n## 结构变更清单\n\n无\n\n## 新计划周期\n\n重新确认兼容边界。\n");
     assert.equal(proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal").to_state, "propose_ready");
     confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
     assert.equal(startApply(fx.projectRoot, fx.change, fx.changeRoot).to_state, "apply");
@@ -2162,7 +2162,7 @@ test("Apply 计划材料冻结：遗漏修正必须回 Propose，且复用 Apply
   const fx = setupApplyWithDoneTask();
   try {
     const frozen = applyPlanningBaseline(fx.changeRoot);
-    writeFileSync(join(fx.changeRoot, "design.md"), "# D\n\n补充遗漏的公开接口约束\n");
+    writeFileSync(join(fx.changeRoot, "design.md"), "# D\n\n补充遗漏的公开接口约束\n\n## 结构变更清单\n\n无\n");
 
     const selfTestRepair = reopen(fx.projectRoot, fx.change, fx.changeRoot, "apply", "计划遗漏了公开接口", {
       selfTestFix: "TASK-001",
@@ -2212,7 +2212,7 @@ test("Propose 返工：重新打开既有 task 时保留新的 Apply 确认", ()
   const fx = setupApplyWithDoneTask();
   try {
     assert.equal(reopen(fx.projectRoot, fx.change, fx.changeRoot, "propose", "调整已批准需求").to_state, "propose");
-    writeFileSync(join(fx.changeRoot, "design.md"), "# D\n\n默认路径调整为新位置\n");
+    writeFileSync(join(fx.changeRoot, "design.md"), "# D\n\n默认路径调整为新位置\n\n## 结构变更清单\n\n无\n");
     writeFileSync(join(fx.changeRoot, "tasks.md"), [
       "# Tasks", "",
       "- [ ] TASK-001 Update the new default path",
@@ -2595,9 +2595,10 @@ test("code-reviewer：spec 问题必须经用户决策才能 reopen propose", ()
     assert.deepEqual((commit?.payload as { planning_validation_profile?: unknown }).planning_validation_profile, {
       version: 2,
       openspec: { mode: "disabled" },
-      design: { schema_version: 1 },
+      design: { schema_version: 2 },
     });
 
+    writeFileSync(join(fx.changeRoot, "design.md"), "# D\n\n## 结构变更清单\n\n无\n");
     writeFileSync(join(fx.changeRoot, "tasks.md"), [
       "# Tasks",
       "",
@@ -3660,7 +3661,7 @@ test("accepted：受控 reopen 只能回到 propose，并记录计划材料基�
     assert.equal(unchanged.events_written, 0);
     assert.match(unchanged.message, /至少一个计划文档必须变化/);
 
-    writeFileSync(join(fx.changeRoot, "design.md"), "# D\n\n新增验收设计\n");
+    writeFileSync(join(fx.changeRoot, "design.md"), "# D\n\n新增验收设计\n\n## 结构变更清单\n\n无\n");
     assert.equal(startApply(fx.projectRoot, fx.change, fx.changeRoot).to_state, "apply");
   } finally { fx.cleanup(); }
 });
@@ -3727,7 +3728,7 @@ test("accepted reopen：reopen 前已有计划材料变化时复用 accept basel
   try {
     advanceApplyToReview(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
     acceptAfterFinalVerifier(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
-    writeFileSync(join(fx.changeRoot, "design.md"), "# D\n\naccepted 后已补充设计约束\n");
+    writeFileSync(join(fx.changeRoot, "design.md"), "# D\n\naccepted 后已补充设计约束\n\n## 结构变更清单\n\n无\n");
 
     const done = next(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
     assert.equal(done.path, "done");
@@ -3771,7 +3772,7 @@ test("accepted reopen：新 minimal planning round 不复用历史 proposal 审�
       reopen(fx.projectRoot, fx.change, fx.changeRoot, "propose", "修改计划边界").to_state,
       "propose",
     );
-    writeFileSync(join(fx.changeRoot, "design.md"), "# D\n\nchanged after accepted reopen\n");
+    writeFileSync(join(fx.changeRoot, "design.md"), "# D\n\nchanged after accepted reopen\n\n## 结构变更清单\n\n无\n");
 
     assert.equal(proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal").to_state, "propose_ready");
     const applied = startApply(fx.projectRoot, fx.change, fx.changeRoot);

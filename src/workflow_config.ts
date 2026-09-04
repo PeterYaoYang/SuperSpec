@@ -9,6 +9,16 @@ import type { Event, State } from "./types.ts";
 export const WORKFLOW_CONFIG_PATH = ".superspec/config.json";
 /** 项目未声明 workflow.mode 时采用的默认档位。 */
 export const DEFAULT_WORKFLOW_RISK: ReviewRisk = "normal";
+export const DEFAULT_WORKFLOW_BUDGET = {
+  tasks: 10,
+  tests: 20,
+  review_fix_rounds: 2,
+} as const;
+export type WorkflowBudget = {
+  tasks: number | null;
+  tests: number | null;
+  review_fix_rounds: number | null;
+};
 export const WORKFLOW_HOSTS = ["codex", "omp"] as const;
 export type WorkflowHost = (typeof WORKFLOW_HOSTS)[number];
 /** 未声明 hosts 的旧项目按 Codex 入口处理。 */
@@ -23,6 +33,45 @@ export class WorkflowConfigError extends Error {
 
 function isReviewRisk(value: unknown): value is ReviewRisk {
   return value === "minimal" || value === "normal" || value === "strict";
+}
+
+function parseWorkflowBudgetValue(value: unknown, field: string): number | null {
+  if (value === null) return null;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    throw new WorkflowConfigError(`${WORKFLOW_CONFIG_PATH} 的 workflow.budget.${field} 必须是非负整数或 null`);
+  }
+  return value;
+}
+
+function workflowBudgetFromObject(budget: Record<string, unknown> | undefined): WorkflowBudget {
+  if (!budget) return { ...DEFAULT_WORKFLOW_BUDGET };
+  const tasks = budget.tasks === undefined
+    ? DEFAULT_WORKFLOW_BUDGET.tasks
+    : parseWorkflowBudgetValue(budget.tasks, "tasks");
+  const tests = budget.tests === undefined
+    ? DEFAULT_WORKFLOW_BUDGET.tests
+    : parseWorkflowBudgetValue(budget.tests, "tests");
+  const review_fix_rounds = budget.review_fix_rounds === undefined
+    ? DEFAULT_WORKFLOW_BUDGET.review_fix_rounds
+    : parseWorkflowBudgetValue(budget.review_fix_rounds, "review_fix_rounds");
+  return { tasks, tests, review_fix_rounds };
+}
+
+/**
+ * 读取计划规模与 review-fix 上限；minimal 档整体忽略，budget 为 null 整体关闭，单项 null 关闭该项检查。
+ * 注意 0 不等于关闭：tasks/tests 为 0 表示任何任务/TEST 都超预算，review_fix_rounds 为 0 表示不允许自动修复。
+ */
+export function workflowBudgetForRisk(projectRoot: string, risk: ReviewRisk): WorkflowBudget | null {
+  if (risk === "minimal") return null;
+  const workflow = workflowObject(readWorkflowConfigObject(projectRoot));
+  if (!workflow) return { ...DEFAULT_WORKFLOW_BUDGET };
+  if (workflow.budget === undefined) return { ...DEFAULT_WORKFLOW_BUDGET };
+  // budget: null 表示整体关闭预算与修复上限。
+  if (workflow.budget === null) return { tasks: null, tests: null, review_fix_rounds: null };
+  if (typeof workflow.budget !== "object" || Array.isArray(workflow.budget)) {
+    throw new WorkflowConfigError(`${WORKFLOW_CONFIG_PATH} 的 workflow.budget 必须是 object 或 null`);
+  }
+  return workflowBudgetFromObject(workflow.budget as Record<string, unknown>);
 }
 
 function isWorkflowHost(value: unknown): value is WorkflowHost {

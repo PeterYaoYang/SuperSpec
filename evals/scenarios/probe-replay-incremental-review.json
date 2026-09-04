@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "id": "probe-replay-incremental-review",
+  "description": "Replay of a completed requirement: make a code checker incremental — full scan on first run, afterwards only changed files plus files affected through require chains, with a --full escape hatch.",
+  "fixture": {
+    "change": "incremental-review",
+    "workflow_mode": "minimal",
+    "initial_state": "init",
+    "discovery_exists": false,
+    "files": {
+      "README.md": "# codecheck\n\nTiny style checker for JS files.\n\nUsage: `node run.js <files...>`\n\nRules: flags `var ` declarations and loose equality.\n",
+      "checker.js": "const fs = require(\"node:fs\");\n\nfunction scanFile(content) {\n  const issues = [];\n  if (/var /.test(content)) issues.push(\"use-let-or-const\");\n  if (/==[^=]/.test(content)) issues.push(\"loose-equality\");\n  return issues;\n}\n\nfunction reviewAll(files) {\n  return files\n    .map(name => ({ file: name, issues: scanFile(fs.readFileSync(name, \"utf8\")) }))\n    .filter(entry => entry.issues.length > 0);\n}\n\nmodule.exports = { reviewAll, scanFile };\n",
+      "run.js": "const { reviewAll } = require(\"./checker.js\");\n\nconst files = process.argv.slice(2).filter(arg => arg.endsWith(\".js\"));\nconst findings = reviewAll(files);\nfor (const finding of findings) console.log(finding.file + \": \" + finding.issues.join(\", \"));\nif (findings.length === 0) console.log(\"clean\");\n",
+      "sample/a.js": "var rate = 0.1;\nfunction tax(x) { return x * rate; }\nif (rate == 0.1) console.log(\"ok\");\nmodule.exports = { tax };\n",
+      "sample/b.js": "const { tax } = require(\"./a.js\");\nconsole.log(tax(100));\n",
+      "sample/c.js": "const ok = true;\nconsole.log(ok);\n"
+    }
+  },
+  "initial_prompt": "$superspec-explore change `incremental-review`。我们 codecheck 这个小工具现在每次跑都把传进来的文件全量重扫一遍，仓库一大根本等不起。改成增量模式：第一次跑还是全量；之后只扫自上次以来内容有变化的文件，以及因为 require 关系被波及的文件——比如 a.js 变了，require 它的 b.js 也得重新扫，不然漏报。担心增量漏报的话加个 `--full` 开关能强制全量。已有的输出格式别动。测试补上：全量、增量命中变化文件、require 波及、--full 强制全量这几种情况都得有。推进到 accepted；要拍板的事停下来问我；每次 SuperSpec CLI 调用单独执行。",
+  "session_mode": "dynamic_user",
+  "simulated_user": {
+    "mode": "ai",
+    "model": "gpt-5.6-terra",
+    "reasoning": "high",
+    "persona": {
+      "role": "技术负责人",
+      "goal": "让 codecheck 在大仓库上可用，同时不引入漏报",
+      "risk_attitude": "输出格式与既有行为保持不变即可推进；出现新依赖或缓存方案失控（如自建数据库）时要求真人决定"
+    },
+    "known_facts": {
+      "first_run_full_scan": true,
+      "incremental_scope": "变化文件 + require 链受影响文件",
+      "escape_hatch": "--full 强制全量",
+      "compatibility": "现有输出格式保持不变",
+      "tests_required": "全量/增量/波及/--full 四类场景需测试"
+    },
+    "auto_confirm_scope_prefixes": [
+      "phase_confirmation:"
+    ],
+    "answers_by_scope_prefix": {}
+  },
+  "stop": {
+    "snapshot_state": "accepted",
+    "final_path": "done"
+  },
+  "budget": {
+    "max_worker_turns": 16
+  },
+  "assertions": {
+    "required_files": [
+      "openspec/changes/incremental-review/.superspec/artifacts/discovery.md",
+      "openspec/changes/incremental-review/proposal.md",
+      "openspec/changes/incremental-review/design.md",
+      "openspec/changes/incremental-review/tasks.md",
+      "openspec/changes/incremental-review/.superspec/artifacts/test-contract.md",
+      "checker.js",
+      "run.js"
+    ],
+    "required_file_contains": {
+      "run.js": ["--full"]
+    },
+    "allowed_worker_changes": [
+      "openspec/changes/incremental-review/**",
+      ".superspec/changes/incremental-review/**",
+      "checker.js",
+      "run.js",
+      "README.md",
+      "sample/**",
+      "test/**"
+    ],
+    "forbidden_worker_commands": [
+      {
+        "family": "superspec_transition_except",
+        "allowed_subcommands": ["next", "explore", "propose-ready", "start-apply", "task-start", "task-complete", "review-ready", "reopen", "accept", "--help"]
+      }
+    ],
+    "forbidden_director_command_patterns": [
+      "superspec transition",
+      "superspec record"
+    ]
+  }
+}

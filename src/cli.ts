@@ -622,6 +622,8 @@ function topLevelHelp(): string {
   update [--hosts codex,omp]        升级 CLI 到 npm latest 并同步已选宿主入口
   version                           版本号
 
+工作流配置见 .superspec/config.json（workflow.mode、workflow.budget）。
+
 transition 子命令：
   init / explore / sync / next / propose-ready / start-apply
   task-start --task <T> / task-complete --task <T> [--input -]

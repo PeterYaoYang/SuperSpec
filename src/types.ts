@@ -169,6 +169,7 @@ export interface JobPacketContext {
   unattributed_paths?: string[];
   unknown_attribution_tasks?: string[];
   added_code_paths?: string[];
+  structure_ledger?: StructureChangeLedger;
   code_state_check?: CodeStateCheck;
 }
 
@@ -190,6 +191,7 @@ export interface JobPacket {
   unattributed_paths?: string[];
   unknown_attribution_tasks?: string[];
   added_code_paths?: string[];
+  structure_ledger?: StructureChangeLedger;
   code_state_check?: CodeStateCheck;
   packet_digest: string;
   required_output_kind: string;
@@ -247,7 +249,23 @@ export type OpenSpecValidationProfile =
 export interface PlanningValidationProfile {
   version: 2;
   openspec: OpenSpecValidationProfile;
-  design?: { schema_version: 1 };
+  design?: { schema_version: 1 | 2 };
+}
+
+export interface StructureChangeEntry {
+  id: string;
+  category: string;
+  change: string;
+  basis: string;
+  decision: string;
+}
+
+export interface StructureChangeLedger {
+  present: boolean;
+  none: boolean;
+  entries: StructureChangeEntry[];
+  /** 标题存在但表格无法解析时的原因；有值时 entries 为空。 */
+  format_error?: string;
 }
 
 // transition_commit payload 格式

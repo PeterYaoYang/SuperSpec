@@ -68,6 +68,12 @@ const STRICT_DESIGN = [
   "",
 ].join("\n");
 
+const STRUCTURE_LEDGER_NONE_SECTION = "\n\n## 结构变更清单\n\n无\n";
+
+function appendStructureLedgerNone(design: string): string {
+  return design.includes("## 结构变更清单") ? design : `${design.trimEnd()}${STRUCTURE_LEDGER_NONE_SECTION}`;
+}
+
 function setupExplore(): { projectRoot: string; change: string; changeRoot: string; cleanup: () => void } {
   const projectRoot = mkdtempSync(join(tmpdir(), "superspec-p2-"));
   const change = "test-change";
@@ -771,6 +777,7 @@ test("next 在 propose 待用户确认问题优先于审查 job", () => {
       "- [x] DEC-001 是否兼容旧 API？",
     ].join("\n"));
     writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "test-contract.md"), "# Test Contract\n");
+    writeFileSync(join(fx.changeRoot, "design.md"), appendStructureLedgerNone("# Design\n"));
 
     const afterConfirmed = next(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(afterConfirmed.path, "required_job");
@@ -1597,6 +1604,7 @@ test("next 在 propose 不让非阶段 open job 抢占正常推进", () => {
       created_from_transition: "apply",
     });
     writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "test-contract.md"), "# Test Contract\n");
+    writeFileSync(join(fx.changeRoot, "design.md"), appendStructureLedgerNone("# Design\n"));
 
     const result = next(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(result.path, "next_command");
@@ -1612,6 +1620,7 @@ test("next 在 propose 不把 tasks 普通 checklist 解析成设计决定", () 
     assert.equal(entered.to_state, "propose");
     writeFileSync(join(fx.changeRoot, "tasks.md"), "# Tasks\n\n- [ ] TASK-001 tdd_required:true\n");
     writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "test-contract.md"), "# Test Contract\n");
+    writeFileSync(join(fx.changeRoot, "design.md"), appendStructureLedgerNone("# Design\n"));
 
     const result = next(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(result.path, "material_update_required");
@@ -2432,7 +2441,7 @@ test("propose-ready：有待用户确认问题时不创建审查 job", () => {
     "- [ ] DEC-001 是否保留兼容层？",
   ].join("\n"));
   writeFileSync(join(changeRoot, "tasks.md"), DOCUMENTATION_TASKS);
-  writeFileSync(join(changeRoot, "design.md"), "# Design\n");
+  writeFileSync(join(changeRoot, "design.md"), appendStructureLedgerNone("# Design\n"));
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "discovery.md"), "# Discovery\n");
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");
   ensureChangeLayout(projectRoot, change);
@@ -2472,7 +2481,7 @@ test("propose-ready：已确认项不阻断审查 job 创建", () => {
     "- [x] DEC-001 已确认兼容策略",
   ].join("\n"));
   writeFileSync(join(changeRoot, "tasks.md"), DOCUMENTATION_TASKS);
-  writeFileSync(join(changeRoot, "design.md"), "# Design\n");
+  writeFileSync(join(changeRoot, "design.md"), appendStructureLedgerNone("# Design\n"));
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "discovery.md"), "# Discovery\n");
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");
   ensureChangeLayout(projectRoot, change);
@@ -2564,6 +2573,28 @@ test("propose-ready 与 start-apply：格式预检先于审查 job，拒绝重�
   }
 });
 
+test("历史 strict round：profile 无 design 字段时不检查稳定标题也不要求结构变更清单", () => {
+  const fx = setupPropose();
+  try {
+    writeFileSync(join(fx.projectRoot, "openspec", "config.yaml"), "schema: spec-driven\n");
+    const legacyProfile = planningValidationProfileForNewRound(fx.projectRoot);
+    delete (legacyProfile as { design?: unknown }).design;
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "transition_commit", {
+      transition: "propose", from_state: "explore", to_state: "propose",
+      outcome: "advanced", created_job_ids: [], reason: "seed legacy strict propose",
+      planning_validation_version: 2,
+      planning_validation_profile: legacyProfile,
+    }, { transitionId: "T-legacy-strict-propose", idempotencyKey: "legacy-strict-propose" }));
+    writeFileSync(join(fx.changeRoot, "design.md"), "# Design\n\n没有稳定标题也没有清单的旧 design\n");
+
+    const result = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.doesNotMatch(result.message, /稳定结构标题/);
+    assert.doesNotMatch(result.message, /结构变更清单/);
+  } finally {
+    fx.cleanup();
+  }
+});
+
 test("已初始化 v2 工作流：propose-ready 与 start-apply 解析执行依据文件和锚点", () => {
   const fx = setupPropose();
   try {
@@ -2584,7 +2615,7 @@ test("已初始化 v2 工作流：propose-ready 与 start-apply 解析执行依�
       "|---|---|",
       "| src/a.ts | 验证引用解析 |",
     ].join("\n"));
-    writeFileSync(join(fx.changeRoot, "design.md"), "# Design\n");
+    writeFileSync(join(fx.changeRoot, "design.md"), appendStructureLedgerNone("# Design\n"));
     writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "test-contract.md"), "# Test Contract\n");
     writeFileSync(join(fx.changeRoot, "tasks.md"), [
       "# Tasks",
@@ -2646,7 +2677,7 @@ test("历史 v2 strict planning round 不追溯要求新版 design 结构", () =
       "|---|---|",
       "| src/a.ts | Historical compatibility |",
     ].join("\n"));
-    writeFileSync(join(fx.changeRoot, "design.md"), "# Design\n\n## Route\n");
+    writeFileSync(join(fx.changeRoot, "design.md"), STRICT_DESIGN + "\n\n## Route\n");
     writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "test-contract.md"), "# Test Contract\n");
     writeFileSync(join(fx.changeRoot, "tasks.md"), [
       "# Tasks",
@@ -2661,7 +2692,7 @@ test("历史 v2 strict planning round 不追溯要求新版 design 结构", () =
     ].join("\n"));
 
     const result = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
-    assert.doesNotMatch(result.message, /design\.md .*稳定结构|design\.md 缺少稳定结构标题/);
+    assert.doesNotMatch(result.message, /结构变更清单/);
   } finally {
     fx.cleanup();
   }
@@ -2674,7 +2705,7 @@ test("propose-ready --risk normal：基础职责全满足 + critic accepted → 
   mkdirSync(join(changeRoot, ".superspec", "artifacts"), { recursive: true });
   writeFileSync(join(changeRoot, "proposal.md"), "# Proposal\n");
   writeFileSync(join(changeRoot, "tasks.md"), DOCUMENTATION_TASKS);
-  writeFileSync(join(changeRoot, "design.md"), "# Design\n");
+  writeFileSync(join(changeRoot, "design.md"), appendStructureLedgerNone("# Design\n"));
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "discovery.md"), "# Discovery\n");
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");
   ensureChangeLayout(projectRoot, change);
@@ -2714,7 +2745,7 @@ test("propose-ready strict 配置：创建 critic + architect + test 审核工�
   mkdirSync(join(changeRoot, ".superspec", "artifacts"), { recursive: true });
   writeFileSync(join(changeRoot, "proposal.md"), "# Proposal\n");
   writeFileSync(join(changeRoot, "tasks.md"), DOCUMENTATION_TASKS);
-  writeFileSync(join(changeRoot, "design.md"), "# Design\n");
+  writeFileSync(join(changeRoot, "design.md"), appendStructureLedgerNone("# Design\n"));
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "discovery.md"), "# Discovery\n");
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");
   ensureChangeLayout(projectRoot, change);
@@ -2818,7 +2849,7 @@ test("propose reviewer freshness：单文档变化只重启职责角色", () => 
     },
     {
       name: "design",
-      mutate: changeRoot => writeFileSync(join(changeRoot, "design.md"), "# Design\n\nchanged\n"),
+      mutate: changeRoot => writeFileSync(join(changeRoot, "design.md"), appendStructureLedgerNone("# Design\n\nchanged\n")),
       staleRoles: ["architect"],
     },
     {
@@ -2844,7 +2875,7 @@ test("propose reviewer freshness：单文档变化只重启职责角色", () => 
   for (const scenario of cases) {
     const fx = setupPropose();
     try {
-      writeFileSync(join(fx.changeRoot, "design.md"), "# Design\n");
+      writeFileSync(join(fx.changeRoot, "design.md"), appendStructureLedgerNone("# Design\n"));
       writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");
       mkdirSync(join(fx.changeRoot, "specs", "auth"), { recursive: true });
       writeFileSync(join(fx.changeRoot, "specs", "auth", "spec.md"), "# Spec\n");
@@ -2880,7 +2911,7 @@ test("propose reviewer retry：只继承当前 gate 的同角色 findings", () =
   try {
     confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     assert.equal(transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal").to_state, "propose");
-    writeFileSync(join(fx.changeRoot, "design.md"), "# Design\n");
+    writeFileSync(join(fx.changeRoot, "design.md"), appendStructureLedgerNone("# Design\n"));
     writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");
 
     const first = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "strict");
@@ -2901,7 +2932,7 @@ test("propose reviewer retry：只继承当前 gate 的同角色 findings", () =
     }
 
     writeFileSync(join(fx.changeRoot, "proposal.md"), "# Proposal\n\nchanged\n");
-    writeFileSync(join(fx.changeRoot, "design.md"), "# Design\n\nchanged\n");
+    writeFileSync(join(fx.changeRoot, "design.md"), appendStructureLedgerNone("# Design\n\nchanged\n"));
     writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n\nchanged\n");
 
     const retry = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "strict");
@@ -2930,7 +2961,7 @@ test("propose review override：只裁决 rejected 角色，其他角色仍须 a
   try {
     confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     assert.equal(transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal").to_state, "propose");
-    writeFileSync(join(fx.changeRoot, "design.md"), "# Design\n");
+    writeFileSync(join(fx.changeRoot, "design.md"), appendStructureLedgerNone("# Design\n"));
     writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");
     const created = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "strict");
     assert.equal(created.created_jobs.length, 3);
@@ -2990,7 +3021,7 @@ test("review gate：更新的 rejected terminal 不能被旧 accepted job 越过
   try {
     confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     assert.equal(transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal").to_state, "propose");
-    writeFileSync(join(fx.changeRoot, "design.md"), "# Design\n");
+    writeFileSync(join(fx.changeRoot, "design.md"), appendStructureLedgerNone("# Design\n"));
     writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");
     const first = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     const acceptedJobId = first.created_jobs[0];
@@ -3034,7 +3065,7 @@ test("phase confirmation：start-apply 复用 propose-ready 冻结的 strict mod
   try {
     confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     assert.equal(transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal").to_state, "propose");
-    writeFileSync(join(fx.changeRoot, "design.md"), "# Design\n");
+    writeFileSync(join(fx.changeRoot, "design.md"), appendStructureLedgerNone("# Design\n"));
     writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");
     const strict = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "strict");
     assert.equal(strict.created_jobs.length, 3);
@@ -3085,7 +3116,7 @@ test("phase confirmation：角色 recheck 不丢失原 required role 的 overrid
   try {
     confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     assert.equal(transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal").to_state, "propose");
-    writeFileSync(join(fx.changeRoot, "design.md"), "# Design\n");
+    writeFileSync(join(fx.changeRoot, "design.md"), appendStructureLedgerNone("# Design\n"));
     writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");
     const strict = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "strict");
     let criticJobId = "";
@@ -3114,7 +3145,7 @@ test("phase confirmation：角色 recheck 不丢失原 required role 的 overrid
     assert.notEqual(criticJobId, "");
     assert.equal(proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "strict").to_state, "propose_ready");
 
-    writeFileSync(join(fx.changeRoot, "design.md"), "# Design\n\nrecheck\n");
+    writeFileSync(join(fx.changeRoot, "design.md"), appendStructureLedgerNone("# Design\n\nrecheck\n"));
     const recheck = startApply(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(recheck.outcome, "job_created");
     assert.equal(recheck.created_jobs.length, 1);
@@ -3144,7 +3175,7 @@ test("propose reviewer history：legacy 无 gate_id 的同角色失败仍可继�
   try {
     confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     assert.equal(transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal").to_state, "propose");
-    writeFileSync(join(fx.changeRoot, "design.md"), "# Design\n");
+    writeFileSync(join(fx.changeRoot, "design.md"), appendStructureLedgerNone("# Design\n"));
     writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");
     const legacy = appendOpenJob(fx.projectRoot, fx.change, "propose", {
       job_id: "JOB-legacy-propose-history",
@@ -3223,7 +3254,7 @@ test("propose-ready strict：同一 gate 下 critic 不能满足 architect 或 t
   try {
     confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal");
-    writeFileSync(join(fx.changeRoot, "design.md"), "# Design\n");
+    writeFileSync(join(fx.changeRoot, "design.md"), appendStructureLedgerNone("# Design\n"));
     writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");
 
     const normal = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
@@ -3243,7 +3274,7 @@ test("propose-ready normal：旧 accepted critic job 无 gate_id 仍可满足最
   try {
     confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal");
-    writeFileSync(join(fx.changeRoot, "design.md"), "# Design\n");
+    writeFileSync(join(fx.changeRoot, "design.md"), appendStructureLedgerNone("# Design\n"));
     writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");
 
     const job = appendOpenJob(fx.projectRoot, fx.change, "propose", {
@@ -3272,7 +3303,7 @@ test("legacy propose job：已取消历史绑定路径缺失时仅 stale，且�
   try {
     confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal");
-    writeFileSync(join(fx.changeRoot, "design.md"), "# Design\n");
+    writeFileSync(join(fx.changeRoot, "design.md"), appendStructureLedgerNone("# Design\n"));
     writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");
     const legacyPath = ".superspec/artifacts/business-invariants.md";
     writeFileSync(join(fx.changeRoot, legacyPath), "# Legacy\n");
@@ -3333,7 +3364,7 @@ test("propose-ready strict：explore 阶段 critic accepted 不能满足 proposa
     const second = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "strict");
     assert.equal(second.to_state, "propose");
 
-    writeFileSync(join(fx.changeRoot, "design.md"), "# Design\n");
+    writeFileSync(join(fx.changeRoot, "design.md"), appendStructureLedgerNone("# Design\n"));
     writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");
 
     const result = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "strict");
@@ -3350,7 +3381,7 @@ test("完整 e2e（Phase 2）：init→explore→写 discovery→propose→propo
   mkdirSync(join(changeRoot, ".superspec", "artifacts"), { recursive: true });
   writeFileSync(join(changeRoot, "proposal.md"), "# Proposal\n");
   writeFileSync(join(changeRoot, "tasks.md"), DOCUMENTATION_TASKS);
-  writeFileSync(join(changeRoot, "design.md"), "# Design\n");
+  writeFileSync(join(changeRoot, "design.md"), appendStructureLedgerNone("# Design\n"));
   ensureChangeLayout(projectRoot, change);
 
   try {
@@ -3425,10 +3456,40 @@ test("architect 审查时 design 缺失：新建后仅 architect accepted job �
   const fx = setupPropose();
   try {
     confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "normal");
-    assert.equal(transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal").to_state, "propose");
+    mkdirSync(join(fx.changeRoot, "specs", "demo"), { recursive: true });
+    writeFileSync(join(fx.changeRoot, "specs", "demo", "spec.md"), [
+      "## ADDED Requirements",
+      "",
+      "### Requirement: demo",
+      "demo behavior",
+      "",
+    ].join("\n"));
+    writeFileSync(join(fx.changeRoot, "proposal.md"), [
+      "# Proposal",
+      "",
+      "## Impact",
+      "",
+      "| Area | Reason |",
+      "|---|---|",
+      "| api | demo |",
+      "",
+    ].join("\n"));
+    writeFileSync(join(fx.changeRoot, "tasks.md"), "# Tasks\n\n- [ ] TASK-001 Documentation fixture\n");
+    writeFileSync(join(fx.projectRoot, "openspec", "config.yaml"), "schema: spec-driven\n");
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "transition_commit", {
+      transition: "propose",
+      from_state: "explore",
+      to_state: "propose",
+      outcome: "advanced",
+      created_job_ids: [],
+      // 历史 planning round：没有冻结 profile，按 v1 回放。v2 round 会在 design 缺失时直接拦截，
+      // 因此“design 缺失仍创建 architect job”只可能发生在这类历史 round 上。
+      reason: "legacy propose round for missing-design fixture",
+    }, { transitionId: "T-propose-legacy", idempotencyKey: "propose-legacy-key" }));
     writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");
 
-    assert.equal(proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "strict").created_jobs.length, 3);
+    const blocked = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "strict");
+    assert.equal(blocked.created_jobs.length, 3, blocked.message);
     const firstJobId = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot).open_jobs
       .find(job => job.role === "architect")?.job_id;
     assert.ok(firstJobId);
@@ -3439,7 +3500,7 @@ test("architect 审查时 design 缺失：新建后仅 architect accepted job �
     });
     acceptAllProposeJobs(fx);
 
-    writeFileSync(join(fx.changeRoot, "design.md"), "# Design\n");
+    writeFileSync(join(fx.changeRoot, "design.md"), appendStructureLedgerNone(STRICT_DESIGN));
     assert.deepEqual(
       rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot).accepted_jobs
         .filter(job => job.created_from_transition === "propose-ready")
@@ -3462,7 +3523,7 @@ test("CLI status：区分 fresh/historical/stale accepted jobs", () => {
   mkdirSync(join(changeRoot, ".superspec", "artifacts"), { recursive: true });
   writeFileSync(join(changeRoot, "proposal.md"), "# Proposal\noriginal");
   writeFileSync(join(changeRoot, "tasks.md"), DOCUMENTATION_TASKS);
-  writeFileSync(join(changeRoot, "design.md"), "# Design\n");
+  writeFileSync(join(changeRoot, "design.md"), appendStructureLedgerNone("# Design\n"));
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "discovery.md"), "# Discovery\n");
   writeFileSync(join(changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");
   ensureChangeLayout(projectRoot, change);
@@ -3504,7 +3565,7 @@ test("CLI status：区分 fresh/historical/stale accepted jobs", () => {
 
 function setupProposeWithSpecs(): ReturnType<typeof setupPropose> {
   const fx = setupPropose();
-  writeFileSync(join(fx.changeRoot, "design.md"), "# Design\n");
+  writeFileSync(join(fx.changeRoot, "design.md"), appendStructureLedgerNone("# Design\n"));
   writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");
   mkdirSync(join(fx.changeRoot, "specs", "auth"), { recursive: true });
   writeFileSync(join(fx.changeRoot, "specs", "auth", "spec.md"), "# Auth Spec\n\n## ADDED Requirements\n");
@@ -3597,7 +3658,7 @@ test("specs freshness：删除 specs 文件同样作废审查", () => {
 test("specs freshness：审查时无 specs 目录、通过后新建 specs 同样作废审查", () => {
   const fx = setupPropose();
   try {
-    writeFileSync(join(fx.changeRoot, "design.md"), "# Design\n");
+    writeFileSync(join(fx.changeRoot, "design.md"), appendStructureLedgerNone("# Design\n"));
     writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");
     confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal");

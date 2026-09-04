@@ -19,9 +19,11 @@ import {
 import {
   CODE_REVIEW_DECISION_ANSWER_LABELS,
   CODE_REVIEW_DECISION_SCOPE_PREFIX,
+  codeReviewFindingNeedsUserDecision,
   codeReviewJobStaleReason,
   codeReviewDecisionAnswerLabel,
   currentCodeReviewWorkingPaths,
+  isReviewFixCapReached,
   latestCodeReviewFailedStatus,
   normalizeCodeReviewDecisionAnswer,
   parseCodeReviewDecisionScope,
@@ -1372,8 +1374,9 @@ function recordUserDecisionLoaded(
     const changeRoot = openspecChangeRoot(projectRoot, change);
     const snapshot = rebuildSnapshot(projectRoot, change, changeRoot);
     const status = latestCodeReviewFailedStatus(events);
+    const reviewFixCapReached = isReviewFixCapReached(projectRoot, events);
     const finding = ref && status?.terminal.job.job_id === ref.jobId
-      ? status.findings.find(item => item.id === ref.findingId && (item.type === "spec" || item.type === "mixed"))
+      ? status.findings.find(item => item.id === ref.findingId && codeReviewFindingNeedsUserDecision(item.type, reviewFixCapReached))
       : null;
     const staleReason = status && ref && status.terminal.job.job_id === ref.jobId
       ? codeReviewJobStaleReason(projectRoot, status.terminal.job, currentCodeReviewWorkingPaths(projectRoot, events), events)
@@ -1571,6 +1574,7 @@ function packetFieldDescriptions(): Record<string, string> {
     changed_paths_partial_reason: "该任务（task）的提交段 diff 失败原因；存在时 changed_paths 只包含工作区对比结果，归属可能不完整。",
     unattributed_paths: "代码审查范围中暂时无法归属到某个任务（task）的文件。",
     added_code_paths: "相对本次代码审查基点新建的代码文件，供判断是否服务已批准行为。",
+    structure_ledger: "design.md 中已批准的结构变更清单；清单是已批准结构的边界，清单外结构按 unjustified_addition 处理。",
     claim_kind: "阻塞问题相对已批准计划的关系：漏做、破坏已有行为、或计划或验收没有要求的改动。",
     approved_refs: "指向当前 change 已批准材料的引用；引擎只检查能否解析，apply 漏做还需要 TEST 或 spec Requirement。",
     unknown_attribution_tasks: "因为缺少边界快照或提交段 diff 失败而无法完整计算改动归属的任务（task）。",
@@ -1624,6 +1628,7 @@ export function jobsPacket(
         ...(packetContext?.unattributed_paths ? { unattributed_paths: packetContext.unattributed_paths } : {}),
         ...(packetContext?.unknown_attribution_tasks ? { unknown_attribution_tasks: packetContext.unknown_attribution_tasks } : {}),
         ...(packetContext?.added_code_paths ? { added_code_paths: packetContext.added_code_paths } : {}),
+        ...(packetContext?.structure_ledger ? { structure_ledger: packetContext.structure_ledger } : {}),
         ...(packetContext?.code_state_check ? { code_state_check: packetContext.code_state_check } : {}),
         packet_digest: job.packet_digest,
         required_output_kind: "job_report_json",

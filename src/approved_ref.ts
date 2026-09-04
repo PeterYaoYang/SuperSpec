@@ -2,7 +2,7 @@
 
 import { readFileSync, statSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import { parseTasksMd, parseTestContractEntries } from "./format.ts";
+import { headingExists, parseTasksMd, parseTestContractEntries, parseStructureChangeLedger } from "./format.ts";
 import type { CodeReviewClaimKind } from "./types.ts";
 
 export const CODE_REVIEW_CLAIM_KINDS = [
@@ -12,9 +12,10 @@ export const CODE_REVIEW_CLAIM_KINDS = [
 ] as const;
 
 const TEST_ID_RE = /^TEST-[A-Za-z0-9_-]+$/;
+const STRUCTURE_LEDGER_ID_RE = /^SC-[A-Za-z0-9_-]+$/;
 const TEST_CONTRACT_REL = join(".superspec", "artifacts", "test-contract.md");
 
-export type ApprovedRefKind = "test" | "requirement" | "task" | "design" | "proposal";
+export type ApprovedRefKind = "test" | "requirement" | "task" | "design" | "proposal" | "structure";
 
 export interface ResolvedApprovedRef {
   raw: string;
@@ -22,18 +23,9 @@ export interface ResolvedApprovedRef {
   short: string;
 }
 
-function escapeRegex(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 function isPathInside(root: string, target: string): boolean {
   const rel = relative(root, target);
   return rel !== "" && !rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel);
-}
-
-function headingExists(content: string, title: string): boolean {
-  const heading = new RegExp(`^#{1,6}[\\t ]+${escapeRegex(title)}(?:[\\t ]+#+)?[\\t ]*$`, "m");
-  return heading.test(content);
 }
 
 function shortTestId(raw: string): string | null {
@@ -117,6 +109,13 @@ export function resolveApprovedRef(changeRoot: string, raw: unknown): { ok: true
   }
 
   if (path === "design.md") {
+    if (STRUCTURE_LEDGER_ID_RE.test(anchor)) {
+      const ledger = parseStructureChangeLedger(content);
+      if (ledger.present && ledger.entries.some(entry => entry.id === anchor)) {
+        return { ok: true, value: { raw: ref, kind: "structure", short: anchor } };
+      }
+      return { ok: false, reason: `design.md 结构变更清单中不存在 ${anchor}` };
+    }
     if (!headingExists(content, anchor)) return { ok: false, reason: `design.md 中不存在标题「${anchor}」` };
     return { ok: true, value: { raw: ref, kind: "design", short: anchor } };
   }

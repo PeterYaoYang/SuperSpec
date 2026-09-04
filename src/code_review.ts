@@ -15,8 +15,10 @@ import {
   projectHasReadableDirectory,
   walkCodeFiles,
 } from "./git_state.ts";
-import { parseExecutionRequirements, parseTestContractEntries } from "./format.ts";
-import type { BoundarySnapshot, CodeReviewGateEvidence, CodeReviewResultKind, CodeReviewScope, CodeStateCheck, CoverageExemptionRef, DirtyFileFingerprint, Event, Job, JobPacketContext, Ref, ReviewPreviousRejection, TaskAttempt, TaskExecutionIndexEntry } from "./types.ts";
+import { parseExecutionRequirements, parseTestContractEntries, parseStructureChangeLedger } from "./format.ts";
+import type { BoundarySnapshot, CodeReviewGateEvidence, CodeReviewResultKind, CodeReviewScope, CodeStateCheck, CoverageExemptionRef, DirtyFileFingerprint, Event, Job, JobPacketContext, Ref, ReviewPreviousRejection, TaskAttempt, TaskExecutionIndexEntry, StructureChangeLedger } from "./types.ts";
+import { planningValidationProfileForCurrentRound } from "./propose_round.ts";
+import { workflowBudgetForRisk, workflowRiskForApplyRound, workflowRiskForProject } from "./workflow_config.ts";
 
 export const CODE_REVIEW_REPAIR_SCOPE_PREFIX = "code_reviewer_report_repair:";
 export const CODE_REVIEW_DECISION_SCOPE_PREFIX = "code_review_decision:";
@@ -477,6 +479,15 @@ export function addedCodePathsForScope(projectRoot: string, scope: CodeReviewSco
   return [...added].sort();
 }
 
+function structureLedgerForCodeReview(changeRoot: string, events: Event[]): StructureChangeLedger | undefined {
+  // 只有 v2 planning round 才有清单契约；v1 change 不写该字段，保持旧 packet 形态。
+  if (planningValidationProfileForCurrentRound(events)?.design?.schema_version !== 2) return undefined;
+  const designPath = join(changeRoot, "design.md");
+  if (!existsSync(designPath)) return undefined;
+  const ledger = parseStructureChangeLedger(readFileSync(designPath, "utf8"));
+  return ledger.present ? ledger : undefined;
+}
+
 export function codeReviewPacketContext(changeRoot: string, projectRoot: string, scope: CodeReviewScope, events: Event[]): JobPacketContext {
   const taskExecutionIndex = taskExecutionIndexFromEvents(projectRoot, events);
   // changed_paths 未知（快照缺失）或不完整（committed 段 diff 失败）的 task
@@ -489,6 +500,7 @@ export function codeReviewPacketContext(changeRoot: string, projectRoot: string,
   for (const item of taskExecutionIndex) {
     for (const path of item.changed_paths ?? []) attributedPaths.add(path);
   }
+  const structureLedger = structureLedgerForCodeReview(changeRoot, events);
   return {
     code_review_scope: scope,
     coverage_exemption_refs: coverageExemptionRefs(changeRoot, events),
@@ -496,6 +508,7 @@ export function codeReviewPacketContext(changeRoot: string, projectRoot: string,
     unattributed_paths: scope.review_paths.filter(path => !attributedPaths.has(path)).sort(),
     unknown_attribution_tasks: unknownAttributionTasks,
     added_code_paths: addedCodePathsForScope(projectRoot, scope),
+    ...(structureLedger ? { structure_ledger: structureLedger } : {}),
   };
 }
 
@@ -699,6 +712,43 @@ function codeReviewResultKind(value: unknown): CodeReviewResultKind | undefined 
 
 export function codeReviewDecisionScope(jobId: string, findingId: string): string {
   return `${CODE_REVIEW_DECISION_SCOPE_PREFIX}${jobId}#${findingId}`;
+}
+
+// ===== review-fix 自动修复上限 =====
+//
+// next / reopen --review-fix / record user-decision 三处必须得出同一个结论，
+// 否则会出现 next 要求使用者决策而 CLI 直调仍自动放行的分叉。这里是唯一判定入口。
+
+/** 自当前 Apply round 的 start-apply 起，带 review_fix_of 的 reopen 次数。 */
+export function countReviewFixReopensSinceStartApply(events: readonly Event[]): number {
+  let startIndex = -1;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i];
+    if (ev.event_type !== "transition_commit") continue;
+    const payload = ev.payload as { transition?: unknown; to_state?: unknown };
+    if (payload.transition === "start-apply" && payload.to_state === "apply") { startIndex = i; break; }
+  }
+  if (startIndex < 0) return 0;
+  let count = 0;
+  for (const ev of events.slice(startIndex + 1)) {
+    if (ev.event_type !== "transition_commit") continue;
+    const payload = ev.payload as { review_fix_of?: unknown };
+    if (typeof payload.review_fix_of === "string" && payload.review_fix_of.trim() !== "") count++;
+  }
+  return count;
+}
+
+/** 上限是否生效按 Apply round 在 start-apply 冻结的档位判断（minimal 忽略），未冻结时回落项目配置。 */
+export function isReviewFixCapReached(projectRoot: string, events: readonly Event[]): boolean {
+  const risk = workflowRiskForApplyRound(events as Event[], workflowRiskForProject(projectRoot));
+  const budget = workflowBudgetForRisk(projectRoot, risk);
+  if (!budget || budget.review_fix_rounds === null) return false;
+  return countReviewFixReopensSinceStartApply(events) >= budget.review_fix_rounds;
+}
+
+/** spec / mixed 问题始终交使用者决策；implementation 问题只在自动修复触顶后交使用者决策。 */
+export function codeReviewFindingNeedsUserDecision(type: string | undefined, reviewFixCapReached: boolean): boolean {
+  return type === "spec" || type === "mixed" || (type === "implementation" && reviewFixCapReached);
 }
 
 export interface CodeReviewDecisionScopeRef {

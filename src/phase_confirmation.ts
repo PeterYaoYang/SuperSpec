@@ -5,7 +5,7 @@ import { historicalProposeReadyRoles, reviewEvidenceDigest, reviewGateRoleResolu
 import { EXPLORE_DISCOVERY_REVIEW_GATE, PROPOSE_FINAL_REVIEW_GATE, type ReviewGateRule } from "./review_job_gates.ts";
 import { changeRoot as openspecChangeRoot } from "./openspec.ts";
 import { findLatestEvent, sha256Text } from "./store.ts";
-import { parseExecutionRequirements, parseTasksMd, parseTestContractEntries, type ParsedTask } from "./format.ts";
+import { parseExecutionRequirements, parseTasksMd, parseTestContractEntries, parseStructureChangeLedger, formatStructureChangeLedgerSummary, type ParsedTask } from "./format.ts";
 import type { AskUser, AskUserAction, Event, JobRole, Snapshot, State } from "./types.ts";
 import {
   hasFrozenWorkflowModeForProposeRound,
@@ -104,7 +104,13 @@ function proposeTaskDeliverySummary(changeRoot: string): string | null {
   const status = completedCount === 0
     ? ""
     : `已完成 ${completedCount} 项；${pendingTasks.length === 0 ? "当前没有待实施任务。" : `以下 ${pendingTasks.length} 项仍待实施或调整。`}\n\n`;
-  return `执行计划概览\n\n${status}${items.join("\n\n")}`;
+  const taskSummary = `执行计划概览\n\n${status}${items.join("\n\n")}`;
+
+  const designPath = join(changeRoot, "design.md");
+  const ledgerSummary = existsSync(designPath)
+    ? formatStructureChangeLedgerSummary(parseStructureChangeLedger(readFileSync(designPath, "utf8")))
+    : null;
+  return ledgerSummary ? `${taskSummary}\n\n${ledgerSummary}` : taskSummary;
 }
 
 export interface PhaseDecisionAction extends AskUserAction {

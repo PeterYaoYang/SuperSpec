@@ -8,9 +8,51 @@ import {
   proposeQuestionKey,
   type ProposeQuestion,
 } from "./format.ts";
-import type { Event } from "./types.ts";
+import type { Event, PlanningValidationProfile } from "./types.ts";
 
 const PROPOSE_ANSWER_REGISTRATION_VERSION = 1;
+
+// ===== planning validation profile =====
+//
+// profile 在进入 propose 的边界事件上冻结，propose-ready 时复制到 propose_ready
+// 事件。所有读取方共用这里的判定，避免各处复制一份而在升级时漏改。
+
+export function isPlanningValidationProfile(value: unknown): value is PlanningValidationProfile {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const profile = value as {
+    version?: unknown;
+    openspec?: { mode?: unknown; config_digest?: unknown };
+    design?: { schema_version?: unknown };
+  };
+  if (profile.version !== 2 || !profile.openspec || typeof profile.openspec !== "object") return false;
+  const designValid = profile.design == null
+    || profile.design.schema_version === 1
+    || profile.design.schema_version === 2;
+  return designValid && (profile.openspec.mode === "disabled" ||
+    profile.openspec.mode === "strict" && typeof profile.openspec.config_digest === "string");
+}
+
+/**
+ * 当前 planning round 的冻结 profile：优先取最近一次 propose-ready 写入的快照，
+ * 否则取进入 propose 的边界事件。两者都没有时是升级前的 v1 change。
+ */
+export function planningValidationProfileForCurrentRound(events: readonly Event[]): PlanningValidationProfile | null {
+  for (let index = events.length - 1; index >= 0; index--) {
+    const event = events[index];
+    if (event.event_type !== "transition_commit") continue;
+    const payload = event.payload as {
+      transition?: unknown;
+      to_state?: unknown;
+      planning_validation_profile?: unknown;
+    };
+    const isReady = payload.transition === "propose-ready" && payload.to_state === "propose_ready";
+    if (!isReady && !isProposeRoundEntry(event)) continue;
+    return isPlanningValidationProfile(payload.planning_validation_profile)
+      ? payload.planning_validation_profile
+      : null;
+  }
+  return null;
+}
 
 interface ProposeRoundEntry {
   event: Event;

@@ -3,10 +3,10 @@
 // 所有可机械判定的文档协议、格式定义和解析逻辑都在这里。skills 只指导
 // 生成与语义判断，不得自行充当格式校验器或在其它地方重复解析。
 
-import { readFileSync, existsSync, realpathSync } from "node:fs";
+import { readFileSync, existsSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { sha256Text } from "./store.ts";
-import { GREEN_ONLY_NO_TDD_REASON, type ExecutionContract, type ExecutionPolicy } from "./types.ts";
+import { GREEN_ONLY_NO_TDD_REASON, type ExecutionContract, type ExecutionPolicy, type StructureChangeEntry, type StructureChangeLedger } from "./types.ts";
 
 // ===== discovery.md =====
 //
@@ -420,6 +420,259 @@ export function collectProposeOpenQuestions(changeRoot: string): { openCount: nu
     openCount: files.reduce((sum, file) => sum + file.openCount, 0),
     files,
   };
+}
+
+// ===== design.md 结构变更清单 =====
+//
+// 格式（状态机校验，propose skill 负责生成）：
+//   ## 结构变更清单
+//   无
+// 或
+//   | ID | 类别 | 变更 | 需求依据 | 决定 |
+//   |---|---|---|---|---|
+//   | SC-001 | 新增持久化结构 | ... | specs/x/spec.md#Requirement: ... | DEC-001 |
+//
+// 需决定类别的依据只接受 specs Requirement 或 TEST；仅展示类别可另接受
+// proposal（Impact 除外）与 discovery 的标题。所有依据都必须能在当前 change 中解析。
+
+export const STRUCTURE_CHANGE_CATEGORIES = [
+  "新增持久化结构",
+  "迁移或回填",
+  "功能开关",
+  "新增公共接口",
+  "删除既有路径",
+  "改既有公共签名",
+  "改变既有数据语义",
+  "新增公共类型",
+] as const;
+
+export type StructureChangeCategory = (typeof STRUCTURE_CHANGE_CATEGORIES)[number];
+
+export const STRUCTURE_DECISION_REQUIRED_CATEGORIES: ReadonlySet<string> = new Set<string>([
+  "新增持久化结构",
+  "迁移或回填",
+  "功能开关",
+  "新增公共接口",
+  "删除既有路径",
+  "改既有公共签名",
+  "改变既有数据语义",
+]);
+
+const STRUCTURE_LEDGER_HEADINGS = ["结构变更清单"] as const;
+const STRUCTURE_LEDGER_COLUMNS = ["ID", "类别", "变更", "需求依据", "决定"] as const;
+const STRUCTURE_LEDGER_ID_RE = /^SC-[A-Za-z0-9_-]+$/;
+const STRUCTURE_LEDGER_NONE_RE = /^\s*无\s*$/;
+const STRUCTURE_TEST_ID_RE = /^TEST-[A-Za-z0-9_-]+$/;
+const DEC_ID_RE = /^DEC-[A-Za-z0-9][A-Za-z0-9_-]*$/;
+const DISPLAY_ONLY_DECISION_MARKERS = new Set(["—", "-", "–"]);
+const STRUCTURE_LEDGER_MISSING_MESSAGE = 'design.md 缺少 ## 结构变更清单；没有结构变更时在该标题下写"无"';
+const STRUCTURE_LEDGER_FORMAT_MESSAGE = `## 结构变更清单 一节只能是"无"或一张含 ${STRUCTURE_LEDGER_COLUMNS.join("、")} 列的表格，其他说明写到别的标题下`;
+
+export function isStructureChangeCategory(value: string): value is StructureChangeCategory {
+  return (STRUCTURE_CHANGE_CATEGORIES as readonly string[]).includes(value);
+}
+
+export function parseStructureChangeLedger(content: string): StructureChangeLedger {
+  const sectionBody = sectionBodyByHeadings(content, STRUCTURE_LEDGER_HEADINGS);
+  if (sectionBody == null) {
+    return { present: false, none: false, entries: [] };
+  }
+  if (STRUCTURE_LEDGER_NONE_RE.test(sectionBody)) {
+    return { present: true, none: true, entries: [] };
+  }
+  const tableLines = sectionBody.split("\n").filter(line => line.trim().startsWith("|"));
+  if (tableLines.length < 2) {
+    return { present: true, none: false, entries: [], format_error: STRUCTURE_LEDGER_FORMAT_MESSAGE };
+  }
+  const header = splitMarkdownTableRow(tableLines[0]);
+  if (header.length === 0 || !isMarkdownTableSeparator(tableLines[1])) {
+    return { present: true, none: false, entries: [], format_error: STRUCTURE_LEDGER_FORMAT_MESSAGE };
+  }
+  const columnIndexes = Object.fromEntries(
+    STRUCTURE_LEDGER_COLUMNS.map(col => [col, header.indexOf(col)]),
+  ) as Record<(typeof STRUCTURE_LEDGER_COLUMNS)[number], number>;
+  if (STRUCTURE_LEDGER_COLUMNS.some(col => columnIndexes[col] < 0)) {
+    return { present: true, none: false, entries: [], format_error: STRUCTURE_LEDGER_FORMAT_MESSAGE };
+  }
+  const entries: StructureChangeEntry[] = [];
+  for (const row of tableLines.slice(2).map(splitMarkdownTableRow).filter(cells => cells.length > 0)) {
+    entries.push({
+      id: (row[columnIndexes.ID] ?? "").trim(),
+      category: (row[columnIndexes["类别"]] ?? "").trim(),
+      change: (row[columnIndexes["变更"]] ?? "").trim(),
+      basis: (row[columnIndexes["需求依据"]] ?? "").trim(),
+      decision: (row[columnIndexes["决定"]] ?? "").trim(),
+    });
+  }
+  if (entries.length === 0) {
+    return { present: true, none: false, entries: [], format_error: STRUCTURE_LEDGER_FORMAT_MESSAGE };
+  }
+  return { present: true, none: false, entries };
+}
+
+export interface StructureChangeLedgerValidation {
+  ok: boolean;
+  errors: string[];
+}
+
+function readChangeDocument(changeRoot: string, relPath: string): string | null {
+  const root = resolve(changeRoot);
+  const target = resolve(root, relPath);
+  if (!isPathInside(root, target)) return null;
+  try {
+    if (!existsSync(target) || !statSync(target).isFile()) return null;
+    return readFileSync(target, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+/** Markdown 标题是否存在（任意层级，允许闭合 #）。供文档引用解析共用。 */
+export function headingExists(content: string, title: string): boolean {
+  const heading = new RegExp(`^#{1,6}[\\t ]+${escapeRegex(title)}(?:[\\t ]+#+)?[\\t ]*$`, "m");
+  return heading.test(content);
+}
+
+function splitBasisRef(basis: string): { path: string; anchor: string } | null {
+  const separator = basis.indexOf("#");
+  if (separator <= 0 || separator === basis.length - 1) return null;
+  return {
+    path: basis.slice(0, separator).replace(/\\/g, "/"),
+    anchor: basis.slice(separator + 1).trim(),
+  };
+}
+
+/**
+ * 结构变更清单"需求依据"的唯一解析入口。与 approved_refs 的解析分开：
+ * 这里接受 discovery 标题、拒绝 proposal.md#Impact，且按类别收紧允许集。
+ */
+export function resolveStructureBasisRef(
+  changeRoot: string,
+  raw: unknown,
+  category: string,
+): { ok: true; value: string } | { ok: false; reason: string } {
+  if (typeof raw !== "string" || raw.trim() === "") {
+    return { ok: false, reason: "需求依据必须是非空字符串" };
+  }
+  const basis = raw.trim();
+  if (/[\u0000-\u001f\u007f]/.test(basis)) {
+    return { ok: false, reason: `需求依据不能包含换行等控制字符：${JSON.stringify(basis)}` };
+  }
+  const decisionRequired = STRUCTURE_DECISION_REQUIRED_CATEGORIES.has(category);
+  const allowedHint = decisionRequired
+    ? "需决定类别请引用 specs Requirement 或 TEST"
+    : "请引用 specs Requirement、TEST、proposal 标题（Impact 除外）或 discovery 标题";
+
+  if (STRUCTURE_TEST_ID_RE.test(basis)) {
+    const content = readChangeDocument(changeRoot, join(".superspec", "artifacts", "test-contract.md"));
+    if (content == null) return { ok: false, reason: `无法读取 test-contract.md，无法校验 TEST 依据：${basis}` };
+    const parsed = parseTestContractEntries(content);
+    if (!parsed.ok || !parsed.entries.some(entry => entry.test_id === basis)) {
+      return { ok: false, reason: `test-contract.md 中不存在 ${basis}` };
+    }
+    return { ok: true, value: basis };
+  }
+
+  const ref = splitBasisRef(basis);
+  if (!ref) return { ok: false, reason: `需求依据格式无法解析，应为 文件#标题 或 TEST-ID：${basis}；${allowedHint}` };
+
+  if (/^specs\/[^/]+\/spec\.md$/.test(ref.path)) {
+    const requirementTitle = ref.anchor.startsWith("Requirement:")
+      ? ref.anchor.slice("Requirement:".length).trim()
+      : "";
+    if (!requirementTitle) return { ok: false, reason: `spec 依据必须以 Requirement: 开头：${basis}` };
+    const content = readChangeDocument(changeRoot, ref.path);
+    if (content == null) return { ok: false, reason: `${ref.path} 在当前 change 中不存在` };
+    if (!headingExists(content, `Requirement: ${requirementTitle}`)) {
+      return { ok: false, reason: `${ref.path} 中不存在 Requirement「${requirementTitle}」` };
+    }
+    return { ok: true, value: basis };
+  }
+
+  if (ref.path === "proposal.md" && ref.anchor === "Impact") {
+    return { ok: false, reason: `proposal.md#Impact 不能作为结构依据；${allowedHint}` };
+  }
+  if (decisionRequired) {
+    return { ok: false, reason: `需求依据 ${basis} 不满足类别要求；${allowedHint}` };
+  }
+
+  if (ref.path === "proposal.md") {
+    const content = readChangeDocument(changeRoot, "proposal.md");
+    if (content == null) return { ok: false, reason: "proposal.md 在当前 change 中不存在" };
+    if (!headingExists(content, ref.anchor)) return { ok: false, reason: `proposal.md 中不存在标题「${ref.anchor}」` };
+    return { ok: true, value: basis };
+  }
+
+  const discoveryRel = ".superspec/artifacts/discovery.md";
+  if (ref.path === "discovery.md" || ref.path === discoveryRel) {
+    const content = readChangeDocument(changeRoot, join(".superspec", "artifacts", "discovery.md"));
+    if (content == null) return { ok: false, reason: "discovery.md 在当前 change 中不存在" };
+    if (!headingExists(content, ref.anchor)) return { ok: false, reason: `discovery.md 中不存在标题「${ref.anchor}」` };
+    return { ok: true, value: basis };
+  }
+
+  return { ok: false, reason: `需求依据 ${basis} 无法解析；${allowedHint}` };
+}
+
+function isDisplayOnlyDecisionMarker(decision: string): boolean {
+  return decision.trim() === "" || DISPLAY_ONLY_DECISION_MARKERS.has(decision.trim());
+}
+
+export function validateStructureChangeLedger(changeRoot: string, ledger: StructureChangeLedger): StructureChangeLedgerValidation {
+  if (!ledger.present) return { ok: false, errors: [STRUCTURE_LEDGER_MISSING_MESSAGE] };
+  if (ledger.none) return { ok: true, errors: [] };
+  if (ledger.format_error) return { ok: false, errors: [ledger.format_error] };
+
+  const errors: string[] = [];
+  const seenIds = new Set<string>();
+  const knownDecIds = new Set(collectProposeQuestions(changeRoot).map(question => question.id));
+
+  for (const entry of ledger.entries) {
+    if (!STRUCTURE_LEDGER_ID_RE.test(entry.id)) {
+      errors.push(`结构变更清单 ${entry.id || "<空>"} 的 ID 格式无效，应为 SC-xxx`);
+      continue;
+    }
+    if (seenIds.has(entry.id)) {
+      errors.push(`结构变更清单 ID 重复：${entry.id}`);
+      continue;
+    }
+    seenIds.add(entry.id);
+
+    if (!isStructureChangeCategory(entry.category)) {
+      errors.push(`结构变更清单 ${entry.id} 的类别无效：${entry.category || "<空>"}；可用类别：${STRUCTURE_CHANGE_CATEGORIES.join("、")}`);
+      continue;
+    }
+    if (!entry.change) {
+      errors.push(`结构变更清单 ${entry.id} 的变更不能为空`);
+    }
+
+    const basis = resolveStructureBasisRef(changeRoot, entry.basis, entry.category);
+    if (!basis.ok) errors.push(`结构变更清单 ${entry.id} 的需求依据无效：${basis.reason}`);
+
+    const decisionValid = DEC_ID_RE.test(entry.decision) && knownDecIds.has(entry.decision);
+    if (STRUCTURE_DECISION_REQUIRED_CATEGORIES.has(entry.category)) {
+      if (!decisionValid) {
+        errors.push(`结构变更清单 ${entry.id} 属于 ${entry.category}，必须在 决定 列引用一个 ## 待用户确认 中的 DEC`);
+      }
+    } else if (!isDisplayOnlyDecisionMarker(entry.decision) && !decisionValid) {
+      errors.push(`结构变更清单 ${entry.id} 的决定列引用了无效的 DEC：${entry.decision}`);
+    }
+  }
+
+  return { ok: errors.length === 0, errors: [...new Set(errors)] };
+}
+
+export function formatStructureChangeLedgerSummary(ledger: StructureChangeLedger): string | null {
+  if (!ledger.present || ledger.format_error) return null;
+  if (ledger.none) return "结构变更：无";
+  if (ledger.entries.length === 0) return null;
+  const lines = ledger.entries.map(entry => {
+    const ref = splitBasisRef(entry.basis);
+    const basisLabel = ref && /^specs\//.test(ref.path) ? ref.anchor : entry.basis;
+    const decisionSuffix = DEC_ID_RE.test(entry.decision) ? ` — 决定 ${entry.decision}` : "";
+    return `- ${entry.id} [${entry.category}] ${entry.change} — 依据 ${basisLabel}${decisionSuffix}`;
+  });
+  return ["结构变更清单", "", ...lines].join("\n");
 }
 
 // ===== tasks.md =====

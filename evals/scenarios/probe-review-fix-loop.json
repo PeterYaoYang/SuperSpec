@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "id": "probe-review-fix-loop",
+  "description": "Trap scenario: a rounding fix whose naive implementation passes casual tests but mishandles negative halves and binary floating point (1.005), designed to provoke a genuine code-reviewer fail report with anchors and exercise the REVIEW-FIX loop.",
+  "fixture": {
+    "change": "fix-rounding",
+    "workflow_mode": "minimal",
+    "initial_state": "init",
+    "discovery_exists": false,
+    "files": {
+      "README.md": "# Billing Utils\n\nShared helpers for invoice calculations.\n\n- `roundHalfUp(value)` — rounds monetary values to 2 decimals.\n",
+      "round.js": "function roundHalfUp(value) {\n  return Math.floor(value + 0.5);\n}\n\nmodule.exports = { roundHalfUp };\n",
+      "invoice.js": "const { roundHalfUp } = require(\"./round.js\");\n\nfunction lineTotal(price, quantity) {\n  return roundHalfUp(price * quantity);\n}\n\nmodule.exports = { lineTotal };\n",
+      "test/round.test.js": "const test = require(\"node:test\");\nconst assert = require(\"node:assert/strict\");\nconst { roundHalfUp } = require(\"../round.js\");\n\ntest(\"rounds positive amounts to nearest integer\", () => {\n  assert.equal(roundHalfUp(10.4), 10);\n  assert.equal(roundHalfUp(10.5), 11);\n});\n"
+    }
+  },
+  "initial_prompt": "$superspec-explore change `fix-rounding`。财务对账最近老差几分钱，追到是金额舍入不对。帮我把 round.js 的舍入修成真正业务要的四舍五入：0.5 必须进位，负数同样处理（比如 -2.5 要得到 -3），输出一律保留两位小数、类型是 number——现在这个实现连两位小数都没保证。约束：不准引入任何依赖，函数名和签名一个字都不能动（调用方很多），invoice.js 不需要改。测试该补的补上，尤其财务给的几个对账样例都要覆盖。做完跑一遍测试给我结果。请持续推进直到 accepted；遇到需要拍板的问题停下来问我；每次 SuperSpec CLI 调用单独执行。",
+  "session_mode": "dynamic_user",
+  "simulated_user": {
+    "mode": "ai",
+    "model": "gpt-5.6-terra",
+    "reasoning": "high",
+    "persona": {
+      "role": "技术负责人",
+      "goal": "彻底修复金额舍入，杜绝对账差异",
+      "risk_attitude": "满足财务口径即可推进；出现新增依赖、公共签名变化或扩大改动面时要求真人决定"
+    },
+    "known_facts": {
+      "rounding_rule": "标准四舍五入，0.5 进位；负数远离零（-2.5 → -3）",
+      "output_contract": "保留两位小数，number 类型",
+      "compatibility": "函数名与签名不变；不引入依赖；invoice.js 无需改动",
+      "finance_samples": "1.005 应为 1.01；-2.5 应为 -3；2.675 应为 2.68"
+    },
+    "auto_confirm_scope_prefixes": [
+      "phase_confirmation:"
+    ],
+    "answers_by_scope_prefix": {}
+  },
+  "stop": {
+    "snapshot_state": "accepted",
+    "final_path": "done"
+  },
+  "budget": {
+    "max_worker_turns": 16
+  },
+  "assertions": {
+    "required_files": [
+      "openspec/changes/fix-rounding/.superspec/artifacts/discovery.md",
+      "openspec/changes/fix-rounding/proposal.md",
+      "openspec/changes/fix-rounding/design.md",
+      "openspec/changes/fix-rounding/tasks.md",
+      "openspec/changes/fix-rounding/.superspec/artifacts/test-contract.md",
+      "round.js",
+      "test/round.test.js"
+    ],
+    "required_file_contains": {
+      "test/round.test.js": ["-2.5", "1.005"]
+    },
+    "allowed_worker_changes": [
+      "openspec/changes/fix-rounding/**",
+      ".superspec/changes/fix-rounding/**",
+      "round.js",
+      "test/round.test.js",
+      "README.md"
+    ],
+    "forbidden_worker_commands": [
+      {
+        "family": "superspec_transition_except",
+        "allowed_subcommands": ["next", "explore", "propose-ready", "start-apply", "task-start", "task-complete", "review-ready", "reopen", "accept", "--help"]
+      }
+    ],
+    "forbidden_director_command_patterns": [
+      "superspec transition",
+      "superspec record"
+    ]
+  }
+}

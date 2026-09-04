@@ -46,6 +46,8 @@ import {
   requiresFinalVerifierForCurrentReview,
   scanCodeChangesForReview,
   taskExecutionIndexForReview,
+  codeReviewFindingNeedsUserDecision,
+  isReviewFixCapReached,
 } from "./code_review.ts";
 import { taskEvidenceReadiness } from "./task_evidence.ts";
 import {
@@ -1374,8 +1376,8 @@ export function reopen(
         if (!ref) return { skip: true, message: "--review-fix 必须是 <job_id>#<finding_id>" };
         const found = findReviewFailedFinding(events, ref);
         if (!found) return { skip: true, message: `找不到有效的代码审查问题 ${opts.reviewFix}` };
-        const type = found.finding.type;
-        if (type === "spec" || type === "mixed") {
+        const type = typeof found.finding.type === "string" ? found.finding.type : undefined;
+        if (codeReviewFindingNeedsUserDecision(type, isReviewFixCapReached(projectRoot, events))) {
           const scope = codeReviewDecisionScope(ref.jobId, ref.findingId);
           const decision = latestCodeReviewDecision(events, scope);
           if (decision?.answer !== "reopen_apply") return { skip: true, message: `缺少使用者确认：需要先确认问题 ${ref.findingId} 是否直接回到实现阶段修复` };

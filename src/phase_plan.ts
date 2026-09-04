@@ -11,6 +11,7 @@ import {
 import {
   currentProposeOpenQuestion,
   currentProposeRoundId,
+  isPlanningValidationProfile,
   proposeAnswerRegistrationPayload,
   unregisteredClosedProposeQuestions,
   unresolvedPresentedProposeQuestionScopes,
@@ -23,16 +24,20 @@ import {
   parseExecutionRequirements,
   parseDiscoveryOpenQuestions,
   parseTasksMd,
+  parseTestContractEntries,
+  isFixTaskId,
   pendingTasksInContent,
   validateDiscovery,
   validateExecutionRequirements,
   validateExecutionRequirementDocumentReferences,
   validateProposalImpact,
   validateTasksDocument,
+  parseStructureChangeLedger,
+  validateStructureChangeLedger,
 } from "./format.ts";
 import { currentGitHead } from "./git_state.ts";
 import { validateOpenSpecChange } from "./openspec.ts";
-import { docRef, sha256File } from "./store.ts";
+import { docRef, sha256File, sha256Text, findLatestEvent } from "./store.ts";
 import {
   isReviewReadyVerifier,
   isFreshReviewVerifier,
@@ -46,9 +51,12 @@ import {
   CODE_REVIEW_DECISION_ANSWER_LABELS,
   CODE_REVIEW_REPAIR_SCOPE_PREFIX,
   codeReviewDecisionScope,
+  codeReviewFindingNeedsUserDecision,
   codeReviewJobStaleReason,
   collectCodeReviewGateFacts,
+  countReviewFixReopensSinceStartApply,
   currentCodeReviewWorkingPaths,
+  isReviewFixCapReached,
   latestCodeReviewFailedStatus,
   requiresFinalVerifierForCurrentReview,
   scanCodeChangesForReview,
@@ -76,7 +84,11 @@ import type {
 } from "./types.ts";
 import type { Snapshot } from "./types.ts";
 import type { ReviewRisk } from "./review.ts";
-import { workflowRiskForProposeRound, workflowRiskForState } from "./workflow_config.ts";
+import { workflowRiskForProposeRound, workflowRiskForState, workflowBudgetForRisk, type WorkflowBudget } from "./workflow_config.ts";
+
+export const PLAN_SIZE_BUDGET_SCOPE_PREFIX = "plan_size_budget:";
+export const PLAN_SIZE_BUDGET_CONFIRM_ANSWER = "确认规模合理，继续审查";
+export const PLAN_SIZE_BUDGET_SHRINK_ANSWER = "回去收缩计划";
 
 export type TransitionName =
   | "explore"
@@ -294,26 +306,46 @@ const REQUIRED_DESIGN_HEADINGS = [
 ] as const;
 
 function validateDesignPlan(changeRoot: string, profile: PlanningValidationProfile | null): string | null {
-  if (profile?.openspec.mode !== "strict" || profile.design?.schema_version !== 1) return null;
-  const designPath = join(changeRoot, "design.md");
-  if (!existsSync(designPath)) return null;
-  const lines = readFileSync(designPath, "utf8").split(/\r?\n/).map(line => line.trimEnd());
   const errors: string[] = [];
-  const headingIndexes = new Map<string, number[]>();
-  for (const heading of REQUIRED_DESIGN_HEADINGS) {
-    const indexes = lines.flatMap((line, index) => line === heading ? [index] : []);
-    headingIndexes.set(heading, indexes);
-    if (indexes.length === 0) errors.push(`design.md 缺少稳定结构标题：${heading}`);
-    if (indexes.length > 1) errors.push(`design.md 稳定结构标题重复：${heading}`);
+
+  // 稳定标题检查自 design.schema_version 引入起生效；更早的 strict round 没有 design 字段，保持不检查。
+  if (profile?.openspec.mode === "strict" && profile.design != null) {
+    const designPath = join(changeRoot, "design.md");
+    if (existsSync(designPath)) {
+      const lines = readFileSync(designPath, "utf8").split(/\r?\n/).map(line => line.trimEnd());
+      const headingIndexes = new Map<string, number[]>();
+      for (const heading of REQUIRED_DESIGN_HEADINGS) {
+        const indexes = lines.flatMap((line, index) => line === heading ? [index] : []);
+        headingIndexes.set(heading, indexes);
+        if (indexes.length === 0) errors.push(`design.md 缺少稳定结构标题：${heading}`);
+        if (indexes.length > 1) errors.push(`design.md 稳定结构标题重复：${heading}`);
+      }
+      if (errors.length === 0) {
+        let previousIndex = -1;
+        for (const heading of REQUIRED_DESIGN_HEADINGS) {
+          const indexes = headingIndexes.get(heading)!;
+          if (indexes[0] <= previousIndex) {
+            errors.push(`design.md 稳定结构标题顺序错误：${heading}`);
+            break;
+          }
+          previousIndex = indexes[0];
+        }
+      }
+    }
   }
-  if (errors.length > 0) return errors.join("；");
-  let previousIndex = -1;
-  for (const heading of REQUIRED_DESIGN_HEADINGS) {
-    const indexes = headingIndexes.get(heading)!;
-    if (indexes[0] <= previousIndex) return `design.md 稳定结构标题顺序错误：${heading}`;
-    previousIndex = indexes[0];
+
+  if (profile?.design?.schema_version === 2) {
+    const designPath = join(changeRoot, "design.md");
+    if (!existsSync(designPath)) {
+      errors.push('design.md 缺少 ## 结构变更清单；没有结构变更时在该标题下写"无"');
+    } else {
+      const ledger = parseStructureChangeLedger(readFileSync(designPath, "utf8"));
+      const validation = validateStructureChangeLedger(changeRoot, ledger);
+      if (!validation.ok) errors.push(...validation.errors);
+    }
   }
-  return null;
+
+  return errors.length > 0 ? [...new Set(errors)].join("；") : null;
 }
 
 export function executionPolicyForRisk(risk: ReviewRisk): ExecutionPolicy {
@@ -538,6 +570,108 @@ function latestStartApplyIndex(events: Event[]): number {
   return -1;
 }
 
+function planSizeCountDigest(taskCount: number, testCount: number): string {
+  return sha256Text(`${taskCount},${testCount}`).replace(/^sha256:/, "");
+}
+
+export function planSizeBudgetScope(proposeRoundId: string, taskCount: number, testCount: number): string {
+  return `${PLAN_SIZE_BUDGET_SCOPE_PREFIX}${proposeRoundId}:${planSizeCountDigest(taskCount, testCount)}`;
+}
+
+function countNonFixPlanTasks(changeRoot: string): number {
+  const tasksContent = readFileSync(join(changeRoot, "tasks.md"), "utf8");
+  return parseTasksMd(tasksContent).filter(task => !isFixTaskId(task.taskId)).length;
+}
+
+function countPlanTestEntries(changeRoot: string): number {
+  const testContractPath = join(changeRoot, ".superspec", "artifacts", "test-contract.md");
+  if (!existsSync(testContractPath)) return 0;
+  const parsed = parseTestContractEntries(readFileSync(testContractPath, "utf8"));
+  return parsed.ok ? parsed.entries.length : 0;
+}
+
+function isOverPlanSizeBudget(budget: WorkflowBudget, taskCount: number, testCount: number): boolean {
+  const overTasks = budget.tasks !== null && taskCount > budget.tasks;
+  const overTests = budget.tests !== null && testCount > budget.tests;
+  return overTasks || overTests;
+}
+
+function latestPlanSizeBudgetAnswer(events: Event[], scope: string): string | null {
+  const event = findLatestEvent(events, "user_decision_recorded", ev => {
+    const payload = ev.payload as { scope?: unknown; answer?: unknown; accepted?: unknown };
+    if (payload.scope !== scope) return false;
+    if (payload.accepted === false) return false;
+    return typeof payload.answer === "string" && payload.answer.trim() !== "";
+  });
+  if (!event) return null;
+  const answer = (event.payload as { answer?: unknown }).answer;
+  return typeof answer === "string" ? answer.trim() : null;
+}
+
+function planSizeBudgetOverageMessage(budget: WorkflowBudget, taskCount: number, testCount: number): string {
+  const parts: string[] = [];
+  if (budget.tasks !== null && taskCount > budget.tasks) {
+    parts.push(`任务 ${taskCount} 个（预算 ${budget.tasks}）`);
+  }
+  if (budget.tests !== null && testCount > budget.tests) {
+    parts.push(`TEST ${testCount} 个（预算 ${budget.tests}）`);
+  }
+  return parts.join("；");
+}
+
+function planSizeBudgetSkipReason(
+  projectRoot: string,
+  changeRoot: string,
+  events: Event[],
+  risk: ReviewRisk,
+): string | null {
+  const budget = workflowBudgetForRisk(projectRoot, risk);
+  if (!budget) return null;
+  const taskCount = countNonFixPlanTasks(changeRoot);
+  const testCount = countPlanTestEntries(changeRoot);
+  if (!isOverPlanSizeBudget(budget, taskCount, testCount)) return null;
+  const scope = planSizeBudgetScope(currentProposeRoundId(events), taskCount, testCount);
+  const answer = latestPlanSizeBudgetAnswer(events, scope);
+  if (answer === PLAN_SIZE_BUDGET_CONFIRM_ANSWER) return null;
+  if (answer === PLAN_SIZE_BUDGET_SHRINK_ANSWER) {
+    return `计划规模仍超过预算（${planSizeBudgetOverageMessage(budget, taskCount, testCount)}），请收缩 tasks 或 test-contract 后重试`;
+  }
+  return `计划规模超过预算（${planSizeBudgetOverageMessage(budget, taskCount, testCount)}），需要先确认规模或收缩计划`;
+}
+
+function planSizeBudgetNextStep(context: PhasePlanContext): NextStepPlan | null {
+  const { change, changeRoot, events, mode } = context;
+  const budget = workflowBudgetForRisk(context.projectRoot, mode.risk);
+  if (!budget) return null;
+  const taskCount = countNonFixPlanTasks(changeRoot);
+  const testCount = countPlanTestEntries(changeRoot);
+  if (!isOverPlanSizeBudget(budget, taskCount, testCount)) return null;
+
+  const scope = planSizeBudgetScope(currentProposeRoundId(events), taskCount, testCount);
+  const answer = latestPlanSizeBudgetAnswer(events, scope);
+  if (answer === PLAN_SIZE_BUDGET_CONFIRM_ANSWER) return null;
+  if (answer === PLAN_SIZE_BUDGET_SHRINK_ANSWER) {
+    return {
+      kind: "material_update_required",
+      state: "propose",
+      errors: [`计划规模仍超过预算：${planSizeBudgetOverageMessage(budget, taskCount, testCount)}`],
+      reason: "已选择收缩计划但规模未变化",
+    };
+  }
+
+  const overage = planSizeBudgetOverageMessage(budget, taskCount, testCount);
+  const question = `当前计划规模为 ${overage}。请确认是否按此规模继续进入审查，或先回去收缩 tasks / test-contract。`;
+  const ask: AskUser = {
+    question,
+    allowed_answers: [PLAN_SIZE_BUDGET_CONFIRM_ANSWER, PLAN_SIZE_BUDGET_SHRINK_ANSWER],
+    scope,
+    record_argv: ["superspec", "record", "user-decision", "--change", change, "--input", "-"],
+    record_input: { scope, question, answer: null },
+    required_fields: ["answer"],
+  };
+  return { kind: "ask_user", state: "propose", ask, reason: "计划规模超过预算" };
+}
+
 function executionRequirementVersionFromPayload(payload: Record<string, unknown>): 1 | 2 {
   return payload.execution_requirement_version === 2 ? 2 : 1;
 }
@@ -561,25 +695,12 @@ function executionRequirementVersionForProposeRound(events: Event[]): 1 | 2 {
   return 1;
 }
 
-function isPlanningValidationProfile(value: unknown): value is PlanningValidationProfile {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const profile = value as {
-    version?: unknown;
-    openspec?: { mode?: unknown; config_digest?: unknown };
-    design?: { schema_version?: unknown };
-  };
-  if (profile.version !== 2 || !profile.openspec || typeof profile.openspec !== "object") return false;
-  const designValid = profile.design == null || profile.design.schema_version === 1;
-  return designValid && (profile.openspec.mode === "disabled" ||
-    profile.openspec.mode === "strict" && typeof profile.openspec.config_digest === "string");
-}
-
 /** 新 planning round 在进入 propose 时冻结当前 OpenSpec 校验契约。 */
 export function planningValidationProfileForNewRound(projectRoot: string): PlanningValidationProfile {
   const configDigest = sha256File(join(projectRoot, "openspec", "config.yaml"));
   return configDigest == null
-    ? { version: 2, openspec: { mode: "disabled" }, design: { schema_version: 1 } }
-    : { version: 2, openspec: { mode: "strict", config_digest: configDigest }, design: { schema_version: 1 } };
+    ? { version: 2, openspec: { mode: "disabled" }, design: { schema_version: 2 } }
+    : { version: 2, openspec: { mode: "strict", config_digest: configDigest }, design: { schema_version: 2 } };
 }
 
 /** propose 状态尚未 ready 时，从进入本 planning round 的事件读取冻结 profile。 */
@@ -888,6 +1009,9 @@ export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
         };
       }
 
+      const budgetStep = planSizeBudgetNextStep(context);
+      if (budgetStep) return budgetStep;
+
       const proposalReviewJobs = PROPOSE_FINAL_REVIEW_GATE.openJobsForGate(snapshot);
       if (proposalReviewJobs.length > 0) {
         return requiredJobs("propose", proposalReviewJobs, `有 ${proposalReviewJobs.length} 个待完成 proposal 审查工作项`);
@@ -1086,7 +1210,8 @@ function planApplyDoneNext(context: PhasePlanContext): NextStepPlan {
     const findingId = pendingFinding?.id ?? "";
     const type = pendingFinding?.type;
     const decision = pendingFinding?.decision;
-    if (findingId && type === "implementation") {
+    const reviewFixCapReached = isReviewFixCapReached(context.projectRoot, events);
+    if (findingId && type === "implementation" && !reviewFixCapReached) {
       return {
         kind: "run_transition",
         state: "apply_done",
@@ -1103,7 +1228,7 @@ function planApplyDoneNext(context: PhasePlanContext): NextStepPlan {
       };
     }
 
-    if (findingId && (type === "spec" || type === "mixed")) {
+    if (findingId && codeReviewFindingNeedsUserDecision(type, reviewFixCapReached)) {
       if (decision?.answer === "reopen_propose") {
         return {
           kind: "run_transition",
@@ -1131,9 +1256,14 @@ function planApplyDoneNext(context: PhasePlanContext): NextStepPlan {
       }
       const problemKind = type === "spec"
         ? "方案或需求文档可能需要调整"
-        : "代码实现和方案文档都可能有关";
+        : type === "mixed"
+          ? "代码实现和方案文档都可能有关"
+          : "纯代码实现问题";
+      const capNote = reviewFixCapReached && type === "implementation"
+        ? `本轮 Apply 已自动修复 ${countReviewFixReopensSinceStartApply(events)} 次，`
+        : "";
       const ask: AskUser = {
-        question: `代码审查发现问题 ${findingId}：${problemKind}。请选择回到计划阶段修改文档、确认现有文档方向不变并回到实现阶段修代码，或驳回该问题；无论选择哪一项都必须写明原因。`,
+        question: `${capNote}代码审查发现问题 ${findingId}：${problemKind}。请选择回到计划阶段修改文档、确认现有文档方向不变并回到实现阶段修代码，或驳回该问题；无论选择哪一项都必须写明原因。`,
         allowed_answers: [
           CODE_REVIEW_DECISION_ANSWER_LABELS.reopen_propose,
           CODE_REVIEW_DECISION_ANSWER_LABELS.reopen_apply,
@@ -1332,6 +1462,14 @@ function planProposeReadyTransition(context: TransitionPlanContext): TransitionD
   if (unresolvedPresentedProposeQuestionScopes(context.events).length > 0) {
     return { kind: "skip", message: "此前展示的设计问题缺少答复登记且已从计划材料消失，请恢复原问题并完成登记" };
   }
+
+  const budgetSkip = planSizeBudgetSkipReason(
+    context.projectRoot,
+    changeRoot,
+    context.events,
+    risk,
+  );
+  if (budgetSkip) return { kind: "skip", message: budgetSkip };
 
   const requiredRoles = PROPOSE_FINAL_REVIEW_GATE.requiredRolesForRisk(risk);
   const gatePlan = reviewGatePlan(snapshot, context.events, changeRoot, PROPOSE_FINAL_REVIEW_GATE, requiredRoles);
