@@ -657,10 +657,12 @@ function commandHelp(command: string | undefined, subcommand: string | undefined
     return `用法：superspec record job-submit --change <C> --job <J> --report <F|->
 
 提交 reviewer JSON 报告；--report - 表示从 stdin 读取。报告契约以 jobs packet 返回的 report_schema 为准。
+需要落盘时写到 packet 的 report_file_path（.superspec/changes/<C>/jobs/<J>.report.json），不要放进 openspec/changes 计划材料目录。
 
 示例：
   superspec jobs packet --change <C> --job <J>
-  superspec record job-submit --change <C> --job <J> --report report.json
+  superspec record job-submit --change <C> --job <J> --report -
+  superspec record job-submit --change <C> --job <J> --report .superspec/changes/<C>/jobs/<J>.report.json
 `;
   }
   if (command === "record" && subcommand === "test-run") {

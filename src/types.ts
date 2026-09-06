@@ -199,6 +199,8 @@ export interface JobPacket {
   submission_command?: string;
   submission_argv?: string[];
   file_fallback?: boolean;
+  /** 需要落盘时的报告文件位置（项目相对路径），位于工作流记录目录而非计划材料目录。 */
+  report_file_path?: string;
   output_contract_fields?: string[];
   output_contract_optional_fields?: string[];
   字段说明?: Record<string, string>;

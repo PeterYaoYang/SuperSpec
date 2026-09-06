@@ -877,9 +877,22 @@ function recordJobSubmitLoaded(
   return {
     event_type: "job_accepted",
     accepted: true,
-    message: `工作项 ${jobId}（${job.role}）已接受`,
+    message: `工作项 ${jobId}（${job.role}）已接受${misplacedReportFileNote(change, reportPath)}`,
     job_state: "accepted",
   };
+}
+
+/** 报告文件的推荐落盘位置：工作流记录目录，不进入计划材料。 */
+export function jobReportFilePath(change: string, jobId: string): string {
+  return `.superspec/changes/${change}/jobs/${jobId}.report.json`;
+}
+
+/** 报告内容已存入 raw 记录；文件若写在 openspec change 目录里会跟计划材料一起进版本库，提示清理。 */
+function misplacedReportFileNote(change: string, reportPath: string | null): string {
+  if (!reportPath) return "";
+  const normalized = reportPath.replace(/\\/g, "/");
+  if (!normalized.startsWith(`openspec/changes/${change}/`)) return "";
+  return `；报告内容已存入工作流记录，${normalized} 位于计划材料目录，请删除该文件（落盘位置见 packet 的 report_file_path）`;
 }
 
 /** record job-submit：登记工作项结果 */
@@ -1579,6 +1592,7 @@ function packetFieldDescriptions(): Record<string, string> {
     approved_refs: "指向当前 change 已批准材料的引用；引擎只检查能否解析，apply 漏做还需要 TEST 或 spec Requirement。",
     unknown_attribution_tasks: "因为缺少边界快照或提交段 diff 失败而无法完整计算改动归属的任务（task）。",
     coverage_exemption_refs: "测试覆盖豁免引用：说明某个 TEST 为什么没有绑定到任务（task）。",
+    report_file_path: "报告需要落盘时的文件位置（项目相对路径），位于工作流记录目录；报告内容登记后由引擎存入 raw 记录，不属于计划材料。",
     code_review_gate: "最终验证读取的代码审查门禁事实：passed 指向已接受的代码审查工作项，skipped 表示本轮没有代码类改动。",
     code_state_check: "代码状态检查：最终验证时用于判断代码审查后代码是否又发生变化。",
     event_id: "事件 ID，用于追溯证据来源。",
@@ -1636,6 +1650,7 @@ export function jobsPacket(
         submission_command: `superspec record job-submit --change "${change}" --job "${job.job_id}" --report -`,
         submission_argv: jobSubmitArgv(change, job.job_id),
         file_fallback: true,
+        report_file_path: jobReportFilePath(change, job.job_id),
         output_contract_fields: isCodeReviewer
           ? [...REVIEW_REPORT_REQUIRED_FIELDS, "reviewer", "review_scope"]
           : [
@@ -1652,7 +1667,7 @@ export function jobsPacket(
           (job.review_evidence_digest ? `本工作项对应的执行证据版本为 ${job.review_evidence_digest}，` : "") +
           (isReviewer ? genericReviewCoverageInstruction(job) + proposalIncrementalReviewInstruction(job) + previousRejectionInstruction(job) : "") +
           (requiresReviewer(job.role) ? `必须由独立 ${recommendedAgentForRole(job.role)} 审查角色执行，并在审查者来源字段（reviewer.kind/id）中记录来源，` : "") +
-          `产出 JSON 报告内容并优先通过 --report - 从 stdin 登记；文件路径模式仅作备用。${recordInputInstruction(job)}协议字段含义见 packet 顶层“字段说明”，普通对话不要原样复述 JSON。` +
+          `产出 JSON 报告内容并优先通过 --report - 从 stdin 登记；需要落盘时写到 report_file_path，不要写进 openspec/changes 或 .superspec/artifacts 等计划材料目录。${recordInputInstruction(job)}协议字段含义见 packet 顶层“字段说明”，普通对话不要原样复述 JSON。` +
           (isCodeReviewer
             ? `格式骨架：{"role":"code-reviewer","verdict":"pass","review_scope":{"job_id":"${job.job_id}","packet_digest":"${job.packet_digest}","checked_paths":[],"checked_docs":[],"unchecked":[]},"findings":[],"reviewer":{"kind":"subagent","id":"<thread-or-agent-id>"}}。提交前按真实审查结果填写数组；不得从 boundFiles 自动复制 checked_paths。verdict 只能为 pass 或 fail；审查覆盖范围（review_scope）用来说明本次审查覆盖了哪些文件和文档，已检查路径（checked_paths）与未检查项（unchecked）必须合起来覆盖全部绑定文件（boundFiles），unchecked 条目格式为 {"path":"<path>","reason":"<reason>"}；pass 不允许仍有未检查的绑定文件。`
               + `报告结论为 fail 时，问题列表（findings）至少包含一个可处理、可追溯的阻塞问题，字段为 {"id":"<stable-id>","blocking":true,"type":"implementation|spec|mixed","claim_kind":"missing_approved|breaks_existing|unjustified_addition","approved_refs":["TEST-001"],"description":"<what>","evidence":"<why>","source_refs":["<path:line>"],"impact":"<impact>","suggested_action":"apply|propose"}。问题类型（type）中 implementation 表示纯代码实现问题，spec 表示方案/需求文档问题，mixed 表示需要使用者判断的混合问题；claim_kind 与 approved_refs 见字段说明。`

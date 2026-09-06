@@ -1730,11 +1730,13 @@ test("explore→propose 默认完整审查：创建 critic，接受 JSON 报告�
       "superspec", "record", "job-submit", "--change", fx.change, "--job", first.created_jobs[0], "--report", "-",
     ]);
     assert.equal(packet.packet?.file_fallback, true);
+    assert.equal(packet.packet?.report_file_path, `.superspec/changes/${fx.change}/jobs/${first.created_jobs[0]}.report.json`);
     assert.deepEqual(packet.packet?.output_contract_fields, ["role", "verdict", "findings", "reviewer", "review_scope"]);
-    const reportPath = join(fx.projectRoot, "critic.json");
+    const reportPath = join(fx.projectRoot, packet.packet!.report_file_path!);
     writeFileSync(reportPath, reviewerReportForJob(fx.projectRoot, fx.change, first.created_jobs[0]));
     const record = recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, first.created_jobs[0], reportPath);
     assert.equal(record.accepted, true);
+    assert.doesNotMatch(record.message, /计划材料目录/);
 
     confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot);
     const second = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot);
@@ -1743,6 +1745,20 @@ test("explore→propose 默认完整审查：创建 critic，接受 JSON 报告�
 
     snapshot = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(snapshot.state, "propose");
+  } finally { fx.cleanup(); }
+});
+
+test("job-submit：报告文件写在 openspec change 目录内时接受但提示清理", () => {
+  const fx = setupPropose();
+  try {
+    const created = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot);
+    const jobId = created.created_jobs[0];
+    const misplaced = join(fx.changeRoot, ".superspec", "artifacts", "discovery-review-report.json");
+    writeFileSync(misplaced, reviewerReportForJob(fx.projectRoot, fx.change, jobId));
+    const record = recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, jobId, misplaced);
+    assert.equal(record.accepted, true);
+    assert.match(record.message, /计划材料目录/);
+    assert.match(record.message, new RegExp(`openspec/changes/${fx.change}/\\.superspec/artifacts/discovery-review-report\\.json`));
   } finally { fx.cleanup(); }
 });
 
