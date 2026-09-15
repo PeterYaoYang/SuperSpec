@@ -32,6 +32,7 @@ import {
   codeReviewBoundFiles,
   codeReviewDecisionScope,
   codeReviewJobStaleReason,
+  outOfScopeUncheckedForJob,
   codeReviewPacketContext,
   codeReviewPacketDigest,
   collectCodeReviewGateFacts,
@@ -681,6 +682,10 @@ function evaluateApplyDoneCodeReviewGate(input: {
             job_id: latest.job.job_id,
             packet_digest: latest.job.packet_digest,
             current_head: acceptedScope.current_head,
+            // pass 放行了范围外未检查项；把置信边界写进门禁事实，供最终验证与使用方读取。
+            ...(outOfScopeUncheckedForJob(input.events, latest.job.job_id).length > 0
+              ? { out_of_scope_unchecked: outOfScopeUncheckedForJob(input.events, latest.job.job_id) }
+              : {}),
           },
         },
       };
@@ -1368,6 +1373,8 @@ export function reopen(
 
       if (opts.reviewFix) {
         if (to !== "apply") return { skip: true, message: "--review-fix 只能用于回到实现阶段（reopen --to apply）" };
+        // 无需 invalidateOpenJobs：--review-fix 的引用来自已终结的代码审查问题，此时 open_jobs
+        // 通常为空；即使残留过期的工作项，也会被 apply_done 侧的新鲜度过滤与重建消化，不构成死锁。
         if (snapshot.state !== "apply_done") return { skip: true, message: `当前状态 ${snapshot.state}，不能通过代码审查修复回到实现阶段` };
         if (applyPlanningMaterialsChanged(changeRoot, events)) {
           return { skip: true, message: "计划材料已变化，不能作为纯实现问题回到 Apply；请 reopen --to propose" };
@@ -1536,6 +1543,9 @@ export function reopen(
         toState: "apply",
         outcome: "advanced" as const,
         reason: `${reason.trim()}（pending tasks: ${pending.join(", ")}）`,
+        // 回到 Apply 意味着代码会被改动：仍在等待报告的审查工作项依据已失效，
+        // 在此显式作废，避免审查者继续投入后才发现报告过期。
+        extraEvents: invalidateOpenJobs(snapshot, "apply", reason.trim()),
       };
     },
   });

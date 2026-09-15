@@ -134,6 +134,8 @@ export interface CodeReviewGateEvidence {
   job_id: string | null;
   packet_digest: string | null;
   reason?: "no_code_changes";
+  /** pass 结论下的范围外未检查项：门禁事实的一部分，供最终验证与使用方判断置信边界。 */
+  out_of_scope_unchecked?: { path: string; reason: string }[];
   event_id: string;
   event_digest: string;
 }
@@ -203,6 +205,8 @@ export interface JobPacket {
   report_file_path?: string;
   output_contract_fields?: string[];
   output_contract_optional_fields?: string[];
+  /** 按本工作项预填的报告骨架；完整契约见 `superspec jobs contract`。 */
+  report_skeleton?: Record<string, unknown>;
   字段说明?: Record<string, string>;
   output_instructions?: string;
   stop_conditions: string[];

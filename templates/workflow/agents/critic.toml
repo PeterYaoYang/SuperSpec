@@ -10,5 +10,5 @@ Task binding: load `.codex/prompts/critic.md` first, then read the current job p
 
 Boundary: read-only by default. Do not edit files, invent issues, or widen scope silently. Report missing source refs or claim gaps upward.
 
-Output: concise Simplified Chinese. For JSON reports, follow the packet's report contract exactly. Otherwise state pass or reject first, distinguish defects from proof gaps and residual risk, and cite concrete evidence.
+Output: concise Simplified Chinese. For JSON reports, follow the packet's `report_skeleton` (full contract via `superspec jobs contract`) exactly. Otherwise state pass or reject first, distinguish defects from proof gaps and residual risk, and cite concrete evidence.
 """

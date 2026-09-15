@@ -70,24 +70,22 @@ import {
   type ProposeQuestion,
 } from "./format.ts";
 import type { CodeReviewResultKind, Event, RecordResult, Job, JobPacket, JobRole, JobState } from "./types.ts";
+import {
+  COVERAGE_MESSAGES,
+  REVIEWER_KINDS,
+  outOfScopeUncheckedFromReport,
+  REVIEW_REPORT_OPTIONAL_FIELDS,
+  REVIEW_REPORT_REQUIRED_FIELDS,
+  isReviewRole,
+  requiresReviewer,
+  requiresReviewScope,
+  reportSchemaForJob,
+  reportSkeletonFillItems,
+  reportSkeletonForJob,
+  type ReportSchemaContract,
+} from "./report_contract.ts";
 
-const REVIEW_REPORT_REQUIRED_FIELDS = ["role", "verdict", "findings"] as const;
-const REVIEW_REPORT_OPTIONAL_FIELDS = ["summary", "evidence_refs", "risks", "open_questions"] as const;
-const REVIEWER_KINDS = new Set(["subagent", "codex-subagent", "human", "external-agent"]);
 const CODE_REVIEW_FINDING_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
-
-function isReviewRole(role: JobRole): boolean {
-  return role === "critic" || role === "architect" || role === "test-engineer" || role === "code-reviewer" || role === "verifier";
-}
-
-function requiresReviewer(role: JobRole): boolean {
-  return role === "critic" || role === "architect" || role === "test-engineer" || role === "code-reviewer";
-}
-
-/** All review reports with bound material acknowledge full file coverage. */
-function requiresReviewScope(job: Job): boolean {
-  return job.boundFiles.length > 0 && isReviewRole(job.role);
-}
 
 function projectLocalInvalidReportMustTerminate(job: Job): boolean {
   return job.role === "code-reviewer" || job.packet_context?.code_state_check !== undefined;
@@ -385,7 +383,7 @@ function uncheckedCodeReviewPaths(value: unknown, checks: string[]): Set<string>
   for (const item of value) {
     const obj = asObject(item);
     if (!obj) {
-      checks.push("代码审查覆盖范围里的未检查项必须是包含 path/reason 的对象");
+      checks.push(COVERAGE_MESSAGES.uncheckedItemNotObject);
       continue;
     }
     if (!nonEmptyString(obj.path)) {
@@ -413,8 +411,8 @@ function validateReviewer(obj: { reviewer?: unknown }, checks: string[]): void {
   if (!reviewer || typeof reviewer !== "object" || Array.isArray(reviewer)) {
     checks.push("报告 reviewer 必须是包含 kind/id 的对象");
   } else {
-    if (typeof reviewer.kind !== "string" || !REVIEWER_KINDS.has(reviewer.kind)) {
-      checks.push(`报告 reviewer.kind 必须是 ${[...REVIEWER_KINDS].join("|")} 之一`);
+    if (typeof reviewer.kind !== "string" || !(REVIEWER_KINDS as readonly string[]).includes(reviewer.kind)) {
+      checks.push(`报告 reviewer.kind 必须是 ${REVIEWER_KINDS.join("|")} 之一`);
     }
     if (typeof reviewer.id !== "string" || reviewer.id.trim() === "") {
       checks.push("报告 reviewer.id 必须是非空字符串");
@@ -429,7 +427,7 @@ function validateCodeReviewScope(
 ): void {
   const scope = asObject(obj.review_scope);
   if (!scope) {
-    checks.push("代码审查报告缺少覆盖范围字段 review_scope");
+    checks.push(COVERAGE_MESSAGES.codeReviewScopeMissing);
     return;
   }
   if (scope.job_id !== job.job_id) {
@@ -438,9 +436,9 @@ function validateCodeReviewScope(
   if (scope.packet_digest !== job.packet_digest) {
     checks.push("代码审查覆盖范围里的 packet_digest 与工作项不匹配，请使用当前工作项说明重新生成报告");
   }
-  if (!stringArray(scope.checked_paths)) checks.push("代码审查覆盖范围里的 checked_paths 必须是字符串数组");
-  if (!stringArray(scope.checked_docs)) checks.push("代码审查覆盖范围里的 checked_docs 必须是字符串数组");
-  if (!Array.isArray(scope.unchecked)) checks.push("代码审查覆盖范围里的 unchecked 必须是数组");
+  if (!stringArray(scope.checked_paths)) checks.push(COVERAGE_MESSAGES.checkedPathsNotStringArray);
+  if (!stringArray(scope.checked_docs)) checks.push(COVERAGE_MESSAGES.checkedDocsNotStringArray);
+  if (!Array.isArray(scope.unchecked)) checks.push(COVERAGE_MESSAGES.uncheckedNotArray);
   if (stringArray(scope.checked_paths) && Array.isArray(scope.unchecked)) {
     const checkedPaths = new Set(scope.checked_paths);
     const uncheckedPaths = uncheckedCodeReviewPaths(scope.unchecked, checks);
@@ -449,8 +447,10 @@ function validateCodeReviewScope(
         checks.push(`代码审查报告未说明是否检查了 ${bound.path}`);
       }
     }
-    if (obj.verdict === "pass" && uncheckedPaths.size > 0) {
-      checks.push("代码审查结论为 pass 时不能包含未检查的绑定文件");
+    // 只有绑定文件被列为未检查时才阻塞 pass：范围外观察（未跑构建、无关文件）写进
+    // unchecked 是诚实记录，不应让 pass 结论无法提交。
+    if (obj.verdict === "pass" && job.boundFiles.some(bound => uncheckedPaths.has(bound.path))) {
+      checks.push(COVERAGE_MESSAGES.passWithUncheckedBoundFile);
     }
   }
 }
@@ -462,11 +462,11 @@ function validateReviewScope(
 ): void {
   const scope = asObject(obj.review_scope);
   if (!scope) {
-    checks.push("审查报告缺少覆盖范围字段 review_scope");
+    checks.push(COVERAGE_MESSAGES.reviewScopeMissing);
     return;
   }
   if (!stringArray(scope.checked_paths)) {
-    checks.push("审查报告覆盖范围里的 checked_paths 必须是字符串数组");
+    checks.push(COVERAGE_MESSAGES.reviewCheckedPathsNotStringArray);
     return;
   }
   const checkedPaths = new Set(scope.checked_paths);
@@ -865,11 +865,15 @@ function recordJobSubmitLoaded(
   }
 
   const rawRef = appendRawRecord(projectRoot, change, "review-reports", parsedReport);
+  // pass 结论下的范围外未检查项不进门禁，但必须留在决策面：只翻 raw 才能看到
+  // 会让「pass 但未跑构建 / 未覆盖范围外文件」这一事实在流程里消失。
+  const outOfScopeUnchecked = job.role === "code-reviewer" ? outOfScopeUncheckedFromReport(parsedReport, job.boundFiles) : [];
   const acceptEvent = makeEvent(change, "job_accepted", {
     job_id: jobId,
     role: job.role,
     report_digest: reportDigest,
     accepted_at: new Date().toISOString(),
+    ...(outOfScopeUnchecked.length > 0 ? { out_of_scope_unchecked: outOfScopeUnchecked } : {}),
     ...(reportPath ? { report_path: reportPath } : {}),
     ...rawRef,
   });
@@ -1593,6 +1597,8 @@ function packetFieldDescriptions(): Record<string, string> {
     unknown_attribution_tasks: "因为缺少边界快照或提交段 diff 失败而无法完整计算改动归属的任务（task）。",
     coverage_exemption_refs: "测试覆盖豁免引用：说明某个 TEST 为什么没有绑定到任务（task）。",
     report_file_path: "报告需要落盘时的文件位置（项目相对路径），位于工作流记录目录；报告内容登记后由引擎存入 raw 记录，不属于计划材料。",
+    report_skeleton: "按本工作项预填的报告骨架（job_id / packet_digest / 空数组）；逐字段填写即可，不要自行设计结构。",
+    report_schema: "报告契约（字段形状、取值、条件、提示消息）；由 `superspec jobs contract --change <C> --job <J>` 输出，提交校验引用同一份定义。",
     code_review_gate: "最终验证读取的代码审查门禁事实：passed 指向已接受的代码审查工作项，skipped 表示本轮没有代码类改动。",
     code_state_check: "代码状态检查：最终验证时用于判断代码审查后代码是否又发生变化。",
     event_id: "事件 ID，用于追溯证据来源。",
@@ -1659,9 +1665,10 @@ export function jobsPacket(
               ...(hasReviewScope ? ["review_scope"] : []),
             ],
         output_contract_optional_fields: [...REVIEW_REPORT_OPTIONAL_FIELDS],
+        report_skeleton: reportSkeletonForJob(job),
         字段说明: packetFieldDescriptions(),
         output_instructions:
-          `${roleDescription(job.role)}。` +
+          `${roleDescription(job.role)}。本工作项的报告结构以 packet 顶层 report_skeleton 为准（完整契约：superspec jobs contract --change "${change}" --job "${job.job_id}"）：按骨架逐字段填写，job_id / packet_digest 已按本工作项预填，不要改写，也不要用上一轮报告里的值。` +
           (isReviewer ? reviewScopeInstruction(job, reviewTargets, readOnlyRefs) : "") +
           (isReviewer ? migrationEvidenceInstruction(job) : "") +
           (job.review_evidence_digest ? `本工作项对应的执行证据版本为 ${job.review_evidence_digest}，` : "") +
@@ -1669,19 +1676,19 @@ export function jobsPacket(
           (requiresReviewer(job.role) ? `必须由独立 ${recommendedAgentForRole(job.role)} 审查角色执行，并在审查者来源字段（reviewer.kind/id）中记录来源，` : "") +
           `产出 JSON 报告内容并优先通过 --report - 从 stdin 登记；需要落盘时写到 report_file_path，不要写进 openspec/changes 或 .superspec/artifacts 等计划材料目录。${recordInputInstruction(job)}协议字段含义见 packet 顶层“字段说明”，普通对话不要原样复述 JSON。` +
           (isCodeReviewer
-            ? `格式骨架：{"role":"code-reviewer","verdict":"pass","review_scope":{"job_id":"${job.job_id}","packet_digest":"${job.packet_digest}","checked_paths":[],"checked_docs":[],"unchecked":[]},"findings":[],"reviewer":{"kind":"subagent","id":"<thread-or-agent-id>"}}。提交前按真实审查结果填写数组；不得从 boundFiles 自动复制 checked_paths。verdict 只能为 pass 或 fail；审查覆盖范围（review_scope）用来说明本次审查覆盖了哪些文件和文档，已检查路径（checked_paths）与未检查项（unchecked）必须合起来覆盖全部绑定文件（boundFiles），unchecked 条目格式为 {"path":"<path>","reason":"<reason>"}；pass 不允许仍有未检查的绑定文件。`
+            ? `格式骨架：${JSON.stringify(reportSkeletonForJob(job))}。提交前按真实审查结果填写数组；不得从 boundFiles 自动复制 checked_paths。verdict 只能为 pass 或 fail；审查覆盖范围（review_scope）用来说明本次审查覆盖了哪些文件和文档，已检查路径（checked_paths）与未检查项（unchecked）必须合起来覆盖全部绑定文件（boundFiles），unchecked 条目格式为 {"path":"<path>","reason":"<reason>"}；pass 不允许仍有未检查的绑定文件。`
               + `报告结论为 fail 时，问题列表（findings）至少包含一个可处理、可追溯的阻塞问题，字段为 {"id":"<stable-id>","blocking":true,"type":"implementation|spec|mixed","claim_kind":"missing_approved|breaks_existing|unjustified_addition","approved_refs":["TEST-001"],"description":"<what>","evidence":"<why>","source_refs":["<path:line>"],"impact":"<impact>","suggested_action":"apply|propose"}。问题类型（type）中 implementation 表示纯代码实现问题，spec 表示方案/需求文档问题，mixed 表示需要使用者判断的混合问题；claim_kind 与 approved_refs 见字段说明。`
               + (packetContext?.task_execution_index
                 ? `本工作项带任务执行索引（task_execution_index）：按 task 对照其执行依据快照（contract）审查——实现路线对照 design 引用原文、累计 diff 对照 guard 边界、测试断言对照 tests 声明的 scenario；每项的 required_evidence 是 task-start 冻结的证据口径，red_required/green_required 分别说明是否需要 RED/GREEN；fix 非空表示状态机创建的实现修复，source、parent_task_id 和 reason 说明其归属，code_review 来源还需核对 review_finding；scope_note 既可能解释必要的范围扩大，也可能说明代码审查修复为何保留原实现，均需结合 Diff、调用链和验证证据独立判断；changed_paths 是归属线索不是结论（null 表示未知）；unattributed_paths 中的无主改动和 added_code_paths 中的新建代码文件，均需判断是否服务已批准行为：放行其中任何计划外文件，都必须写明它服务于哪条已批准锚点、为何无法避免，说不出依据的按 unjustified_addition 收缩；coverage_exemption_refs 解释未绑定 task 的 TEST 豁免。当前 packet 的 boundFiles 是本轮冻结的审查范围；若它来自前一轮审查后的增量，只复核本轮变化及其直接影响链路，不要求重复审查未变化文件，但仍要判断批准行为是否完整闭合。`
                 : "")
             : job.role === "verifier"
-            ? `最小格式：{"role":"verifier","verdict":"pass","findings":[]${hasReviewScope ? `,"review_scope":{"checked_paths":${JSON.stringify(job.boundFiles.map(file => file.path))}}` : ""}}。verdict 只能为 pass 或 fail；核对代码审查记录（code_review_gate）：passed 必须能追溯到已接受的代码审查工作项，skipped 必须能证明本次没有代码类改动。核对修复闭环：task_execution_index.fix.source=code_review 时必须核对 review_finding 对应问题是否关闭；source=self_test 时必须核对 parent_task_id、记录的自测原因、本次 attempt 验证和最新代码审查是否共同闭环。方案/混合问题必须有用户决策或后续修复证据。按 task_execution_index 的 required_evidence 核对测试证据：red_required 时需要同一 TEST 的 RED（expected_failure）后 GREEN；green_required 时每个声明 TEST 都需要允许的 GREEN 语义状态；测试运行证据应包含测试 ID（test_id）、命令（command）、工作目录（cwd）、退出码（exit_code）、语义状态（semantic_status）。修复 task 的回归测试运行可用回归覆盖任务列表（covers_task_ids）说明覆盖了哪些已完成任务；缺少任务尝试 ID（attempt_id）的旧证据只能弱引用。` +
+            ? `最小格式：${JSON.stringify(reportSkeletonForJob(job))}。verdict 只能为 pass 或 fail；核对代码审查记录（code_review_gate）：passed 必须能追溯到已接受的代码审查工作项，skipped 必须能证明本次没有代码类改动。核对修复闭环：task_execution_index.fix.source=code_review 时必须核对 review_finding 对应问题是否关闭；source=self_test 时必须核对 parent_task_id、记录的自测原因、本次 attempt 验证和最新代码审查是否共同闭环。方案/混合问题必须有用户决策或后续修复证据。按 task_execution_index 的 required_evidence 核对测试证据：red_required 时需要同一 TEST 的 RED（expected_failure）后 GREEN；green_required 时每个声明 TEST 都需要允许的 GREEN 语义状态；测试运行证据应包含测试 ID（test_id）、命令（command）、工作目录（cwd）、退出码（exit_code）、语义状态（semantic_status）。修复 task 的回归测试运行可用回归覆盖任务列表（covers_task_ids）说明覆盖了哪些已完成任务；缺少任务尝试 ID（attempt_id）的旧证据只能弱引用。` +
               (packetContext?.code_state_check
                 ? `本工作项带代码状态检查（code_state_check），它是创建 packet 时的快照：验证期间若代码状态已变化，不要提交该报告；主流程会通过 next 创建携带最新事实的验证工作项。`
                 : "")
             : isReviewer
-            ? `最小格式：{"role":"${job.role}","verdict":"pass","findings":[]${hasReviewScope ? `,"review_scope":{"checked_paths":${JSON.stringify(job.boundFiles.map(file => file.path))}}` : ""},"reviewer":{"kind":"subagent","id":"<thread-or-agent-id>"}}。verdict 只能为 pass 或 fail。`
-            : `最小格式：{"role":"${job.role}","verdict":"pass","findings":[]}。verdict 只能为 pass 或 fail。`),
+            ? `最小格式：${JSON.stringify(reportSkeletonForJob(job))}。verdict 只能为 pass 或 fail。`
+            : `最小格式：${JSON.stringify(reportSkeletonForJob(job))}。verdict 只能为 pass 或 fail。`),
         stop_conditions: isReviewer
           ? ["完成审查后提交报告，不要修改文档"]
           : job.role === "executor"
@@ -1690,5 +1697,45 @@ export function jobsPacket(
         created_from_transition: job.created_from_transition,
       },
     message: `工作项 ${jobId} 的执行说明`,
+  };
+}
+
+/**
+ * jobs contract：单独取报告契约（默认）或可填骨架（--skeleton）。
+ *
+ * 与 packet 顶层的 report_skeleton 同源，供审查角色在产出报告前自查结构，
+ * 不必从 packet 的长段落里提取。
+ */
+export function jobsContract(
+  projectRoot: string,
+  change: string,
+  jobId: string,
+  opts: { skeleton?: boolean } = {},
+): {
+  found: boolean;
+  job_id?: string;
+  role?: JobRole;
+  report_schema?: ReportSchemaContract;
+  report_skeleton?: Record<string, unknown>;
+  fill_items?: string[];
+  contract_command?: string;
+  skeleton_command?: string;
+  message: string;
+} {
+  const job = findJob(readEvents(projectRoot, change), jobId);
+  if (!job) return { found: false, message: `工作项 ${jobId} 不存在` };
+  const base = ["superspec", "jobs", "contract", "--change", change, "--job", job.job_id];
+  return {
+    found: true,
+    job_id: job.job_id,
+    role: job.role,
+    report_schema: reportSchemaForJob(job),
+    report_skeleton: reportSkeletonForJob(job),
+    fill_items: reportSkeletonFillItems(job),
+    contract_command: base.join(" "),
+    skeleton_command: [...base, "--skeleton"].join(" "),
+    message: opts.skeleton
+      ? `工作项 ${job.job_id} 的报告骨架`
+      : `工作项 ${job.job_id} 的报告契约`,
   };
 }

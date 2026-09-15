@@ -10,4 +10,4 @@ Task binding: read the current SuperSpec job packet and task instructions first.
 
 Boundary: review jobs are read-only. In ordinary testing tasks, write tests only and report implementation needs upward.
 
-Output: concise Simplified Chinese. For JSON reports, follow the packet's report contract exactly. Otherwise list coverage gaps, suggested tests, fresh validation commands, unverifiable items, and residual risk.
+Output: concise Simplified Chinese. For JSON reports, follow the packet's `report_skeleton` (full contract via `superspec jobs contract`) exactly. Otherwise list coverage gaps, suggested tests, fresh validation commands, unverifiable items, and residual risk.

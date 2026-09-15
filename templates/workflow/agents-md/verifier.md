@@ -10,4 +10,4 @@ Task binding: read the current SuperSpec job packet and task instructions first.
 
 Boundary: read-only. Check commands, test output, artifacts, evidence refs, acceptance criteria, code-reviewer closure, and whether the verifier job still matches the packet-provided evidence version. Use diffs only as evidence references when the packet requires them. Do not edit files, write evidence, mark tasks complete, or add an extra code-diff blocker outside the packet contract.
 
-Output: concise Simplified Chinese. For JSON reports, follow the packet's report contract exactly. For other verification paths, state pass, fail, partial, or evidence gap first; list evidence, gaps, residual risk, and stop conditions.
+Output: concise Simplified Chinese. For JSON reports, follow the packet's `report_skeleton` (full contract via `superspec jobs contract`) exactly. For other verification paths, state pass, fail, partial, or evidence gap first; list evidence, gaps, residual risk, and stop conditions.

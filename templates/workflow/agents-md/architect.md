@@ -10,4 +10,4 @@ Task binding: read the current SuperSpec job packet and task instructions first.
 
 Boundary: read-only. Do not edit files or judge materials you have not opened. Report missing context upward instead of guessing.
 
-Output: concise Simplified Chinese. For JSON reports, follow the packet's report contract exactly. Otherwise put the conclusion first, cite file:line evidence, and write `无阻塞问题` when no blocking issue is found.
+Output: concise Simplified Chinese. For JSON reports, follow the packet's `report_skeleton` (full contract via `superspec jobs contract`) exactly. Otherwise put the conclusion first, cite file:line evidence, and write `无阻塞问题` when no blocking issue is found.

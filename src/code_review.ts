@@ -946,13 +946,22 @@ export function latestCodeReviewGateEvidence(events: Event[]): CodeReviewGateEvi
       code_review_gate?: unknown;
     };
     if (payload.transition !== "review-ready" || payload.from_state !== "apply_done" || payload.to_state !== "review") continue;
-    const gate = payload.code_review_gate as { decision?: unknown; job_id?: unknown; packet_digest?: unknown; reason?: unknown } | undefined;
+    const gate = payload.code_review_gate as {
+      decision?: unknown;
+      job_id?: unknown;
+      packet_digest?: unknown;
+      reason?: unknown;
+      out_of_scope_unchecked?: unknown;
+    } | undefined;
     if (!gate || (gate.decision !== "passed" && gate.decision !== "skipped")) return null;
     return {
       decision: gate.decision,
       job_id: typeof gate.job_id === "string" ? gate.job_id : null,
       packet_digest: typeof gate.packet_digest === "string" ? gate.packet_digest : null,
       ...(gate.reason === "no_code_changes" ? { reason: gate.reason } : {}),
+      ...(Array.isArray(gate.out_of_scope_unchecked) && gate.out_of_scope_unchecked.length > 0
+        ? { out_of_scope_unchecked: gate.out_of_scope_unchecked as { path: string; reason: string }[] }
+        : {}),
       event_id: event.event_id,
       event_digest: event.event_digest,
     };
@@ -1048,4 +1057,20 @@ export function computeCodeStateCheck(projectRoot: string, events: Event[], igno
     changed_paths: [...changed].filter(isCodeLikePath).sort(),
     scope_reason: scopeReason,
   };
+}
+
+/** 已接受代码审查工作项在事件流里留下的范围外未检查摘要（pass 的置信边界）。 */
+export function outOfScopeUncheckedForJob(events: Event[], jobId: string): { path: string; reason: string }[] {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i];
+    if (event.event_type !== "job_accepted") continue;
+    const payload = event.payload as { job_id?: unknown; out_of_scope_unchecked?: unknown };
+    if (payload.job_id !== jobId) continue;
+    if (!Array.isArray(payload.out_of_scope_unchecked)) return [];
+    return payload.out_of_scope_unchecked.filter((item): item is { path: string; reason: string } => {
+      const candidate = item as { path?: unknown; reason?: unknown };
+      return typeof candidate?.path === "string" && typeof candidate?.reason === "string";
+    });
+  }
+  return [];
 }

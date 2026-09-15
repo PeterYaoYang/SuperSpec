@@ -10,4 +10,4 @@ Task binding: read the current SuperSpec job packet and task instructions first.
 
 Boundary: read-only by default. Do not edit files, invent issues, or widen scope silently. Report missing source refs or claim gaps upward. Undeclared theoretical risks are residual, not blockers.
 
-Output: concise Simplified Chinese. For JSON reports, follow the packet's report contract exactly. Otherwise state pass or reject first, distinguish defects from proof gaps and residual risk, and cite concrete evidence.
+Output: concise Simplified Chinese. For JSON reports, follow the packet's `report_skeleton` (full contract via `superspec jobs contract`) exactly. Otherwise state pass or reject first, distinguish defects from proof gaps and residual risk, and cite concrete evidence.

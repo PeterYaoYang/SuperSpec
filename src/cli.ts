@@ -10,7 +10,7 @@ import { rebuildSnapshot } from "./sync.ts";
 import { next as nextCmd } from "./next.ts";
 import { proposeReady, commitTransition, transitionInit, transitionExplore, startApply, taskStart, taskComplete, reopen, reviewReady, accept } from "./transition.ts";
 import type { State, TransitionResult } from "./types.ts";
-import { recordJobSubmit, recordJobSubmitContent, recordUserDecision, recordUserDecisionContent, jobsList, jobsPacket } from "./record.ts";
+import { recordJobSubmit, recordJobSubmitContent, recordUserDecision, recordUserDecisionContent, jobsList, jobsPacket, jobsContract } from "./record.ts";
 import { recordTestRun, recordTestRunContent } from "./task.ts";
 import { RecordInputDecodingError, decodeRecordInput } from "./record_input.ts";
 import { probeOpenSpec, openspecStatus, changeRoot } from "./openspec.ts";
@@ -638,11 +638,21 @@ record 子命令：
   test-run --input <F|->
 
 jobs 子命令：
-  list / packet --job <J>
+  list / packet --job <J> / contract --job <J> [--skeleton]
 `;
 }
 
 function commandHelp(command: string | undefined, subcommand: string | undefined): string {
+  if (command === "jobs" && subcommand === "contract") {
+    return `用法：superspec jobs contract --change <C> --job <J> [--skeleton]
+
+输出该工作项的报告契约（默认）或可直接填写的报告骨架（--skeleton）。
+契约与 packet 顶层的 report_skeleton 同源；审查角色应在产出报告前先取骨架，逐字段填写。
+
+示例：
+  superspec jobs contract --change <C> --job <J> --skeleton
+`;
+  }
   if (command === "record" && subcommand === "user-decision") {
     return `用法：superspec record user-decision --change <C> --input <F|->
 
@@ -656,7 +666,7 @@ function commandHelp(command: string | undefined, subcommand: string | undefined
   if (command === "record" && subcommand === "job-submit") {
     return `用法：superspec record job-submit --change <C> --job <J> --report <F|->
 
-提交 reviewer JSON 报告；--report - 表示从 stdin 读取。报告契约以 jobs packet 返回的 report_schema 为准。
+提交 reviewer JSON 报告；--report - 表示从 stdin 读取。报告契约（report_schema）见 superspec jobs contract --change <C> --job <J>；packet 顶层给出预填骨架（report_skeleton）。
 需要落盘时写到 packet 的 report_file_path（.superspec/changes/<C>/jobs/<J>.report.json），不要放进 openspec/changes 计划材料目录。
 
 示例：
@@ -1019,6 +1029,15 @@ async function main(argv: string[]): Promise<number> {
             if (!jobId) { console.error("jobs packet 需要 --job"); return 1; }
             const result = jobsPacket(projectRoot, change, jobId);
             console.log(JSON.stringify(result, null, 2));
+            return result.found ? 0 : 1;
+          }
+
+          case "contract": {
+            const jobId = opts.job;
+            if (!jobId) { console.error("jobs contract 需要 --job"); return 1; }
+            const skeletonOnly = opts.skeleton === "true";
+            const result = jobsContract(projectRoot, change, jobId, { skeleton: skeletonOnly });
+            console.log(JSON.stringify(skeletonOnly && result.found ? result.report_skeleton : result, null, 2));
             return result.found ? 0 : 1;
           }
 
