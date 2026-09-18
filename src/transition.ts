@@ -1319,6 +1319,45 @@ function canReopenToPropose(from: State): boolean {
     from === "review" || from === "accepted";
 }
 
+/**
+ * 普通 reopen --to propose 成功后附带一次非阻断提示：本次回退本可用 --self-test-fix 完成。
+ * 刻意不按 reason 关键词分类（主会话自由文本不可靠），也刻意不在 apply 状态提示
+ * （apply 内直接修任务即可，无需 reopen）。提示门禁与 self-test-fix 分支保持同一套：
+ * pending 为空、无活跃尝试、contract 模式需要完成事件、无未处理的代码审查问题；
+ * 条件不满足时不提示，避免建议一条必然被 skip 的命令。提示不改变任何转换结果。
+ */
+function selfTestFixAdvisory(
+  change: string,
+  changeRoot: string,
+  snapshot: Snapshot,
+  events: Event[],
+  opts: { reviewFix?: string; reviewFinding?: string; selfTestFix?: string },
+): string | null {
+  if (opts.reviewFix || opts.reviewFinding || opts.selfTestFix) return null;
+  if (!["apply_done", "review", "accepted"].includes(snapshot.state)) return null;
+  if (applyPlanningMaterialsChanged(changeRoot, events)) return null;
+  const status = pendingTaskStatusForApply(changeRoot, events);
+  if (status.pending.length > 0) return null;
+  if (snapshot.active_task_attempts.some(attempt => attempt.state === "active")) return null;
+  const tasksContent = readFileSync(join(changeRoot, "tasks.md"), "utf8");
+  let parentTaskId: string | null = null;
+  if (status.mode === "contract") {
+    parentTaskId = status.completedByEvent[0]
+      ?? parseTasksMd(tasksContent).find(task => hasHistoricalTaskCompletion(events, task.taskId))?.taskId
+      ?? null;
+  } else {
+    parentTaskId = parseTasksMd(tasksContent).find(task => task.done)?.taskId ?? null;
+  }
+  if (!parentTaskId) return null;
+  const failedReview = latestCodeReviewFailedStatus(events);
+  if (failedReview?.unresolved.length) return null;
+  return [
+    `提示（猜测，可能不适用）：本次 reopen 已回退到 propose。若本意只是不改变已批准行为和方案，这一步本可避免——`,
+    `在 apply_done/review/accepted 状态应执行 superspec transition reopen --change "${change}" --to apply --self-test-fix "${parentTaskId}" --reason "<本次原因>"。`,
+    `当前已在 propose，请继续计划更新流程。`,
+  ].join("");
+}
+
 export function reopen(
   projectRoot: string,
   change: string,
@@ -1495,6 +1534,7 @@ export function reopen(
             jobs: snapshot.open_jobs,
           };
         }
+        const selfTestFixAdvisoryText = selfTestFixAdvisory(change, changeRoot, snapshot, events, opts);
         const currentBaseline = proposalDocsBaseline(changeRoot);
         const acceptedBaseline = snapshot.state === "accepted" ? latestAcceptedProposalBaseline(events) : null;
         // 旧版 accepted 事件的基线可能缺少后来纳入 Propose gate 的材料。保留其已冻结
@@ -1523,6 +1563,7 @@ export function reopen(
             planning_validation_version: 2,
             planning_validation_profile: planningValidationProfileForNewRound(projectRoot),
           },
+          ...(selfTestFixAdvisoryText ? { details: { advisory: selfTestFixAdvisoryText } } : {}),
           extraEvents: planningReopenExtraEvents(snapshot, "propose", reason.trim()),
         };
       }

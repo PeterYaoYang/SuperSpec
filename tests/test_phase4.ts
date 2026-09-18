@@ -2427,6 +2427,43 @@ test("self-test-fix：review 和 accepted 中均回到 apply，且 review 的旧
   } finally { acceptedFx.cleanup(); }
 });
 
+test("reopen propose：确定性条件下 CLI 输出携带 self-test-fix advisory", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    advanceApplyToReview(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    const cli = new URL("../src/cli.ts", import.meta.url).pathname;
+    const output = execFileSync(process.execPath, [
+      cli, "transition", "reopen", "--change", fx.change, "--to", "propose", "--reason", "实现去重，行为不变",
+    ], { cwd: fx.projectRoot, encoding: "utf8" });
+    const result = JSON.parse(output);
+    assert.equal(result.to_state, "propose");
+    assert.match(String(result.details?.advisory ?? ""), /--self-test-fix/);
+    assert.match(String(result.details?.advisory ?? ""), /猜测/);
+  } finally { fx.cleanup(); }
+});
+
+test("reopen propose：计划材料已变化或无已完成任务时不提示", () => {
+  const stale = setupApplyWithDoneTask();
+  try {
+    advanceApplyToReview(stale.projectRoot, stale.change, stale.changeRoot, "minimal");
+    // 计划材料在 Apply 基线之后变化：self-test-fix 本就会被冻结挡下，提示无意义
+    writeFileSync(join(stale.changeRoot, "proposal.md"), "# P\n\n新增了口径变化\n");
+    const staleResult = reopen(stale.projectRoot, stale.change, stale.changeRoot, "propose", "实现去重，行为不变");
+    assert.equal(staleResult.to_state, "propose");
+    assert.equal(staleResult.details?.advisory, undefined);
+  } finally { stale.cleanup(); }
+
+  const noDone = setupApplyWithDoneTask();
+  try {
+    advanceApplyToReview(noDone.projectRoot, noDone.change, noDone.changeRoot, "minimal");
+    // 全部任务改回未勾选：即使状态与材料都允许，也没有可关联的已完成 task
+    writeFileSync(join(noDone.changeRoot, "tasks.md"), "# Tasks\n\n- [ ] TASK-001 Not done\n");
+    const stillPending = reopen(noDone.projectRoot, noDone.change, noDone.changeRoot, "propose", "实现去重，行为不变");
+    assert.equal(stillPending.to_state, "propose");
+    assert.equal(stillPending.details?.advisory, undefined);
+  } finally { noDone.cleanup(); }
+});
+
 test("code-reviewer：reopen 只能引用当前最新代码审查失败里的阻塞问题", () => {
   const fx = setupApplyWithDoneTask();
   try {
