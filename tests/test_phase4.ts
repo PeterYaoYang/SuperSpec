@@ -3380,7 +3380,7 @@ test("verifier：项目内 fallback 格式错误记录路径且不污染 fresh c
     const retry = reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     assert.equal(retry.outcome, "job_created");
     const retryPacket = jobsPacket(fx.projectRoot, fx.change, retry.created_jobs[0]).packet;
-    assert.equal(retryPacket?.packet_context?.code_state_check?.changed_paths.includes("verifier-invalid.json"), false);
+    assert.equal(retryPacket?.code_state_check?.changed_paths.includes("verifier-invalid.json"), false);
     assert.equal(submitVerifierPass(fx.projectRoot, fx.change, fx.changeRoot, retry.created_jobs[0]).accepted, true);
   } finally { fx.cleanup(); }
 });

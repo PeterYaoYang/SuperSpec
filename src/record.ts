@@ -1640,7 +1640,6 @@ export function jobsPacket(
         ...(isReviewer && readOnlyRefs.length > 0 ? { read_only_refs: readOnlyRefs } : {}),
         ...(job.review_evidence_digest ? { review_evidence_digest: job.review_evidence_digest } : {}),
         ...(job.previous_rejection ? { previous_rejection: job.previous_rejection } : {}),
-        ...(packetContext ? { packet_context: packetContext } : {}),
         ...(packetContext?.code_review_scope ? { code_review_scope: packetContext.code_review_scope } : {}),
         ...(packetContext?.code_review_gate ? { code_review_gate: packetContext.code_review_gate } : {}),
         ...(packetContext?.coverage_exemption_refs ? { coverage_exemption_refs: packetContext.coverage_exemption_refs } : {}),

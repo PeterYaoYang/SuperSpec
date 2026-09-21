@@ -185,7 +185,6 @@ export interface JobPacket {
   read_only_refs?: string[];
   review_evidence_digest?: string;
   previous_rejection?: ReviewPreviousRejection;
-  packet_context?: JobPacketContext;
   code_review_scope?: CodeReviewScope;
   code_review_gate?: CodeReviewGateEvidence;
   coverage_exemption_refs?: CoverageExemptionRef[];
