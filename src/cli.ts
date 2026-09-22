@@ -5,14 +5,14 @@ import { execFileSync, type ExecFileSyncOptionsWithStringEncoding } from "node:c
 import { createInterface } from "node:readline/promises";
 import { readFileSync } from "node:fs";
 import { installProject } from "./install.ts";
-import { writeSnapshot } from "./store.ts";
+import { writeSnapshot, readEvents } from "./store.ts";
 import { rebuildSnapshot } from "./sync.ts";
 import { next as nextCmd } from "./next.ts";
 import { proposeReady, commitTransition, transitionInit, transitionExplore, startApply, taskStart, taskComplete, reopen, reviewReady, accept } from "./transition.ts";
 import type { State, TransitionResult } from "./types.ts";
-import { recordJobSubmit, recordJobSubmitContent, recordUserDecision, recordUserDecisionContent, jobsList, jobsPacket, jobsContract } from "./record.ts";
+import { recordJobSubmit, recordJobSubmitContent, recordUserDecision, recordUserDecisionContent, recordWorkflowModeContent, jobsList, jobsPacket, jobsContract } from "./record.ts";
 import { recordTestRun, recordTestRunContent } from "./task.ts";
-import { RecordInputDecodingError, decodeRecordInput } from "./record_input.ts";
+import { RecordInputDecodingError, decodeRecordInput, readRecordInputFile } from "./record_input.ts";
 import { probeOpenSpec, openspecStatus, changeRoot } from "./openspec.ts";
 import { SUPERSPEC_VERSION } from "./version.ts";
 import {
@@ -21,6 +21,8 @@ import {
   WorkflowConfigError,
   workflowHostsDeclared,
   workflowHostsForProject,
+  workflowModeStatus,
+  workflowRiskForChange,
   workflowRiskForProject,
   type WorkflowHost,
 } from "./workflow_config.ts";
@@ -85,7 +87,8 @@ function proposeReadyExitCode(result: TransitionResult): number {
   return result.events_written === 0 && result.outcome === "advanced" && result.from_state === result.to_state ? 1 : 0;
 }
 
-function ensureWorkflowMode(projectRoot: string, _opts: Record<string, string>): boolean {
+/** 档位来源已按 change 解析；项目配置写错仍必须立刻报错，而不是被静默忽略。 */
+function validateWorkflowConfig(projectRoot: string): boolean {
   try {
     workflowRiskForProject(projectRoot);
     return true;
@@ -622,12 +625,12 @@ function topLevelHelp(): string {
   update [--hosts codex,omp]        升级 CLI 到 npm latest 并同步已选宿主入口
   version                           版本号
 
-工作流配置见 .superspec/config.json（workflow.mode、workflow.budget）。
+工作流配置见 .superspec/config.json（workflow.budget；历史 change 仍可读 workflow.mode）。新 change 的模式按 change 独立选择，不接受 --risk/--mode。
 
 transition 子命令：
   init / explore / sync / next / propose-ready / start-apply
   task-start --task <T> / task-complete --task <T> [--input -]
-  reopen --to explore|propose|apply --reason <TEXT>
+  reopen --to explore|propose|apply --reason <TEXT> [--upgrade-mode normal]
   reopen --to apply --reason <TEXT> [--review-fix <JOB#FINDING>|--self-test-fix <TASK>]
   reopen --to propose --reason <TEXT> [--review-finding <JOB#FINDING>]
   review-ready / accept
@@ -636,6 +639,7 @@ record 子命令：
   job-submit --job <J> --report <F|->
   user-decision --input <F|->
   test-run --input <F|->
+  workflow-mode --input <F|->
 
 jobs 子命令：
   list / packet --job <J> / contract --job <J> [--skeleton]
@@ -684,10 +688,16 @@ function commandHelp(command: string | undefined, subcommand: string | undefined
   printf '%s' '{"test_id":"TEST-001","task_structure_digest":"sha256:<digest>","command":"npm test","cwd":"<project>","exit_code":0,"semantic_status":"expected_success"}' | superspec record test-run --change <C> --input -
 `;
   }
+  if (command === "record" && subcommand === "workflow-mode") {
+    return `用法：superspec record workflow-mode --change <C> --input <F|->
+
+登记当前 change 的模式选择；--input - 表示从 stdin 读取。合法字段与登记时机以 \`superspec transition next --change <C>\` 返回的 mode_selection_required.selection 为准。
+`;
+  }
   if (command === "transition" && subcommand === "propose-ready") {
     return `用法：superspec transition propose-ready --change <C>
 
-校验当前计划材料和审查门禁；满足条件时推进到 propose_ready。工作流模式来自项目配置，不接受 --risk。
+校验当前计划材料和审查门禁；满足条件时推进到 propose_ready。工作流模式来自当前 change 的选择或历史冻结，不接受 --risk/--mode。
 `;
   }
   return topLevelHelp();
@@ -806,9 +816,12 @@ async function main(argv: string[]): Promise<number> {
         const snapshot = rebuildSnapshot(projectRoot, change, cr);
         const jobs = jobsList(projectRoot, change);
         const staleAcceptedJobs = Math.max(0, jobs.accepted.length - snapshot.accepted_jobs.length);
+        const events = readEvents(projectRoot, change);
+        const modeStatus = workflowModeStatus(events, snapshot.state, workflowRiskForChange(projectRoot, events, snapshot.state), change);
         console.log(JSON.stringify({
           change,
           state: snapshot.state,
+          ...modeStatus,
           open_jobs: snapshot.open_jobs.length,
           accepted_jobs: snapshot.accepted_jobs.length,
           historical_accepted_jobs: jobs.accepted.length,
@@ -827,9 +840,9 @@ async function main(argv: string[]): Promise<number> {
 
       case "transition": {
         const cr = changeRoot(projectRoot, change);
-        // mode 只能由项目配置和已冻结 round 快照决定；任何 transition 都不接受 --risk。
-        if (opts.risk !== undefined) {
-          console.error("工作流模式由 .superspec/config.json 的 workflow.mode 控制，不支持 --risk");
+        // 禁止 transition 临时 --mode/--risk 绕过当前 change 的选择或历史冻结。
+        if (opts.risk !== undefined || opts.mode !== undefined) {
+          console.error("工作流模式由当前 change 的选择或历史冻结决定，不支持 --risk/--mode");
           return 1;
         }
 
@@ -840,7 +853,7 @@ async function main(argv: string[]): Promise<number> {
 
           case "explore":
             {
-              if (!ensureWorkflowMode(projectRoot, opts)) return 1;
+              if (!validateWorkflowConfig(projectRoot)) return 1;
               console.log(JSON.stringify(transitionExplore(projectRoot, change, cr), null, 2));
             }
             return 0;
@@ -856,16 +869,15 @@ async function main(argv: string[]): Promise<number> {
             }, null, 2));
             return 0;
           }
-
           case "next": {
-            if (!ensureWorkflowMode(projectRoot, opts)) return 1;
+            if (!validateWorkflowConfig(projectRoot)) return 1;
             const result = nextCmd(projectRoot, change, cr);
             console.log(JSON.stringify(result, null, 2));
             return 0;
           }
 
           case "propose-ready": {
-            if (!ensureWorkflowMode(projectRoot, opts)) return 1;
+            if (!validateWorkflowConfig(projectRoot)) return 1;
             const result = proposeReady(projectRoot, change, cr);
             console.log(JSON.stringify(result, null, 2));
             return proposeReadyExitCode(result);
@@ -915,6 +927,7 @@ async function main(argv: string[]): Promise<number> {
             if (!to) { console.error("reopen 需要 --to"); return 1; }
             if (!reason) { console.error("reopen 需要 --reason"); return 1; }
             const result = reopen(projectRoot, change, cr, to, reason, {
+              ...(opts["upgrade-mode"] ? { upgradeMode: opts["upgrade-mode"] as "normal" } : {}),
               ...(opts["review-fix"] ? { reviewFix: opts["review-fix"] } : {}),
               ...(opts["review-finding"] ? { reviewFinding: opts["review-finding"] } : {}),
               ...(opts["self-test-fix"] ? { selfTestFix: opts["self-test-fix"] } : {}),
@@ -924,7 +937,7 @@ async function main(argv: string[]): Promise<number> {
           }
 
           case "review-ready": {
-            if (!ensureWorkflowMode(projectRoot, opts)) return 1;
+            if (!validateWorkflowConfig(projectRoot)) return 1;
             const result = reviewReady(projectRoot, change, cr);
             console.log(JSON.stringify(result, null, 2));
             return transitionExitCode(result);
@@ -999,6 +1012,26 @@ async function main(argv: string[]): Promise<number> {
               result = inputFile === "-"
                 ? recordTestRunContent(projectRoot, change, readStdinRecordContent("--input"))
                 : recordTestRun(projectRoot, change, inputFile);
+            } catch (err) {
+              if (err instanceof StdinRecordInputError || err instanceof RecordInputDecodingError) {
+                console.error(err.message);
+                return 1;
+              }
+              throw err;
+            }
+            console.log(JSON.stringify(result, null, 2));
+            return result.accepted ? 0 : 1;
+          }
+
+          case "workflow-mode": {
+            const inputFile = opts.input;
+            if (!inputFile) { console.error("record workflow-mode 需要 --input"); return 1; }
+            let result;
+            try {
+              const content = inputFile === "-"
+                ? readStdinRecordContent("--input")
+                : readRecordInputFile(inputFile);
+              result = recordWorkflowModeContent(projectRoot, change, content);
             } catch (err) {
               if (err instanceof StdinRecordInputError || err instanceof RecordInputDecodingError) {
                 console.error(err.message);

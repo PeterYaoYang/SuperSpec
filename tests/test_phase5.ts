@@ -79,7 +79,7 @@ test("review gate：gate_id 不能绕过角色边界", () => {
   assert.deepEqual(PROPOSE_FINAL_REVIEW_GATE.openJobsForGate(snapshot), []);
 });
 
-test("CLI：工作流 mode 只能由项目配置控制，不接受 --risk", () => {
+test("CLI：transition 不能用临时 --risk 覆盖工作流模式", () => {
   const projectRoot = mkdtempSync(join(tmpdir(), "superspec-risk-"));
   try {
     const cli = new URL("../src/cli.ts", import.meta.url).pathname;
@@ -97,7 +97,7 @@ test("CLI：工作流 mode 只能由项目配置控制，不接受 --risk", () =
     });
 
     assert.equal(result.status, 1);
-    assert.match(result.stderr, /workflow\.mode 控制，不支持 --risk/);
+    assert.deepEqual(readEvents(projectRoot, "test-change"), []);
     assert.equal(result.stdout.trim(), "");
   } finally {
     rmSync(projectRoot, { recursive: true, force: true });

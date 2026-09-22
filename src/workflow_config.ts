@@ -1,10 +1,10 @@
-// SuperSpec 项目级工作流配置。所有阶段从同一位置解析默认 mode，
-// 避免 CLI、Explore、Propose、Review 各自保留不同默认值。
+// SuperSpec 工作流配置与 change 级模式解析。
+// 新 change 使用事件中的选择及轮次冻结值；项目 mode 仅为历史 change 提供回退。
 
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { ReviewRisk } from "./review.ts";
-import type { Event, State } from "./types.ts";
+import type { Event, State, WorkflowModeSelection, WorkflowModeStatus, WorkflowModeSelectionAction } from "./types.ts";
 
 export const WORKFLOW_CONFIG_PATH = ".superspec/config.json";
 /** 项目未声明 workflow.mode 时采用的默认档位。 */
@@ -154,6 +154,147 @@ function workflowModeFromPayload(payload: Record<string, unknown>): ReviewRisk |
   return isReviewRisk(payload.workflow_mode) ? payload.workflow_mode : null;
 }
 
+export function latestWorkflowModeSelection(events: readonly Event[]): WorkflowModeSelection | null {
+  const event = events.findLast(event => event.event_type === "workflow_mode_selected");
+  if (!event) return null;
+  const { mode, source, reason, user_request } = event.payload;
+  if ((mode !== "minimal" && mode !== "normal") || (source !== "agent" && source !== "user") || typeof reason !== "string") {
+    throw new WorkflowConfigError("change 的模式选择记录无效");
+  }
+  return { mode, source, reason, ...(typeof user_request === "string" ? { user_request } : {}) };
+}
+
+export function changeUsesWorkflowModeSelection(events: readonly Event[]): boolean {
+  return !events.some(event => event.event_type === "transition_commit") || events.some(event =>
+    event.event_type === "workflow_mode_selected" ||
+    (event.event_type === "transition_commit" && event.payload.workflow_mode_version === 1)
+  );
+}
+
+/**
+ * reopen --upgrade-mode 之后等待登记 normal。normal 选择或用户本人的选择都算已决定：
+ * 用户明确维持 minimal 是受限升级允许的结论，不是可以无限绕过的缺口。
+ */
+export function workflowModeUpgradePending(events: readonly Event[]): boolean {
+  const upgradeIndex = events.findLastIndex(event =>
+    event.event_type === "transition_commit" &&
+    event.payload.to_state === "explore" &&
+    event.payload.workflow_mode_upgrade_target === "normal",
+  );
+  if (upgradeIndex < 0) return false;
+  const selectionIndex = events.findLastIndex(event => event.event_type === "workflow_mode_selected");
+  if (selectionIndex <= upgradeIndex) return true;
+  const selection = latestWorkflowModeSelection(events);
+  return selection?.mode !== "normal" && selection?.source !== "user";
+}
+
+export function requiresWorkflowModeSelection(events: readonly Event[]): boolean {
+  return changeUsesWorkflowModeSelection(events) && (
+    latestWorkflowModeSelection(events) === null || workflowModeUpgradePending(events)
+  );
+}
+
+/** mode_selection_required 的 reason：新 change 首次选档与升级等待两种口径。 */
+export function workflowModeSelectionReason(events: readonly Event[]): string {
+  return workflowModeUpgradePending(events)
+    ? "已请求升级到 normal，等待登记 normal 或由用户维持 minimal"
+    : "需要根据初步调查选择当前 change 的模式";
+}
+
+function startedModeDependentWork(event: Event): boolean {
+  if (event.event_type !== "transition_commit") return false;
+  const jobs = event.payload.new_jobs;
+  return (Array.isArray(jobs) && jobs.length > 0) ||
+    ["propose", "propose_ready", "apply", "apply_done", "review", "accepted"].includes(String(event.payload.to_state));
+}
+
+/** 回到 Explore 允许升级，但不清除用于阻止降档的历史。 */
+function modeSelectionFrozen(events: readonly Event[], state: State): boolean {
+  if (state !== "init" && state !== "explore") return true;
+  const roundStart = events.findLastIndex(event => event.event_type === "transition_commit" &&
+    event.payload.to_state === "explore" && event.payload.from_state !== "explore");
+  return events.some((event, index) => index > roundStart && startedModeDependentWork(event));
+}
+
+export function workflowModeSelectionError(
+  events: Event[], state: State, selection: WorkflowModeSelection,
+): string | null {
+  const previous = latestWorkflowModeSelection(events);
+  if (!changeUsesWorkflowModeSelection(events)) {
+    return "历史 change 没有 change 级选档协议，继续沿用原模式与冻结记录";
+  }
+  if (modeSelectionFrozen(events, state)) {
+    return "当前轮次模式已冻结；需要升级时请先 reopen --to explore，补齐探索与计划审查";
+  }
+  if (workflowModeUpgradePending(events) && selection.mode !== "normal" && selection.source === "agent") {
+    return previous?.source === "user"
+      ? "本 change 已请求升级到 normal；此前选档由用户决定，请由用户确认升级或明确维持 minimal"
+      : "本 change 已请求升级到 normal，不能由 agent 就地维持 minimal；用户明确维持 minimal 时请用 source=user 登记用户原话";
+  }
+  if (previous?.source === "user" && selection.source === "agent") {
+    return "已有用户明确选择，不能由 agent 覆盖；请说明新事实并取得用户明确选择";
+  }
+  if (previous?.mode === "normal" && selection.mode === "minimal" && events.some(startedModeDependentWork)) {
+    return "change 已按 normal 进入审查或计划，不能降档绕过已有审查；reopen 不清除该约束";
+  }
+  return null;
+}
+
+export function workflowModeSelectionAction(change: string, upgradePending = false): WorkflowModeSelectionAction {
+  if (upgradePending) {
+    return {
+      allowed_modes: ["minimal", "normal"],
+      record_argv: ["superspec", "record", "workflow-mode", "--change", change, "--input", "-"],
+      record_input: { mode: "normal", source: "agent", reason: null },
+      user_record_input: { mode: null, source: "user", reason: null, user_request: null },
+      instruction: "本 change 已请求升级到 normal：agent 提交 normal；选档来自用户时由用户用 user_record_input 决定，用户否决升级则按原话登记并维持 minimal。",
+    };
+  }
+  return {
+    allowed_modes: ["minimal", "normal"],
+    record_argv: ["superspec", "record", "workflow-mode", "--change", change, "--input", "-"],
+    record_input: { mode: null, source: "agent", reason: null },
+    user_record_input: { mode: null, source: "user", reason: null, user_request: null },
+    instruction: "用户明确指定优先：使用 user_record_input 并原样填写真实 user_request；否则使用 record_input，根据已有初步调查选择 minimal 或 normal 并简短告知，不新增评估角色或默认问答。目标明确、影响局部且验收直接可选 minimal；存在实质不确定性或共享影响选 normal，不按文件或方法数量打分。reason 说明实际依据。",
+  };
+}
+
+export function workflowModeStatus(
+  events: Event[], state: State, fallback: ReviewRisk = DEFAULT_WORKFLOW_RISK, change?: string,
+): WorkflowModeStatus {
+  const selection = latestWorkflowModeSelection(events);
+  if (requiresWorkflowModeSelection(events) && selection === null) {
+    return { workflow_mode: null, mode_source: "unselected", mode_reason: workflowModeSelectionReason(events), mode_frozen: false };
+  }
+  const upgradePending = workflowModeUpgradePending(events);
+  const workflowMode = workflowRiskForState(events, state, selection?.mode ?? fallback);
+  const frozen = modeSelectionFrozen(events, state);
+  const canReopenExplore = ["propose", "propose_ready", "apply", "apply_done", "review", "accepted"].includes(state);
+  return {
+    workflow_mode: workflowMode,
+    mode_source: selection?.source ?? "legacy",
+    mode_reason: selection?.reason ?? "沿用历史轮次冻结值或项目模式",
+    mode_frozen: frozen,
+    ...(upgradePending ? { mode_upgrade_pending: true as const } : {}),
+    ...(change && selection?.mode === "minimal" && frozen && canReopenExplore ? {
+      mode_upgrade: {
+        target_mode: "normal",
+        reopen_argv: ["superspec", "transition", "reopen", "--change", change, "--to", "explore", "--upgrade-mode", "normal", "--reason", "发现新事实，minimal 不再适用，需要补齐 normal 审查"],
+        selection_after_reopen: workflowModeSelectionAction(change, true),
+        instruction: "只有新事实推翻 minimal 依据时使用：按 reopen_argv 回到 Explore 补齐 normal 审查，不得降档或用升级动作绕过当前问题。",
+      },
+    } : {}),
+  };
+}
+
+/** 已选档 change 不读可变项目档位；legacy change 保留原有回退。 */
+export function workflowRiskForChange(projectRoot: string, events: Event[], state: State, fallback?: ReviewRisk): ReviewRisk {
+  const candidate = changeUsesWorkflowModeSelection(events)
+    ? latestWorkflowModeSelection(events)?.mode ?? DEFAULT_WORKFLOW_RISK
+    : fallback ?? workflowRiskForProject(projectRoot);
+  return workflowRiskForState(events, state, candidate);
+}
+
 /**
  * Propose-ready 是一个 planning round 的冻结点。配置只影响尚未冻结的计划；
  * 已就绪计划必须沿用当时的 mode，直到 reopen 回到 propose 后创建新 round。
@@ -215,6 +356,7 @@ export function workflowRiskForApplyRound(events: Event[], fallback: ReviewRisk)
 
 /** 供阶段确认和登记共用，避免任何调用者从 JSON/CLI 注入本轮 mode。 */
 export function workflowRiskForState(events: Event[], state: State, fallback: ReviewRisk): ReviewRisk {
+  fallback = latestWorkflowModeSelection(events)?.mode ?? fallback;
   switch (state) {
     case "propose_ready":
       return workflowRiskForProposeRound(events, fallback);

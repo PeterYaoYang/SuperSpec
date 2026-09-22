@@ -9,8 +9,7 @@ import { parseExecutionRequirements, parseTasksMd, parseTestContractEntries, par
 import type { AskUser, AskUserAction, Event, JobRole, Snapshot, State } from "./types.ts";
 import {
   hasFrozenWorkflowModeForProposeRound,
-  workflowRiskForProject,
-  workflowRiskForState,
+  workflowRiskForChange,
 } from "./workflow_config.ts";
 
 export const PHASE_CONFIRMATION_SCOPE_PREFIX = "phase_confirmation:";
@@ -224,14 +223,14 @@ function ordinaryReviewRolesForBoundary(
 
 /**
  * 阶段确认不是 mode 的输入。它只读取当前 planning/apply round 的冻结快照；
- * 仍处于 Explore/Propose 时才从项目配置获取候选 mode。
+ * 尚未冻结时读取当前 change 选择；旧 change 才回退项目配置。
  */
 export function workflowRiskForPhaseConfirmation(
   projectRoot: string,
   events: Event[],
   snapshot: Snapshot,
 ): ReviewRisk {
-  return workflowRiskForState(events, snapshot.state, workflowRiskForProject(projectRoot));
+  return workflowRiskForChange(projectRoot, events, snapshot.state);
 }
 
 function materialDigest(

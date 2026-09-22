@@ -80,11 +80,21 @@ import type {
   PlanningValidationProfile,
   ReviewFindingContext,
   WorkflowArtifactKind,
+  WorkflowModeSelectionAction,
   State,
 } from "./types.ts";
 import type { Snapshot } from "./types.ts";
 import type { ReviewRisk } from "./review.ts";
-import { workflowRiskForProposeRound, workflowRiskForState, workflowBudgetForRisk, type WorkflowBudget } from "./workflow_config.ts";
+import {
+  requiresWorkflowModeSelection,
+  workflowBudgetForRisk,
+  workflowModeSelectionAction,
+  workflowModeSelectionReason,
+  workflowModeUpgradePending,
+  workflowRiskForProposeRound,
+  workflowRiskForState,
+  type WorkflowBudget,
+} from "./workflow_config.ts";
 
 export const PLAN_SIZE_BUDGET_SCOPE_PREFIX = "plan_size_budget:";
 export const PLAN_SIZE_BUDGET_CONFIRM_ANSWER = "确认规模合理，继续审查";
@@ -129,6 +139,7 @@ export type NextStepPlan =
     }
   | { kind: "ask_user"; state: State; ask: AskUser; reason: string }
   | { kind: "material_update_required"; state: State; errors: string[]; reason: string }
+  | { kind: "mode_selection_required"; state: State; selection: WorkflowModeSelectionAction; reason: string }
   | { kind: "run_transition"; state: State; transition: TransitionName; reason: string; risk?: ReviewRisk; taskId?: string; reopen?: ReopenNextStep }
   | {
       kind: "done";
@@ -148,7 +159,7 @@ function reviewFindingContext(finding: Record<string, unknown> | undefined): Rev
 }
 
 export type TransitionDecisionPlan =
-  | { kind: "skip"; message: string }
+  | { kind: "skip"; message: string; selection?: WorkflowModeSelectionAction }
   | { kind: "blocked"; jobs: Job[]; reason: string; details?: Record<string, unknown> }
   | { kind: "create_gate_jobs"; gate: ReviewGateRule; roles: JobRole[]; requiredRoles: JobRole[]; reason: string }
   | { kind: "advance"; fromState: State; toState: State; reason: string; payload?: Record<string, unknown> };
@@ -193,6 +204,23 @@ function requiredArtifact(
     artifact: { kind, path: artifactPath, operation: "create_or_update" },
     resume: { argv: nextArgv(change, risk) },
     reason: `${canonicalPath.split("/").at(-1)} 不存在`,
+  };
+}
+
+function modeSelectionRequiredStep(change: string, state: State, events: Event[]): NextStepPlan {
+  return {
+    kind: "mode_selection_required",
+    state,
+    selection: workflowModeSelectionAction(change, workflowModeUpgradePending(events)),
+    reason: workflowModeSelectionReason(events),
+  };
+}
+
+function modeSelectionRequiredSkip(change: string, events: Event[]): Extract<TransitionDecisionPlan, { kind: "skip" }> {
+  return {
+    kind: "skip",
+    message: workflowModeSelectionReason(events),
+    selection: workflowModeSelectionAction(change, workflowModeUpgradePending(events)),
   };
 }
 
@@ -873,6 +901,7 @@ function acceptedMaterialFollowup(
 
 export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
   const { projectRoot, change, changeRoot, events, mode, snapshot } = context;
+  const needsModeSelection = requiresWorkflowModeSelection(events);
 
   switch (snapshot.state) {
     case "init":
@@ -933,6 +962,9 @@ export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
         };
       }
 
+      if (needsModeSelection) {
+        return modeSelectionRequiredStep(change, "explore", events);
+      }
       // 先让用户澄清当前 Discovery，再审查材料；否则 critic 会审查一份仍有
       // 关键业务未知的文档。正常创建的 job 已绑定 discovery 指纹，材料变化后
       // 会由 snapshot freshness 自动失效。
@@ -957,6 +989,7 @@ export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
     }
 
     case "propose": {
+      if (needsModeSelection) return modeSelectionRequiredStep(change, "propose", events);
       const currentQuestion = currentProposeOpenQuestion(changeRoot);
       if (currentQuestion) {
         const question = `设计方案中有一件高影响取舍需要你决定：${proposeOpenQuestionDisplayText(currentQuestion)}\n\n请只回答这一件事。主流程会登记答复并将决定回写相关计划材料；回写完成前仍会停在当前事项。`;
@@ -1027,6 +1060,7 @@ export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
     }
 
     case "propose_ready": {
+      if (needsModeSelection) return modeSelectionRequiredStep(change, "propose_ready", events);
       const proposalReviewJobs = PROPOSE_FINAL_REVIEW_GATE.openJobsForGate(snapshot);
       if (proposalReviewJobs.length > 0) {
         return requiredJobs("propose_ready", proposalReviewJobs, `有 ${proposalReviewJobs.length} 个待完成 proposal 审查工作项`);
@@ -1056,12 +1090,15 @@ export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
     }
 
     case "apply":
+      if (needsModeSelection) return modeSelectionRequiredStep(change, "apply", events);
       return planApplyNext(context);
 
     case "apply_done":
+      if (needsModeSelection) return modeSelectionRequiredStep(change, "apply_done", events);
       return planApplyDoneNext(context);
 
     case "review":
+      if (needsModeSelection) return modeSelectionRequiredStep(change, "review", events);
       return planReviewNext(context);
 
     case "accepted":
@@ -1413,6 +1450,9 @@ function planExploreTransition(context: TransitionPlanContext): TransitionDecisi
   if (unresolvedPresentedExploreQuestionScopes(events).length > 0) {
     return { kind: "skip", message: "此前展示的 Explore 问题缺少答复登记且已从 discovery.md 消失，请恢复原问题并完成登记" };
   }
+  if (requiresWorkflowModeSelection(events)) {
+    return modeSelectionRequiredSkip(context.change, context.events);
+  }
 
   const requiredRoles = EXPLORE_DISCOVERY_REVIEW_GATE.requiredRolesForRisk(mode.risk);
   const gatePlan = reviewGatePlan(snapshot, events, changeRoot, EXPLORE_DISCOVERY_REVIEW_GATE, requiredRoles);
@@ -1441,6 +1481,7 @@ function planProposeReadyTransition(context: TransitionPlanContext): TransitionD
   const { changeRoot, mode, snapshot } = context;
   const risk = mode.risk;
   if (snapshot.state !== "propose") return { kind: "skip", message: `当前状态 ${snapshot.state}，不能 propose-ready` };
+  if (requiresWorkflowModeSelection(context.events)) return modeSelectionRequiredSkip(context.change, context.events);
   const planningProfile = planningValidationProfileForPendingProposeRound(context.events);
 
   const preflight = validatePlanningPreflight(
@@ -1509,6 +1550,7 @@ function planStartApplyTransition(
 ): TransitionDecisionPlan {
   const { changeRoot, events, projectRoot, snapshot } = context;
   if (snapshot.state !== "propose_ready") return { kind: "skip", message: `当前状态 ${snapshot.state}，需要 propose_ready` };
+  if (requiresWorkflowModeSelection(events)) return modeSelectionRequiredSkip(context.change, context.events);
 
   const reopenBaseline = latestReopenProposeBaseline(events);
   if (reopenBaseline && !proposalDocsChangedSinceBaseline(changeRoot, reopenBaseline)) {
@@ -1582,6 +1624,7 @@ function planStartApplyTransition(
 function planAcceptTransition(context: TransitionPlanContext): TransitionDecisionPlan {
   const { changeRoot, events, projectRoot, snapshot } = context;
   if (snapshot.state !== "review") return { kind: "skip", message: `当前状态 ${snapshot.state}，需要 review` };
+  if (requiresWorkflowModeSelection(events)) return modeSelectionRequiredSkip(context.change, context.events);
 
   const pending = pendingTaskStatusForApply(changeRoot, events).pending;
   if (pending.length > 0) {

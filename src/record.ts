@@ -8,6 +8,7 @@ import {
 } from "./store.ts";
 import { rebuildSnapshot } from "./sync.ts";
 import { changeRoot as openspecChangeRoot } from "./openspec.ts";
+import { latestWorkflowModeSelection, workflowModeSelectionError, workflowModeUpgradePending } from "./workflow_config.ts";
 import {
   isPhaseConfirmationScope,
   phaseActionForAnswer,
@@ -66,10 +67,11 @@ import {
   proposeQuestionDecisionBasisDigest,
   legacyProposeOpenQuestionScope,
   PROPOSE_OPEN_QUESTION_SCOPE_PREFIX,
+  validateDiscovery,
   type DiscoveryOpenQuestion,
   type ProposeQuestion,
 } from "./format.ts";
-import type { CodeReviewResultKind, Event, RecordResult, Job, JobPacket, JobRole, JobState } from "./types.ts";
+import type { CodeReviewResultKind, Event, RecordResult, Job, JobPacket, JobRole, JobState, State, WorkflowModeSelection } from "./types.ts";
 import {
   COVERAGE_MESSAGES,
   REVIEWER_KINDS,
@@ -1533,6 +1535,50 @@ export function recordUserDecisionContent(
     ensureChangeLayout(projectRoot, change);
     const events = readEvents(projectRoot, change);
     return recordUserDecisionLoaded(projectRoot, change, events, content, sha256Text(content));
+  });
+}
+
+/** 模式选择是 change 本地事实，不是执行授权。 */
+export function recordWorkflowModeContent(projectRoot: string, change: string, content: string): RecordResult {
+  return withLock(projectRoot, change, () => {
+    const reject = (message: string): RecordResult => ({ accepted: false, message, events_written: 0 });
+    let input: Record<string, unknown> | null;
+    try {
+      input = asObject(JSON.parse(content));
+    } catch {
+      return reject("模式选择必须是有效 JSON 对象");
+    }
+    if (!input || Object.keys(input).some(key => !["mode", "source", "reason", "user_request"].includes(key))) {
+      return reject("模式选择仅接受 mode、source、reason 和 user_request");
+    }
+    const { mode, source, reason, user_request } = input;
+    if (mode !== "minimal" && mode !== "normal") return reject("当前 change 只能选择 minimal 或 normal");
+    if (source !== "agent" && source !== "user") return reject("source 必须为 agent 或 user");
+    if (!nonEmptyString(reason)) return reject("reason 必须说明本次选档的实际依据");
+    if (source === "user" && !nonEmptyString(user_request)) return reject("用户明确指定时必须保留真实 user_request");
+    if (source === "agent" && user_request !== undefined) return reject("agent 自动选档不能附带伪装成用户选择的 user_request");
+    if (source === "agent") {
+      const discovery = validateDiscovery(openspecChangeRoot(projectRoot, change));
+      if (!discovery.ok) return reject(`agent 自动选档前必须完成有效 discovery：${discovery.message}`);
+      if (discovery.openCount > 0) return reject("agent 自动选档前必须先完成 discovery 中的待确认事项");
+    }
+    const selection: WorkflowModeSelection = {
+      mode, source, reason: reason.trim(),
+      ...(source === "user" ? { user_request: (user_request as string).trim() } : {}),
+    };
+    const events = readEvents(projectRoot, change);
+    const latestCommit = events.findLast(event => event.event_type === "transition_commit");
+    if (!latestCommit) return reject("请先通过 transition init 或 explore 初始化 change");
+    const previous = latestWorkflowModeSelection(events);
+    // 升级请求未决时，重复选择是一次新决定而不是幂等重放：必须落事件，否则用户无法维持 minimal。
+    if (!workflowModeUpgradePending(events) && previous && JSON.stringify(previous) === JSON.stringify(selection)) {
+      return { accepted: true, message: "当前 change 的相同模式选择已登记", events_written: 0 };
+    }
+    const state = latestCommit.payload.to_state as State;
+    const error = workflowModeSelectionError(events, state, selection);
+    if (error) return reject(error);
+    appendEvent(projectRoot, change, makeEvent(change, "workflow_mode_selected", { ...selection }));
+    return { event_type: "workflow_mode_selected", accepted: true, message: `当前 change 使用 ${mode}`, events_written: 1 };
   });
 }
 

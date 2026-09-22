@@ -6,8 +6,12 @@ import { rebuildSnapshot } from "./sync.ts";
 import { appendEvent, makeEvent, readEvents, withLock } from "./store.ts";
 import { requiredJobActions } from "./job_action.ts";
 import type { Job, NextOutput, State } from "./types.ts";
+import type { ReviewRisk } from "./review.ts";
 import { planNextStep, type NextStepPlan } from "./phase_plan.ts";
-import { workflowRiskForProject } from "./workflow_config.ts";
+import {
+  workflowModeStatus,
+  workflowRiskForChange,
+} from "./workflow_config.ts";
 import { currentExploreRoundId } from "./explore_round.ts";
 import { currentProposeRoundId } from "./propose_round.ts";
 import {
@@ -120,6 +124,13 @@ function toNextOutput(change: string, plan: NextStepPlan): NextOutput {
         resume: { argv: ["superspec", "transition", "next", "--change", change] },
         reason: plan.reason,
       };
+    case "mode_selection_required":
+      return {
+        state: plan.state,
+        path: "mode_selection_required",
+        selection: plan.selection,
+        reason: plan.reason,
+      };
     case "run_transition": {
       const findingContext = plan.reopen?.reason === "review_fix" ? plan.reopen.findingContext : undefined;
       return {
@@ -141,19 +152,29 @@ function toNextOutput(change: string, plan: NextStepPlan): NextOutput {
   }
 }
 
+
 /** next 命令：读取当前状态，返回唯一可执行路径，并登记正式展示的用户问题。 */
 export function next(
   projectRoot: string,
   change: string,
   changeRoot: string,
-  defaultRisk = workflowRiskForProject(projectRoot),
+  defaultRisk?: ReviewRisk,
 ): NextOutput {
   return withLock(projectRoot, change, () => {
     const snapshot = rebuildSnapshot(projectRoot, change, changeRoot);
     const events = readEvents(projectRoot, change);
-    const plannedNextStep = planNextStep({ projectRoot, change, changeRoot, events, snapshot, mode: { kind: "risk", risk: defaultRisk } });
+    const risk = workflowRiskForChange(projectRoot, events, snapshot.state, defaultRisk);
+    const plannedNextStep = planNextStep({
+      projectRoot,
+      change,
+      changeRoot,
+      events,
+      snapshot,
+      mode: { kind: "risk", risk },
+    });
+    const status = workflowModeStatus(events, snapshot.state, risk, change);
     if (plannedNextStep) {
-      const output = toNextOutput(change, plannedNextStep);
+      const output = { ...toNextOutput(change, plannedNextStep), ...status };
       recordPresentedQuestion(projectRoot, change, changeRoot, output);
       return output;
     }
@@ -162,6 +183,7 @@ export function next(
       state: snapshot.state,
       path: "done",
       reason: `状态 ${snapshot.state} 没有可执行下一步`,
+      ...status,
     };
   });
 }

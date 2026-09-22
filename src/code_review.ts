@@ -18,7 +18,7 @@ import {
 import { parseExecutionRequirements, parseTestContractEntries, parseStructureChangeLedger } from "./format.ts";
 import type { BoundarySnapshot, CodeReviewGateEvidence, CodeReviewResultKind, CodeReviewScope, CodeStateCheck, CoverageExemptionRef, DirtyFileFingerprint, Event, Job, JobPacketContext, Ref, ReviewPreviousRejection, TaskAttempt, TaskExecutionIndexEntry, StructureChangeLedger } from "./types.ts";
 import { planningValidationProfileForCurrentRound } from "./propose_round.ts";
-import { workflowBudgetForRisk, workflowRiskForApplyRound, workflowRiskForProject } from "./workflow_config.ts";
+import { workflowBudgetForRisk, workflowRiskForChange } from "./workflow_config.ts";
 
 export const CODE_REVIEW_REPAIR_SCOPE_PREFIX = "code_reviewer_report_repair:";
 export const CODE_REVIEW_DECISION_SCOPE_PREFIX = "code_review_decision:";
@@ -738,9 +738,9 @@ export function countReviewFixReopensSinceStartApply(events: readonly Event[]): 
   return count;
 }
 
-/** 上限是否生效按 Apply round 在 start-apply 冻结的档位判断（minimal 忽略），未冻结时回落项目配置。 */
+/** 上限沿用 Apply round 冻结模式；新 change 不受项目 mode 的后续修改影响。 */
 export function isReviewFixCapReached(projectRoot: string, events: readonly Event[]): boolean {
-  const risk = workflowRiskForApplyRound(events as Event[], workflowRiskForProject(projectRoot));
+  const risk = workflowRiskForChange(projectRoot, events as Event[], "apply");
   const budget = workflowBudgetForRisk(projectRoot, risk);
   if (!budget || budget.review_fix_rounds === null) return false;
   return countReviewFixReopensSinceStartApply(events) >= budget.review_fix_rounds;

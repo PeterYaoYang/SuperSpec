@@ -536,19 +536,15 @@ test("next 在 explore 无 discovery 时返回 canonical artifact_required", () 
   const fx = setupExplore();
   try {
     const result = next(fx.projectRoot, fx.change, fx.changeRoot);
-    assert.deepEqual(result, {
-      state: "explore",
-      path: "artifact_required",
-      artifact: {
-        kind: "discovery",
-        path: "openspec/changes/test-change/.superspec/artifacts/discovery.md",
-        operation: "create_or_update",
-      },
-      resume: {
-        argv: ["superspec", "transition", "next", "--change", "test-change"],
-      },
-      reason: "discovery.md 不存在",
+    assert.equal(result.state, "explore");
+    assert.equal(result.path, "artifact_required");
+    assert.deepEqual(result.artifact, {
+      kind: "discovery",
+      path: "openspec/changes/test-change/.superspec/artifacts/discovery.md",
+      operation: "create_or_update",
     });
+    assert.equal(result.reason, "discovery.md 不存在");
+    assert.deepEqual(result.resume.argv, ["superspec", "transition", "next", "--change", fx.change]);
   } finally { fx.cleanup(); }
 });
 
@@ -1637,19 +1633,15 @@ test("next 在 propose 缺 test-contract 时返回 canonical artifact_required",
     assert.equal(transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal").to_state, "propose");
 
     const result = next(fx.projectRoot, fx.change, fx.changeRoot);
-    assert.deepEqual(result, {
-      state: "propose",
-      path: "artifact_required",
-      artifact: {
-        kind: "test_contract",
-        path: "openspec/changes/test-change/.superspec/artifacts/test-contract.md",
-        operation: "create_or_update",
-      },
-      resume: {
-        argv: ["superspec", "transition", "next", "--change", "test-change"],
-      },
-      reason: "test-contract.md 不存在",
+    assert.equal(result.state, "propose");
+    assert.equal(result.path, "artifact_required");
+    assert.deepEqual(result.artifact, {
+      kind: "test_contract",
+      path: "openspec/changes/test-change/.superspec/artifacts/test-contract.md",
+      operation: "create_or_update",
     });
+    assert.equal(result.reason, "test-contract.md 不存在");
+    assert.deepEqual(result.resume.argv, ["superspec", "transition", "next", "--change", fx.change]);
   } finally { fx.cleanup(); }
 });
 
@@ -1662,19 +1654,15 @@ test("next 在 propose 缺 tasks 时返回 canonical artifact_required", () => {
     rmSync(join(fx.changeRoot, "tasks.md"));
 
     const result = next(fx.projectRoot, fx.change, fx.changeRoot);
-    assert.deepEqual(result, {
-      state: "propose",
-      path: "artifact_required",
-      artifact: {
-        kind: "tasks",
-        path: "openspec/changes/test-change/tasks.md",
-        operation: "create_or_update",
-      },
-      resume: {
-        argv: ["superspec", "transition", "next", "--change", "test-change"],
-      },
-      reason: "tasks.md 不存在",
+    assert.equal(result.state, "propose");
+    assert.equal(result.path, "artifact_required");
+    assert.deepEqual(result.artifact, {
+      kind: "tasks",
+      path: "openspec/changes/test-change/tasks.md",
+      operation: "create_or_update",
     });
+    assert.equal(result.reason, "tasks.md 不存在");
+    assert.deepEqual(result.resume.argv, ["superspec", "transition", "next", "--change", fx.change]);
   } finally { fx.cleanup(); }
 });
 

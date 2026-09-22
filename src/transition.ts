@@ -85,7 +85,14 @@ import {
   type PhaseBoundary,
 } from "./phase_confirmation.ts";
 import { currentGitHead, dirtyCodeFiles, stageProductionJavaFilesSince } from "./git_state.ts";
-import { workflowRiskForProject } from "./workflow_config.ts";
+import {
+  latestWorkflowModeSelection,
+  requiresWorkflowModeSelection,
+  workflowModeSelectionAction,
+  workflowModeSelectionReason,
+  workflowModeUpgradePending,
+  workflowRiskForChange,
+} from "./workflow_config.ts";
 import type { CodeReviewScope, Event, Snapshot, State, Job, JobRole, TransitionResult, Ref, TaskAttempt, BoundarySnapshot, EffectiveEvidencePlan, ExecutionPolicy, FixDescriptor, ReviewPreviousRejection, TestEvidenceAction } from "./types.ts";
 
 let transitionSeq = 0;
@@ -868,6 +875,7 @@ interface Decision {
 interface SkipDecision {
   skip: true;
   message: string;
+  details?: Record<string, unknown>;
 }
 
 interface BlockedDecision {
@@ -921,7 +929,11 @@ function transitionPlanToDecision(
 ): Decision | SkipDecision | BlockedDecision {
   switch (plan.kind) {
     case "skip":
-      return { skip: true, message: plan.message };
+      return {
+        skip: true,
+        message: plan.message,
+        ...(plan.selection ? { details: { path: "mode_selection_required", selection: plan.selection } } : {}),
+      };
     case "blocked":
       return { blocked: true, reason: plan.reason, jobs: plan.jobs, ...(plan.details ? { details: plan.details } : {}) };
     case "create_gate_jobs":
@@ -936,6 +948,7 @@ function transitionPlanToDecision(
       };
   }
 }
+
 
 /**
  * 统一 transition 提交协议——所有校验在锁内。
@@ -988,6 +1001,22 @@ export function commitTransition(
         transition: name, outcome: "advanced",
         from_state: snapshot.state, to_state: snapshot.state,
         created_jobs: [], message: decision.message, events_written: 0,
+        ...(decision.details ? { details: decision.details } : {}),
+      };
+    }
+    if (
+      requiresWorkflowModeSelection(events) &&
+      name !== "init" &&
+      name !== "reopen" &&
+      !(name === "explore" && decision.fromState === "init" && decision.toState === "explore")
+    ) {
+      return {
+        transition: name, outcome: "advanced",
+        from_state: snapshot.state, to_state: snapshot.state,
+        created_jobs: [],
+        message: workflowModeSelectionReason(events),
+        events_written: 0,
+        details: { path: "mode_selection_required", selection: workflowModeSelectionAction(change, workflowModeUpgradePending(events)) },
       };
     }
 
@@ -1017,11 +1046,18 @@ export function commitTransition(
       decision.postCommit(projectRoot, change, changeRoot);
     }
 
+    const firstCommit = !events.some(event => event.event_type === "transition_commit");
+    const workflowModeMarker = firstCommit && (
+      name === "init" ||
+      (name === "explore" && fromState === "init" && toState === "explore")
+    ) ? { workflow_mode_version: 1 as const } : {};
+
     // commit（postCommit 成功后才写）
     appendEvent(projectRoot, change, makeEvent(change, "transition_commit", {
       transition: name, from_state: fromState, to_state: toState,
       outcome, created_job_ids: newJobs.map(j => j.job_id), new_jobs: newJobs, reason,
       ...commitPayload,
+      ...workflowModeMarker,
     }, { transitionId, idempotencyKey: idemKey, prevSnapshotDigest: worldDigest }));
 
     // extra events (task_started, task_completed, etc.)
@@ -1044,7 +1080,7 @@ export function commitTransition(
 
 // ===== propose-ready =====
 
-export function proposeReady(projectRoot: string, change: string, changeRoot: string, risk = workflowRiskForProject(projectRoot)): TransitionResult {
+export function proposeReady(projectRoot: string, change: string, changeRoot: string, risk?: ReviewRisk): TransitionResult {
   return commitTransition(projectRoot, change, changeRoot, {
     name: "propose-ready", idempotencyInputs: { risk },
     decide: (snapshot) => {
@@ -1055,7 +1091,7 @@ export function proposeReady(projectRoot: string, change: string, changeRoot: st
         changeRoot,
         events,
         snapshot,
-        mode: { kind: "risk", risk },
+        mode: { kind: "risk", risk: workflowRiskForChange(projectRoot, events, snapshot.state, risk) },
       });
       return transitionPlanToDecision(snapshot, changeRoot, change, plan, events);
     },
@@ -1069,7 +1105,7 @@ export function transitionInit(projectRoot: string, change: string, changeRoot: 
     name: "init", idempotencyInputs: { phase: "init" },
     decide: () => {
       const events = readEvents(projectRoot, change);
-      if (events.length > 0) return { skip: true, message: "change 已初始化" };
+      if (events.some(event => event.event_type === "transition_commit")) return { skip: true, message: "change 已初始化" };
       return { fromState: "init", toState: "init", outcome: "advanced" as const, reason: "引擎初始化" };
     },
   });
@@ -1077,7 +1113,7 @@ export function transitionInit(projectRoot: string, change: string, changeRoot: 
 
 // ===== explore =====
 
-export function transitionExplore(projectRoot: string, change: string, changeRoot: string, risk = workflowRiskForProject(projectRoot)): TransitionResult {
+export function transitionExplore(projectRoot: string, change: string, changeRoot: string, risk?: ReviewRisk): TransitionResult {
   return commitTransition(projectRoot, change, changeRoot, {
     name: "explore", idempotencyInputs: { phase: "explore", risk },
     decide: (snapshot) => {
@@ -1088,7 +1124,7 @@ export function transitionExplore(projectRoot: string, change: string, changeRoo
         changeRoot,
         events,
         snapshot,
-        mode: { kind: "risk", risk },
+        mode: { kind: "risk", risk: workflowRiskForChange(projectRoot, events, snapshot.state, risk) },
       });
       return transitionPlanToDecision(snapshot, changeRoot, change, plan, events);
     },
@@ -1108,7 +1144,7 @@ export function startApply(projectRoot: string, change: string, changeRoot: stri
         changeRoot,
         events,
         snapshot,
-        mode: { kind: "risk", risk: workflowRiskForProject(projectRoot) },
+        mode: { kind: "risk", risk: workflowRiskForChange(projectRoot, events, snapshot.state) },
       });
       return transitionPlanToDecision(snapshot, changeRoot, change, plan, events);
     },
@@ -1364,7 +1400,7 @@ export function reopen(
   changeRoot: string,
   to: State,
   reason: string,
-  opts: { reviewFix?: string; reviewFinding?: string; selfTestFix?: string } = {},
+  opts: { reviewFix?: string; reviewFinding?: string; selfTestFix?: string; upgradeMode?: "normal" } = {},
 ): TransitionResult {
   return commitTransition(projectRoot, change, changeRoot, {
     name: "reopen", idempotencyInputs: {
@@ -1373,12 +1409,16 @@ export function reopen(
       reviewFix: opts.reviewFix ?? "",
       reviewFinding: opts.reviewFinding ?? "",
       selfTestFix: opts.selfTestFix ?? "",
+      upgradeMode: opts.upgradeMode ?? "",
     },
     decide: (snapshot) => {
       if (!reason || reason.trim() === "") return { skip: true, message: "reopen 需要非空 --reason" };
       const events = readEvents(projectRoot, change);
       const specialFixCount = [opts.reviewFix, opts.reviewFinding, opts.selfTestFix].filter(Boolean).length;
       if (specialFixCount > 1) return { skip: true, message: "一次 reopen 只能指定一种修复或审查引用" };
+      if (opts.upgradeMode && (to !== "explore" || specialFixCount > 0)) {
+        return { skip: true, message: "--upgrade-mode 只能单独用于 --to explore，不能与 --review-fix/--review-finding/--self-test-fix 组合" };
+      }
 
       if (opts.reviewFinding) {
         if (to !== "propose") return { skip: true, message: "--review-finding 只能用于回到计划阶段（reopen --to propose）" };
@@ -1505,6 +1545,12 @@ export function reopen(
       }
 
       if (to === "explore") {
+        if (opts.upgradeMode && opts.upgradeMode !== "normal") {
+          return { skip: true, message: "--upgrade-mode 目前只能指定 normal" };
+        }
+        if (opts.upgradeMode && latestWorkflowModeSelection(events)?.mode !== "minimal") {
+          return { skip: true, message: "只有当前 change 已选择 minimal 时才能请求升级到 normal" };
+        }
         if (!canReopenToExplore(snapshot.state)) {
           return { skip: true, message: `当前状态 ${snapshot.state}，不能 reopen 到 explore` };
         }
@@ -1518,6 +1564,7 @@ export function reopen(
             reopen_source: snapshot.state,
             baseline_docs: discoveryDocsBaseline(changeRoot),
             ...exploreAnswerRegistrationPayloadForChange(changeRoot),
+            ...(opts.upgradeMode ? { workflow_mode_upgrade_target: opts.upgradeMode } : {}),
           },
           extraEvents: planningReopenExtraEvents(snapshot, "explore", reason.trim()),
         };
@@ -1594,13 +1641,14 @@ export function reopen(
 
 // ===== review-ready =====
 
-export function reviewReady(projectRoot: string, change: string, changeRoot: string, risk = workflowRiskForProject(projectRoot)): TransitionResult {
+export function reviewReady(projectRoot: string, change: string, changeRoot: string, risk?: ReviewRisk): TransitionResult {
   return commitTransition(projectRoot, change, changeRoot, {
     name: "review-ready", idempotencyInputs: { phase: "review-ready", risk },
     decide: (snapshot) => {
       const events = readEvents(projectRoot, change);
+      const resolvedRisk = workflowRiskForChange(projectRoot, events, snapshot.state, risk);
       const storedPolicy = readReviewPolicyFromEvents(events);
-      const policy = storedPolicy ?? reviewPolicyForRisk(risk);
+      const policy = storedPolicy ?? reviewPolicyForRisk(resolvedRisk);
       const policyPayload = storedPolicy ? {} : { review_policy: policy };
       const currentEvidenceDigest = reviewEvidenceDigest(events);
 
@@ -1694,7 +1742,7 @@ export function accept(projectRoot: string, change: string, changeRoot: string):
         changeRoot,
         events,
         snapshot,
-        mode: { kind: "risk", risk: workflowRiskForProject(projectRoot) },
+        mode: { kind: "risk", risk: workflowRiskForChange(projectRoot, events, snapshot.state) },
       });
       return transitionPlanToDecision(snapshot, changeRoot, change, plan, events);
     },

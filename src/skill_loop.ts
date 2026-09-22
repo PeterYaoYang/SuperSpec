@@ -102,6 +102,17 @@ export function simulateLoop(
         step.detail = output.ask_user.question;
         steps.push(step);
         return { completed: false, steps, finalState: output.state, message: `需要用户确认：${output.ask_user.question}` };
+
+      case "mode_selection_required":
+        step.action = "select_mode";
+        step.detail = output.selection.instruction;
+        steps.push(step);
+        return {
+          completed: false,
+          steps,
+          finalState: output.state,
+          message: output.reason,
+        };
     }
   }
 

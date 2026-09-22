@@ -8,6 +8,49 @@ export type State =
   | "abandoned";
 
 export type ExecutionPolicy = "tdd" | "green_only";
+
+/** 新 change 在这两档中选择；strict 仍对历史轮次有效。 */
+export type ChangeWorkflowMode = "minimal" | "normal";
+
+export interface WorkflowModeSelection {
+  mode: ChangeWorkflowMode;
+  source: "agent" | "user";
+  reason: string;
+  /** 用户原话，仅作来源记录，不用于身份校验。 */
+  user_request?: string;
+}
+
+export interface WorkflowModeStatus {
+  workflow_mode: ChangeWorkflowMode | "strict" | null;
+  mode_source: "agent" | "user" | "legacy" | "unselected";
+  mode_reason: string;
+  mode_frozen: boolean;
+  /** reopen --upgrade-mode 已请求 normal，尚未登记且未被用户决定清除。 */
+  mode_upgrade_pending?: true;
+  mode_upgrade?: WorkflowModeUpgradeAction;
+}
+
+export interface WorkflowModeSelectionRecordInput {
+  mode: ChangeWorkflowMode | null;
+  source: "agent" | "user";
+  reason: string | null;
+  user_request?: string | null;
+}
+
+export interface WorkflowModeSelectionAction {
+  allowed_modes: ChangeWorkflowMode[];
+  record_argv: string[];
+  record_input: WorkflowModeSelectionRecordInput;
+  user_record_input: WorkflowModeSelectionRecordInput;
+  instruction: string;
+}
+
+export interface WorkflowModeUpgradeAction {
+  target_mode: "normal";
+  reopen_argv: string[];
+  selection_after_reopen: WorkflowModeSelectionAction;
+  instruction: string;
+}
 export const GREEN_ONLY_NO_TDD_REASON = "green-only";
 
 // Phase 1 只实现前 4 个
@@ -230,6 +273,7 @@ export type EventType =
   // record events (don't advance state)
   | "job_accepted" | "job_rejected"
   | "user_question_presented" | "user_decision_recorded" | "test_run_recorded"
+  | "workflow_mode_selected"
   | "task_activation_recorded" | "artifact_recorded";
 
 export interface Event {
@@ -307,6 +351,10 @@ export interface TransitionCommitPayload {
   accepted_baseline_docs?: Record<string, string>;
   /** Apply 开始时冻结的计划材料摘要；tasks.md 由状态机维护，不参与冻结。 */
   apply_planning_baseline?: Record<string, string>;
+  /** 新模式协议的标记；带此标记的 change 不再回落到可变项目配置。 */
+  workflow_mode_version?: 1;
+  /** reopen 到 explore 时显式请求 minimal → normal 升级。 */
+  workflow_mode_upgrade_target?: "normal";
   /** Propose-ready / start-apply 写入的本轮 workflow mode，后续阶段只读该快照。 */
   workflow_mode?: "minimal" | "normal" | "strict";
   /** v2 起所有普通任务必须有五字段执行依据；缺失表示旧 change，沿用旧规则回放。 */
@@ -476,11 +524,12 @@ export interface ReviewFindingContext {
 
 export type NextOutput = {
   state: State;
-} & (
+} & Partial<WorkflowModeStatus> & (
   | { path: "next_command"; next_command: string; reason: string; missing_inputs: MissingInput[]; finding_context?: ReviewFindingContext }
   | { path: "required_job"; required_jobs: RequiredJobAction[]; reason: string }
   | { path: "artifact_required"; artifact: RequiredWorkflowArtifact; resume: ArtifactRequiredResume; reason: string }
   | { path: "material_update_required"; errors: string[]; resume: MaterialUpdateRequiredResume; reason: string }
+  | { path: "mode_selection_required"; selection: WorkflowModeSelectionAction; reason: string }
   | { path: "ask_user"; ask_user: AskUser; reason: string }
   | { path: "done"; reason: string; continuation?: AcceptedMaterialFollowupContinuation }
 );
