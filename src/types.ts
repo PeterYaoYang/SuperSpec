@@ -199,6 +199,13 @@ export interface TaskExecutionIndexEntry {
   task_completed_event_ref: string;
 }
 
+export interface TaskExecutionIndexScope {
+  /** 索引收录该事件之后完成的任务；null 表示收录全部历史。 */
+  since_event_id: string | null;
+  /** 早于 since_event_id、因被收录的修复任务通过 parent_task_id 关联而带入的任务。 */
+  carried_task_ids: string[];
+}
+
 export interface CoverageExemptionRef {
   test_id: string;
   event_id: string;
@@ -211,6 +218,7 @@ export interface JobPacketContext {
   code_review_gate?: CodeReviewGateEvidence;
   coverage_exemption_refs?: CoverageExemptionRef[];
   task_execution_index?: TaskExecutionIndexEntry[];
+  task_execution_index_scope?: TaskExecutionIndexScope;
   unattributed_paths?: string[];
   unknown_attribution_tasks?: string[];
   added_code_paths?: string[];
@@ -232,6 +240,7 @@ export interface JobPacket {
   code_review_gate?: CodeReviewGateEvidence;
   coverage_exemption_refs?: CoverageExemptionRef[];
   task_execution_index?: TaskExecutionIndexEntry[];
+  task_execution_index_scope?: TaskExecutionIndexScope;
   unattributed_paths?: string[];
   unknown_attribution_tasks?: string[];
   added_code_paths?: string[];

@@ -15,7 +15,7 @@ import { jobsPacket, recordJobSubmit, recordJobSubmitContent, recordUserDecision
 import { latestReviewHistoryForGateRole, reviewEvidenceDigest } from "../src/review.ts";
 import { REVIEW_FINAL_VERIFIER_GATE } from "../src/review_job_gates.ts";
 import { codeFileContentSha, dirtyCodeFiles } from "../src/git_state.ts";
-import { scanCodeReviewScope } from "../src/code_review.ts";
+import { codeReviewPacketContext, computeCodeStateCheck, scanCodeReviewScope, taskExecutionIndexForReview } from "../src/code_review.ts";
 import { phaseConfirmationForCurrentState, type PhaseDecisionAction } from "../src/phase_confirmation.ts";
 import { applyPlanningBaseline, latestAcceptedProposalBaseline } from "../src/phase_plan.ts";
 import type { Job, JobRole, State } from "../src/types.ts";
@@ -867,6 +867,7 @@ test("review-ready：apply_done → 创建 code-reviewer，review → 创建 ver
     assert.equal(verifierPacket.packet?.code_review_gate?.decision, "passed");
     assert.equal(verifierPacket.packet?.code_review_gate?.job_id, result.created_jobs[0]);
     assert.deepEqual(verifierPacket.packet?.task_execution_index, []);
+    assert.deepEqual(verifierPacket.packet?.task_execution_index_scope?.carried_task_ids, []);
     assert.deepEqual(verifierPacket.packet?.coverage_exemption_refs, []);
     assert.match(String(verifierPacket.packet?.output_instructions), /code_review_gate/);
     assert.match(String(verifierPacket.packet?.output_instructions), /attempt_id/);
@@ -1309,6 +1310,305 @@ test("code-reviewer scope：复审只包含修复增量和原 finding 的直接�
 
     const scope = scanCodeReviewScope(fx.projectRoot, readEvents(fx.projectRoot, fx.change));
     assert.deepEqual(scope.review_paths, ["src/a.ts", "src/b.ts"]);
+  } finally { fx.cleanup(); }
+});
+
+function gitHead(projectRoot: string): string {
+  return execFileSync("git", ["rev-parse", "HEAD"], { cwd: projectRoot, encoding: "utf8" }).trim();
+}
+
+function commitSources(projectRoot: string, files: Record<string, string>): void {
+  mkdirSync(join(projectRoot, "src"), { recursive: true });
+  for (const [name, content] of Object.entries(files)) writeFileSync(join(projectRoot, "src", name), content);
+  execFileSync("git", ["add", "."], { cwd: projectRoot, stdio: "ignore" });
+  execFileSync("git", ["commit", "-m", "initial"], { cwd: projectRoot, stdio: "ignore" });
+}
+
+function appendTaskBoundary(projectRoot: string, change: string, eventType: "task_started" | "task_completed", taskId: string, attemptId: string, extra: Record<string, unknown> = {}): void {
+  const dirty = dirtyCodeFiles(projectRoot);
+  assert.equal(dirty.ok, true);
+  appendEvent(projectRoot, change, makeEvent(change, eventType, {
+    task_id: taskId,
+    attempt_id: attemptId,
+    ...(eventType === "task_started" ? { task_structure_digest: "sha256:scope", contract_mode: false } : {}),
+    boundary_snapshot: { head: gitHead(projectRoot), dirty_files: dirty.files },
+    ...extra,
+  }));
+}
+
+function appendCodeReviewJob(projectRoot: string, change: string, jobId: string, paths: string[]): Job {
+  const head = gitHead(projectRoot);
+  const job: Job = {
+    job_id: jobId,
+    role: "code-reviewer",
+    state: "requested",
+    gate_id: "review.code_review",
+    boundFiles: paths.map(path => ({ path, sha: codeFileContentSha(projectRoot, path) ?? "sha256:missing" })),
+    packet_digest: `sha256:${jobId}`,
+    packet_context: {
+      code_review_scope: {
+        base_head: head,
+        current_head: head,
+        scope_reliable: true,
+        scope_reason: "test",
+        committed_paths: [],
+        worktree_paths: paths,
+        untracked_paths: [],
+        review_paths: paths,
+      },
+    },
+    created_from_transition: "review-ready",
+    created_at: new Date().toISOString(),
+  };
+  appendEvent(projectRoot, change, makeEvent(change, "transition_commit", {
+    transition: "review-ready",
+    from_state: "apply_done",
+    to_state: "apply_done",
+    outcome: "job_created",
+    new_jobs: [job],
+    created_job_ids: [job.job_id],
+    reason: "review",
+  }));
+  return job;
+}
+
+function appendReviewFailed(projectRoot: string, change: string, jobId: string, sourceRefs: string[]): void {
+  appendEvent(projectRoot, change, makeEvent(change, "job_rejected", {
+    job_id: jobId,
+    role: "code-reviewer",
+    result_kind: "review_failed",
+    findings: [{ id: "CR-001", blocking: true, type: "implementation", source_refs: sourceRefs }],
+  }));
+}
+
+function appendStateCommit(projectRoot: string, change: string, transition: string, fromState: State, toState: State, extra: Record<string, unknown> = {}): void {
+  appendEvent(projectRoot, change, makeEvent(change, "transition_commit", {
+    transition, from_state: fromState, to_state: toState, outcome: "advanced", created_job_ids: [], reason: transition, ...extra,
+  }));
+}
+
+test("code-reviewer scope：复审不把审查周期开始前未变化的脏文件当成新改动", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    initGitRepo(fx.projectRoot);
+    commitSources(fx.projectRoot, {
+      "a.ts": "export const a = 1;\n",
+      "b.ts": "export const b = 1;\n",
+      "c.ts": "export const c = 1;\n",
+      "user.ts": "export const user = 1;\n",
+      "user-edited.ts": "export const userEdited = 1;\n",
+    });
+    writeFileSync(join(fx.projectRoot, "src", "user.ts"), "export const user = 2;\n");
+    writeFileSync(join(fx.projectRoot, "src", "user-edited.ts"), "export const userEdited = 2;\n");
+    writeFileSync(join(fx.projectRoot, "src", "c.ts"), "export const c = 2;\n");
+    writeFileSync(join(fx.projectRoot, "src", "untracked-user.ts"), "export const untrackedUser = 1;\n");
+    appendTaskBoundary(fx.projectRoot, fx.change, "task_started", "TASK-001", "ATT-pre");
+    writeFileSync(join(fx.projectRoot, "src", "a.ts"), "export const a = 2;\n");
+    writeFileSync(join(fx.projectRoot, "src", "c.ts"), "export const c = 3;\n");
+    appendTaskBoundary(fx.projectRoot, fx.change, "task_completed", "TASK-001", "ATT-pre");
+    const first = appendCodeReviewJob(fx.projectRoot, fx.change, "JOB-pre-1", ["src/a.ts", "src/c.ts"]);
+    appendReviewFailed(fx.projectRoot, fx.change, first.job_id, ["src/a.ts:1"]);
+
+    writeFileSync(join(fx.projectRoot, "src", "b.ts"), "export const b = 2;\n");
+    writeFileSync(join(fx.projectRoot, "src", "c.ts"), "export const c = 2;\n");
+    writeFileSync(join(fx.projectRoot, "src", "user-edited.ts"), "export const userEdited = 3;\n");
+
+    const scope = scanCodeReviewScope(fx.projectRoot, readEvents(fx.projectRoot, fx.change));
+    assert.deepEqual(scope.review_paths, ["src/a.ts", "src/b.ts", "src/c.ts", "src/user-edited.ts"]);
+  } finally { fx.cleanup(); }
+});
+
+test("code-reviewer scope：未通过审查的 Apply round 回到计划后，重新 start-apply 仍审查上一 round 的改动", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    initGitRepo(fx.projectRoot);
+    commitSources(fx.projectRoot, { "a.ts": "export const a = 1;\n", "b.ts": "export const b = 1;\n", "user.ts": "export const user = 1;\n" });
+    writeFileSync(join(fx.projectRoot, "src", "user.ts"), "export const user = 2;\n");
+    appendTaskBoundary(fx.projectRoot, fx.change, "task_started", "TASK-001", "ATT-round-a");
+    writeFileSync(join(fx.projectRoot, "src", "a.ts"), "export const a = 2;\n");
+    appendTaskBoundary(fx.projectRoot, fx.change, "task_completed", "TASK-001", "ATT-round-a");
+    const roundA = appendCodeReviewJob(fx.projectRoot, fx.change, "JOB-round-a", ["src/a.ts"]);
+    appendReviewFailed(fx.projectRoot, fx.change, roundA.job_id, ["src/a.ts:1"]);
+    appendStateCommit(fx.projectRoot, fx.change, "reopen", "apply_done", "propose", { reopen_target: "propose", reopen_source: "apply_done" });
+    appendStateCommit(fx.projectRoot, fx.change, "propose-ready", "propose", "propose_ready");
+    appendStateCommit(fx.projectRoot, fx.change, "start-apply", "propose_ready", "apply", { apply_start_head: gitHead(fx.projectRoot), apply_start_head_reason: "ok" });
+    appendTaskBoundary(fx.projectRoot, fx.change, "task_started", "TASK-002", "ATT-round-b");
+    writeFileSync(join(fx.projectRoot, "src", "b.ts"), "export const b = 2;\n");
+    appendTaskBoundary(fx.projectRoot, fx.change, "task_completed", "TASK-002", "ATT-round-b");
+
+    const scope = scanCodeReviewScope(fx.projectRoot, readEvents(fx.projectRoot, fx.change));
+    assert.deepEqual(scope.review_paths, ["src/a.ts", "src/b.ts"]);
+  } finally { fx.cleanup(); }
+});
+
+test("code-reviewer scope：门禁因无代码改动跳过后出现的新改动不带入审查周期前就存在的脏文件", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    initGitRepo(fx.projectRoot);
+    commitSources(fx.projectRoot, { "a.ts": "export const a = 1;\n", "user.ts": "export const user = 1;\n" });
+    writeFileSync(join(fx.projectRoot, "src", "user.ts"), "export const user = 2;\n");
+    appendTaskBoundary(fx.projectRoot, fx.change, "task_started", "TASK-001", "ATT-skip");
+    appendTaskBoundary(fx.projectRoot, fx.change, "task_completed", "TASK-001", "ATT-skip");
+    appendStateCommit(fx.projectRoot, fx.change, "review-ready", "apply_done", "review", {
+      code_review_gate: { decision: "skipped", reason: "no_code_changes", head: gitHead(fx.projectRoot) },
+    });
+    appendStateCommit(fx.projectRoot, fx.change, "reopen", "review", "apply", { reopen_target: "apply", reopen_source: "review" });
+    appendTaskBoundary(fx.projectRoot, fx.change, "task_started", "TASK-002", "ATT-after-skip");
+    writeFileSync(join(fx.projectRoot, "src", "a.ts"), "export const a = 2;\n");
+    appendTaskBoundary(fx.projectRoot, fx.change, "task_completed", "TASK-002", "ATT-after-skip");
+
+    const scope = scanCodeReviewScope(fx.projectRoot, readEvents(fx.projectRoot, fx.change));
+    assert.deepEqual(scope.review_paths, ["src/a.ts"]);
+  } finally { fx.cleanup(); }
+});
+
+test("code_state_check：增量复审链中已审且未变化的文件与审查前就存在的脏文件都不算差异", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    initGitRepo(fx.projectRoot);
+    commitSources(fx.projectRoot, { "a.ts": "export const a = 1;\n", "b.ts": "export const b = 1;\n", "user.ts": "export const user = 1;\n" });
+    writeFileSync(join(fx.projectRoot, "src", "user.ts"), "export const user = 2;\n");
+    appendTaskBoundary(fx.projectRoot, fx.change, "task_started", "TASK-001", "ATT-state");
+    writeFileSync(join(fx.projectRoot, "src", "a.ts"), "export const a = 2;\n");
+    writeFileSync(join(fx.projectRoot, "src", "b.ts"), "export const b = 2;\n");
+    appendTaskBoundary(fx.projectRoot, fx.change, "task_completed", "TASK-001", "ATT-state");
+    const first = appendCodeReviewJob(fx.projectRoot, fx.change, "JOB-state-1", ["src/a.ts", "src/b.ts"]);
+    appendReviewFailed(fx.projectRoot, fx.change, first.job_id, ["src/a.ts:1"]);
+    writeFileSync(join(fx.projectRoot, "src", "a.ts"), "export const a = 3;\n");
+    const second = appendCodeReviewJob(fx.projectRoot, fx.change, "JOB-state-2", ["src/a.ts"]);
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "job_accepted", { job_id: second.job_id, role: "code-reviewer" }));
+    appendStateCommit(fx.projectRoot, fx.change, "review-ready", "apply_done", "review", {
+      code_review_gate: { decision: "passed", job_id: second.job_id, packet_digest: second.packet_digest, current_head: gitHead(fx.projectRoot) },
+    });
+
+    assert.deepEqual(computeCodeStateCheck(fx.projectRoot, readEvents(fx.projectRoot, fx.change)).changed_paths, []);
+
+    writeFileSync(join(fx.projectRoot, "src", "b.ts"), "export const b = 3;\n");
+    writeFileSync(join(fx.projectRoot, "src", "user.ts"), "export const user = 3;\n");
+    assert.deepEqual(computeCodeStateCheck(fx.projectRoot, readEvents(fx.projectRoot, fx.change)).changed_paths, ["src/b.ts", "src/user.ts"]);
+  } finally { fx.cleanup(); }
+});
+
+function appendAcceptedCodeReview(projectRoot: string, change: string, jobId: string, paths: string[]): Job {
+  const job = appendCodeReviewJob(projectRoot, change, jobId, paths);
+  appendEvent(projectRoot, change, makeEvent(change, "job_accepted", { job_id: job.job_id, role: "code-reviewer" }));
+  appendStateCommit(projectRoot, change, "review-ready", "apply_done", "review", {
+    code_review_gate: { decision: "passed", job_id: job.job_id, packet_digest: job.packet_digest, current_head: gitHead(projectRoot) },
+  });
+  return job;
+}
+
+test("code-reviewer scope：放行后经 self-test-fix 回到 apply 再回到计划，修复改动仍进入下一次代码审查", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    initGitRepo(fx.projectRoot);
+    commitSources(fx.projectRoot, { "a.ts": "export const a = 1;\n", "f.ts": "export const f = 1;\n", "g.ts": "export const g = 1;\n", "user.ts": "export const user = 1;\n" });
+    writeFileSync(join(fx.projectRoot, "src", "user.ts"), "export const user = 2;\n");
+    appendTaskBoundary(fx.projectRoot, fx.change, "task_started", "1.1", "ATT-1.1");
+    writeFileSync(join(fx.projectRoot, "src", "a.ts"), "export const a = 2;\n");
+    appendTaskBoundary(fx.projectRoot, fx.change, "task_completed", "1.1", "ATT-1.1");
+    appendAcceptedCodeReview(fx.projectRoot, fx.change, "JOB-before-fix", ["src/a.ts"]);
+    appendStateCommit(fx.projectRoot, fx.change, "reopen", "review", "apply", { reopen_target: "apply", reopen_source: "review" });
+    appendTaskBoundary(fx.projectRoot, fx.change, "task_started", "FIX-SELFTEST-1.1-1", "ATT-FIX", {
+      fix: { fix_id: "FIX-SELFTEST-1.1-1", source: "self_test", parent_task_id: "1.1", reason: "回归" },
+    });
+    writeFileSync(join(fx.projectRoot, "src", "f.ts"), "export const f = 2;\n");
+    appendTaskBoundary(fx.projectRoot, fx.change, "task_completed", "FIX-SELFTEST-1.1-1", "ATT-FIX");
+    appendStateCommit(fx.projectRoot, fx.change, "reopen", "apply", "propose", { reopen_target: "propose", reopen_source: "apply" });
+    appendStateCommit(fx.projectRoot, fx.change, "propose-ready", "propose", "propose_ready");
+    appendStateCommit(fx.projectRoot, fx.change, "start-apply", "propose_ready", "apply", { apply_start_head: gitHead(fx.projectRoot), apply_start_head_reason: "ok" });
+    appendTaskBoundary(fx.projectRoot, fx.change, "task_started", "2.1", "ATT-2.1");
+    writeFileSync(join(fx.projectRoot, "src", "g.ts"), "export const g = 2;\n");
+    appendTaskBoundary(fx.projectRoot, fx.change, "task_completed", "2.1", "ATT-2.1");
+
+    const events = readEvents(fx.projectRoot, fx.change);
+    const scope = scanCodeReviewScope(fx.projectRoot, events);
+    assert.deepEqual(scope.review_paths, ["src/f.ts", "src/g.ts"]);
+    const context = codeReviewPacketContext(fx.changeRoot, fx.projectRoot, scope, events);
+    assert.deepEqual(context.task_execution_index?.map(entry => entry.task_id), ["1.1", "2.1", "FIX-SELFTEST-1.1-1"]);
+    assert.deepEqual(context.task_execution_index_scope?.carried_task_ids, ["1.1"]);
+    assert.deepEqual(context.unattributed_paths, []);
+  } finally { fx.cleanup(); }
+});
+
+test("code-reviewer scope：验收后修复的复审不把前几轮已审且未变化的文件带回范围", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    initGitRepo(fx.projectRoot);
+    commitSources(fx.projectRoot, { "a.ts": "export const a = 1;\n", "f.ts": "export const f = 1;\n", "g.ts": "export const g = 1;\n" });
+    appendTaskBoundary(fx.projectRoot, fx.change, "task_started", "1.1", "ATT-1.1");
+    writeFileSync(join(fx.projectRoot, "src", "a.ts"), "export const a = 2;\n");
+    writeFileSync(join(fx.projectRoot, "src", "f.ts"), "export const f = 2;\n");
+    appendTaskBoundary(fx.projectRoot, fx.change, "task_completed", "1.1", "ATT-1.1");
+    const first = appendCodeReviewJob(fx.projectRoot, fx.change, "JOB-round-1", ["src/a.ts", "src/f.ts"]);
+    appendReviewFailed(fx.projectRoot, fx.change, first.job_id, ["src/a.ts:1"]);
+    writeFileSync(join(fx.projectRoot, "src", "a.ts"), "export const a = 3;\n");
+    appendAcceptedCodeReview(fx.projectRoot, fx.change, "JOB-round-2", ["src/a.ts"]);
+    appendStateCommit(fx.projectRoot, fx.change, "accept", "review", "accepted");
+    appendStateCommit(fx.projectRoot, fx.change, "reopen", "accepted", "apply", { reopen_target: "apply", reopen_source: "accepted" });
+    appendTaskBoundary(fx.projectRoot, fx.change, "task_started", "FIX-SELFTEST-1.1-1", "ATT-FIX", {
+      fix: { fix_id: "FIX-SELFTEST-1.1-1", source: "self_test", parent_task_id: "1.1", reason: "回归" },
+    });
+    writeFileSync(join(fx.projectRoot, "src", "g.ts"), "export const g = 2;\n");
+    appendTaskBoundary(fx.projectRoot, fx.change, "task_completed", "FIX-SELFTEST-1.1-1", "ATT-FIX");
+
+    const events = readEvents(fx.projectRoot, fx.change);
+    const scope = scanCodeReviewScope(fx.projectRoot, events);
+    assert.deepEqual(scope.review_paths, ["src/g.ts"]);
+    assert.deepEqual(codeReviewPacketContext(fx.changeRoot, fx.projectRoot, scope, events).unattributed_paths, []);
+  } finally { fx.cleanup(); }
+});
+
+test("task_execution_index：最终验证收录本次验收周期内所有 Apply round 的任务", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    initGitRepo(fx.projectRoot);
+    commitSources(fx.projectRoot, { "a.ts": "export const a = 1;\n", "b.ts": "export const b = 1;\n" });
+    appendTaskBoundary(fx.projectRoot, fx.change, "task_started", "1.1", "ATT-1.1");
+    writeFileSync(join(fx.projectRoot, "src", "a.ts"), "export const a = 2;\n");
+    appendTaskBoundary(fx.projectRoot, fx.change, "task_completed", "1.1", "ATT-1.1");
+    const roundA = appendCodeReviewJob(fx.projectRoot, fx.change, "JOB-round-a", ["src/a.ts"]);
+    appendReviewFailed(fx.projectRoot, fx.change, roundA.job_id, ["src/a.ts:1"]);
+    appendStateCommit(fx.projectRoot, fx.change, "reopen", "apply_done", "propose", { reopen_target: "propose", reopen_source: "apply_done" });
+    appendStateCommit(fx.projectRoot, fx.change, "propose-ready", "propose", "propose_ready");
+    appendStateCommit(fx.projectRoot, fx.change, "start-apply", "propose_ready", "apply", { apply_start_head: gitHead(fx.projectRoot), apply_start_head_reason: "ok" });
+    appendTaskBoundary(fx.projectRoot, fx.change, "task_started", "2.1", "ATT-2.1");
+    writeFileSync(join(fx.projectRoot, "src", "b.ts"), "export const b = 2;\n");
+    appendTaskBoundary(fx.projectRoot, fx.change, "task_completed", "2.1", "ATT-2.1");
+    appendAcceptedCodeReview(fx.projectRoot, fx.change, "JOB-round-b", ["src/a.ts", "src/b.ts"]);
+
+    const events = readEvents(fx.projectRoot, fx.change);
+    const index = taskExecutionIndexForReview(fx.projectRoot, events);
+    assert.deepEqual(index.entries.map(entry => entry.task_id), ["1.1", "2.1"]);
+    assert.deepEqual(index.scope, { since_event_id: null, carried_task_ids: [] });
+    assert.deepEqual(computeCodeStateCheck(fx.projectRoot, events).changed_paths, []);
+  } finally { fx.cleanup(); }
+});
+
+test("task_execution_index：最终验证只收录最近一次验收后完成的任务，并带入修复任务关联的历史任务", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    initGitRepo(fx.projectRoot);
+    commitSources(fx.projectRoot, { "a.ts": "export const a = 1;\n" });
+    for (const [taskId, attemptId] of [["1.1", "ATT-1.1"], ["1.2", "ATT-1.2"]]) {
+      appendTaskBoundary(fx.projectRoot, fx.change, "task_started", taskId, attemptId);
+      appendTaskBoundary(fx.projectRoot, fx.change, "task_completed", taskId, attemptId);
+    }
+    appendStateCommit(fx.projectRoot, fx.change, "accept", "review", "accepted");
+    const accepted = readEvents(fx.projectRoot, fx.change).at(-1)!;
+    appendStateCommit(fx.projectRoot, fx.change, "reopen", "accepted", "propose", { reopen_target: "propose", reopen_source: "accepted" });
+    appendStateCommit(fx.projectRoot, fx.change, "propose-ready", "propose", "propose_ready");
+    appendStateCommit(fx.projectRoot, fx.change, "start-apply", "propose_ready", "apply", { apply_start_head: gitHead(fx.projectRoot), apply_start_head_reason: "ok" });
+    appendTaskBoundary(fx.projectRoot, fx.change, "task_started", "2.1", "ATT-2.1");
+    appendTaskBoundary(fx.projectRoot, fx.change, "task_completed", "2.1", "ATT-2.1");
+    appendTaskBoundary(fx.projectRoot, fx.change, "task_started", "FIX-SELFTEST-1.1-1", "ATT-FIX", {
+      fix: { fix_id: "FIX-SELFTEST-1.1-1", source: "self_test", parent_task_id: "1.1", reason: "回归" },
+    });
+    appendTaskBoundary(fx.projectRoot, fx.change, "task_completed", "FIX-SELFTEST-1.1-1", "ATT-FIX");
+
+    const index = taskExecutionIndexForReview(fx.projectRoot, readEvents(fx.projectRoot, fx.change));
+    assert.deepEqual(index.entries.map(entry => entry.task_id), ["1.1", "2.1", "FIX-SELFTEST-1.1-1"]);
+    assert.deepEqual(index.scope, { since_event_id: accepted.event_id, carried_task_ids: ["1.1"] });
   } finally { fx.cleanup(); }
 });
 

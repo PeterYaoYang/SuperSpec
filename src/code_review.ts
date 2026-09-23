@@ -16,7 +16,7 @@ import {
   walkCodeFiles,
 } from "./git_state.ts";
 import { parseExecutionRequirements, parseTestContractEntries, parseStructureChangeLedger } from "./format.ts";
-import type { BoundarySnapshot, CodeReviewGateEvidence, CodeReviewResultKind, CodeReviewScope, CodeStateCheck, CoverageExemptionRef, DirtyFileFingerprint, Event, Job, JobPacketContext, Ref, ReviewPreviousRejection, TaskAttempt, TaskExecutionIndexEntry, StructureChangeLedger } from "./types.ts";
+import type { BoundarySnapshot, CodeReviewGateEvidence, CodeReviewResultKind, CodeReviewScope, CodeStateCheck, CoverageExemptionRef, DirtyFileFingerprint, Event, Job, JobPacketContext, Ref, ReviewPreviousRejection, TaskAttempt, TaskExecutionIndexEntry, TaskExecutionIndexScope, StructureChangeLedger } from "./types.ts";
 import { planningValidationProfileForCurrentRound } from "./propose_round.ts";
 import { workflowBudgetForRisk, workflowRiskForChange } from "./workflow_config.ts";
 
@@ -158,10 +158,78 @@ interface CodeReviewBase {
   dirty_files?: DirtyFileFingerprint[];
   reviewed_files?: Ref[];
   required_recheck_paths?: string[];
+  // 审查周期首个 task 开始前就已存在的脏文件；内容未变的视为用户或并行工作，不属于本 change 的改动
+  preexisting_dirty_files?: DirtyFileFingerprint[];
+}
+
+function isStartApplyCommit(ev: Event): boolean {
+  return ev.event_type === "transition_commit" &&
+    (ev.payload as { transition?: unknown }).transition === "start-apply";
+}
+
+function isCodeSettledCommit(ev: Event): boolean {
+  if (ev.event_type !== "transition_commit") return false;
+  const payload = ev.payload as { transition?: unknown; from_state?: unknown; to_state?: unknown; code_review_gate?: { decision?: unknown } };
+  if (payload.transition === "accept" && payload.to_state === "accepted") return true;
+  return payload.transition === "review-ready" &&
+    payload.from_state === "apply_done" &&
+    payload.to_state === "review" &&
+    (payload.code_review_gate?.decision === "passed" || payload.code_review_gate?.decision === "skipped");
+}
+
+function isApplyEntryCommit(ev: Event): boolean {
+  if (ev.event_type !== "transition_commit") return false;
+  const payload = ev.payload as { from_state?: unknown; to_state?: unknown };
+  return payload.to_state === "apply" && payload.from_state !== "apply";
+}
+
+/**
+ * 代码审查周期的起点：最近一次代码审查放行或 change 验收之后，第一次进入 apply 的转换
+ * （start-apply 或任意 reopen 到 apply）。未放行的 Apply round 回到计划后重新 start-apply，
+ * 上一 round 的改动仍属于同一审查周期。放行之后尚未再进入 apply 时，当前处于刚放行的周期，按放行前的事件计算。
+ */
+function reviewCycleStartIndex(events: Event[]): number {
+  const settledIndex = events.findLastIndex(isCodeSettledCommit);
+  for (let i = settledIndex + 1; i < events.length; i++) {
+    if (isApplyEntryCommit(events[i])) return i;
+  }
+  return settledIndex >= 0 ? reviewCycleStartIndex(events.slice(0, settledIndex)) : -1;
+}
+
+function reviewCycleTaskBoundary(events: Event[]): { boundary: BoundarySnapshot; isFirstTask: boolean } | null {
+  const startIndex = reviewCycleStartIndex(events);
+  if (startIndex < 0) return null;
+  let isFirstTask = true;
+  for (let i = startIndex + 1; i < events.length; i++) {
+    if (events[i].event_type !== "task_started") continue;
+    const boundary = boundaryFromPayload(events[i].payload);
+    if (boundary) return { boundary, isFirstTask };
+    isFirstTask = false;
+  }
+  return null;
+}
+
+/** 只有审查周期第一个 task 的边界可信：更晚的边界可能已经包含前面 task 的改动。 */
+function preexistingDirtyFiles(events: Event[]): DirtyFileFingerprint[] | undefined {
+  const cycle = reviewCycleTaskBoundary(events);
+  return cycle?.isFirstTask ? cycle.boundary.dirty_files : undefined;
+}
+
+function unchangedPreexistingPaths(current: DirtyFileFingerprint[], preexisting: DirtyFileFingerprint[] | undefined): Set<string> {
+  if (!preexisting || preexisting.length === 0) return new Set();
+  const before = new Map(preexisting.map(file => [file.path, file]));
+  return new Set(current
+    .filter(file => {
+      const original = before.get(file.path);
+      return original !== undefined && original.status === file.status && original.sha256 === file.sha256;
+    })
+    .map(file => file.path));
 }
 
 function latestReviewAttemptBase(events: Event[]): CodeReviewBase | null {
   const jobs = new Map<string, Job>();
+  // 增量复审只绑定变化文件：已审集合取本 round 各轮形成结论的审查中每个文件最后一次被审查的指纹
+  const reviewedByPath = new Map<string, Ref>();
   let latest: CodeReviewBase | null = null;
   let startIndex = 0;
   for (let i = events.length - 1; i >= 0; i--) {
@@ -204,39 +272,25 @@ function latestReviewAttemptBase(events: Event[]): CodeReviewBase | null {
         });
       })
       : [];
+    for (const bound of job.boundFiles) reviewedByPath.set(bound.path, bound);
     latest = {
       base_head: scope.current_head ?? null,
       kind: "reviewed",
       reason: "latest_code_review_attempt",
-      reviewed_files: job.boundFiles,
+      reviewed_files: [...reviewedByPath.values()],
       required_recheck_paths: uniqSorted(requiredRecheckPaths),
     };
   }
   return latest;
 }
 
-function firstTaskBoundaryInCurrentApply(events: Event[]): BoundarySnapshot | null {
-  let startIndex = -1;
-  for (let i = events.length - 1; i >= 0; i--) {
-    const ev = events[i];
-    if (ev.event_type !== "transition_commit") continue;
-    if ((ev.payload as { transition?: unknown }).transition === "start-apply") {
-      startIndex = i;
-      break;
-    }
-  }
-  for (let i = startIndex + 1; i < events.length; i++) {
-    if (events[i].event_type !== "task_started") continue;
-    const boundary = boundaryFromPayload(events[i].payload);
-    if (boundary) return boundary;
-  }
-  return null;
-}
-
 export function selectCodeReviewBase(events: Event[]): CodeReviewBase {
   const reviewed = latestReviewAttemptBase(events);
-  if (reviewed) return reviewed;
-  const taskBoundary = firstTaskBoundaryInCurrentApply(events);
+  if (reviewed) {
+    const preexisting = preexistingDirtyFiles(events);
+    return preexisting ? { ...reviewed, preexisting_dirty_files: preexisting } : reviewed;
+  }
+  const taskBoundary = reviewCycleTaskBoundary(events)?.boundary;
   if (taskBoundary) {
     return {
       base_head: taskBoundary.head,
@@ -294,7 +348,7 @@ function scanCodeReviewScopeFromBase(
     }
     untrackedPaths = [];
   } else if (base.reviewed_files) {
-    const dirty = dirtyCodePaths(projectRoot);
+    const dirty = dirtyCodeFiles(projectRoot);
     if (!dirty.ok) {
       scopeReliable = false;
       scopeReason = [scopeReason, dirty.reason].filter(Boolean).join("; ");
@@ -304,7 +358,11 @@ function scanCodeReviewScopeFromBase(
       const changedReviewed = base.reviewed_files
         .filter(file => (codeFileContentSha(projectRoot, file.path) ?? "sha256:missing") !== file.sha)
         .map(file => file.path);
-      const newlyChanged = dirty.paths.filter(path => !reviewed.has(path));
+      // 排除只作用于上轮未审过的文件：已审文件的内容变化和 finding 点名的复查文件始终保留
+      const preexisting = unchangedPreexistingPaths(dirty.files, base.preexisting_dirty_files);
+      const newlyChanged = dirty.files
+        .map(file => file.path)
+        .filter(path => !reviewed.has(path) && !preexisting.has(path));
       worktreePaths = excludeKnownPaths(uniqSorted([
         ...changedReviewed,
         ...newlyChanged,
@@ -324,6 +382,12 @@ function scanCodeReviewScopeFromBase(
     }
     worktreePaths = excludeKnownPaths(uniqSorted([...(staged.ok ? staged.lines : []), ...(unstaged.ok ? unstaged.lines : [])]), ignoredPaths);
     untrackedPaths = excludeKnownPaths(uniqSorted(untracked.ok ? untracked.lines : []), ignoredPaths);
+    if (base.preexisting_dirty_files) {
+      const dirty = dirtyCodeFiles(projectRoot);
+      const preexisting = dirty.ok ? unchangedPreexistingPaths(dirty.files, base.preexisting_dirty_files) : new Set<string>();
+      worktreePaths = worktreePaths.filter(path => !preexisting.has(path));
+      untrackedPaths = untrackedPaths.filter(path => !preexisting.has(path));
+    }
   }
   const fallbackPaths = projectHasReadableDirectory(projectRoot)
     ? excludeKnownPaths(walkCodeFiles(projectRoot).sort(), ignoredPaths)
@@ -489,7 +553,7 @@ function structureLedgerForCodeReview(changeRoot: string, events: Event[]): Stru
 }
 
 export function codeReviewPacketContext(changeRoot: string, projectRoot: string, scope: CodeReviewScope, events: Event[]): JobPacketContext {
-  const taskExecutionIndex = taskExecutionIndexFromEvents(projectRoot, events);
+  const { entries: taskExecutionIndex, scope: taskExecutionIndexScope } = taskExecutionIndexFromEvents(projectRoot, events, reviewCycleStartIndex(events));
   // changed_paths 未知（快照缺失）或不完整（committed 段 diff 失败）的 task
   // 都进入 unknown_attribution_tasks，提示 code-reviewer 扩大对照范围
   const unknownAttributionTasks = taskExecutionIndex
@@ -505,6 +569,7 @@ export function codeReviewPacketContext(changeRoot: string, projectRoot: string,
     code_review_scope: scope,
     coverage_exemption_refs: coverageExemptionRefs(changeRoot, events),
     task_execution_index: taskExecutionIndex,
+    task_execution_index_scope: taskExecutionIndexScope,
     unattributed_paths: scope.review_paths.filter(path => !attributedPaths.has(path)).sort(),
     unknown_attribution_tasks: unknownAttributionTasks,
     added_code_paths: addedCodePathsForScope(projectRoot, scope),
@@ -653,10 +718,47 @@ function testEvidenceForAttempt(events: Event[], attempt: TaskAttempt): Record<s
   return evidence.sort((a, b) => String(a.test_id).localeCompare(String(b.test_id)));
 }
 
-function taskExecutionIndexFromEvents(projectRoot: string, events: Event[]): TaskExecutionIndexEntry[] {
+interface CompletedTaskRecord {
+  event: Event;
+  index: number;
+  taskId: string;
+  attemptId: string;
+  started: StartedAttemptRecord | undefined;
+}
+
+function taskExecutionIndexEntry(projectRoot: string, events: Event[], record: CompletedTaskRecord): TaskExecutionIndexEntry {
+  const payload = record.event.payload as { scope_note?: unknown };
+  const attempt = record.started?.attempt;
+  const effectiveContract = attempt?.contract_mode === true ? attempt.contract ?? null : null;
+  const requiredEvidence = attempt?.required_evidence ?? null;
+  const changedResult = changedPathsBetweenSnapshots(projectRoot, record.started?.boundary ?? null, boundaryFromPayload(record.event.payload));
+  return {
+    task_id: record.taskId,
+    attempt_id: record.attemptId,
+    ...(attempt?.fix ? { fix: attempt.fix } : {}),
+    execution_policy: attempt?.execution_policy ?? "tdd",
+    changed_paths: changedResult ? changedResult.paths : null,
+    ...(changedResult?.partial_reason ? { changed_paths_partial_reason: changedResult.partial_reason } : {}),
+    contract: effectiveContract,
+    required_evidence: requiredEvidence,
+    declared_tests: requiredEvidence?.test_ids ?? effectiveContract?.tests ?? [],
+    scope_note: payload.scope_note && typeof payload.scope_note === "object" && !Array.isArray(payload.scope_note)
+      ? payload.scope_note as Record<string, unknown>
+      : null,
+    test_evidence: attempt ? testEvidenceForAttempt(events, attempt) : [],
+    task_completed_event_ref: record.event.event_id,
+  };
+}
+
+/**
+ * 索引覆盖 sinceIndex 之后完成的任务；这些任务的修复通过 parent_task_id 关联的更早任务按最近一次完成记录传递带入。
+ * 更早完成的任务已在此前的审查或验收中闭环，不再重复投影。
+ */
+function taskExecutionIndexFromEvents(projectRoot: string, events: Event[], sinceIndex: number): { entries: TaskExecutionIndexEntry[]; scope: TaskExecutionIndexScope } {
   const attempts = new Map<string, StartedAttemptRecord>();
-  const entries: TaskExecutionIndexEntry[] = [];
-  for (const ev of events) {
+  const completed: CompletedTaskRecord[] = [];
+  const latestCompletedByTask = new Map<string, CompletedTaskRecord>();
+  events.forEach((ev, index) => {
     if (ev.event_type === "task_started") {
       const attempt = ev.payload as unknown as TaskAttempt;
       if (typeof attempt.attempt_id === "string") {
@@ -666,38 +768,48 @@ function taskExecutionIndexFromEvents(projectRoot: string, events: Event[]): Tas
         });
       }
     } else if (ev.event_type === "task_completed") {
-      const payload = ev.payload as { task_id?: unknown; attempt_id?: unknown; scope_note?: unknown };
-      if (typeof payload.task_id !== "string" || typeof payload.attempt_id !== "string") continue;
-      const started = attempts.get(payload.attempt_id);
-      const attempt = started?.attempt;
-      const effectiveContract = attempt?.contract_mode === true ? attempt.contract ?? null : null;
-      const requiredEvidence = attempt?.required_evidence ?? null;
-      const changedResult = changedPathsBetweenSnapshots(projectRoot, started?.boundary ?? null, boundaryFromPayload(ev.payload));
-      entries.push({
-        task_id: payload.task_id,
-        attempt_id: payload.attempt_id,
-        ...(attempt?.fix ? { fix: attempt.fix } : {}),
-        execution_policy: attempt?.execution_policy ?? "tdd",
-        changed_paths: changedResult ? changedResult.paths : null,
-        ...(changedResult?.partial_reason ? { changed_paths_partial_reason: changedResult.partial_reason } : {}),
-        contract: effectiveContract,
-        required_evidence: requiredEvidence,
-        declared_tests: requiredEvidence?.test_ids ?? effectiveContract?.tests ?? [],
-        scope_note: payload.scope_note && typeof payload.scope_note === "object" && !Array.isArray(payload.scope_note)
-          ? payload.scope_note as Record<string, unknown>
-          : null,
-        test_evidence: attempt ? testEvidenceForAttempt(events, attempt) : [],
-        task_completed_event_ref: ev.event_id,
-      });
+      const payload = ev.payload as { task_id?: unknown; attempt_id?: unknown };
+      if (typeof payload.task_id !== "string" || typeof payload.attempt_id !== "string") return;
+      const record = { event: ev, index, taskId: payload.task_id, attemptId: payload.attempt_id, started: attempts.get(payload.attempt_id) };
+      completed.push(record);
+      latestCompletedByTask.set(record.taskId, record);
     }
+  });
+
+  const selected = new Map<string, CompletedTaskRecord>();
+  for (const record of completed) {
+    if (record.index > sinceIndex) selected.set(record.attemptId, record);
   }
-  entries.sort((a, b) => a.task_id.localeCompare(b.task_id) || a.attempt_id.localeCompare(b.attempt_id));
-  return entries;
+  const carriedTaskIds = new Set<string>();
+  const pending = [...selected.values()];
+  while (pending.length > 0) {
+    const parentTaskId = pending.pop()!.started?.attempt.fix?.parent_task_id;
+    if (!parentTaskId) continue;
+    const parent = latestCompletedByTask.get(parentTaskId);
+    if (!parent || selected.has(parent.attemptId)) continue;
+    selected.set(parent.attemptId, parent);
+    carriedTaskIds.add(parentTaskId);
+    pending.push(parent);
+  }
+
+  const entries = [...selected.values()]
+    .map(record => taskExecutionIndexEntry(projectRoot, events, record))
+    .sort((a, b) => a.task_id.localeCompare(b.task_id) || a.attempt_id.localeCompare(b.attempt_id));
+  return {
+    entries,
+    scope: {
+      since_event_id: sinceIndex >= 0 ? events[sinceIndex].event_id : null,
+      carried_task_ids: [...carriedTaskIds].sort(),
+    },
+  };
 }
 
-/** Read-only execution evidence projected for code review and final verification. */
-export function taskExecutionIndexForReview(projectRoot: string, events: Event[]): TaskExecutionIndexEntry[] {
-  return taskExecutionIndexFromEvents(projectRoot, events);
+/** 最终验证的执行证据：覆盖最近一次 change 验收之后完成的全部任务，即本次验收周期。 */
+export function taskExecutionIndexForReview(projectRoot: string, events: Event[]): { entries: TaskExecutionIndexEntry[]; scope: TaskExecutionIndexScope } {
+  const lastAcceptIndex = events.findLastIndex(ev => ev.event_type === "transition_commit" &&
+    (ev.payload as { transition?: unknown }).transition === "accept" &&
+    (ev.payload as { to_state?: unknown }).to_state === "accepted");
+  return taskExecutionIndexFromEvents(projectRoot, events, lastAcceptIndex);
 }
 
 function isCodeReviewerJob(job: Job): boolean {
@@ -1001,6 +1113,31 @@ function latestApplyDoneToReviewGatePayload(events: Event[]): { decision: "passe
   return null;
 }
 
+/** 放行的代码审查链中每个文件最后一次被实际审查时的内容指纹；只统计形成结论的审查（accepted 或 review_failed）。 */
+function reviewedFileShas(events: Event[], passedJob: Job | null): Map<string, string> {
+  const shas = new Map<string, string>();
+  if (!passedJob) return shas;
+  const startIndex = Math.max(0, events.findLastIndex(isStartApplyCommit));
+  const jobs = new Map<string, Job>();
+  for (let i = startIndex; i < events.length; i++) {
+    const ev = events[i];
+    if (ev.event_type === "transition_commit") {
+      for (const job of (ev.payload as { new_jobs?: Job[] }).new_jobs ?? []) {
+        if (isCodeReviewerJob(job)) jobs.set(job.job_id, job);
+      }
+      continue;
+    }
+    if (ev.event_type !== "job_accepted" && ev.event_type !== "job_rejected") continue;
+    const payload = ev.payload as { job_id?: unknown; result_kind?: unknown };
+    const job = typeof payload.job_id === "string" ? jobs.get(payload.job_id) : undefined;
+    if (!job) continue;
+    if (ev.event_type === "job_rejected" && payload.result_kind !== "review_failed") continue;
+    for (const bound of job.boundFiles) shas.set(bound.path, bound.sha);
+  }
+  for (const bound of passedJob.boundFiles) shas.set(bound.path, bound.sha);
+  return shas;
+}
+
 export function computeCodeStateCheck(projectRoot: string, events: Event[], ignoredCodePaths: string[] = []): CodeStateCheck {
   const gate = latestApplyDoneToReviewGatePayload(events);
   const currentHead = currentGitHead(projectRoot);
@@ -1032,15 +1169,18 @@ export function computeCodeStateCheck(projectRoot: string, events: Event[], igno
   }
 
   // bound 基线与当前磁盘状态共用 {path,status,sha256} 指纹原语对比：
-  // 基线是 code review 时点的 bound 文件指纹；当前侧取 bound 路径与脏代码文件的并集。
-  // gate skipped 时基线为空，任何脏代码文件都会作为差异列出。
-  const baselineFingerprints: DirtyFileFingerprint[] = (reviewedJob?.boundFiles ?? [])
-    .map(bound => ({ path: bound.path, status: "modified" as const, sha256: bound.sha }));
+  // 基线是本 Apply round 各轮代码审查实际审过的文件指纹（增量复审只绑定变化文件，未变化的已审文件取更早轮次的记录）；
+  // 当前侧取 bound 路径与脏代码文件的并集，审查周期开始前就存在且内容未变的脏文件不属于本 change。
+  // gate skipped 时基线为空，任何属于本 change 的脏代码文件都会作为差异列出。
+  const baselineFingerprints: DirtyFileFingerprint[] = [...reviewedFileShas(events, reviewedJob).entries()]
+    .map(([path, sha]) => ({ path, status: "modified" as const, sha256: sha }));
   const baselinePaths = new Set(baselineFingerprints.map(file => file.path));
+  const dirty = dirtyCodeFiles(projectRoot);
+  const preexisting = dirty.ok ? unchangedPreexistingPaths(dirty.files, preexistingDirtyFiles(events)) : new Set<string>();
   // ignored（审查报告文件等）只豁免 bound 集合之外的新脏文件，bound 文件本身的变化仍需暴露
   const currentPaths = new Set([
     ...baselinePaths,
-    ...scanCodeChanges(projectRoot).paths.filter(path => !ignored.has(path)),
+    ...scanCodeChanges(projectRoot).paths.filter(path => !ignored.has(path) && !preexisting.has(path)),
   ]);
   // 缺失文件用与 bound 基线一致的 "sha256:missing" 占位：review 时点就缺失、现在仍缺失的文件不算差异
   const currentFingerprints: DirtyFileFingerprint[] = [...currentPaths].map(path => ({

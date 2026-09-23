@@ -763,10 +763,12 @@ function createFinalVerifierJob(
 ): Job {
   const boundFiles = reviewBoundFiles(changeRoot);
   const codeReviewGate = latestCodeReviewGateEvidence(events);
+  const taskExecutionIndex = taskExecutionIndexForReview(projectRoot, events);
   const packetContext = {
     code_state_check: computeCodeStateCheck(projectRoot, events),
     coverage_exemption_refs: effectiveCoverageExemptionRefsFromEvents(events),
-    task_execution_index: taskExecutionIndexForReview(projectRoot, events),
+    task_execution_index: taskExecutionIndex.entries,
+    task_execution_index_scope: taskExecutionIndex.scope,
     ...(codeReviewGate ? { code_review_gate: codeReviewGate } : {}),
   };
   const previousRejection = latestReviewHistoryForGateRole(events, REVIEW_FINAL_VERIFIER_GATE, "verifier");
