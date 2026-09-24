@@ -288,6 +288,9 @@ export function snapshotDigest(snapshot: Snapshot): string {
 // ===== 锁（per-change 文件锁，PID + staleness 回收）=====
 
 const LOCK_STALE_MS = 5 * 60 * 1000;
+// 并行审查角色会各自登记报告；每次持锁操作都很短，短暂等待即可避免撞锁直接失败
+const LOCK_WAIT_MS = 3000;
+const LOCK_RETRY_INTERVAL_MS = 50;
 
 interface LockInfo {
   pid: number;
@@ -295,7 +298,11 @@ interface LockInfo {
   created_at: string;
 }
 
-export function acquireLock(projectRoot: string, change: string): void {
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+export function acquireLock(projectRoot: string, change: string, waitMs = 0): void {
   ensureChangeLayout(projectRoot, change); // 确保 change 目录存在（含 events.jsonl）
   const lf = lockFile(projectRoot, change);
   const info: LockInfo = {
@@ -303,7 +310,9 @@ export function acquireLock(projectRoot: string, change: string): void {
     hostname: hostname(),
     created_at: new Date().toISOString(),
   };
-  for (let attempt = 0; attempt < 2; attempt++) {
+  const deadline = Date.now() + waitMs;
+  let staleRecoveries = 0;
+  for (;;) {
     try {
       const fd = openSync(lf, "wx");
       try {
@@ -317,8 +326,13 @@ export function acquireLock(projectRoot: string, change: string): void {
       // 尝试回收 stale lock
       const existing = readLockInfo(lf);
       if (existing && isLockStale(existing)) {
+        if (++staleRecoveries > 1) throw new Error(`Failed to acquire lock after stale recovery: ${lf}`);
         unlinkSync(lf);
         continue; // retry
+      }
+      if (Date.now() < deadline) {
+        sleepSync(LOCK_RETRY_INTERVAL_MS);
+        continue;
       }
       throw new Error(
         `Lock contention: ${lf} held by pid=${existing?.pid} on ${existing?.hostname}. ` +
@@ -326,7 +340,6 @@ export function acquireLock(projectRoot: string, change: string): void {
       );
     }
   }
-  throw new Error(`Failed to acquire lock after stale recovery: ${lf}`);
 }
 
 export function releaseLock(projectRoot: string, change: string): void {
@@ -347,7 +360,7 @@ function isLockStale(info: LockInfo): boolean {
 }
 
 export function withLock<T>(projectRoot: string, change: string, fn: () => T): T {
-  acquireLock(projectRoot, change);
+  acquireLock(projectRoot, change, LOCK_WAIT_MS);
   try {
     return fn();
   } finally {

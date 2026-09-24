@@ -15,11 +15,13 @@ import {
   isReviewReadyVerifier,
   latestAcceptedReviewBaseline,
   latestReviewHistoryForGateRole,
+  latestReviewTerminalForGateRole,
   readReviewPolicyFromEvents,
   reviewBoundFiles,
   reviewEvidenceDigest,
   reviewPolicyForRisk,
   REVIEW_DOC_PATHS,
+  terminalReportContent,
   type ReviewPolicy, type ReviewRisk,
 } from "./review.ts";
 import {
@@ -848,6 +850,7 @@ function evaluateFinalVerifierGate(input: {
 
   if (!verifierAccepted) {
     const previousVerifierRejected = hasRejectedReviewReadyVerifier(input.events);
+    const latestVerifierTerminal = latestReviewTerminalForGateRole(input.events, REVIEW_FINAL_VERIFIER_GATE, "verifier");
     const job = createFinalVerifierJob(input.change, input.projectRoot, input.changeRoot, input.events, input.currentEvidenceDigest);
     return {
       fromState: input.snapshot.state,
@@ -859,7 +862,17 @@ function evaluateFinalVerifierGate(input: {
         : "创建最终验证工作项",
       commitPayload: input.policyPayload,
       ...(previousVerifierRejected ? {
-        details: { advisory: "此前最终验证未通过；请先根据验证报告修改任务或文档，确认无需修改时再执行新的最终验证工作项" },
+        details: {
+          advisory: "此前最终验证未通过；请先根据验证报告修改任务或文档，确认无需修改时再执行新的最终验证工作项",
+          ...(latestVerifierTerminal?.state === "rejected" ? {
+            previous_verifier_rejection: {
+              job_id: latestVerifierTerminal.job.job_id,
+              result_kind: latestVerifierTerminal.result_kind,
+              reason: latestVerifierTerminal.reason ?? "报告结论为 fail，工作项未通过",
+              ...terminalReportContent(latestVerifierTerminal),
+            },
+          } : {}),
+        },
       } : {}),
     };
   }

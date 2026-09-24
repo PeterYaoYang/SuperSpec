@@ -2,6 +2,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -489,5 +490,34 @@ test("锁竞争保护", () => {
     releaseLock(fx.projectRoot, fx.change);
     acquireLock(fx.projectRoot, fx.change); // 不抛
     releaseLock(fx.projectRoot, fx.change);
+  } finally { fx.cleanup(); }
+});
+
+test("锁等待：另一个进程持锁期间，引擎操作等待释放后继续，而不是直接失败", async () => {
+  const fx = setupFixture("propose");
+  try {
+    acquireLock(fx.projectRoot, fx.change);
+    const storeModule = new URL("../src/store.ts", import.meta.url).href;
+    const script = [
+      `import { writeSync } from "node:fs";`,
+      `import { withLock } from ${JSON.stringify(storeModule)};`,
+      `writeSync(1, "waiting\\n");`,
+      `withLock(${JSON.stringify(fx.projectRoot)}, ${JSON.stringify(fx.change)}, () => writeSync(1, "acquired\\n"));`,
+    ].join("\n");
+    const child = spawn(process.execPath, ["--input-type=module", "-e", script], { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stderr.setEncoding("utf8").on("data", chunk => { stderr += chunk; });
+    const closed = new Promise<number | null>(resolve => child.on("close", resolve));
+    await new Promise<void>(resolve => child.stdout.setEncoding("utf8").on("data", chunk => {
+      stdout += chunk;
+      if (stdout.includes("waiting")) resolve();
+    }));
+    await new Promise(resolve => setTimeout(resolve, 300));
+    assert.equal(stdout.includes("acquired"), false);
+    releaseLock(fx.projectRoot, fx.change);
+
+    assert.equal(await closed, 0, stderr);
+    assert.ok(stdout.includes("acquired"));
   } finally { fx.cleanup(); }
 });

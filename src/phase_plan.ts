@@ -46,6 +46,7 @@ import {
   reviewGateRoleResolution,
   reviewRejectionOverrideScope,
   reviewEvidenceDigest,
+  terminalReportContent,
 } from "./review.ts";
 import {
   CODE_REVIEW_DECISION_ANSWER_LABELS,
@@ -278,6 +279,7 @@ function reviewGatePlan(
             packet_digest: terminal.job.packet_digest,
             result_kind: terminal.result_kind,
             reason: terminal.reason ?? "报告结论为 fail，工作项未通过",
+            ...terminalReportContent(terminal),
             override_scope: overrideScope,
             allowed_actions: ["modify_materials", "record_override", "ask_user"],
             record_input: {

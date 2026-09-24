@@ -10,7 +10,7 @@ import { rebuildSnapshot } from "./sync.ts";
 import { next as nextCmd } from "./next.ts";
 import { proposeReady, commitTransition, transitionInit, transitionExplore, startApply, taskStart, taskComplete, reopen, reviewReady, accept } from "./transition.ts";
 import type { State, TransitionResult } from "./types.ts";
-import { recordJobSubmit, recordJobSubmitContent, recordUserDecision, recordUserDecisionContent, recordWorkflowModeContent, jobsList, jobsPacket, jobsContract } from "./record.ts";
+import { jobSubmitConclusionRecorded, recordJobSubmit, recordJobSubmitContent, recordUserDecision, recordUserDecisionContent, recordWorkflowModeContent, jobsList, jobsPacket, jobsContract } from "./record.ts";
 import { recordTestRun, recordTestRunContent } from "./task.ts";
 import { RecordInputDecodingError, decodeRecordInput, readRecordInputFile } from "./record_input.ts";
 import { probeOpenSpec, openspecStatus, changeRoot } from "./openspec.ts";
@@ -636,7 +636,7 @@ transition 子命令：
   review-ready / accept
 
 record 子命令：
-  job-submit --job <J> --report <F|->
+  job-submit --job <J> --report <F|-> [--on-behalf]
   user-decision --input <F|->
   test-run --input <F|->
   workflow-mode --input <F|->
@@ -668,10 +668,12 @@ function commandHelp(command: string | undefined, subcommand: string | undefined
 `;
   }
   if (command === "record" && subcommand === "job-submit") {
-    return `用法：superspec record job-submit --change <C> --job <J> --report <F|->
+    return `用法：superspec record job-submit --change <C> --job <J> --report <F|-> [--on-behalf]
 
 提交 reviewer JSON 报告；--report - 表示从 stdin 读取。报告契约（report_schema）见 superspec jobs contract --change <C> --job <J>；packet 顶层给出预填骨架（report_skeleton）。
 需要落盘时写到 packet 的 report_file_path（.superspec/changes/<C>/jobs/<J>.report.json），不要放进 openspec/changes 计划材料目录。
+报告由执行工作项的审查角色自己登记；主流程代为登记人工、外部来源或无法运行命令的审查角色交回的原样报告时加 --on-behalf，事件会记录 submitted_by=main_process。
+返回的 result_kind 说明登记结果；结论（含 fail）已登记时退出码为 0，retryable 表示可修正后以同一工作项重交。
 
 示例：
   superspec jobs packet --change <C> --job <J>
@@ -966,11 +968,12 @@ async function main(argv: string[]): Promise<number> {
               console.error("record job-submit 需要 --job 和 --report");
               return 1;
             }
+            const submitOptions = { onBehalf: opts["on-behalf"] !== undefined };
             let result;
             try {
               result = report === "-"
-                ? recordJobSubmitContent(projectRoot, change, cr, jobId, readStdinRecordContent("--report"))
-                : recordJobSubmit(projectRoot, change, cr, jobId, report);
+                ? recordJobSubmitContent(projectRoot, change, cr, jobId, readStdinRecordContent("--report"), submitOptions)
+                : recordJobSubmit(projectRoot, change, cr, jobId, report, submitOptions);
             } catch (err) {
               if (err instanceof StdinRecordInputError || err instanceof RecordInputDecodingError) {
                 console.error(err.message);
@@ -979,7 +982,7 @@ async function main(argv: string[]): Promise<number> {
               throw err;
             }
             console.log(JSON.stringify(result, null, 2));
-            return result.accepted ? 0 : 1;
+            return jobSubmitConclusionRecorded(result) ? 0 : 1;
           }
 
           case "user-decision": {

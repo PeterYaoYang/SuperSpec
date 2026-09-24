@@ -10,8 +10,9 @@ import {
   REVIEW_FINAL_VERIFIER_GATE,
   type ReviewGateRule,
 } from "./review_job_gates.ts";
-import type { CodeReviewResultKind, Event, Job, JobRole, Ref, ReviewBaseline, ReviewPreviousRejection, State, TaskAttempt } from "./types.ts";
+import type { CodeReviewResultKind, CodeStateCheck, Event, Job, JobRole, Ref, ReviewBaseline, ReviewPreviousRejection, State, TaskAttempt } from "./types.ts";
 import { computeCodeStateCheck, effectiveCoverageExemptionRefsFromEvents } from "./code_review.ts";
+import { materialManifest } from "./material_snapshot.ts";
 
 export type ReviewRisk = "minimal" | "normal" | "strict";
 
@@ -146,6 +147,9 @@ export interface ReviewTerminalResult {
   result_kind?: CodeReviewResultKind;
   reason?: string;
   findings?: unknown[];
+  summary?: string;
+  /** 报告提交时绑定事实已变化而作废；fail 结论的问题仍作为下一轮复核的历史。 */
+  stale_report?: boolean;
 }
 
 function reviewTerminalResultsForGateRole(
@@ -170,7 +174,7 @@ function reviewTerminalResultsForGateRole(
   for (let i = cycleStartIndex; i < events.length; i++) {
     const event = events[i];
     if (event.event_type !== "job_accepted" && event.event_type !== "job_rejected") continue;
-    const payload = event.payload as { job_id?: unknown; result_kind?: unknown; reason?: unknown; findings?: unknown };
+    const payload = event.payload as { job_id?: unknown; result_kind?: unknown; reason?: unknown; findings?: unknown; summary?: unknown; stale_report?: unknown };
     if (typeof payload.job_id !== "string") continue;
     const job = jobsById.get(payload.job_id);
     if (!job) continue;
@@ -184,6 +188,8 @@ function reviewTerminalResultsForGateRole(
         : {}),
       ...(typeof payload.reason === "string" && payload.reason.trim() !== "" ? { reason: payload.reason } : {}),
       ...(findings ? { findings } : {}),
+      ...(typeof payload.summary === "string" && payload.summary.trim() !== "" ? { summary: payload.summary } : {}),
+      ...(payload.stale_report === true ? { stale_report: true } : {}),
     });
   }
   return results;
@@ -287,6 +293,19 @@ export function reviewGateRoleResolution(
     : { kind: "rejected_pending", terminal };
 }
 
+function carriesReviewFindings(result: ReviewTerminalResult): boolean {
+  return (result.result_kind === "review_failed" || result.stale_report === true) &&
+    Array.isArray(result.findings) && result.findings.length > 0;
+}
+
+/** 最近一次形成结论的报告内容，供主流程按引擎记录处理审查结果，不依赖审查角色的回复转述。 */
+export function terminalReportContent(result: ReviewTerminalResult): { findings?: unknown[]; summary?: string } {
+  return {
+    ...(result.findings && result.findings.length > 0 ? { findings: result.findings } : {}),
+    ...(result.summary ? { summary: result.summary } : {}),
+  };
+}
+
 export function latestReviewHistoryForGateRole(
   events: Event[],
   gate: ReviewGateRule,
@@ -302,7 +321,7 @@ export function latestReviewHistoryForGateRole(
       ? "报告结论为 fail，工作项未通过"
       : "审查报告无效，工作项未通过"
   );
-  if (resultKind === "review_failed" && latest.findings && latest.findings.length > 0) {
+  if (carriesReviewFindings(latest)) {
     return {
       result_kind: resultKind,
       reason,
@@ -314,7 +333,7 @@ export function latestReviewHistoryForGateRole(
   for (let i = terminalResults.length - 2; i >= 0; i--) {
     const previous = terminalResults[i];
     if (previous.state === "accepted") break;
-    if (previous.result_kind !== "review_failed" || !previous.findings || previous.findings.length === 0) continue;
+    if (!carriesReviewFindings(previous)) continue;
     return {
       result_kind: resultKind,
       reason,
@@ -515,12 +534,29 @@ export function reviewEvidenceDigest(events: Event[]): string {
   return sha256Text(JSON.stringify(records));
 }
 
+const STALE_DETAIL_PATH_LIMIT = 10;
+
+function stalePathList(paths: string[]): string {
+  const sorted = [...paths].sort();
+  const shown = sorted.slice(0, STALE_DETAIL_PATH_LIMIT).join("、");
+  return sorted.length > STALE_DETAIL_PATH_LIMIT ? `${shown} 等 ${sorted.length} 个` : shown;
+}
+
+/** 目录绑定只有聚合指纹；有逐文件清单时指出目录内具体变化的文件，便于定位是谁改了材料。 */
+function changedFilesInBoundDirectory(job: Job, changeRoot: string, boundPath: string): string[] {
+  if (!boundPath.endsWith("/") || !job.material_manifest) return [];
+  const before = new Map(job.material_manifest.filter(file => file.path.startsWith(boundPath)).map(file => [file.path, file.sha]));
+  const after = new Map(materialManifest(changeRoot, [boundPath]).map(file => [file.path, file.sha]));
+  return [...new Set([...before.keys(), ...after.keys()])].filter(path => before.get(path) !== after.get(path));
+}
+
 export function boundFilesStaleReason(job: Job, changeRoot: string): string | null {
   for (const bf of job.boundFiles) {
     // 目录绑定（path 以 / 结尾）比对聚合指纹，覆盖目录内文件的增/删/改
     const current = docRef(changeRoot, bf.path).sha;
     if (current !== bf.sha) {
-      return `绑定文件 ${bf.path} 已变化（${bf.sha} → ${current}）`;
+      const changedFiles = changedFilesInBoundDirectory(job, changeRoot, bf.path);
+      return `绑定文件 ${bf.path} 已变化（${bf.sha} → ${current}）${changedFiles.length > 0 ? `，变化的文件：${stalePathList(changedFiles)}` : ""}`;
     }
   }
   return null;
@@ -545,10 +581,26 @@ export function codeStateCheckStaleReason(
   if (!job.packet_context?.code_state_check) return null;
   if (!projectRoot || !events) return null;
   const current = computeCodeStateCheck(projectRoot, events, ignoredCodePaths);
-  if (JSON.stringify(current) !== JSON.stringify(job.packet_context.code_state_check)) {
-    return "最终验证工作项的代码状态事实已变化";
+  const frozen = job.packet_context.code_state_check;
+  if (JSON.stringify(current) !== JSON.stringify(frozen)) {
+    return `最终验证工作项的代码状态事实已变化${codeStateCheckDifference(frozen, current)}`;
   }
   return null;
+}
+
+function codeStateCheckDifference(frozen: CodeStateCheck, current: CodeStateCheck): string {
+  const before = new Set(frozen.changed_paths);
+  const after = new Set(current.changed_paths);
+  const added = current.changed_paths.filter(path => !before.has(path));
+  const removed = frozen.changed_paths.filter(path => !after.has(path));
+  const parts = [
+    ...(frozen.baseline_head !== current.baseline_head ? [`审查基线 ${frozen.baseline_head ?? "<none>"} → ${current.baseline_head ?? "<none>"}`] : []),
+    ...(frozen.current_head !== current.current_head ? [`HEAD ${frozen.current_head ?? "<none>"} → ${current.current_head ?? "<none>"}`] : []),
+    ...(added.length > 0 ? [`新出现的代码差异：${stalePathList(added)}`] : []),
+    ...(removed.length > 0 ? [`不再有差异：${stalePathList(removed)}`] : []),
+    ...(frozen.scope_reason !== current.scope_reason ? [`检查依据 ${frozen.scope_reason} → ${current.scope_reason}`] : []),
+  ];
+  return parts.length > 0 ? `（${parts.join("；")}）` : "";
 }
 
 export function reviewVerifierStaleReason(

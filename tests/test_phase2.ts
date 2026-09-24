@@ -3859,6 +3859,7 @@ test("计划审查：审查进行中修改绑定材料，新建工作项时显�
     const late = recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, running.job_id, reviewerReport("critic", running.boundFiles.map(file => file.path)));
     assert.equal(late.accepted, false);
     assert.ok(late.message.includes(recreated.created_jobs[0]));
+    assert.equal(late.result_kind, "job_invalidated");
     assert.equal(readEvents(fx.projectRoot, fx.change).length, eventsBefore);
   } finally { fx.cleanup(); }
 });
@@ -3922,6 +3923,94 @@ test("计划审查：packet 带上工作项创建前有效登记的 Explore/Prop
     proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     const decisions = jobsPacket(fx.projectRoot, fx.change, openProposeJob(fx).job_id).packet?.confirmed_decisions;
     assert.deepEqual(decisions?.map(item => [item.phase, item.question_id, item.answer]), [["explore", "Q-001", "B"]]);
+  } finally { fx.cleanup(); }
+});
+
+test("审查角色登记报告：result_kind 区分已登记的 fail、可重交与已结束，结束后再交不同报告不改变结论", () => {
+  const fx = enterProposeWithSpecs();
+  try {
+    proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    const job = openProposeJob(fx);
+
+    const malformed = recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, job.job_id, JSON.stringify({ role: "critic" }));
+    assert.equal(malformed.result_kind, "retryable");
+    assert.equal(malformed.events_written, 0);
+
+    const failReport = failedReviewerReportForJob(fx.projectRoot, fx.change, job.job_id, "CR-SELF-1");
+    const failed = recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, job.job_id, failReport);
+    assert.equal(failed.result_kind, "review_failed");
+    const failEvent = readEvents(fx.projectRoot, fx.change).findLast(event => event.event_type === "job_rejected");
+    assert.equal("submitted_by" in (failEvent?.payload ?? {}), false);
+
+    const eventsAfterFail = readEvents(fx.projectRoot, fx.change).length;
+    const rewritten = recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, job.job_id, reviewerReportForJob(fx.projectRoot, fx.change, job.job_id));
+    assert.equal(rewritten.accepted, false);
+    assert.equal(rewritten.result_kind, "job_closed");
+    assert.equal(rewritten.events_written, 0);
+    assert.equal(readEvents(fx.projectRoot, fx.change).length, eventsAfterFail);
+
+    const repeated = recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, job.job_id, failReport);
+    assert.equal(repeated.result_kind, "review_failed");
+    assert.equal(repeated.events_written, 0);
+
+    const blocked = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    const rejection = (blocked.details as { review_rejection?: { job_id: string; findings?: { id: string }[] } } | undefined)?.review_rejection;
+    assert.equal(rejection?.job_id, job.job_id);
+    assert.deepEqual(rejection?.findings?.map(finding => finding.id), ["CR-SELF-1"]);
+  } finally { fx.cleanup(); }
+});
+
+test("审查角色登记报告：主流程代为登记时事件记录 submitted_by", () => {
+  const fx = enterProposeWithSpecs();
+  try {
+    proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    const job = openProposeJob(fx);
+    const result = recordJobSubmitContent(
+      fx.projectRoot, fx.change, fx.changeRoot, job.job_id,
+      reviewerReportForJob(fx.projectRoot, fx.change, job.job_id),
+      { onBehalf: true },
+    );
+    assert.equal(result.result_kind, "accepted");
+    const accepted = readEvents(fx.projectRoot, fx.change).findLast(event => event.event_type === "job_accepted");
+    assert.equal((accepted?.payload as { submitted_by?: string }).submitted_by, "main_process");
+  } finally { fx.cleanup(); }
+});
+
+test("审查中途材料变化：过期的 fail 报告作废，但问题带入下一轮复核，过期原因指出目录内变化的文件", () => {
+  const fx = enterProposeWithSpecs();
+  try {
+    proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    const running = openProposeJob(fx);
+    const staleFail = failedReviewerReportForJob(fx.projectRoot, fx.change, running.job_id, "CR-STALE-1");
+    writeFileSync(join(fx.changeRoot, "specs", "auth", "spec.md"), "# Auth Spec\n\n## ADDED Requirements\n\n审查中途补充\n");
+
+    const stale = recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, running.job_id, staleFail);
+    assert.equal(stale.result_kind, "invalid_report");
+    assert.ok(stale.message.includes("specs/auth/spec.md"));
+    const repeated = recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, running.job_id, staleFail);
+    assert.equal(repeated.result_kind, "invalid_report");
+    assert.equal(repeated.events_written, 0);
+
+    assert.equal(proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal").outcome, "job_created");
+    const next = openProposeJob(fx);
+    assert.notEqual(next.job_id, running.job_id);
+    assert.equal(next.previous_rejection?.job_id, running.job_id);
+    assert.equal(next.previous_rejection?.result_kind, "invalid_report");
+    assert.deepEqual((next.previous_rejection?.findings as { id: string }[] | undefined)?.map(finding => finding.id), ["CR-STALE-1"]);
+  } finally { fx.cleanup(); }
+});
+
+test("审查中途材料变化：过期的 pass 报告不带入问题历史", () => {
+  const fx = enterProposeWithSpecs();
+  try {
+    proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    const running = openProposeJob(fx);
+    const stalePass = reviewerReportForJob(fx.projectRoot, fx.change, running.job_id);
+    writeFileSync(join(fx.changeRoot, "proposal.md"), "# Proposal\n\nTest.\n\n审查中途补充\n");
+    assert.equal(recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, running.job_id, stalePass).result_kind, "invalid_report");
+
+    assert.equal(proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal").outcome, "job_created");
+    assert.equal(openProposeJob(fx).previous_rejection?.findings, undefined);
   } finally { fx.cleanup(); }
 });
 

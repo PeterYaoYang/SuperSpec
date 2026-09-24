@@ -11,7 +11,7 @@ import { ensureChangeLayout, appendEvent, docRef, makeEvent, readEvents, rawFile
 import { rebuildSnapshot } from "../src/sync.ts";
 import { next } from "../src/next.ts";
 import { proposeReady, reviewReady, startApply, taskStart, taskComplete, reopen, accept, transitionExplore } from "../src/transition.ts";
-import { jobsPacket, recordJobSubmit, recordJobSubmitContent, recordUserDecisionContent } from "../src/record.ts";
+import { jobReportFilePath, jobsPacket, recordJobSubmit, recordJobSubmitContent, recordUserDecisionContent } from "../src/record.ts";
 import { latestReviewHistoryForGateRole, reviewEvidenceDigest } from "../src/review.ts";
 import { REVIEW_FINAL_VERIFIER_GATE } from "../src/review_job_gates.ts";
 import { codeFileContentSha, dirtyCodeFiles } from "../src/git_state.ts";
@@ -909,7 +909,9 @@ test("code_state_check：已审 dirty 文件未变化不算差异，后续修改
     writeFileSync(join(fx.projectRoot, "src", "a.ts"), "export const value = 3;\n");
     const submitted = submitVerifierPass(fx.projectRoot, fx.change, fx.changeRoot, verifier.created_jobs[0]);
     assert.equal(submitted.accepted, false);
+    assert.equal(submitted.result_kind, "invalid_report");
     assert.match(submitted.message, /代码状态事实已变化/);
+    assert.ok(submitted.message.includes("src/a.ts"), submitted.message);
   } finally { fx.cleanup(); }
 });
 
@@ -1164,7 +1166,6 @@ test("code-reviewer：pass 报告漏覆盖时可在同一工作项重交", () =>
     assert.equal(created.outcome, "job_created");
     const packet = jobsPacket(fx.projectRoot, fx.change, created.created_jobs[0]);
     assert.deepEqual((packet.packet?.boundFiles as { path: string }[]).map(file => file.path), ["src/example.ts"]);
-    assert.match(String(packet.packet?.output_instructions), /项目内 fallback 报告若存在解码或协议错误会终结当前工作项/);
 
     const rejected = recordJobSubmitContent(
       fx.projectRoot,
@@ -1185,6 +1186,27 @@ test("code-reviewer：pass 报告漏覆盖时可在同一工作项重交", () =>
       created.created_jobs[0],
       JSON.stringify(codeReviewerReport(fx.projectRoot, fx.change, created.created_jobs[0], "pass", [], ["src/example.ts"])),
     ).accepted, true);
+  } finally { fx.cleanup(); }
+});
+
+test("code-reviewer：report_file_path 下的报告有协议错误时可修正后以同一工作项重交", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    initGitRepo(fx.projectRoot);
+    mkdirSync(join(fx.projectRoot, "src"), { recursive: true });
+    writeFileSync(join(fx.projectRoot, "src", "example.ts"), "export const value = 1;\n");
+    reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    const jobId = reviewReady(fx.projectRoot, fx.change, fx.changeRoot).created_jobs[0];
+    const reportPath = join(fx.projectRoot, jobReportFilePath(fx.change, jobId));
+    mkdirSync(join(reportPath, ".."), { recursive: true });
+
+    writeFileSync(reportPath, JSON.stringify(codeReviewerReport(fx.projectRoot, fx.change, jobId, "pass", [])));
+    const incomplete = recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, jobId, reportPath);
+    assert.equal(incomplete.result_kind, "retryable");
+    assert.equal(readEvents(fx.projectRoot, fx.change).some(event => event.event_type === "job_rejected"), false);
+
+    writeFileSync(reportPath, JSON.stringify(codeReviewerReport(fx.projectRoot, fx.change, jobId, "pass", [], ["src/example.ts"])));
+    assert.equal(recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, jobId, reportPath).result_kind, "accepted");
   } finally { fx.cleanup(); }
 });
 
@@ -3802,7 +3824,6 @@ test("verifier：项目内 fallback 格式错误记录路径且不污染 fresh c
     const created = reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     assert.equal(created.outcome, "job_created");
     const jobId = created.created_jobs[0];
-    assert.match(String(jobsPacket(fx.projectRoot, fx.change, jobId).packet?.output_instructions), /项目内 fallback 报告若存在解码或协议错误会终结当前工作项/);
     const reportPath = join(fx.projectRoot, "verifier-invalid.json");
     writeFileSync(reportPath, JSON.stringify({ role: "verifier", verdict: "pass", findings: [] }));
 
@@ -3818,6 +3839,30 @@ test("verifier：项目内 fallback 格式错误记录路径且不污染 fresh c
     const retryPacket = jobsPacket(fx.projectRoot, fx.change, retry.created_jobs[0]).packet;
     assert.equal(retryPacket?.code_state_check?.changed_paths.includes("verifier-invalid.json"), false);
     assert.equal(submitVerifierPass(fx.projectRoot, fx.change, fx.changeRoot, retry.created_jobs[0]).accepted, true);
+  } finally { fx.cleanup(); }
+});
+
+test("verifier：fail 登记后，重新 review-ready 的结果带出上次验证报告的问题", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    advanceApplyToReview(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    const jobId = reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "normal").created_jobs[0];
+    const failed = recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, jobId, JSON.stringify({
+      role: "verifier",
+      verdict: "fail",
+      findings: [{ id: "VF-001", description: "验收证据缺失", evidence: "TEST-001 没有 GREEN 记录" }],
+      summary: "证据不足",
+      review_scope: { checked_paths: checkedPathsForJob(fx.projectRoot, fx.change, jobId) },
+    }));
+    assert.equal(failed.result_kind, "review_failed");
+
+    const retry = reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.equal(retry.outcome, "job_created");
+    const previous = (retry.details as { previous_verifier_rejection?: { job_id: string; findings?: { id: string }[]; summary?: string } } | undefined)
+      ?.previous_verifier_rejection;
+    assert.equal(previous?.job_id, jobId);
+    assert.deepEqual(previous?.findings?.map(finding => finding.id), ["VF-001"]);
+    assert.equal(previous?.summary, "证据不足");
   } finally { fx.cleanup(); }
 });
 
@@ -3905,7 +3950,6 @@ test("accept：verifier accepted 后补登记匹配 digest 的 legacy test-run �
     assert.equal(typeof packet.packet?.code_review_gate?.job_id, "string");
     assert.equal(packet.packet?.task_execution_index?.[0]?.task_id, "TASK-001");
     assert.equal(packet.packet?.task_execution_index?.[0]?.attempt_id, attempt.attempt_id);
-    assert.match(String(packet.packet?.output_instructions), /不要提交该报告；主流程会通过 next/);
 
     const reportPath = join(fx.projectRoot, "verifier-evidence.json");
     writeFileSync(reportPath, JSON.stringify({

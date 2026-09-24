@@ -61,6 +61,38 @@ function appendCriticJob(projectRoot: string, change: string, jobId: string): vo
   }, { transitionId: `T-${jobId}`, idempotencyKey: `${jobId}-key` }));
 }
 
+test("CLI job-submit：结论（含 fail）登记成功退出码为 0，其余结果非 0；出现 --on-behalf 即留痕", () => {
+  const fx = setupProject();
+  try {
+    const submit = (jobId: string, report: unknown, extra: string[] = []) =>
+      runCli(fx.projectRoot, ["record", "job-submit", "--change", fx.change, "--job", jobId, "--report", "-", ...extra], JSON.stringify(report));
+    const reviewer = { kind: "subagent", id: "critic-cli" };
+
+    appendCriticJob(fx.projectRoot, fx.change, "JOB-cli-fail");
+    const failed = submit("JOB-cli-fail", { role: "critic", verdict: "fail", findings: [{ id: "CR-1", description: "问题", evidence: "证据" }], reviewer });
+    assert.equal(failed.status, 0, failed.stderr || failed.stdout);
+    assert.equal(JSON.parse(failed.stdout).result_kind, "review_failed");
+
+    appendCriticJob(fx.projectRoot, fx.change, "JOB-cli-retry");
+    const malformed = submit("JOB-cli-retry", { role: "critic" });
+    assert.equal(malformed.status, 1);
+    assert.equal(JSON.parse(malformed.stdout).result_kind, "retryable");
+
+    const missing = submit("JOB-cli-missing", { role: "critic", verdict: "pass", findings: [], reviewer });
+    assert.equal(missing.status, 1);
+    assert.equal(JSON.parse(missing.stdout).result_kind, "job_not_found");
+
+    appendCriticJob(fx.projectRoot, fx.change, "JOB-cli-onbehalf");
+    const onBehalf = submit("JOB-cli-onbehalf", { role: "critic", verdict: "pass", findings: [], reviewer: { kind: "human", id: "reviewer" } }, ["--on-behalf", "yes"]);
+    assert.equal(onBehalf.status, 0, onBehalf.stderr || onBehalf.stdout);
+    const accepted = readEvents(fx.projectRoot, fx.change).findLast(event => event.event_type === "job_accepted");
+    assert.equal((accepted?.payload as { job_id?: string; submitted_by?: string }).job_id, "JOB-cli-onbehalf");
+    assert.equal((accepted?.payload as { submitted_by?: string }).submitted_by, "main_process");
+  } finally {
+    fx.cleanup();
+  }
+});
+
 function stagingFiles(projectRoot: string, change: string): string[] {
   return readdirSync(join(projectRoot, ".superspec", "changes", change, "staging"));
 }

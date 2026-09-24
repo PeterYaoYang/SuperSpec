@@ -31,6 +31,7 @@ import {
 } from "./code_review.ts";
 import { invalidReasonForSubmittedReport } from "./job_validity.ts";
 import { jobSubmitArgv } from "./job_action.ts";
+import { isCodeLikePath } from "./git_state.ts";
 import {
   hasBehaviorAnchor,
   isCodeReviewClaimKind,
@@ -73,7 +74,7 @@ import {
   type DiscoveryOpenQuestion,
   type ProposeQuestion,
 } from "./format.ts";
-import type { CodeReviewResultKind, Event, RecordResult, Job, JobPacket, JobRole, JobState, State, WorkflowModeSelection } from "./types.ts";
+import type { CodeReviewResultKind, Event, RecordResult, Job, JobPacket, JobRole, JobState, JobSubmitResultKind, State, WorkflowModeSelection } from "./types.ts";
 import {
   COVERAGE_MESSAGES,
   REVIEWER_KINDS,
@@ -94,6 +95,11 @@ const CODE_REVIEW_FINDING_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 
 function projectLocalInvalidReportMustTerminate(job: Job): boolean {
   return job.role === "code-reviewer" || job.packet_context?.code_state_check !== undefined;
+}
+
+/** 只有会被代码范围扫描当成改动的报告文件才必须终结工作项；report_file_path 等非代码路径可修正重交。 */
+function invalidReportFileMustTerminate(job: Job, reportPath: string | null): reportPath is string {
+  return projectLocalInvalidReportMustTerminate(job) && reportPath !== null && isCodeLikePath(reportPath);
 }
 
 function isOrdinaryReviewer(role: JobRole): boolean {
@@ -175,6 +181,7 @@ function reviewScopeInstruction(job: Job, reviewTargets: string[], readOnlyRefs:
   return targets + refs;
 }
 
+const REVIEWER_SELF_SUBMISSION_INSTRUCTION = "完成审查后由你自己运行 submission_command，经 stdin 登记 JSON 报告；登记前绑定材料或代码一旦变化，报告就会作废，登记后本工作项即结束。登记结果以返回的 result_kind 为准；无法运行命令时，把完整报告 JSON 原样交回主流程，由主流程加 --on-behalf 代为登记。";
 const PREVIOUS_REVIEW_EVIDENCE_INSTRUCTION = "previous_review_evidence 是上一轮同角色审查记录的证据与结论：code_files 中 unchanged 为 true 的代码文件自那次核实后内容未变，除非本轮材料变化直接涉及，可以沿用其核实结论而不必重新逐行核对；unchanged 为 false 或未列出的文件需要重新核实。";
 const CONFIRMED_DECISIONS_INSTRUCTION = "confirmed_decisions 是已登记的用户答复原文，核对材料中的已确认结论时以它为准，不必再到事件日志中查找。";
 
@@ -200,7 +207,7 @@ function migrationEvidenceInstruction(job: Job): string {
 function recordInputInstruction(job: Job): string {
   const encoding = "stdin 请传 UTF-8 JSON；Windows PowerShell 请设置 $OutputEncoding 和 [Console]::OutputEncoding 为 UTF-8，文件备用方式请使用 Set-Content -Encoding utf8。为兼容旧版 PowerShell，带 BOM 的 UTF-16LE 文件也可接受。";
   if (!projectLocalInvalidReportMustTerminate(job)) return encoding;
-  return `${encoding}项目内 fallback 报告若存在解码或协议错误会终结当前工作项，以免被后续代码状态检查当作改动；如需保留同一工作项重交，请使用 stdin 或工作区外临时文件。`;
+  return `${encoding}report_file_path 之外的项目内报告文件会被代码状态检查当作改动，若存在解码或协议错误会终结当前工作项；需要落盘时使用 report_file_path，可修正后以同一工作项重交。`;
 }
 
 function asObject(value: unknown): Record<string, unknown> | null {
@@ -690,6 +697,24 @@ function invalidatedJobMessage(events: Event[], jobId: string): string | null {
   return `工作项 ${jobId} 已因回退到更早阶段失效，不接受新报告。`;
 }
 
+export interface JobSubmitOptions {
+  /** 主流程代为登记（人工或外部审查来源，或审查角色无法执行登记命令）；写入事件留痕。 */
+  onBehalf?: boolean;
+}
+
+function submitterPayload(options: JobSubmitOptions): Record<string, unknown> {
+  return options.onBehalf ? { submitted_by: "main_process" } : {};
+}
+
+/** 结论已登记为工作项结果（含 fail）；登记命令据此返回成功，避免调用方把已登记的 fail 当成登记失败而重交。 */
+export function jobSubmitConclusionRecorded(result: RecordResult): boolean {
+  return result.result_kind === "accepted" || result.result_kind === "review_failed" || result.result_kind === "non_actionable_report";
+}
+
+function rejectedResultKind(value: unknown): JobSubmitResultKind {
+  return value === "review_failed" || value === "non_actionable_report" ? value : "invalid_report";
+}
+
 function terminalJobSubmitResult(
   events: Event[],
   jobId: string,
@@ -707,12 +732,18 @@ function terminalJobSubmitResult(
       accepted: existing.event_type === "job_accepted",
       message: "幂等返回：同一报告已提交",
       job_state: existing.event_type === "job_accepted" ? "accepted" : "rejected",
+      events_written: 0,
+      result_kind: existing.event_type === "job_accepted"
+        ? "accepted"
+        : rejectedResultKind((existing.payload as { result_kind?: unknown }).result_kind),
     };
   }
   return {
     event_type: "job_rejected",
     accepted: false,
     message: `工作项 ${jobId} 已结束（${terminal}），不接受新报告。需要新工作项请重新执行对应的 transition。`,
+    events_written: 0,
+    result_kind: "job_closed",
   };
 }
 
@@ -722,7 +753,14 @@ function retryableJobSubmitResult(jobId: string, checks: string[]): RecordResult
     message: `工作项 ${jobId} 的报告未接受，可修正后以同一工作项重新提交：${checks.join("; ")}`,
     job_state: "requested",
     events_written: 0,
+    result_kind: "retryable",
   };
+}
+
+/** 过期报告的 fail 结论仍是对上一版本材料的审查，保留问题供下一轮复核；代码审查问题由 review-fix 闭环，不经这里。 */
+function staleReportFindings(job: Job, report: Record<string, unknown> | null): unknown[] | null {
+  if (job.role === "code-reviewer" || report?.verdict !== "fail") return null;
+  return Array.isArray(report.findings) && report.findings.length > 0 ? report.findings : null;
 }
 
 function terminalInvalidReportResult(input: {
@@ -734,25 +772,38 @@ function terminalInvalidReportResult(input: {
   reason: string;
   parsedReport: Record<string, unknown> | null;
   reportPath: string | null;
+  staleFindings?: unknown[] | null;
+  submitter: Record<string, unknown>;
 }): RecordResult {
-  const rawRef = input.job.role === "code-reviewer" && input.parsedReport
+  const rawRef = input.parsedReport && (input.job.role === "code-reviewer" || input.staleFindings)
     ? appendRawRecord(input.projectRoot, input.change, "review-reports", input.parsedReport)
     : null;
-  appendEvent(input.projectRoot, input.change, makeEvent(input.change, "job_rejected", codeReviewRejectEventPayload({
-    jobId: input.jobId,
-    job: input.job,
-    reportDigest: input.reportDigest,
-    resultKind: "invalid_report",
-    reason: input.reason,
-    parsedReport: input.parsedReport,
-    rawRef,
-    reportPath: input.reportPath,
-  })));
+  appendEvent(input.projectRoot, input.change, makeEvent(input.change, "job_rejected", {
+    ...codeReviewRejectEventPayload({
+      jobId: input.jobId,
+      job: input.job,
+      reportDigest: input.reportDigest,
+      resultKind: "invalid_report",
+      reason: input.reason,
+      parsedReport: input.parsedReport,
+      rawRef,
+      reportPath: input.reportPath,
+    }),
+    ...(input.staleFindings
+      ? {
+        stale_report: true,
+        findings: input.staleFindings,
+        ...(typeof input.parsedReport?.summary === "string" ? { summary: input.parsedReport.summary } : {}),
+      }
+      : {}),
+    ...input.submitter,
+  }));
   return {
     event_type: "job_rejected",
     accepted: false,
     message: `工作项 ${input.jobId} 被拒绝：${input.reason}`,
     job_state: "rejected",
+    result_kind: "invalid_report",
   };
 }
 
@@ -765,10 +816,12 @@ function recordJobSubmitLoaded(
   events: Event[],
   reportContent: string,
   reportDigest: string,
-  reportFile?: string,
+  reportFile: string | undefined,
+  options: JobSubmitOptions,
 ): RecordResult {
   const checks: string[] = [];
   let parsedReport: Record<string, unknown> | null = null;
+  const submitter = submitterPayload(options);
 
   try {
     const report = JSON.parse(reportContent);
@@ -818,13 +871,15 @@ function recordJobSubmitLoaded(
   if (invalidReason) {
     return terminalInvalidReportResult({
       projectRoot, change, jobId, job, reportDigest, reason: invalidReason, parsedReport, reportPath,
+      staleFindings: checks.length === 0 ? staleReportFindings(job, parsedReport) : null,
+      submitter,
     });
   }
 
   // Code-state-sensitive review jobs must record project-local fallback paths for later scope scans.
-  if (checks.length > 0 && projectLocalInvalidReportMustTerminate(job) && reportPath) {
+  if (checks.length > 0 && invalidReportFileMustTerminate(job, reportPath)) {
     return terminalInvalidReportResult({
-      projectRoot, change, jobId, job, reportDigest, reason: checks.join("; "), parsedReport, reportPath,
+      projectRoot, change, jobId, job, reportDigest, reason: checks.join("; "), parsedReport, reportPath, submitter,
     });
   }
   if (checks.length > 0) return retryableJobSubmitResult(jobId, checks);
@@ -840,6 +895,7 @@ function recordJobSubmitLoaded(
         rawRef,
       }),
       ...ordinaryReviewEvidencePayload(projectRoot, job, parsedReport),
+      ...submitter,
     });
     if (reportPath) rejectEvent.payload.report_path = reportPath;
     appendEvent(projectRoot, change, rejectEvent);
@@ -848,6 +904,7 @@ function recordJobSubmitLoaded(
       accepted: false,
       message: `工作项 ${jobId} 被拒绝：报告结论为 fail，工作项未通过`,
       job_state: "rejected",
+      result_kind: "review_failed",
     };
   }
 
@@ -862,9 +919,9 @@ function recordJobSubmitLoaded(
     if (verdict === "pass") {
       if (blockingCount > 0) {
         const reason = "报告结论为 pass 时不能包含 blocking:true 的阻塞问题";
-        if (projectLocalInvalidReportMustTerminate(job) && reportPath) {
+        if (invalidReportFileMustTerminate(job, reportPath)) {
           return terminalInvalidReportResult({
-            projectRoot, change, jobId, job, reportDigest, reason, parsedReport, reportPath,
+            projectRoot, change, jobId, job, reportDigest, reason, parsedReport, reportPath, submitter,
           });
         }
         return retryableJobSubmitResult(jobId, [reason]);
@@ -878,21 +935,25 @@ function recordJobSubmitLoaded(
           ? `代码审查报告包含无法处理的阻塞问题：${reasons.join("; ")}`
           : `代码审查报告没有给出可处理的阻塞问题${reasons.length > 0 ? `：${reasons.join("; ")}` : ""}`;
       const rawRef = appendRawRecord(projectRoot, change, "review-reports", parsedReport);
-      appendEvent(projectRoot, change, makeEvent(change, "job_rejected", codeReviewRejectEventPayload({
-        jobId,
-        job,
-        reportDigest,
-        resultKind,
-        reason,
-        parsedReport,
-        rawRef,
-        reportPath,
-      })));
+      appendEvent(projectRoot, change, makeEvent(change, "job_rejected", {
+        ...codeReviewRejectEventPayload({
+          jobId,
+          job,
+          reportDigest,
+          resultKind,
+          reason,
+          parsedReport,
+          rawRef,
+          reportPath,
+        }),
+        ...submitter,
+      }));
       return {
         event_type: "job_rejected",
         accepted: false,
         message: `工作项 ${jobId} 被拒绝：${reason}`,
         job_state: "rejected",
+        result_kind: resultKind,
       };
     }
   }
@@ -916,6 +977,7 @@ function recordJobSubmitLoaded(
       }
       : {}),
     ...rawRef,
+    ...submitter,
   });
   appendEvent(projectRoot, change, acceptEvent);
   return {
@@ -923,6 +985,7 @@ function recordJobSubmitLoaded(
     accepted: true,
     message: `工作项 ${jobId}（${job.role}）已接受${misplacedReportFileNote(change, reportPath)}`,
     job_state: "accepted",
+    result_kind: "accepted",
   };
 }
 
@@ -940,24 +1003,31 @@ function misplacedReportFileNote(change: string, reportPath: string | null): str
 }
 
 /** record job-submit：登记工作项结果 */
+function unknownJobResult(jobId: string): RecordResult {
+  return { event_type: "job_rejected", accepted: false, message: `工作项 ${jobId} 不存在`, events_written: 0, result_kind: "job_not_found" };
+}
+
+function invalidatedJobResult(message: string): RecordResult {
+  return { accepted: false, message, events_written: 0, result_kind: "job_invalidated" };
+}
+
 export function recordJobSubmit(
   projectRoot: string,
   change: string,
   changeRoot: string,
   jobId: string,
   reportFile: string,
+  options: JobSubmitOptions = {},
 ): RecordResult {
   return withLock(projectRoot, change, () => {
     ensureChangeLayout(projectRoot, change);
     const events = readEvents(projectRoot, change);
 
     const job = findJob(events, jobId);
-    if (!job) {
-      return { event_type: "job_rejected", accepted: false, message: `工作项 ${jobId} 不存在` };
-    }
+    if (!job) return unknownJobResult(jobId);
 
     const invalidatedMessage = invalidatedJobMessage(events, jobId);
-    if (invalidatedMessage) return { accepted: false, message: invalidatedMessage };
+    if (invalidatedMessage) return invalidatedJobResult(invalidatedMessage);
     const terminal = jobTerminalState(events, jobId);
     if (terminal) {
       const reportDigest = sha256File(reportFile) ?? "sha256:unknown";
@@ -974,16 +1044,17 @@ export function recordJobSubmit(
     } catch (err) {
       if (err instanceof RecordInputDecodingError) {
         const reportPath = projectRelativePath(projectRoot, reportFile);
-        if (projectLocalInvalidReportMustTerminate(job) && reportPath) {
+        if (invalidReportFileMustTerminate(job, reportPath)) {
           return terminalInvalidReportResult({
             projectRoot, change, jobId, job, reportDigest, reason: err.message, parsedReport: null, reportPath,
+            submitter: submitterPayload(options),
           });
         }
         return retryableJobSubmitResult(jobId, [err.message]);
       }
       throw err;
     }
-    return recordJobSubmitLoaded(projectRoot, change, changeRoot, jobId, job, events, reportContent, reportDigest, reportFile);
+    return recordJobSubmitLoaded(projectRoot, change, changeRoot, jobId, job, events, reportContent, reportDigest, reportFile, options);
   });
 }
 
@@ -994,25 +1065,24 @@ export function recordJobSubmitContent(
   changeRoot: string,
   jobId: string,
   reportContent: string,
+  options: JobSubmitOptions = {},
 ): RecordResult {
   return withLock(projectRoot, change, () => {
     ensureChangeLayout(projectRoot, change);
     const events = readEvents(projectRoot, change);
 
     const job = findJob(events, jobId);
-    if (!job) {
-      return { event_type: "job_rejected", accepted: false, message: `工作项 ${jobId} 不存在` };
-    }
+    if (!job) return unknownJobResult(jobId);
 
     const invalidatedMessage = invalidatedJobMessage(events, jobId);
-    if (invalidatedMessage) return { accepted: false, message: invalidatedMessage };
+    if (invalidatedMessage) return invalidatedJobResult(invalidatedMessage);
     const reportDigest = sha256Text(reportContent);
     const terminal = jobTerminalState(events, jobId);
     if (terminal) {
       return terminalJobSubmitResult(events, jobId, terminal, reportDigest);
     }
 
-    return recordJobSubmitLoaded(projectRoot, change, changeRoot, jobId, job, events, reportContent, reportDigest);
+    return recordJobSubmitLoaded(projectRoot, change, changeRoot, jobId, job, events, reportContent, reportDigest, undefined, options);
   });
 }
 
@@ -1680,6 +1750,7 @@ function packetFieldDescriptions(): Record<string, string> {
     unknown_attribution_tasks: "因为缺少边界快照或提交段 diff 失败而无法完整计算改动归属的任务（task）。",
     coverage_exemption_refs: "测试覆盖豁免引用：说明某个 TEST 为什么没有绑定到任务（task）。",
     report_file_path: "报告需要落盘时的文件位置（项目相对路径），位于工作流记录目录；报告内容登记后由引擎存入 raw 记录，不属于计划材料。",
+    submission_command: "登记本工作项报告的命令，由执行本工作项的角色在完成后自己运行；返回的 result_kind 说明登记结果：accepted、review_failed、non_actionable_report 表示结论已登记为本工作项结果，retryable 表示可修正后以同一工作项重交，invalid_report、job_closed、job_invalidated、job_not_found 表示本次没有形成结论。",
     report_skeleton: "按本工作项预填的报告骨架（job_id / packet_digest / 空数组）；逐字段填写即可，不要自行设计结构。",
     report_schema: "报告契约（字段形状、取值、条件、提示消息）；由 `superspec jobs contract --change <C> --job <J>` 输出，提交校验引用同一份定义。",
     code_review_gate: "最终验证读取的代码审查门禁事实：passed 指向已接受的代码审查工作项，skipped 表示本轮没有代码类改动。",
@@ -1771,7 +1842,8 @@ export function jobsPacket(
           (previousEvidence ? PREVIOUS_REVIEW_EVIDENCE_INSTRUCTION : "") +
           (decisions.length > 0 ? CONFIRMED_DECISIONS_INSTRUCTION : "") +
           (requiresReviewer(job.role) ? `必须由独立 ${recommendedAgentForRole(job.role)} 审查角色执行，并在审查者来源字段（reviewer.kind/id）中记录来源，` : "") +
-          `产出 JSON 报告内容并优先通过 --report - 从 stdin 登记；需要落盘时写到 report_file_path，不要写进 openspec/changes 或 .superspec/artifacts 等计划材料目录。${recordInputInstruction(job)}协议字段含义见 packet 顶层“字段说明”，普通对话不要原样复述 JSON。` +
+          (isReviewer ? REVIEWER_SELF_SUBMISSION_INSTRUCTION : "产出 JSON 报告内容并优先通过 --report - 从 stdin 登记；") +
+          `需要落盘时写到 report_file_path，不要写进 openspec/changes 或 .superspec/artifacts 等计划材料目录。${recordInputInstruction(job)}协议字段含义见 packet 顶层“字段说明”，普通对话不要原样复述 JSON。` +
           (isCodeReviewer
             ? `格式骨架：${JSON.stringify(reportSkeletonForJob(job))}。提交前按真实审查结果填写数组；不得从 boundFiles 自动复制 checked_paths。verdict 只能为 pass 或 fail；审查覆盖范围（review_scope）用来说明本次审查覆盖了哪些文件和文档，已检查路径（checked_paths）与未检查项（unchecked）必须合起来覆盖全部绑定文件（boundFiles），unchecked 条目格式为 {"path":"<path>","reason":"<reason>"}；pass 不允许仍有未检查的绑定文件。`
               + `报告结论为 fail 时，问题列表（findings）至少包含一个可处理、可追溯的阻塞问题，字段为 {"id":"<stable-id>","blocking":true,"type":"implementation|spec|mixed","claim_kind":"missing_approved|breaks_existing|unjustified_addition","approved_refs":["TEST-001"],"description":"<what>","evidence":"<why>","source_refs":["<path:line>"],"impact":"<impact>","suggested_action":"apply|propose"}。问题类型（type）中 implementation 表示纯代码实现问题，spec 表示方案/需求文档问题，mixed 表示需要使用者判断的混合问题；claim_kind 与 approved_refs 见字段说明。`
@@ -1779,15 +1851,12 @@ export function jobsPacket(
                 ? `本工作项带任务执行索引（task_execution_index）：按 task 对照其执行依据快照（contract）审查——实现路线对照 design 引用原文、累计 diff 对照 guard 边界、测试断言对照 tests 声明的 scenario；每项的 required_evidence 是 task-start 冻结的证据口径，red_required/green_required 分别说明是否需要 RED/GREEN；fix 非空表示状态机创建的实现修复，source、parent_task_id 和 reason 说明其归属，code_review 来源还需核对 review_finding；scope_note 既可能解释必要的范围扩大，也可能说明代码审查修复为何保留原实现，均需结合 Diff、调用链和验证证据独立判断；changed_paths 是归属线索不是结论（null 表示未知）；unattributed_paths 中的无主改动和 added_code_paths 中的新建代码文件，均需判断是否服务已批准行为：放行其中任何计划外文件，都必须写明它服务于哪条已批准锚点、为何无法避免，说不出依据的按 unjustified_addition 收缩；coverage_exemption_refs 解释未绑定 task 的 TEST 豁免。当前 packet 的 boundFiles 是本轮冻结的审查范围；若它来自前一轮审查后的增量，只复核本轮变化及其直接影响链路，不要求重复审查未变化文件，但仍要判断批准行为是否完整闭合。`
                 : "")
             : job.role === "verifier"
-            ? `最小格式：${JSON.stringify(reportSkeletonForJob(job))}。verdict 只能为 pass 或 fail；核对代码审查记录（code_review_gate）：passed 必须能追溯到已接受的代码审查工作项，skipped 必须能证明本次没有代码类改动。核对修复闭环：task_execution_index.fix.source=code_review 时必须核对 review_finding 对应问题是否关闭；source=self_test 时必须核对 parent_task_id、记录的自测原因、本次 attempt 验证和最新代码审查是否共同闭环。方案/混合问题必须有用户决策或后续修复证据。按 task_execution_index 的 required_evidence 核对测试证据：red_required 时需要同一 TEST 的 RED（expected_failure）后 GREEN；green_required 时每个声明 TEST 都需要允许的 GREEN 语义状态；测试运行证据应包含测试 ID（test_id）、命令（command）、工作目录（cwd）、退出码（exit_code）、语义状态（semantic_status）。修复 task 的回归测试运行可用回归覆盖任务列表（covers_task_ids）说明覆盖了哪些已完成任务；缺少任务尝试 ID（attempt_id）的旧证据只能弱引用。` +
-              (packetContext?.code_state_check
-                ? `本工作项带代码状态检查（code_state_check），它是创建 packet 时的快照：验证期间若代码状态已变化，不要提交该报告；主流程会通过 next 创建携带最新事实的验证工作项。`
-                : "")
+            ? `最小格式：${JSON.stringify(reportSkeletonForJob(job))}。verdict 只能为 pass 或 fail；核对代码审查记录（code_review_gate）：passed 必须能追溯到已接受的代码审查工作项，skipped 必须能证明本次没有代码类改动。核对修复闭环：task_execution_index.fix.source=code_review 时必须核对 review_finding 对应问题是否关闭；source=self_test 时必须核对 parent_task_id、记录的自测原因、本次 attempt 验证和最新代码审查是否共同闭环。方案/混合问题必须有用户决策或后续修复证据。按 task_execution_index 的 required_evidence 核对测试证据：red_required 时需要同一 TEST 的 RED（expected_failure）后 GREEN；green_required 时每个声明 TEST 都需要允许的 GREEN 语义状态；测试运行证据应包含测试 ID（test_id）、命令（command）、工作目录（cwd）、退出码（exit_code）、语义状态（semantic_status）。修复 task 的回归测试运行可用回归覆盖任务列表（covers_task_ids）说明覆盖了哪些已完成任务；缺少任务尝试 ID（attempt_id）的旧证据只能弱引用。`
             : isReviewer
             ? `最小格式：${JSON.stringify(reportSkeletonForJob(job))}。verdict 只能为 pass 或 fail。`
             : `最小格式：${JSON.stringify(reportSkeletonForJob(job))}。verdict 只能为 pass 或 fail。`),
         stop_conditions: isReviewer
-          ? ["完成审查后提交报告，不要修改文档"]
+          ? ["用 submission_command 登记本工作项报告后结束，不要修改文档或代码"]
           : job.role === "executor"
           ? ["完成绑定范围内的实现后提交执行报告，不要修改未绑定范围"]
           : ["完成指定验证后提交测试报告，不要修改项目文档"],

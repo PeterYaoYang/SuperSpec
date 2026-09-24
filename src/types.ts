@@ -606,11 +606,27 @@ export interface TransitionResult {
 }
 
 // ===== Record 结果 =====
+/**
+ * 工作项报告的登记结果：accepted / review_failed / non_actionable_report 表示结论已登记为本工作项结果；
+ * invalid_report 表示报告已终结但不构成结论；retryable 可修正后以同一工作项重交；
+ * job_closed / job_invalidated / job_not_found 表示本次提交没有写入任何结论。
+ */
+export type JobSubmitResultKind =
+  | "accepted"
+  | "review_failed"
+  | "non_actionable_report"
+  | "invalid_report"
+  | "retryable"
+  | "job_closed"
+  | "job_invalidated"
+  | "job_not_found";
+
 export interface RecordResult {
-  /** Undefined means the input was rejected before an event was written and may be corrected and resubmitted. */
+  /** 多数情况下是本次写入的事件类型，为空通常表示输入在写事件前被拒；工作项报告的登记结果以 result_kind 为准。 */
   event_type?: EventType;
   accepted: boolean;
   message: string;
   job_state?: JobState;
   events_written?: number;
+  result_kind?: JobSubmitResultKind;
 }
