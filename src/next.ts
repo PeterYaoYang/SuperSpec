@@ -172,7 +172,8 @@ export function next(
       snapshot,
       mode: { kind: "risk", risk },
     });
-    const status = workflowModeStatus(events, snapshot.state, risk, change);
+    // 升级入口只在 status 中提供：next 每步都返回，常驻的升级提示会被当作待办。
+    const status = workflowModeStatus(events, snapshot.state, risk);
     if (plannedNextStep) {
       const output = { ...toNextOutput(change, plannedNextStep), ...status };
       recordPresentedQuestion(projectRoot, change, changeRoot, output);

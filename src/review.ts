@@ -11,7 +11,8 @@ import {
   type ReviewGateRule,
 } from "./review_job_gates.ts";
 import type { CodeReviewResultKind, CodeStateCheck, Event, Job, JobRole, Ref, ReviewBaseline, ReviewPreviousRejection, State, TaskAttempt } from "./types.ts";
-import { computeCodeStateCheck, effectiveCoverageExemptionRefsFromEvents } from "./code_review.ts";
+import { computeCodeStateCheck, computeDeliverableDocs, effectiveCoverageExemptionRefsFromEvents } from "./code_review.ts";
+import { diffFingerprints } from "./git_state.ts";
 import { materialManifest } from "./material_snapshot.ts";
 
 export type ReviewRisk = "minimal" | "normal" | "strict";
@@ -603,6 +604,19 @@ function codeStateCheckDifference(frozen: CodeStateCheck, current: CodeStateChec
   return parts.length > 0 ? `（${parts.join("；")}）` : "";
 }
 
+/** 早期创建的最终验证工作项没有冻结交付文档，按当时契约不检查。 */
+export function deliverableDocsStaleReason(
+  job: Job,
+  projectRoot: string | undefined,
+  events: Event[] | undefined,
+): string | null {
+  if (!isReviewReadyVerifier(job)) return null;
+  const frozen = job.packet_context?.deliverable_docs;
+  if (!frozen || !projectRoot || !events) return null;
+  const changed = diffFingerprints(frozen, computeDeliverableDocs(projectRoot, events));
+  return changed.length > 0 ? `最终验证工作项绑定的交付文档已变化：${stalePathList(changed)}` : null;
+}
+
 export function reviewVerifierStaleReason(
   job: Job,
   changeRoot: string,
@@ -613,7 +627,8 @@ export function reviewVerifierStaleReason(
 ): string | null {
   return boundFilesStaleReason(job, changeRoot)
     ?? reviewEvidenceStaleReason(job, currentEvidenceDigest)
-    ?? codeStateCheckStaleReason(job, projectRoot, events, ignoredCodePaths);
+    ?? codeStateCheckStaleReason(job, projectRoot, events, ignoredCodePaths)
+    ?? deliverableDocsStaleReason(job, projectRoot, events);
 }
 
 export function isFreshReviewVerifier(

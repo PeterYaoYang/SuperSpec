@@ -176,6 +176,42 @@ export function unregisteredClosedProposeQuestions(events: readonly Event[], cha
   });
 }
 
+/**
+ * 已勾选但找不到答复登记的问题，区分“本轮已答复、勾选时改了问题行原文”与“从未登记答复”。
+ * 前者返回登记时的问题行原文（早期登记没有保存原文时为 null）。
+ */
+export function answeredProposeQuestionRegisteredText(
+  events: readonly Event[],
+  question: ProposeQuestion,
+): { registeredText: string | null } | null {
+  const roundId = currentProposeRoundId(events);
+  for (let index = events.length - 1; index >= 0; index--) {
+    const event = events[index];
+    if (event.event_type !== "user_decision_recorded") continue;
+    const payload = event.payload as {
+      accepted?: unknown;
+      propose_open_question?: {
+        round_id?: unknown;
+        path?: unknown;
+        question_id?: unknown;
+        question_ordinal?: unknown;
+        question_text?: unknown;
+      };
+    };
+    const recorded = payload.propose_open_question;
+    if (
+      payload.accepted === true &&
+      recorded?.round_id === roundId &&
+      recorded.path === question.path &&
+      recorded.question_id === question.id &&
+      (!question.id.startsWith("item-") || recorded.question_ordinal === question.ordinal)
+    ) {
+      return { registeredText: typeof recorded.question_text === "string" ? recorded.question_text : null };
+    }
+  }
+  return null;
+}
+
 export function currentProposeOpenQuestion(changeRoot: string): ProposeQuestion | null {
   return collectProposeQuestions(changeRoot).find(question => question.status === "open") ?? null;
 }

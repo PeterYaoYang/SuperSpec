@@ -160,6 +160,16 @@ export function resolveApprovedRefs(
   return { ok: true, values };
 }
 
+/** 代码审查修复针对的已批准 TEST：修复后的验证必须重新证明这些场景，而不是只登记一次泛化回归。 */
+export function approvedRefTestIds(changeRoot: string, refs: readonly string[] | undefined): string[] {
+  const ids = new Set<string>();
+  for (const raw of refs ?? []) {
+    const resolved = resolveApprovedRef(changeRoot, raw);
+    if (resolved.ok && resolved.value.kind === "test") ids.add(resolved.value.short);
+  }
+  return [...ids];
+}
+
 export function hasBehaviorAnchor(values: readonly ResolvedApprovedRef[]): boolean {
   return values.some(value => value.kind === "test" || value.kind === "requirement");
 }

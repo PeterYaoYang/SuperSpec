@@ -1,14 +1,16 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
-import { EXPLORE_DISCOVERY_REVIEW_GATE, PROPOSE_FINAL_REVIEW_GATE } from "./review_job_gates.ts";
+import { EXPLORE_DISCOVERY_REVIEW_GATE, PROPOSE_FINAL_REVIEW_GATE, REVIEW_FINAL_VERIFIER_GATE } from "./review_job_gates.ts";
 import type { ReviewGateRule } from "./review_job_gates.ts";
 import {
+  answeredExploreQuestionRegisteredText,
   currentExploreRoundId,
   exploreAnswerRegistrationPayload,
   unregisteredClosedExploreQuestions,
   unresolvedPresentedExploreQuestionScopes,
 } from "./explore_round.ts";
 import {
+  answeredProposeQuestionRegisteredText,
   currentProposeOpenQuestion,
   currentProposeRoundId,
   isPlanningValidationProfile,
@@ -34,14 +36,17 @@ import {
   validateTasksDocument,
   parseStructureChangeLedger,
   validateStructureChangeLedger,
+  type DiscoveryQuestion,
+  type ProposeQuestion,
 } from "./format.ts";
 import { currentGitHead } from "./git_state.ts";
 import { validateOpenSpecChange } from "./openspec.ts";
-import { docRef, sha256File, sha256Text, findLatestEvent } from "./store.ts";
+import { docRef, sha256File, sha256Text, findLatestEvent, listMarkdownFiles } from "./store.ts";
 import {
   isReviewReadyVerifier,
   isFreshReviewVerifier,
   historicalProposeReadyRoles,
+  latestReviewTerminalForGateRole,
   readReviewPolicyFromEvents,
   reviewGateRoleResolution,
   reviewRejectionOverrideScope,
@@ -197,6 +202,7 @@ function requiredArtifact(
   kind: WorkflowArtifactKind,
   canonicalPath: string,
   risk: ReviewRisk,
+  reason = `${canonicalPath.split("/").at(-1)} 不存在`,
 ): NextStepPlan {
   const artifactPath = relative(projectRoot, join(changeRoot, canonicalPath)).replaceAll("\\", "/");
   return {
@@ -204,8 +210,46 @@ function requiredArtifact(
     state,
     artifact: { kind, path: artifactPath, operation: "create_or_update" },
     resume: { argv: nextArgv(change, risk) },
-    reason: `${canonicalPath.split("/").at(-1)} 不存在`,
+    reason,
   };
+}
+
+/**
+ * 结构变更清单进入计划契约后，计划分两拍：先有 proposal、specs 与含 DEC 的 design，
+ * 用户决定结构取舍后才写 tasks 与 test-contract；更早的计划轮保持原顺序。
+ */
+function missingProposeFirstBeatArtifact(
+  changeRoot: string,
+  profile: PlanningValidationProfile | null,
+): { kind: WorkflowArtifactKind; path: string; reason?: string } | null {
+  if (profile?.design?.schema_version !== 2) return null;
+  const openspecStrict = profile.openspec.mode === "strict";
+  if (openspecStrict && !existsSync(join(changeRoot, "proposal.md"))) return { kind: "proposal", path: "proposal.md" };
+  if (openspecStrict && listMarkdownFiles(join(changeRoot, "specs")).length === 0) {
+    return { kind: "specs", path: "specs/", reason: "specs/ 下还没有能力规格" };
+  }
+  if (!existsSync(join(changeRoot, "design.md"))) return { kind: "design", path: "design.md" };
+  return null;
+}
+
+function unregisteredClosedExploreQuestionError(events: Event[], question: DiscoveryQuestion): string {
+  const label = question.id.startsWith("item-") ? `discovery.md 第 ${question.ordinal} 项待确认事项` : `discovery.md 中的 ${question.id}`;
+  const answered = answeredExploreQuestionRegisteredText(events, question);
+  if (!answered) {
+    return `${label} 已标记为已确认，但本轮没有它的答复登记；请恢复为待确认，通过 next 向用户展示并登记真实答复后再回写 discovery.md`;
+  }
+  const original = answered.registeredText == null ? "" : `：${answered.registeredText}`;
+  return `${label} 已登记用户答复，但勾选后该事项行的文本与登记时不一致，答复无法匹配；请把该行恢复为登记时的原文${original}，只把 [ ] 改为 [x]，结论写在该行之外`;
+}
+
+function unregisteredClosedProposeQuestionError(events: Event[], question: ProposeQuestion): string {
+  const label = question.id.startsWith("item-") ? `${question.path} 第 ${question.ordinal} 项待确认问题` : `${question.path} 中的 ${question.id}`;
+  const answered = answeredProposeQuestionRegisteredText(events, question);
+  if (!answered) {
+    return `${label} 已标记为确认，但本轮没有它的答复登记；请恢复为待确认，通过 next 向用户展示并登记真实答复后再回写计划材料`;
+  }
+  const original = answered.registeredText == null ? "" : `：${answered.registeredText}`;
+  return `${label} 已登记用户答复，但勾选后该问题行的文本与登记时不一致，答复无法匹配；请把该行恢复为登记时的原文${original}，只把 [ ] 改为 [x]，结论写在该行之外`;
 }
 
 function modeSelectionRequiredStep(change: string, state: State, events: Event[]): NextStepPlan {
@@ -951,7 +995,7 @@ export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
         return {
           kind: "material_update_required",
           state: "explore",
-          errors: ["发现一项已标记为已确认的事项没有对应答复登记；请恢复为待确认，通过 next 登记真实答复后再回写 discovery.md"],
+          errors: unregisteredClosedQuestions.map(question => unregisteredClosedExploreQuestionError(events, question)),
           reason: "存在未登记答复的已确认事项",
         };
       }
@@ -1000,11 +1044,12 @@ export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
         return { kind: "ask_user", state: "propose", ask, reason: "等待用户确认设计取舍" };
       }
 
-      if (unregisteredClosedProposeQuestions(events, changeRoot).length > 0) {
+      const unregisteredClosed = unregisteredClosedProposeQuestions(events, changeRoot);
+      if (unregisteredClosed.length > 0) {
         return {
           kind: "material_update_required",
           state: "propose",
-          errors: ["发现一项已标记为确认的设计决定没有对应答复登记；请恢复为待确认，通过 next 登记真实答复后再回写计划材料"],
+          errors: unregisteredClosed.map(question => unregisteredClosedProposeQuestionError(events, question)),
           reason: "存在未登记答复的设计决定",
         };
       }
@@ -1017,6 +1062,12 @@ export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
         };
       }
 
+      const planningProfile = planningValidationProfileForPendingProposeRound(events);
+      const firstBeat = missingProposeFirstBeatArtifact(changeRoot, planningProfile);
+      if (firstBeat) {
+        return requiredArtifact(projectRoot, change, changeRoot, "propose", firstBeat.kind, firstBeat.path, mode.risk, firstBeat.reason);
+      }
+
       const testContractPath = join(changeRoot, ".superspec", "artifacts", "test-contract.md");
       if (!existsSync(testContractPath)) {
         return requiredArtifact(projectRoot, change, changeRoot, "propose", "test_contract", ".superspec/artifacts/test-contract.md", mode.risk);
@@ -1026,7 +1077,6 @@ export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
         return requiredArtifact(projectRoot, change, changeRoot, "propose", "tasks", "tasks.md", mode.risk);
       }
 
-      const planningProfile = planningValidationProfileForPendingProposeRound(events);
       const preflight = validatePlanningPreflight(
         projectRoot,
         change,
@@ -1345,7 +1395,11 @@ function planApplyDoneNext(context: PhasePlanContext): NextStepPlan {
     (typeof acceptedCurrentHead === "string" && acceptedCurrentHead.trim() !== "")
   );
   if (!codeScan.hasCodeChanges || acceptedReviewReady) {
-    const confirmation = phaseConfirmationStep(context, "apply_to_review", "Apply 与代码审查完成，等待用户确认进入最终审查");
+    const confirmation = phaseConfirmationStep(
+      context,
+      "apply_to_review",
+      acceptedReviewReady ? "Apply 与代码审查完成，等待用户确认进入最终审查" : "Apply 完成且本轮没有代码类改动，等待用户确认进入最终审查",
+    );
     if (confirmation) return confirmation;
   }
 
@@ -1396,12 +1450,25 @@ function planReviewNext(context: PhasePlanContext): NextStepPlan {
         state: "review",
         transition: "review-ready",
         risk: mode.risk,
-        reason: "最终验证已经缺失或不再匹配当前证据，先补最终验证",
+        reason: missingFinalVerifierReason(events),
       };
     }
   }
 
   return { kind: "run_transition", state: "review", transition: "accept", reason: "审查完成，提交接受" };
+}
+
+/** 进入 review 后首次创建、上一轮未通过与已通过但过期是三种不同处境；执行证据本身不需要重新登记。 */
+function missingFinalVerifierReason(events: Event[]): string {
+  const latest = latestReviewTerminalForGateRole(events, REVIEW_FINAL_VERIFIER_GATE, "verifier");
+  if (!latest) return "本轮尚未创建最终验证工作项；执行 review-ready 创建，已登记的测试证据无需重新登记";
+  if (latest.state === "accepted") {
+    return "此前通过的最终验证已不再匹配当前执行证据或代码状态；执行 review-ready 创建新的最终验证工作项";
+  }
+  if (latest.result_kind === "review_failed") {
+    return "上一次最终验证未通过；按验证报告处理后执行 review-ready 创建新的最终验证工作项";
+  }
+  return "上一次最终验证工作项没有形成结论；执行 review-ready 创建新的最终验证工作项";
 }
 
 export function planTransition(name: "explore" | "propose-ready" | "start-apply" | "accept", context: TransitionPlanContext): TransitionDecisionPlan {

@@ -280,8 +280,7 @@ export function workflowModeStatus(
       mode_upgrade: {
         target_mode: "normal",
         reopen_argv: ["superspec", "transition", "reopen", "--change", change, "--to", "explore", "--upgrade-mode", "normal", "--reason", "发现新事实，minimal 不再适用，需要补齐 normal 审查"],
-        selection_after_reopen: workflowModeSelectionAction(change, true),
-        instruction: "只有新事实推翻 minimal 依据时使用：按 reopen_argv 回到 Explore 补齐 normal 审查，不得降档或用升级动作绕过当前问题。",
+        instruction: "只有新事实推翻 minimal 依据时使用，不用于绕过当前问题；回到 Explore 后按 next 返回的选档动作登记 normal。",
       },
     } : {}),
   };

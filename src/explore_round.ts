@@ -149,6 +149,40 @@ export function unregisteredClosedExploreQuestions(events: readonly Event[], dis
   );
 }
 
+/**
+ * 已勾选但找不到答复登记的事项，区分“本轮已答复、勾选时改了事项行原文”与“从未登记答复”。
+ * 前者返回登记时的事项行原文（早期登记没有保存原文时为 null）。
+ */
+export function answeredExploreQuestionRegisteredText(
+  events: readonly Event[],
+  question: Pick<DiscoveryQuestion, "id" | "ordinal">,
+): { registeredText: string | null } | null {
+  const roundId = currentExploreRoundId(events);
+  for (let index = events.length - 1; index >= 0; index--) {
+    const event = events[index];
+    if (event.event_type !== "user_decision_recorded") continue;
+    const payload = event.payload as {
+      accepted?: unknown;
+      explore_open_question?: {
+        round_id?: unknown;
+        question_id?: unknown;
+        question_ordinal?: unknown;
+        question_text?: unknown;
+      };
+    };
+    const recorded = payload.explore_open_question;
+    if (
+      payload.accepted === true &&
+      recorded?.round_id === roundId &&
+      recorded.question_id === question.id &&
+      (!question.id.startsWith("item-") || recorded.question_ordinal === question.ordinal)
+    ) {
+      return { registeredText: typeof recorded.question_text === "string" ? recorded.question_text : null };
+    }
+  }
+  return null;
+}
+
 /** 已正式展示但尚未登记答复的 Explore 问题不能通过删除问题行绕过。 */
 export function unresolvedPresentedExploreQuestionScopes(events: readonly Event[]): string[] {
   const roundId = currentExploreRoundId(events);

@@ -40,6 +40,7 @@ import {
   codeReviewPacketDigest,
   collectCodeReviewGateFacts,
   computeCodeStateCheck,
+  computeDeliverableDocs,
   currentCodeReviewWorkingPaths,
   dismissedCodeReviewSummary,
   effectiveCoverageExemptionRefsFromEvents,
@@ -64,7 +65,7 @@ import {
   parseTestContractEntries,
   type ParsedExecutionRequirement,
 } from "./format.ts";
-import { isCodeReviewClaimKind, reviewFixReason } from "./approved_ref.ts";
+import { approvedRefTestIds, isCodeReviewClaimKind, reviewFixReason } from "./approved_ref.ts";
 import {
   applyRequirementModeForCurrentRound,
   applyPlanningDocsChangedSinceBaseline,
@@ -311,7 +312,7 @@ function compileRequiredEvidence(
   testIds: string[],
   requiresVerificationWithoutDeclaredTest: boolean,
 ): EffectiveEvidencePlan {
-  // Fix task 没有计划阶段声明的 TEST，但仍必须登记一次真实回归验证。
+  // Fix task 没有计划阶段声明的 TEST；审查问题也没有指向 TEST 时，仍必须登记一次真实回归验证。
   // 是否需要 RED 始终由已冻结的 execution_policy 决定。
   const requiresVerification = testIds.length > 0 || requiresVerificationWithoutDeclaredTest;
   return {
@@ -782,6 +783,7 @@ function createFinalVerifierJob(
   const taskExecutionIndex = taskExecutionIndexForReview(projectRoot, events);
   const packetContext = {
     code_state_check: computeCodeStateCheck(projectRoot, events),
+    deliverable_docs: computeDeliverableDocs(projectRoot, events),
     coverage_exemption_refs: effectiveCoverageExemptionRefsFromEvents(events),
     task_execution_index: taskExecutionIndex.entries,
     task_execution_index_scope: taskExecutionIndex.scope,
@@ -1296,8 +1298,9 @@ export function taskStart(projectRoot: string, change: string, changeRoot: strin
 
       const structureDigest = sha256Text(tasksContent.replace(/- \[[xX]\]/g, "- [ ]"));
       const effectivePolicy = executionPolicy;
+      const fixTestIds = fix?.source === "code_review" ? approvedRefTestIds(changeRoot, fix.review_finding?.approved_refs) : [];
       const requiredEvidence = isFixTask || (contractMode && executionRequirementVersion === 2)
-        ? compileRequiredEvidence(effectivePolicy, adopted.contract?.tests ?? [], isFixTask)
+        ? compileRequiredEvidence(effectivePolicy, [...new Set([...(adopted.contract?.tests ?? []), ...fixTestIds])], isFixTask)
         : null;
       const attempt: TaskAttempt = {
         attempt_id: `ATT-${taskId}-${Date.now()}-${++attemptSeq}`,

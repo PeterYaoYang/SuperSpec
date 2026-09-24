@@ -1180,7 +1180,7 @@ function recordUserDecisionLoaded(
         return {
           event_type: "user_decision_recorded" as const,
           accepted: true,
-          message: "幂等返回：同一用户决策已登记",
+          message: "幂等返回：该事项的答复已登记，本次输入没有改变登记内容；答复绑定 discovery.md 中该事项行的原文，回写时只把 [ ] 改为 [x]，结论写在该行之外",
         };
       }
       return invalidExploreOpenQuestionResult(
@@ -1243,7 +1243,11 @@ function recordUserDecisionLoaded(
     if (acceptedForCurrentScope) {
       const previousAnswer = (acceptedForCurrentScope.payload as { answer?: unknown }).answer;
       if (previousAnswer === decision.answer) {
-        return { event_type: "user_decision_recorded", accepted: true, message: "幂等返回：同一用户决策已登记" };
+        return {
+          event_type: "user_decision_recorded",
+          accepted: true,
+          message: "幂等返回：该设计决定的答复已登记，本次输入没有改变登记内容；答复绑定 design 中该问题行的原文，回写时只把 [ ] 改为 [x]，结论写在该行之外",
+        };
       }
       return invalidProposeOpenQuestionResult(
         projectRoot,
@@ -1563,6 +1567,7 @@ function recordUserDecisionLoaded(
         document_fingerprint: exploreOpenQuestion.documentFingerprint,
         context_fingerprint: exploreOpenQuestionContextFingerprint,
         decision_basis_digest: exploreOpenQuestionBasisDigest,
+        question_text: exploreOpenQuestion.text,
       },
     } : {}),
     ...(proposeOpenQuestion && proposeOpenQuestionRoundId && proposeOpenQuestionContextFingerprint && proposeOpenQuestionBasisDigest ? {
@@ -1574,6 +1579,7 @@ function recordUserDecisionLoaded(
         document_fingerprint: proposeOpenQuestion.documentFingerprint,
         context_fingerprint: proposeOpenQuestionContextFingerprint,
         decision_basis_digest: proposeOpenQuestionBasisDigest,
+        question_text: proposeOpenQuestion.text,
       },
     } : {}),
     ...(phaseAction ? {
@@ -1755,6 +1761,7 @@ function packetFieldDescriptions(): Record<string, string> {
     report_schema: "报告契约（字段形状、取值、条件、提示消息）；由 `superspec jobs contract --change <C> --job <J>` 输出，提交校验引用同一份定义。",
     code_review_gate: "最终验证读取的代码审查门禁事实：passed 指向已接受的代码审查工作项，skipped 表示本轮没有代码类改动。",
     code_state_check: "代码状态检查：最终验证时用于判断代码审查后代码是否又发生变化。",
+    deliverable_docs: "本审查周期改动的普通文档（计划与工作流材料之外）及其内容指纹；纯文档改动的交付物在这里，登记前它们再变化会使本工作项作废。",
     review_baseline: "同角色最近一次审查通过的工作项；存在时本工作项是相对它的材料复审。",
     material_delta: "相对 review_baseline 的逐文件材料变化：status 为 added/removed/modified，diff 为 unified diff；diff_unavailable 说明为何没有差异、需要完整阅读该文件。",
     previous_review_evidence: "上一轮同角色审查（通过或 fail）记录的 summary、evidence_refs，以及报告引用的代码文件自那次提交后是否未变化（code_files[].unchanged）。",
@@ -1811,6 +1818,7 @@ export function jobsPacket(
         ...(packetContext?.added_code_paths ? { added_code_paths: packetContext.added_code_paths } : {}),
         ...(packetContext?.structure_ledger ? { structure_ledger: packetContext.structure_ledger } : {}),
         ...(packetContext?.code_state_check ? { code_state_check: packetContext.code_state_check } : {}),
+        ...(packetContext?.deliverable_docs ? { deliverable_docs: packetContext.deliverable_docs } : {}),
         ...(job.review_baseline
           ? { review_baseline: { job_id: job.review_baseline.job_id }, material_delta: materialDelta(projectRoot, change, job) }
           : {}),

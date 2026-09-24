@@ -86,6 +86,15 @@ export function isCodeLikePath(path: string): boolean {
   return CODE_EXTENSIONS.has(extname(base).toLowerCase());
 }
 
+/** 工作流材料之外的普通 Markdown 文档：不触发代码审查，但可能是纯文档 change 的交付物。 */
+export function isDeliverableDocPath(path: string): boolean {
+  const normalized = path.replace(/\\/g, "/");
+  if (!normalized || extname(normalized).toLowerCase() !== ".md") return false;
+  if (normalized.startsWith("openspec/") || normalized.startsWith(".superspec/") || normalized.startsWith(".omx/")) return false;
+  if (normalized.includes("/.superspec/") || normalized.includes("/.omx/")) return false;
+  return !PROCESS_DOC_RE.test(normalized) && !PROCESS_ARTIFACT_RE.test(normalized);
+}
+
 export function walkCodeFiles(root: string, dir = root, out: string[] = []): string[] {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     if (entry.isDirectory()) {
@@ -126,6 +135,17 @@ function unquoteGitPath(path: string): string {
 }
 
 export function dirtyCodeFiles(projectRoot: string): { ok: true; files: DirtyFileFingerprint[] } | { ok: false; files: DirtyFileFingerprint[]; reason: string } {
+  return dirtyFilesMatching(projectRoot, isCodeLikePath);
+}
+
+export function dirtyDeliverableDocs(projectRoot: string): { ok: true; files: DirtyFileFingerprint[] } | { ok: false; files: DirtyFileFingerprint[]; reason: string } {
+  return dirtyFilesMatching(projectRoot, isDeliverableDocPath);
+}
+
+function dirtyFilesMatching(
+  projectRoot: string,
+  matches: (path: string) => boolean,
+): { ok: true; files: DirtyFileFingerprint[] } | { ok: false; files: DirtyFileFingerprint[]; reason: string } {
   let output: string;
   try {
     output = execFileSync("git", ["-C", projectRoot, "status", "--porcelain", "--untracked-files=all"], {
@@ -149,12 +169,12 @@ export function dirtyCodeFiles(projectRoot: string): { ok: true; files: DirtyFil
       const [oldRaw, newRaw] = rawPath.split(" -> ");
       const oldPath = unquoteGitPath(oldRaw);
       const newPath = unquoteGitPath(newRaw);
-      if (isCodeLikePath(oldPath)) files.push(codeFileFingerprint(projectRoot, oldPath, "deleted"));
-      if (isCodeLikePath(newPath)) files.push(codeFileFingerprint(projectRoot, newPath, "added"));
+      if (matches(oldPath)) files.push(codeFileFingerprint(projectRoot, oldPath, "deleted"));
+      if (matches(newPath)) files.push(codeFileFingerprint(projectRoot, newPath, "added"));
       continue;
     }
     const normalizedPath = unquoteGitPath(rawPath);
-    if (!isCodeLikePath(normalizedPath)) continue;
+    if (!matches(normalizedPath)) continue;
     const deleted = statusCode.includes("D");
     const added = statusCode.includes("A") || statusCode === "??";
     files.push(codeFileFingerprint(projectRoot, normalizedPath, deleted ? "deleted" : added ? "added" : "modified"));

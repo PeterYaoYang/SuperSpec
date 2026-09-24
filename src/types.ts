@@ -48,7 +48,6 @@ export interface WorkflowModeSelectionAction {
 export interface WorkflowModeUpgradeAction {
   target_mode: "normal";
   reopen_argv: string[];
-  selection_after_reopen: WorkflowModeSelectionAction;
   instruction: string;
 }
 export const GREEN_ONLY_NO_TDD_REASON = "green-only";
@@ -269,6 +268,7 @@ export interface JobPacketContext {
   added_code_paths?: string[];
   structure_ledger?: StructureChangeLedger;
   code_state_check?: CodeStateCheck;
+  deliverable_docs?: DirtyFileFingerprint[];
 }
 
 export interface JobPacket {
@@ -291,6 +291,7 @@ export interface JobPacket {
   added_code_paths?: string[];
   structure_ledger?: StructureChangeLedger;
   code_state_check?: CodeStateCheck;
+  deliverable_docs?: DirtyFileFingerprint[];
   review_baseline?: { job_id: string };
   material_delta?: MaterialDeltaEntry[];
   previous_review_evidence?: PreviousReviewEvidence;
@@ -542,7 +543,7 @@ export interface AcceptedMaterialFollowupContinuation {
   plan_docs_changed_since_accept: boolean | null;
 }
 
-export type WorkflowArtifactKind = "discovery" | "test_contract" | "tasks";
+export type WorkflowArtifactKind = "discovery" | "proposal" | "specs" | "design" | "test_contract" | "tasks";
 
 export interface RequiredWorkflowArtifact {
   kind: WorkflowArtifactKind;

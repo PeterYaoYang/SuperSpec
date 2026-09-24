@@ -915,6 +915,36 @@ test("code_state_check：已审 dirty 文件未变化不算差异，后续修改
   } finally { fx.cleanup(); }
 });
 
+test("deliverable_docs：纯文档改动不触发代码审查，但 verifier 创建后文档再变化会使其作废", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    initGitRepo(fx.projectRoot);
+    mkdirSync(join(fx.projectRoot, "docs"), { recursive: true });
+    writeFileSync(join(fx.projectRoot, "docs", "guide.md"), "# Guide\n\nold\n");
+    execFileSync("git", ["add", "."], { cwd: fx.projectRoot, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "initial"], { cwd: fx.projectRoot, stdio: "ignore" });
+
+    writeFileSync(join(fx.projectRoot, "docs", "guide.md"), "# Guide\n\nnew\n");
+    assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot).to_state, "apply_done");
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot).to_state, "review");
+    const verifier = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(verifier.outcome, "job_created");
+    const packet = jobsPacket(fx.projectRoot, fx.change, verifier.created_jobs[0]).packet;
+    assert.equal(packet?.code_review_gate?.decision, "skipped");
+    assert.deepEqual(packet?.deliverable_docs?.map(file => file.path), ["docs/guide.md"]);
+
+    writeFileSync(join(fx.projectRoot, "docs", "guide.md"), "# Guide\n\nchanged after verification started\n");
+    const submitted = submitVerifierPass(fx.projectRoot, fx.change, fx.changeRoot, verifier.created_jobs[0]);
+    assert.equal(submitted.accepted, false);
+    assert.ok(submitted.message.includes("docs/guide.md"), submitted.message);
+
+    const fresh = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(fresh.outcome, "job_created");
+    assert.equal(submitVerifierPass(fx.projectRoot, fx.change, fx.changeRoot, fresh.created_jobs[0]).accepted, true);
+  } finally { fx.cleanup(); }
+});
+
 test("code_state_check：verifier 创建后的干净代码提交会列入差异并使旧 job stale", () => {
   const projectRoot = mkdtempSync(join(tmpdir(), "superspec-p4state-"));
   const change = "test-change";

@@ -1631,6 +1631,7 @@ test("next 在 propose 缺 test-contract 时返回 canonical artifact_required",
   try {
     confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     assert.equal(transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal").to_state, "propose");
+    writeFileSync(join(fx.changeRoot, "design.md"), appendStructureLedgerNone("# Design\n"));
 
     const result = next(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(result.state, "propose");
@@ -1650,6 +1651,7 @@ test("next 在 propose 缺 tasks 时返回 canonical artifact_required", () => {
   try {
     confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     assert.equal(transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal").to_state, "propose");
+    writeFileSync(join(fx.changeRoot, "design.md"), appendStructureLedgerNone("# Design\n"));
     writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "test-contract.md"), "# Test Contract\n");
     rmSync(join(fx.changeRoot, "tasks.md"));
 
@@ -1666,11 +1668,79 @@ test("next 在 propose 缺 tasks 时返回 canonical artifact_required", () => {
   } finally { fx.cleanup(); }
 });
 
+test("next 在 propose 先要含设计决定的 design，用户决定后才要测试契约与任务", () => {
+  const fx = setupPropose();
+  try {
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.equal(transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal").to_state, "propose");
+    rmSync(join(fx.changeRoot, "tasks.md"));
+
+    const first = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(first.path, "artifact_required");
+    if (first.path !== "artifact_required") throw new Error("expected design artifact");
+    assert.equal(first.artifact.kind, "design");
+
+    const decisionLine = "DEC-001 输出路径承载方式：A 扩展现有选项 / B 新增入口。建议：A";
+    const designWith = (mark: " " | "x", line = decisionLine) => appendStructureLedgerNone([
+      "# Design", "", "## 待用户确认", "", `- [${mark}] ${line}`, "",
+    ].join("\n"));
+    writeFileSync(join(fx.changeRoot, "design.md"), designWith(" "));
+    const asked = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(asked.path, "ask_user");
+    if (asked.path !== "ask_user") throw new Error("expected DEC before tasks");
+    assert.equal(recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({
+      ...asked.ask_user.record_input,
+      answer: "A",
+    })).accepted, true);
+
+    writeFileSync(join(fx.changeRoot, "design.md"), designWith("x", "DEC-001 已确认：扩展现有选项"));
+    const rewritten = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(rewritten.path, "material_update_required");
+    if (rewritten.path !== "material_update_required") throw new Error("expected rewritten DEC feedback");
+    assert.ok(rewritten.errors.some(error => error.includes(decisionLine)), "失配反馈应给出登记时的问题行原文");
+
+    writeFileSync(join(fx.changeRoot, "design.md"), designWith("x"));
+    const afterDecision = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(afterDecision.path, "artifact_required");
+    if (afterDecision.path !== "artifact_required") throw new Error("expected test contract after DEC");
+    assert.equal(afterDecision.artifact.kind, "test_contract");
+  } finally { fx.cleanup(); }
+});
+
+test("next 在 OpenSpec strict 计划轮先要 proposal 与 specs，再要 design", () => {
+  const fx = setupPropose();
+  try {
+    writeFileSync(join(fx.projectRoot, "openspec", "config.yaml"), "schema: spec-driven\n");
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "transition_commit", {
+      transition: "propose", from_state: "explore", to_state: "propose",
+      outcome: "advanced", created_job_ids: [], reason: "seed strict propose",
+      planning_validation_version: 2,
+      planning_validation_profile: planningValidationProfileForNewRound(fx.projectRoot),
+    }, { transitionId: "T-strict-first-beat", idempotencyKey: "strict-first-beat" }));
+    rmSync(join(fx.changeRoot, "proposal.md"));
+    rmSync(join(fx.changeRoot, "tasks.md"));
+
+    const kindOf = () => {
+      const result = next(fx.projectRoot, fx.change, fx.changeRoot);
+      return result.path === "artifact_required" ? result.artifact.kind : result.path;
+    };
+    assert.equal(kindOf(), "proposal");
+    writeFileSync(join(fx.changeRoot, "proposal.md"), "# Proposal\n");
+    assert.equal(kindOf(), "specs");
+    mkdirSync(join(fx.changeRoot, "specs", "export"), { recursive: true });
+    writeFileSync(join(fx.changeRoot, "specs", "export", "spec.md"), "## ADDED Requirements\n");
+    assert.equal(kindOf(), "design");
+    writeFileSync(join(fx.changeRoot, "design.md"), appendStructureLedgerNone(STRICT_DESIGN));
+    assert.equal(kindOf(), "test_contract");
+  } finally { fx.cleanup(); }
+});
+
 test("next 在 propose 宣称计划就绪前复用 propose-ready 预检", () => {
   const fx = setupPropose();
   try {
     confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     assert.equal(transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal").to_state, "propose");
+    writeFileSync(join(fx.changeRoot, "design.md"), appendStructureLedgerNone("# Design\n"));
     writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "test-contract.md"), "# Test Contract\n");
     writeFileSync(join(fx.changeRoot, "tasks.md"), [
       "# Tasks",

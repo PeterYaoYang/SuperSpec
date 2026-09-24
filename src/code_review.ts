@@ -10,8 +10,10 @@ import {
   diffFingerprints,
   dirtyCodeFiles,
   dirtyCodePaths,
+  dirtyDeliverableDocs,
   gitLines,
   isCodeLikePath,
+  isDeliverableDocPath,
   projectHasReadableDirectory,
   walkCodeFiles,
 } from "./git_state.ts";
@@ -1219,6 +1221,24 @@ export function computeCodeStateCheck(projectRoot: string, events: Event[], igno
     changed_paths: [...changed].filter(isCodeLikePath).sort(),
     scope_reason: scopeReason,
   };
+}
+
+/** 本审查周期改动的普通文档及其内容指纹：纯文档 change 的交付物不在代码状态检查里，最终验证需要单独绑定。 */
+export function computeDeliverableDocs(projectRoot: string, events: Event[]): DirtyFileFingerprint[] {
+  const byPath = new Map<string, DirtyFileFingerprint>();
+  const baselineHead = reviewCycleBaseline(events)?.boundary.head ?? null;
+  const currentHead = currentGitHead(projectRoot).head;
+  if (baselineHead && currentHead && baselineHead !== currentHead) {
+    const diff = gitLines(projectRoot, ["diff", "--name-only", `${baselineHead}..HEAD`]);
+    if (diff.ok) {
+      for (const path of diff.lines.filter(isDeliverableDocPath)) {
+        byPath.set(path, { path, status: "modified", sha256: codeFileContentSha(projectRoot, path) ?? "sha256:missing" });
+      }
+    }
+  }
+  const dirty = dirtyDeliverableDocs(projectRoot);
+  for (const file of dirty.files) byPath.set(file.path, file);
+  return [...byPath.values()].sort((a, b) => a.path.localeCompare(b.path));
 }
 
 /** 已接受代码审查工作项在事件流里留下的范围外未检查摘要（pass 的置信边界）。 */

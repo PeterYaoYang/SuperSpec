@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 
 import { ensureChangeLayout, appendEvent, makeEvent, readEvents } from "../src/store.ts";
 import { next } from "../src/next.ts";
-import { reviewReady, reopen } from "../src/transition.ts";
+import { reviewReady, reopen, taskStart } from "../src/transition.ts";
 import { jobsPacket, recordJobSubmit } from "../src/record.ts";
 import { applyPlanningBaseline } from "../src/phase_plan.ts";
 import { addedCodePathsForScope, codeReviewPacketContext } from "../src/code_review.ts";
@@ -198,6 +198,32 @@ test("code-reviewer：missing_approved 引用 TEST 后可 REVIEW-FIX，任务行
     const tasks = readFileSync(join(fx.changeRoot, "tasks.md"), "utf8");
     assert.match(tasks, /兑现 TEST-001（missing_approved）/);
     assert.doesNotMatch(tasks, /应加谱系锁/);
+  } finally { fx.cleanup(); }
+});
+
+test("REVIEW-FIX：证据要求继承审查问题指向的 TEST，不能只登记一次泛化回归", () => {
+  const fx = setupChange();
+  try {
+    const jobId = openCodeReviewer(fx.projectRoot, fx.change, fx.changeRoot);
+    submitFinding(fx.projectRoot, fx.change, fx.changeRoot, jobId, {
+      ...baseFinding,
+      id: "CR-MISS-002",
+      claim_kind: "missing_approved",
+      approved_refs: ["TEST-001", "specs/rest/spec.md#Requirement: 按完整集合扣休息"],
+    });
+    assert.equal(reopen(fx.projectRoot, fx.change, fx.changeRoot, "apply", "fix missing test", {
+      reviewFix: `${jobId}#CR-MISS-002`,
+    }).to_state, "apply");
+    const fixTaskId = `REVIEW-FIX-${jobId}#CR-MISS-002`;
+    const started = taskStart(fx.projectRoot, fx.change, fx.changeRoot, fixTaskId);
+    assert.equal(started.outcome, "advanced", started.message);
+    const details = started.details as {
+      required_evidence?: { test_ids: string[]; green_required: boolean };
+      evidence_actions?: { test_id: string }[];
+    };
+    assert.deepEqual(details.required_evidence?.test_ids, ["TEST-001"]);
+    assert.equal(details.required_evidence?.green_required, true);
+    assert.deepEqual([...new Set(details.evidence_actions?.map(action => action.test_id))], ["TEST-001"]);
   } finally { fx.cleanup(); }
 });
 

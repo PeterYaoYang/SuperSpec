@@ -9,6 +9,7 @@ import { accept, proposeReady, reopen, reviewReady, startApply, taskComplete, ta
 import { jobsPacket, recordJobSubmitContent, recordUserDecisionContent, recordWorkflowModeContent } from "../src/record.ts";
 import { appendEvent, ensureChangeLayout, makeEvent, readEvents } from "../src/store.ts";
 import { rebuildSnapshot } from "../src/sync.ts";
+import { workflowModeStatus, workflowRiskForChange } from "../src/workflow_config.ts";
 import type { PhaseDecisionAction } from "../src/phase_confirmation.ts";
 import type { JobRole, TransitionResult } from "../src/types.ts";
 
@@ -47,6 +48,13 @@ function changeFiles(projectRoot: string, change: string): Change {
 
 function discover(fx: Change, detail = "The flag behavior is already implemented; only its comment changes."): void {
   writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "discovery.md"), `# Discovery\n\n${detail}\n`);
+}
+
+/** 与 `superspec status --change` 输出的模式字段一致。 */
+function modeStatus(fx: Change) {
+  const events = readEvents(fx.projectRoot, fx.change);
+  const state = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot).state;
+  return workflowModeStatus(events, state, workflowRiskForChange(fx.projectRoot, events, state), fx.change);
 }
 
 function initialize(root: string, name: string): Change {
@@ -258,7 +266,8 @@ test("minimal 离开 Explore 后不能就地升级，reopen Explore 升级 norma
   assert.equal(select(fx, "minimal").accepted, true);
   enterPropose(fx);
   assert.equal(proposeReady(root, fx.change, fx.changeRoot).to_state, "propose_ready");
-  const upgrade = next(root, fx.change, fx.changeRoot).mode_upgrade;
+  assert.equal(next(root, fx.change, fx.changeRoot).mode_upgrade, undefined, "next 的逐步输出不常驻升级入口");
+  const upgrade = modeStatus(fx).mode_upgrade;
   assert.equal(upgrade?.target_mode, "normal");
   const upgradeArgv = upgrade?.reopen_argv ?? [];
   assert.deepEqual(upgradeArgv.slice(0, 10), [
@@ -288,7 +297,7 @@ test("升级请求等待期间：agent 不能就地维持 minimal，用户明确
   const declined = initialize(root, "upgrade-declined");
   assert.equal(select(declined, "minimal", "user").accepted, true);
   enterPropose(declined);
-  assert.ok(next(root, declined.change, declined.changeRoot).mode_upgrade);
+  assert.ok(modeStatus(declined).mode_upgrade);
   assert.equal(reopen(root, declined.change, declined.changeRoot, "explore", "发现共享影响", { upgradeMode: "normal" }).to_state, "explore");
   discover(declined, "The flag is shared by another consumer.");
 
