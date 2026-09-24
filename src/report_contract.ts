@@ -8,6 +8,7 @@
  *
  * packet 的 report_skeleton、`superspec jobs contract` 与提交校验共用这里的定义。
  */
+import { baselineUnchangedBoundPaths } from "./material_snapshot.ts";
 import type { Job, JobRole } from "./types.ts";
 
 export const REVIEW_REPORT_REQUIRED_FIELDS = ["role", "verdict", "findings"] as const;
@@ -130,7 +131,9 @@ export function reportSchemaForJob(job: Job): ReportSchemaContract {
   } else if (hasScope) {
     fields.review_scope = { type: "object", required: true };
     fields["review_scope.checked_paths"] = { type: "array", required: true, item: "path" };
-    conditions.push("checked_paths 必须覆盖全部绑定文件。");
+    conditions.push(job.review_baseline
+      ? "checked_paths 必须覆盖相对 review_baseline 有变化的全部绑定文件；内容未变化的绑定文件可以省略。"
+      : "checked_paths 必须覆盖全部绑定文件。");
   }
 
   if (job.role !== "code-reviewer" && job.role !== "verifier") {
@@ -157,7 +160,7 @@ export function reportSchemaForJob(job: Job): ReportSchemaContract {
  *
  * 只预填工作项常量（job_id / packet_digest）与空数组：code-reviewer 的 checked_paths
  * 必须由审查者按实际浏览填写，预填会架空覆盖回执的意义。
- * 普通 reviewer / verifier 的 checked_paths 仍按既有协议预填全部绑定文件。
+ * 普通 reviewer / verifier 的 checked_paths 仍按既有协议预填需要覆盖的绑定文件。
  */
 export function reportSkeletonForJob(job: Job): Record<string, unknown> {
   const skeleton: Record<string, unknown> = {
@@ -177,9 +180,15 @@ export function reportSkeletonForJob(job: Job): Record<string, unknown> {
       unchecked: [],
     };
   } else if (requiresReviewScope(job)) {
-    skeleton.review_scope = { checked_paths: job.boundFiles.map(file => file.path) };
+    skeleton.review_scope = { checked_paths: requiredCheckedBoundPaths(job) };
   }
   return skeleton;
+}
+
+/** 普通 reviewer / verifier 必须在 checked_paths 中回执的绑定文件：有通过基线时只含相对基线有变化的部分。 */
+export function requiredCheckedBoundPaths(job: Job): string[] {
+  const unchanged = baselineUnchangedBoundPaths(job);
+  return job.boundFiles.map(file => file.path).filter(path => !unchanged.has(path));
 }
 
 /** 骨架中必须由审查者替换的空值，供 packet 与 CLI 给出同一份填写提示。 */

@@ -52,11 +52,15 @@ export function normalizeGitPath(rawPath: string): string {
   return renamed.replace(/\\/g, "/");
 }
 
+// 大仓库的 ls-files / diff --name-only 输出可能远超 execFileSync 默认的 1MB 缓冲
+const GIT_OUTPUT_MAX_BUFFER = 256 * 1024 * 1024;
+
 export function gitLines(projectRoot: string, args: string[]): { ok: true; lines: string[] } | { ok: false; reason: string } {
   try {
     const output = execFileSync("git", ["-C", projectRoot, ...args], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
+      maxBuffer: GIT_OUTPUT_MAX_BUFFER,
     });
     return {
       ok: true,

@@ -158,7 +158,7 @@ interface CodeReviewBase {
   dirty_files?: DirtyFileFingerprint[];
   reviewed_files?: Ref[];
   required_recheck_paths?: string[];
-  // 审查周期首个 task 开始前就已存在的脏文件；内容未变的视为用户或并行工作，不属于本 change 的改动
+  // 审查周期存量基线上的脏文件；内容未变的视为用户或并行工作，不属于本 change 的改动
   preexisting_dirty_files?: DirtyFileFingerprint[];
 }
 
@@ -167,14 +167,20 @@ function isStartApplyCommit(ev: Event): boolean {
     (ev.payload as { transition?: unknown }).transition === "start-apply";
 }
 
-function isCodeSettledCommit(ev: Event): boolean {
+function isCodeReviewSettledCommit(ev: Event): boolean {
   if (ev.event_type !== "transition_commit") return false;
   const payload = ev.payload as { transition?: unknown; from_state?: unknown; to_state?: unknown; code_review_gate?: { decision?: unknown } };
-  if (payload.transition === "accept" && payload.to_state === "accepted") return true;
   return payload.transition === "review-ready" &&
     payload.from_state === "apply_done" &&
     payload.to_state === "review" &&
     (payload.code_review_gate?.decision === "passed" || payload.code_review_gate?.decision === "skipped");
+}
+
+function isCodeSettledCommit(ev: Event): boolean {
+  if (ev.event_type !== "transition_commit") return false;
+  const payload = ev.payload as { transition?: unknown; to_state?: unknown };
+  if (payload.transition === "accept" && payload.to_state === "accepted") return true;
+  return isCodeReviewSettledCommit(ev);
 }
 
 function isApplyEntryCommit(ev: Event): boolean {
@@ -196,23 +202,39 @@ function reviewCycleStartIndex(events: Event[]): number {
   return settledIndex >= 0 ? reviewCycleStartIndex(events.slice(0, settledIndex)) : -1;
 }
 
-function reviewCycleTaskBoundary(events: Event[]): { boundary: BoundarySnapshot; isFirstTask: boolean } | null {
+interface ReviewCycleBaseline {
+  boundary: BoundarySnapshot;
+  reason: "code_review_settled" | "first_task_boundary";
+  // 基线上指纹未变的脏文件可以按存量排除；更晚 task 的边界可能已经包含前面 task 的改动，不能用于排除
+  excludesPreexisting: boolean;
+}
+
+/**
+ * 审查周期的代码状态基线。change 从审查周期首个 task 到验收都处于活跃期：由代码审查放行开启的周期以放行时的代码状态为基线，
+ * 放行后在 task 外写入的代码未经审查，不能因已出现在新周期首个 task 的边界里而算作存量。
+ * 首个周期、验收后开启的周期或放行未记录代码状态的历史事件取周期内首个 task 的边界；放行时代码状态读取失败则没有可信基线。
+ */
+function reviewCycleBaseline(events: Event[]): ReviewCycleBaseline | null {
   const startIndex = reviewCycleStartIndex(events);
   if (startIndex < 0) return null;
+  const opener = events.slice(0, startIndex).findLast(isCodeSettledCommit);
+  if (opener && isCodeReviewSettledCommit(opener) && Object.prototype.hasOwnProperty.call(opener.payload, "boundary_snapshot")) {
+    const boundary = boundaryFromPayload(opener.payload);
+    return boundary ? { boundary, reason: "code_review_settled", excludesPreexisting: true } : null;
+  }
   let isFirstTask = true;
   for (let i = startIndex + 1; i < events.length; i++) {
     if (events[i].event_type !== "task_started") continue;
     const boundary = boundaryFromPayload(events[i].payload);
-    if (boundary) return { boundary, isFirstTask };
+    if (boundary) return { boundary, reason: "first_task_boundary", excludesPreexisting: isFirstTask };
     isFirstTask = false;
   }
   return null;
 }
 
-/** 只有审查周期第一个 task 的边界可信：更晚的边界可能已经包含前面 task 的改动。 */
 function preexistingDirtyFiles(events: Event[]): DirtyFileFingerprint[] | undefined {
-  const cycle = reviewCycleTaskBoundary(events);
-  return cycle?.isFirstTask ? cycle.boundary.dirty_files : undefined;
+  const baseline = reviewCycleBaseline(events);
+  return baseline?.excludesPreexisting ? baseline.boundary.dirty_files : undefined;
 }
 
 function unchangedPreexistingPaths(current: DirtyFileFingerprint[], preexisting: DirtyFileFingerprint[] | undefined): Set<string> {
@@ -290,13 +312,13 @@ export function selectCodeReviewBase(events: Event[]): CodeReviewBase {
     const preexisting = preexistingDirtyFiles(events);
     return preexisting ? { ...reviewed, preexisting_dirty_files: preexisting } : reviewed;
   }
-  const taskBoundary = reviewCycleTaskBoundary(events)?.boundary;
-  if (taskBoundary) {
+  const baseline = reviewCycleBaseline(events);
+  if (baseline) {
     return {
-      base_head: taskBoundary.head,
+      base_head: baseline.boundary.head,
       kind: "task_start",
-      reason: "first_task_boundary",
-      dirty_files: taskBoundary.dirty_files,
+      reason: baseline.reason,
+      dirty_files: baseline.boundary.dirty_files,
     };
   }
   const firstStart = firstStartApplyHead(events);
@@ -1170,7 +1192,7 @@ export function computeCodeStateCheck(projectRoot: string, events: Event[], igno
 
   // bound 基线与当前磁盘状态共用 {path,status,sha256} 指纹原语对比：
   // 基线是本 Apply round 各轮代码审查实际审过的文件指纹（增量复审只绑定变化文件，未变化的已审文件取更早轮次的记录）；
-  // 当前侧取 bound 路径与脏代码文件的并集，审查周期开始前就存在且内容未变的脏文件不属于本 change。
+  // 当前侧取 bound 路径与脏代码文件的并集，审查周期存量基线上内容未变的脏文件不属于本 change。
   // gate skipped 时基线为空，任何属于本 change 的脏代码文件都会作为差异列出。
   const baselineFingerprints: DirtyFileFingerprint[] = [...reviewedFileShas(events, reviewedJob).entries()]
     .map(([path, sha]) => ({ path, status: "modified" as const, sha256: sha }));

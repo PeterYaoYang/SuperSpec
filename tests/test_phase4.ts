@@ -1559,6 +1559,82 @@ test("code-reviewer scope：验收后修复的复审不把前几轮已审且未�
   } finally { fx.cleanup(); }
 });
 
+function appendSettledCodeReview(projectRoot: string, change: string, jobId: string, paths: string[]): Job {
+  const job = appendCodeReviewJob(projectRoot, change, jobId, paths);
+  appendEvent(projectRoot, change, makeEvent(change, "job_accepted", { job_id: job.job_id, role: "code-reviewer" }));
+  const dirty = dirtyCodeFiles(projectRoot);
+  assert.equal(dirty.ok, true);
+  appendStateCommit(projectRoot, change, "review-ready", "apply_done", "review", {
+    code_review_gate: { decision: "passed", job_id: job.job_id, packet_digest: job.packet_digest, current_head: gitHead(projectRoot) },
+    boundary_snapshot: { head: gitHead(projectRoot), dirty_files: dirty.files },
+  });
+  return job;
+}
+
+function setupSettledFirstCycle(): ReturnType<typeof setupApplyWithDoneTask> {
+  const fx = setupApplyWithDoneTask();
+  initGitRepo(fx.projectRoot);
+  commitSources(fx.projectRoot, { "a.ts": "export const a = 1;\n", "f.ts": "export const f = 1;\n", "g.ts": "export const g = 1;\n", "user.ts": "export const user = 1;\n" });
+  writeFileSync(join(fx.projectRoot, "src", "user.ts"), "export const user = 2;\n");
+  appendTaskBoundary(fx.projectRoot, fx.change, "task_started", "1.1", "ATT-1.1");
+  writeFileSync(join(fx.projectRoot, "src", "a.ts"), "export const a = 2;\n");
+  appendTaskBoundary(fx.projectRoot, fx.change, "task_completed", "1.1", "ATT-1.1");
+  appendSettledCodeReview(fx.projectRoot, fx.change, "JOB-cycle-1", ["src/a.ts"]);
+  return fx;
+}
+
+test("code-reviewer scope：放行后在 task 外写入的代码，经 self-test-fix 回到 apply 后仍进入审查与代码状态检查", () => {
+  const fx = setupSettledFirstCycle();
+  try {
+    writeFileSync(join(fx.projectRoot, "src", "x.ts"), "export const x = 1;\n");
+    appendStateCommit(fx.projectRoot, fx.change, "reopen", "review", "apply", { reopen_target: "apply", reopen_source: "review" });
+    appendTaskBoundary(fx.projectRoot, fx.change, "task_started", "FIX-SELFTEST-1.1-1", "ATT-FIX", {
+      fix: { fix_id: "FIX-SELFTEST-1.1-1", source: "self_test", parent_task_id: "1.1", reason: "回归" },
+    });
+    writeFileSync(join(fx.projectRoot, "src", "f.ts"), "export const f = 2;\n");
+    appendTaskBoundary(fx.projectRoot, fx.change, "task_completed", "FIX-SELFTEST-1.1-1", "ATT-FIX");
+
+    const scope = scanCodeReviewScope(fx.projectRoot, readEvents(fx.projectRoot, fx.change));
+    assert.deepEqual(scope.review_paths, ["src/f.ts", "src/x.ts"]);
+
+    appendSettledCodeReview(fx.projectRoot, fx.change, "JOB-cycle-2", scope.review_paths);
+    assert.deepEqual(computeCodeStateCheck(fx.projectRoot, readEvents(fx.projectRoot, fx.change)).changed_paths, []);
+  } finally { fx.cleanup(); }
+});
+
+test("code-reviewer scope：放行后回到计划再 start-apply，放行后在 task 外写入的代码仍进入审查", () => {
+  const fx = setupSettledFirstCycle();
+  try {
+    writeFileSync(join(fx.projectRoot, "src", "x.ts"), "export const x = 1;\n");
+    appendStateCommit(fx.projectRoot, fx.change, "reopen", "review", "propose", { reopen_target: "propose", reopen_source: "review" });
+    appendStateCommit(fx.projectRoot, fx.change, "propose-ready", "propose", "propose_ready");
+    appendStateCommit(fx.projectRoot, fx.change, "start-apply", "propose_ready", "apply", { apply_start_head: gitHead(fx.projectRoot), apply_start_head_reason: "ok" });
+    appendTaskBoundary(fx.projectRoot, fx.change, "task_started", "2.1", "ATT-2.1");
+    writeFileSync(join(fx.projectRoot, "src", "g.ts"), "export const g = 2;\n");
+    appendTaskBoundary(fx.projectRoot, fx.change, "task_completed", "2.1", "ATT-2.1");
+
+    const scope = scanCodeReviewScope(fx.projectRoot, readEvents(fx.projectRoot, fx.change));
+    assert.deepEqual(scope.review_paths, ["src/g.ts", "src/x.ts"]);
+  } finally { fx.cleanup(); }
+});
+
+test("code-reviewer scope：验收后开启的审查周期仍以首个 task 边界为存量基线", () => {
+  const fx = setupSettledFirstCycle();
+  try {
+    appendStateCommit(fx.projectRoot, fx.change, "accept", "review", "accepted");
+    writeFileSync(join(fx.projectRoot, "src", "user-after-accept.ts"), "export const userAfterAccept = 1;\n");
+    appendStateCommit(fx.projectRoot, fx.change, "reopen", "accepted", "apply", { reopen_target: "apply", reopen_source: "accepted" });
+    appendTaskBoundary(fx.projectRoot, fx.change, "task_started", "FIX-SELFTEST-1.1-1", "ATT-FIX", {
+      fix: { fix_id: "FIX-SELFTEST-1.1-1", source: "self_test", parent_task_id: "1.1", reason: "回归" },
+    });
+    writeFileSync(join(fx.projectRoot, "src", "g.ts"), "export const g = 2;\n");
+    appendTaskBoundary(fx.projectRoot, fx.change, "task_completed", "FIX-SELFTEST-1.1-1", "ATT-FIX");
+
+    const scope = scanCodeReviewScope(fx.projectRoot, readEvents(fx.projectRoot, fx.change));
+    assert.deepEqual(scope.review_paths, ["src/g.ts"]);
+  } finally { fx.cleanup(); }
+});
+
 test("task_execution_index：最终验证收录本次验收周期内所有 Apply round 的任务", () => {
   const fx = setupApplyWithDoneTask();
   try {
@@ -1609,6 +1685,30 @@ test("task_execution_index：最终验证只收录最近一次验收后完成的
     const index = taskExecutionIndexForReview(fx.projectRoot, readEvents(fx.projectRoot, fx.change));
     assert.deepEqual(index.entries.map(entry => entry.task_id), ["1.1", "2.1", "FIX-SELFTEST-1.1-1"]);
     assert.deepEqual(index.scope, { since_event_id: accepted.event_id, carried_task_ids: ["1.1"] });
+  } finally { fx.cleanup(); }
+});
+
+test("code-reviewer：审查进行中代码变化，新建代码审查工作项时显式作废旧工作项", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    initGitRepo(fx.projectRoot);
+    commitSources(fx.projectRoot, { "example.ts": "export const value = 1;\n" });
+    writeFileSync(join(fx.projectRoot, "src", "example.ts"), "export const value = 2;\n");
+    reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    const first = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(first.outcome, "job_created");
+
+    writeFileSync(join(fx.projectRoot, "src", "example.ts"), "export const value = 3;\n");
+    const second = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(second.outcome, "job_created");
+    assert.deepEqual(
+      ((second.details as { superseded_jobs?: { job_id: string }[] } | undefined)?.superseded_jobs ?? []).map(item => item.job_id),
+      first.created_jobs,
+    );
+    const late = recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, first.created_jobs[0],
+      JSON.stringify(codeReviewerReport(fx.projectRoot, fx.change, first.created_jobs[0], "pass", [], ["src/example.ts"])));
+    assert.equal(late.accepted, false);
+    assert.ok(late.message.includes(second.created_jobs[0]));
   } finally { fx.cleanup(); }
 });
 
@@ -2405,6 +2505,42 @@ test("self-test-fix：已完成实现可直接回 apply，不进入 proposal 审
       parent_task_id: "TASK-001",
       reason: "自测发现空输入仍会抛错",
     });
+  } finally { fx.cleanup(); }
+});
+
+test("self-test-fix：代码审查放行后在 task 外新建的文件，修复后的代码审查仍要覆盖", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    initGitRepo(fx.projectRoot);
+    commitSources(fx.projectRoot, { "a.ts": "export const a = 1;\n", "f.ts": "export const f = 1;\n" });
+    writeFileSync(join(fx.projectRoot, "src", "a.ts"), "export const a = 2;\n");
+    assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot).to_state, "apply_done");
+    advanceApplyDoneToReview(fx.projectRoot, fx.change, fx.changeRoot);
+
+    writeFileSync(join(fx.projectRoot, "src", "x.ts"), "export const x = 1;\n");
+    assert.equal(reopen(fx.projectRoot, fx.change, fx.changeRoot, "apply", "自测发现回归", { selfTestFix: "TASK-001" }).to_state, "apply");
+    const fixId = /^- \[ \] (FIX-SELFTEST-TASK-001-[A-Fa-f0-9]+) /m.exec(readFileSync(join(fx.changeRoot, "tasks.md"), "utf8"))?.[1];
+    assert.ok(fixId);
+    assert.equal(taskStart(fx.projectRoot, fx.change, fx.changeRoot, fixId).to_state, "apply");
+    writeFileSync(join(fx.projectRoot, "src", "f.ts"), "export const f = 2;\n");
+    const fixAttempt = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot).active_task_attempts.find(attempt => attempt.task_id === fixId);
+    assert.ok(fixAttempt);
+    for (const [semantic_status, exit_code] of [["expected_failure", 1], ["expected_success", 0]] as const) {
+      appendTestRunEvent(fx.projectRoot, fx.change, {
+        test_id: "TEST-SELFTEST-FIX",
+        attempt_id: fixAttempt.attempt_id,
+        task_structure_digest: fixAttempt.task_structure_digest,
+        semantic_status,
+        exit_code,
+      });
+    }
+    assert.equal(taskComplete(fx.projectRoot, fx.change, fx.changeRoot, fixId).to_state, "apply");
+    assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot).to_state, "apply_done");
+
+    const created = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(created.outcome, "job_created");
+    const reviewPaths = jobsPacket(fx.projectRoot, fx.change, created.created_jobs[0]).packet?.code_review_scope?.review_paths;
+    assert.deepEqual(reviewPaths, ["src/f.ts", "src/x.ts"]);
   } finally { fx.cleanup(); }
 });
 

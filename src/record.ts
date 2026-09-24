@@ -46,6 +46,8 @@ import {
   type ReviewRejectionDecisionSource,
 } from "./review.ts";
 import { EXPLORE_DISCOVERY_REVIEW_GATE, PROPOSE_FINAL_REVIEW_GATE, type ReviewGateRule } from "./review_job_gates.ts";
+import { materialDelta } from "./material_snapshot.ts";
+import { confirmedDecisions, evidenceCodeFiles, previousReviewEvidence } from "./review_context.ts";
 import { RecordInputDecodingError, readRecordInputFile } from "./record_input.ts";
 import { currentExploreRoundId } from "./explore_round.ts";
 import {
@@ -84,6 +86,7 @@ import {
   reportSchemaForJob,
   reportSkeletonFillItems,
   reportSkeletonForJob,
+  requiredCheckedBoundPaths,
   type ReportSchemaContract,
 } from "./report_contract.ts";
 
@@ -132,13 +135,19 @@ function previousRejectionInstruction(job: Job): string {
   const previous = job.previous_rejection;
   if (!previous) return "";
   const reason = `上一次同角色审查没有形成可推进结论，原因：${previous.reason}。`;
+  const incremental = Boolean(job.review_baseline);
   if (!previous.findings || previous.findings.length === 0) {
-    return `${reason}上一轮没有可复核的历史 finding；请按当前 gate 的完整范围独立审查，不要把拒绝原因当作需求或验收标准，`;
+    return incremental
+      ? `${reason}上一轮没有可复核的历史 finding；不要把拒绝原因当作需求或验收标准，`
+      : `${reason}上一轮没有可复核的历史 finding；请按当前 gate 的完整范围独立审查，不要把拒绝原因当作需求或验收标准，`;
   }
   const identityRule = job.role === "code-reviewer"
     ? "逐项核对修复 task 的代码变化、scope_note 和验证证据；实现者用可核实证据说明被质疑实现确有必要时，独立验证后关闭原问题。证据不能支撑必要性且问题仍存在时复用原 finding ID；legacy finding 没有 ID 时沿用原始语义并补一个稳定 ID；同一批准行为的直接消费者若因本次修正暴露出新的遗漏，可以提出新的稳定 finding，但必须给出修正变化或直接消费者链路的因果证据；"
     : "已解决或已由等价证据闭环的问题不要重复报告，不得通过更换标题或措辞重复同一问题；";
-  return `${reason}本轮是修复复核：逐项判断本工作项附带的上一次同角色 finding 是否仍成立。Finding 中的 recommendation 只是非绑定建议，不是需求或验收标准；先独立核对 underlying problem、直接证据和本次验收，不得因原建议指定了某种架构就要求照做。修正不得通过缩小已确认范围、改写用户决定或删除验收来让 finding 字面消失；这类偏离属于本次修正直接引入的回归。${identityRule}默认围绕历史 finding 及其直接影响链路复核；新 blocker 必须能说明“本次修正或同一批准行为 → 当前问题”的因果链，不得展开无关的故障模型、消费者或架构议题。`;
+  const findingScope = incremental
+    ? "先覆盖 material_delta 的全部变化及其与未变化材料的一致性，再在这个范围内核对历史 finding；不得把 delta 里与旧 finding 无关的变化排除出审查。新 blocker 必须能说明与本次材料变化或同一批准行为的因果链。"
+    : "默认围绕历史 finding 及其直接影响链路复核；新 blocker 必须能说明“本次修正或同一批准行为 → 当前问题”的因果链，不得展开无关的故障模型、消费者或架构议题。";
+  return `${reason}本轮是修复复核：逐项判断本工作项附带的上一次同角色 finding 是否仍成立。Finding 中的 recommendation 只是非绑定建议，不是需求或验收标准；先独立核对 underlying problem、直接证据和本次验收，不得因原建议指定了某种架构就要求照做。修正不得通过缩小已确认范围、改写用户决定或删除验收来让 finding 字面消失；这类偏离属于本次修正直接引入的回归。${identityRule}${findingScope}`;
 }
 
 function reviewScopeForJob(job: Job): { reviewTargets: string[]; readOnlyRefs: string[] } {
@@ -166,8 +175,14 @@ function reviewScopeInstruction(job: Job, reviewTargets: string[], readOnlyRefs:
   return targets + refs;
 }
 
+const PREVIOUS_REVIEW_EVIDENCE_INSTRUCTION = "previous_review_evidence 是上一轮同角色审查记录的证据与结论：code_files 中 unchanged 为 true 的代码文件自那次核实后内容未变，除非本轮材料变化直接涉及，可以沿用其核实结论而不必重新逐行核对；unchanged 为 false 或未列出的文件需要重新核实。";
+const CONFIRMED_DECISIONS_INSTRUCTION = "confirmed_decisions 是已登记的用户答复原文，核对材料中的已确认结论时以它为准，不必再到事件日志中查找。";
+
 function genericReviewCoverageInstruction(job: Job): string {
   if (!requiresReviewScope(job)) return "";
+  if (job.review_baseline) {
+    return `本工作项是同角色审查通过后的复审：${job.review_baseline.job_id} 已审查通过 material_delta 之外的材料内容。审查 material_delta 中的全部变化，以及这些变化与未变化材料之间的一致性和对已批准结论的影响，不因发现第一个 blocker 停止；未变化的绑定文件只在核对这种一致性时读取，可以不列入 checked_paths；diff_unavailable 或新增的文件需要完整阅读。read_only_refs 只在核对本次问题与上下游一致性时读取。review_scope.checked_paths 只填写本次实际浏览并完成语义审查的绑定文件，覆盖回执不能代替语义审查，也不扩大可报告问题的范围。`;
+  }
   return "完整审查全部 boundFiles，不因发现第一个 blocker 停止；read_only_refs 只在核对本次问题与上下游一致性时读取。review_scope.checked_paths 只填写本次实际浏览并完成语义审查的绑定文件，不能根据 packet 预填；未检查项如实写入 unchecked。覆盖回执不能代替语义审查，也不扩大可报告问题的范围。";
 }
 
@@ -472,9 +487,9 @@ function validateReviewScope(
     return;
   }
   const checkedPaths = new Set(scope.checked_paths);
-  for (const bound of job.boundFiles) {
-    if (!checkedPaths.has(bound.path)) {
-      checks.push(`审查报告未说明已检查 ${bound.path}`);
+  for (const path of requiredCheckedBoundPaths(job)) {
+    if (!checkedPaths.has(path)) {
+      checks.push(`审查报告未说明已检查 ${path}`);
     }
   }
 }
@@ -581,6 +596,13 @@ function codeReviewRejectEventPayload(input: {
   return payload;
 }
 
+/** 计划材料审查报告引用的代码文件在提交时的内容指纹，供下一轮判断已核实证据是否仍然成立。 */
+function ordinaryReviewEvidencePayload(projectRoot: string, job: Job, parsedReport: Record<string, unknown>): Record<string, unknown> {
+  if (!isOrdinaryReviewer(job.role)) return {};
+  const files = evidenceCodeFiles(projectRoot, parsedReport);
+  return files.length > 0 ? { evidence_code_files: files } : {};
+}
+
 function failedReviewReportRejectEventPayload(input: {
   jobId: string;
   job: Job;
@@ -655,11 +677,17 @@ function jobTerminalState(events: Event[], jobId: string): JobState | null {
   return null;
 }
 
-function jobInvalidated(events: Event[], jobId: string): boolean {
-  return events.some(ev =>
+function invalidatedJobMessage(events: Event[], jobId: string): string | null {
+  const event = events.findLast(ev =>
     ev.event_type === "job_invalidated" &&
     (ev.payload as { job_id?: unknown }).job_id === jobId
   );
+  if (!event) return null;
+  const payload = event.payload as { reason?: unknown; superseded_by?: unknown };
+  if (Array.isArray(payload.superseded_by) && payload.superseded_by.length > 0) {
+    return `工作项 ${jobId} 已作废（${String(payload.reason ?? "绑定事实已变化")}），已由 ${payload.superseded_by.join(", ")} 取代，不接受新报告；请停止本次审查。`;
+  }
+  return `工作项 ${jobId} 已因回退到更早阶段失效，不接受新报告。`;
 }
 
 function terminalJobSubmitResult(
@@ -803,13 +831,16 @@ function recordJobSubmitLoaded(
 
   if (job.role !== "code-reviewer" && parsedReport?.verdict === "fail") {
     const rawRef = appendRawRecord(projectRoot, change, "review-reports", parsedReport);
-    const rejectEvent = makeEvent(change, "job_rejected", failedReviewReportRejectEventPayload({
-      jobId,
-      job,
-      reportDigest,
-      parsedReport,
-      rawRef,
-    }));
+    const rejectEvent = makeEvent(change, "job_rejected", {
+      ...failedReviewReportRejectEventPayload({
+        jobId,
+        job,
+        reportDigest,
+        parsedReport,
+        rawRef,
+      }),
+      ...ordinaryReviewEvidencePayload(projectRoot, job, parsedReport),
+    });
     if (reportPath) rejectEvent.payload.report_path = reportPath;
     appendEvent(projectRoot, change, rejectEvent);
     return {
@@ -877,6 +908,13 @@ function recordJobSubmitLoaded(
     accepted_at: new Date().toISOString(),
     ...(outOfScopeUnchecked.length > 0 ? { out_of_scope_unchecked: outOfScopeUnchecked } : {}),
     ...(reportPath ? { report_path: reportPath } : {}),
+    ...(parsedReport && isOrdinaryReviewer(job.role)
+      ? {
+        ...(typeof parsedReport.summary === "string" ? { summary: parsedReport.summary } : {}),
+        ...(Array.isArray(parsedReport.evidence_refs) ? { evidence_refs: parsedReport.evidence_refs } : {}),
+        ...ordinaryReviewEvidencePayload(projectRoot, job, parsedReport),
+      }
+      : {}),
     ...rawRef,
   });
   appendEvent(projectRoot, change, acceptEvent);
@@ -918,9 +956,8 @@ export function recordJobSubmit(
       return { event_type: "job_rejected", accepted: false, message: `工作项 ${jobId} 不存在` };
     }
 
-    if (jobInvalidated(events, jobId)) {
-      return { accepted: false, message: `工作项 ${jobId} 已因回退到更早阶段失效，不接受新报告。` };
-    }
+    const invalidatedMessage = invalidatedJobMessage(events, jobId);
+    if (invalidatedMessage) return { accepted: false, message: invalidatedMessage };
     const terminal = jobTerminalState(events, jobId);
     if (terminal) {
       const reportDigest = sha256File(reportFile) ?? "sha256:unknown";
@@ -967,9 +1004,8 @@ export function recordJobSubmitContent(
       return { event_type: "job_rejected", accepted: false, message: `工作项 ${jobId} 不存在` };
     }
 
-    if (jobInvalidated(events, jobId)) {
-      return { accepted: false, message: `工作项 ${jobId} 已因回退到更早阶段失效，不接受新报告。` };
-    }
+    const invalidatedMessage = invalidatedJobMessage(events, jobId);
+    if (invalidatedMessage) return { accepted: false, message: invalidatedMessage };
     const reportDigest = sha256Text(reportContent);
     const terminal = jobTerminalState(events, jobId);
     if (terminal) {
@@ -1628,7 +1664,7 @@ function packetFieldDescriptions(): Record<string, string> {
     job_id: "工作项 ID，用于提交本次审查或验证报告。",
     packet_digest: "工作项说明摘要，用于证明报告对应的是当前这份工作项说明。",
     boundFiles: "本工作项绑定的文件清单；审查报告必须说明这些文件是否都看过。",
-    review_scope: "报告中的审查覆盖范围；普通 reviewer/verifier 用 checked_paths 回执全部绑定文件，code-reviewer 还需按专用协议说明未检查项。",
+    review_scope: "报告中的审查覆盖范围；普通 reviewer/verifier 无 review_baseline 时用 checked_paths 回执全部绑定文件，有 review_baseline 时只需回执相对基线发生变化的绑定文件；code-reviewer 还需按专用协议说明未检查项。",
     code_review_scope: "代码审查范围：从已审基点到当前 HEAD 的提交改动、工作区改动和未跟踪代码文件。",
     task_execution_index: "按任务汇总的执行证据：每个任务（task）的执行依据、有效证据要求、声明测试、测试证据和改动文件。",
     task_execution_index_scope: "任务执行索引的收录范围：since_event_id 之后完成的任务（代码审查为本审查周期，最终验证为本次验收周期；null 表示全部历史），加上被这些任务中的修复任务通过 parent_task_id 关联而带入的更早任务（carried_task_ids）；tasks.md 中更早完成的任务已在此前的代码审查放行或 change 验收中闭环，不因未出现在索引中而视为缺少证据。",
@@ -1648,6 +1684,10 @@ function packetFieldDescriptions(): Record<string, string> {
     report_schema: "报告契约（字段形状、取值、条件、提示消息）；由 `superspec jobs contract --change <C> --job <J>` 输出，提交校验引用同一份定义。",
     code_review_gate: "最终验证读取的代码审查门禁事实：passed 指向已接受的代码审查工作项，skipped 表示本轮没有代码类改动。",
     code_state_check: "代码状态检查：最终验证时用于判断代码审查后代码是否又发生变化。",
+    review_baseline: "同角色最近一次审查通过的工作项；存在时本工作项是相对它的材料复审。",
+    material_delta: "相对 review_baseline 的逐文件材料变化：status 为 added/removed/modified，diff 为 unified diff；diff_unavailable 说明为何没有差异、需要完整阅读该文件。",
+    previous_review_evidence: "上一轮同角色审查（通过或 fail）记录的 summary、evidence_refs，以及报告引用的代码文件自那次提交后是否未变化（code_files[].unchanged）。",
+    confirmed_decisions: "工作项创建前已登记的 Explore/Propose 问题答复：phase、question_id、问题原文、答复与登记事件 ID。",
     event_id: "事件 ID，用于追溯证据来源。",
     event_digest: "事件摘要，用于确认引用的证据事件没有被替换。",
     attempt_id: "任务尝试 ID；执行依据模式下测试运行必须绑定当前活跃任务尝试。",
@@ -1675,6 +1715,9 @@ export function jobsPacket(
   const hasReviewScope = requiresReviewScope(job);
   const packetContext = job.packet_context;
   const { reviewTargets, readOnlyRefs } = reviewScopeForJob(job);
+  const isPlanReview = [EXPLORE_DISCOVERY_REVIEW_GATE, PROPOSE_FINAL_REVIEW_GATE].some(gate => gate.isJobForGate(job));
+  const previousEvidence = isPlanReview ? previousReviewEvidence(projectRoot, events, job) : null;
+  const decisions = isPlanReview ? confirmedDecisions(events, job) : [];
   return {
     found: true,
       packet: {
@@ -1697,6 +1740,11 @@ export function jobsPacket(
         ...(packetContext?.added_code_paths ? { added_code_paths: packetContext.added_code_paths } : {}),
         ...(packetContext?.structure_ledger ? { structure_ledger: packetContext.structure_ledger } : {}),
         ...(packetContext?.code_state_check ? { code_state_check: packetContext.code_state_check } : {}),
+        ...(job.review_baseline
+          ? { review_baseline: { job_id: job.review_baseline.job_id }, material_delta: materialDelta(projectRoot, change, job) }
+          : {}),
+        ...(previousEvidence ? { previous_review_evidence: previousEvidence } : {}),
+        ...(decisions.length > 0 ? { confirmed_decisions: decisions } : {}),
         packet_digest: job.packet_digest,
         required_output_kind: "job_report_json",
         preferred_input_mode: "stdin",
@@ -1720,6 +1768,8 @@ export function jobsPacket(
           (isReviewer ? migrationEvidenceInstruction(job) : "") +
           (job.review_evidence_digest ? `本工作项对应的执行证据版本为 ${job.review_evidence_digest}，` : "") +
           (isReviewer ? genericReviewCoverageInstruction(job) + proposalIncrementalReviewInstruction(job) + previousRejectionInstruction(job) : "") +
+          (previousEvidence ? PREVIOUS_REVIEW_EVIDENCE_INSTRUCTION : "") +
+          (decisions.length > 0 ? CONFIRMED_DECISIONS_INSTRUCTION : "") +
           (requiresReviewer(job.role) ? `必须由独立 ${recommendedAgentForRole(job.role)} 审查角色执行，并在审查者来源字段（reviewer.kind/id）中记录来源，` : "") +
           `产出 JSON 报告内容并优先通过 --report - 从 stdin 登记；需要落盘时写到 report_file_path，不要写进 openspec/changes 或 .superspec/artifacts 等计划材料目录。${recordInputInstruction(job)}协议字段含义见 packet 顶层“字段说明”，普通对话不要原样复述 JSON。` +
           (isCodeReviewer

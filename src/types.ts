@@ -99,6 +99,51 @@ export interface Job {
   created_from_transition: string;
   created_at: string;
   previous_rejection?: ReviewPreviousRejection;
+  /** 计划材料审查工作项创建时的逐文件指纹（目录绑定展开为其中的 .md 文件），正文按指纹另存。 */
+  material_manifest?: MaterialFileRef[];
+  /** 同角色最近一次通过审查的工作项及其逐文件指纹；存在时本工作项只需审查相对它的材料变化。 */
+  review_baseline?: ReviewBaseline;
+}
+
+/** 相对 change 目录的材料文件路径及内容指纹。 */
+export interface MaterialFileRef {
+  path: string;
+  sha: string;
+}
+
+export interface ReviewBaseline {
+  job_id: string;
+  material_manifest: MaterialFileRef[];
+}
+
+export interface EvidenceCodeFile {
+  path: string;
+  sha: string;
+}
+
+export interface PreviousReviewEvidence {
+  job_id: string;
+  verdict: "pass" | "fail";
+  summary?: string;
+  evidence_refs?: unknown[];
+  /** 报告引用的代码文件；unchanged 表示内容与报告提交时一致。 */
+  code_files: { path: string; unchanged: boolean }[];
+}
+
+export interface ConfirmedDecision {
+  phase: "explore" | "propose";
+  question_id: string | null;
+  question: string;
+  answer: string;
+  event_id: string;
+}
+
+export interface MaterialDeltaEntry {
+  path: string;
+  status: "added" | "removed" | "modified";
+  /** 相对基线的 unified diff；缺失时 diff_unavailable 说明原因，需要完整审查该文件。 */
+  diff?: string;
+  diff_unavailable?: string;
 }
 
 export interface ExecutionContract {
@@ -246,6 +291,10 @@ export interface JobPacket {
   added_code_paths?: string[];
   structure_ledger?: StructureChangeLedger;
   code_state_check?: CodeStateCheck;
+  review_baseline?: { job_id: string };
+  material_delta?: MaterialDeltaEntry[];
+  previous_review_evidence?: PreviousReviewEvidence;
+  confirmed_decisions?: ConfirmedDecision[];
   packet_digest: string;
   required_output_kind: string;
   preferred_input_mode?: "stdin" | "file";

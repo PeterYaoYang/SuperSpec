@@ -13,6 +13,7 @@ import {
   assertCommitPayloadExtension,
   isFreshReviewVerifier,
   isReviewReadyVerifier,
+  latestAcceptedReviewBaseline,
   latestReviewHistoryForGateRole,
   readReviewPolicyFromEvents,
   reviewBoundFiles,
@@ -51,6 +52,8 @@ import {
   isReviewFixCapReached,
 } from "./code_review.ts";
 import { taskEvidenceReadiness } from "./task_evidence.ts";
+import { invalidReasonForSnapshot } from "./job_validity.ts";
+import { materialManifest as materialManifestForBound, storeMaterialBlobs } from "./material_snapshot.ts";
 import {
   adoptedContractForTask,
   findTaskInLines,
@@ -117,6 +120,8 @@ function createReviewJobsForGate(
     const boundFiles: Ref[] = boundPaths
       .map(p => docRef(changeRoot, p));
     const previousRejection = latestReviewHistoryForGateRole(events, gate, role);
+    const materialManifest = materialManifestForBound(changeRoot, boundPaths);
+    const reviewBaseline = latestAcceptedReviewBaseline(events, gate, role);
     return {
       job_id: newJobId(change, role),
       role,
@@ -133,10 +138,14 @@ function createReviewJobsForGate(
         read_only_refs: scope.readOnlyRefs,
         created_from_transition: gate.created_from_transition,
         ...(previousRejection ? { previous_rejection: previousRejection } : {}),
+        material_manifest: materialManifest,
+        ...(reviewBaseline ? { review_baseline: reviewBaseline } : {}),
       })),
       created_from_transition: gate.created_from_transition,
       created_at: new Date().toISOString(),
       ...(previousRejection ? { previous_rejection: previousRejection } : {}),
+      material_manifest: materialManifest,
+      ...(reviewBaseline ? { review_baseline: reviewBaseline } : {}),
     };
   });
   return {
@@ -145,6 +154,9 @@ function createReviewJobsForGate(
     outcome: "job_created",
     newJobs,
     reason,
+    postCommit: (projectRoot, committedChange) => {
+      for (const job of newJobs) storeMaterialBlobs(projectRoot, committedChange, changeRoot, job.material_manifest ?? []);
+    },
   };
 }
 
@@ -694,6 +706,7 @@ function evaluateApplyDoneCodeReviewGate(input: {
               ? { out_of_scope_unchecked: outOfScopeUncheckedForJob(input.events, latest.job.job_id) }
               : {}),
           },
+          ...boundarySnapshotPayload(input.projectRoot),
         },
       };
     }
@@ -750,6 +763,7 @@ function evaluateApplyDoneCodeReviewGate(input: {
         reason: "no_code_changes",
         head: scan.scope?.current_head ?? null,
       },
+      ...boundarySnapshotPayload(input.projectRoot),
     },
   };
 }
@@ -952,6 +966,43 @@ function transitionPlanToDecision(
 }
 
 
+const SUPERSEDED_JOBS_ACTION = "这些工作项创建后绑定的材料或代码已变化，已被本次新建的同角色工作项取代并作废；请立即终止仍在执行它们的子代理，其报告不会再被接受。";
+
+function jobSupersedeKey(job: Job): string {
+  return `${job.gate_id ?? job.created_from_transition}|${job.role}`;
+}
+
+/**
+ * 快照会静默隐藏绑定事实已过期的待完成工作项；同角色新工作项创建时把它们显式作废，
+ * 避免旧子代理继续审查过期材料、最后才以无效报告收场。
+ */
+function supersededOpenJobs(
+  projectRoot: string,
+  changeRoot: string,
+  events: Event[],
+  snapshot: Snapshot,
+  newJobs: Job[],
+): { job: Job; reason: string }[] {
+  const keys = new Set(newJobs.map(jobSupersedeKey));
+  const open = new Map<string, Job>();
+  for (const ev of events) {
+    if (ev.event_type === "transition_commit") {
+      for (const job of (ev.payload as { new_jobs?: Job[] }).new_jobs ?? []) open.set(job.job_id, job);
+    } else if (ev.event_type === "job_accepted" || ev.event_type === "job_rejected" || ev.event_type === "job_invalidated") {
+      open.delete(String((ev.payload as { job_id?: unknown }).job_id ?? ""));
+    }
+  }
+  const visible = new Set(snapshot.open_jobs.map(job => job.job_id));
+  const currentReviewEvidenceDigest = reviewEvidenceDigest(events);
+  const superseded: { job: Job; reason: string }[] = [];
+  for (const job of open.values()) {
+    if (visible.has(job.job_id) || !keys.has(jobSupersedeKey(job))) continue;
+    const reason = invalidReasonForSnapshot({ job, projectRoot, changeRoot, events, currentReviewEvidenceDigest });
+    if (reason) superseded.push({ job, reason });
+  }
+  return superseded;
+}
+
 /**
  * 统一 transition 提交协议——所有校验在锁内。
  */
@@ -1022,8 +1073,28 @@ export function commitTransition(
       };
     }
 
-    const { fromState, toState, outcome, newJobs = [], reason, commitPayload = {}, extraEvents = [], details } = decision;
+    const { fromState, toState, outcome, newJobs = [], reason, commitPayload = {}, details } = decision;
     assertCommitPayloadExtension(commitPayload);
+    const superseded = newJobs.length > 0 ? supersededOpenJobs(projectRoot, changeRoot, events, snapshot, newJobs) : [];
+    const extraEvents: NonNullable<Decision["extraEvents"]> = [
+      ...superseded.map(({ job, reason: staleReason }) => ({
+        type: "job_invalidated",
+        payload: {
+          job_id: job.job_id,
+          role: job.role,
+          reason: `审查进行中绑定事实已变化：${staleReason}`,
+          superseded_by: newJobs.filter(candidate => jobSupersedeKey(candidate) === jobSupersedeKey(job)).map(candidate => candidate.job_id),
+        },
+      })),
+      ...(decision.extraEvents ?? []),
+    ];
+    const resultDetails = superseded.length > 0
+      ? {
+        ...(details ?? {}),
+        superseded_jobs: superseded.map(({ job, reason: staleReason }) => ({ job_id: job.job_id, role: job.role, reason: staleReason })),
+        superseded_jobs_action: SUPERSEDED_JOBS_ACTION,
+      }
+      : details;
 
     if (fromState !== snapshot.state) {
       return {
@@ -1073,9 +1144,11 @@ export function commitTransition(
       transition: name, outcome, from_state: fromState, to_state: toState,
       created_jobs: newJobs.map(j => j.job_id),
       ...(newJobs.length > 0 ? { required_jobs: requiredJobActions(change, newJobs) } : {}),
-      message: outcome === "advanced" ? `状态推进：${fromState} → ${toState}` : `状态不变（${fromState}），创建了 ${newJobs.length} 个工作项`,
+      message: outcome === "advanced"
+        ? `状态推进：${fromState} → ${toState}`
+        : `状态不变（${fromState}），创建了 ${newJobs.length} 个工作项${superseded.length > 0 ? `；作废 ${superseded.length} 个过期的进行中工作项，请终止对应子代理` : ""}`,
       events_written: 1 + extraEvents.length,
-      ...(details ? { details } : {}),
+      ...(resultDetails ? { details: resultDetails } : {}),
     };
   });
 }

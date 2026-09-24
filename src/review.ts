@@ -10,7 +10,7 @@ import {
   REVIEW_FINAL_VERIFIER_GATE,
   type ReviewGateRule,
 } from "./review_job_gates.ts";
-import type { CodeReviewResultKind, Event, Job, JobRole, Ref, ReviewPreviousRejection, State, TaskAttempt } from "./types.ts";
+import type { CodeReviewResultKind, Event, Job, JobRole, Ref, ReviewBaseline, ReviewPreviousRejection, State, TaskAttempt } from "./types.ts";
 import { computeCodeStateCheck, effectiveCoverageExemptionRefsFromEvents } from "./code_review.ts";
 
 export type ReviewRisk = "minimal" | "normal" | "strict";
@@ -329,6 +329,27 @@ export function latestReviewHistoryForGateRole(
     reason,
     job_id: latest.job.job_id,
   };
+}
+
+/**
+ * 同 gate、同角色最近一次审查通过且带逐文件清单的工作项，不限于当前审查周期：
+ * 通过即说明该清单对应的材料状态已完整审查（增量复审的通过同样覆盖其基线之外的变化）。
+ */
+export function latestAcceptedReviewBaseline(events: Event[], gate: ReviewGateRule, role: JobRole): ReviewBaseline | null {
+  const jobs = new Map<string, Job>();
+  let baseline: ReviewBaseline | null = null;
+  for (const event of events) {
+    if (event.event_type === "transition_commit") {
+      for (const job of (event.payload as { new_jobs?: Job[] }).new_jobs ?? []) {
+        if (job.role === role && gate.isJobForGate(job) && job.material_manifest) jobs.set(job.job_id, job);
+      }
+      continue;
+    }
+    if (event.event_type !== "job_accepted") continue;
+    const job = jobs.get(String((event.payload as { job_id?: unknown }).job_id ?? ""));
+    if (job?.material_manifest) baseline = { job_id: job.job_id, material_manifest: job.material_manifest };
+  }
+  return baseline;
 }
 
 export function historicalProposeReadyRoles(events: Event[]): JobRole[] {

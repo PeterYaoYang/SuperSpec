@@ -3709,6 +3709,222 @@ test("specs 容错：specs/ 含损坏 symlink 时 rebuildSnapshot 不崩溃，�
   } finally { fx.cleanup(); }
 });
 
+function enterProposeWithSpecs(): ReturnType<typeof setupPropose> {
+  const fx = setupProposeWithSpecs();
+  confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+  transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+  return fx;
+}
+
+function openProposeJob(fx: { projectRoot: string; change: string; changeRoot: string }): Job {
+  const job = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot).open_jobs.find(item => item.created_from_transition === "propose-ready");
+  assert.ok(job);
+  return job;
+}
+
+test("计划审查复审：通过后只改部分材料，新工作项相对通过基线给出差异，只需回执变化的文件", () => {
+  const fx = enterProposeWithSpecs();
+  try {
+    proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    const baseline = openProposeJob(fx);
+    assert.equal(baseline.review_baseline, undefined);
+    acceptAllProposeJobs(fx);
+
+    writeFileSync(join(fx.changeRoot, "specs", "auth", "spec.md"), "# Auth Spec\n\n## ADDED Requirements\n\n改动\n");
+    assert.equal(proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal").outcome, "job_created");
+    const recheck = openProposeJob(fx);
+    assert.equal(recheck.review_baseline?.job_id, baseline.job_id);
+
+    const packet = jobsPacket(fx.projectRoot, fx.change, recheck.job_id).packet;
+    assert.ok(packet);
+    assert.equal(packet.review_baseline?.job_id, baseline.job_id);
+    assert.deepEqual(packet.material_delta?.map(entry => [entry.path, entry.status]), [["specs/auth/spec.md", "modified"]]);
+    assert.match(String(packet.material_delta?.[0].diff), /^\+改动$/m);
+    assert.deepEqual((packet.report_skeleton as { review_scope: { checked_paths: string[] } }).review_scope.checked_paths, ["specs/"]);
+
+    const missing = recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, recheck.job_id, reviewerReport("critic", []));
+    assert.equal(missing.accepted, false);
+    const accepted = recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, recheck.job_id, reviewerReport("critic", ["specs/"]));
+    assert.equal(accepted.accepted, true, accepted.message);
+  } finally { fx.cleanup(); }
+});
+
+test("计划审查复审：fail 不当基线；后续工作项仍相对最近一次通过计算差异", () => {
+  const fx = enterProposeWithSpecs();
+  try {
+    proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    const baseline = openProposeJob(fx);
+    acceptAllProposeJobs(fx);
+
+    writeFileSync(join(fx.changeRoot, "proposal.md"), "# Proposal\n\nTest.\n\n第一轮修订\n");
+    assert.equal(proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal").outcome, "job_created");
+    const failed = openProposeJob(fx);
+    const failSubmit = recordJobSubmitContent(
+      fx.projectRoot, fx.change, fx.changeRoot, failed.job_id,
+      failedReviewerReportForJob(fx.projectRoot, fx.change, failed.job_id),
+    );
+    assert.equal(failSubmit.accepted, false);
+    assert.equal(failSubmit.event_type, "job_rejected");
+
+    writeFileSync(join(fx.changeRoot, "proposal.md"), "# Proposal\n\nTest.\n\n第二轮修订\n");
+    assert.equal(proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal").outcome, "job_created");
+    const retry = openProposeJob(fx);
+    assert.equal(retry.review_baseline?.job_id, baseline.job_id);
+    assert.notEqual(retry.review_baseline?.job_id, failed.job_id);
+
+    const packet = jobsPacket(fx.projectRoot, fx.change, retry.job_id).packet;
+    assert.ok(packet);
+    assert.equal(packet.review_baseline?.job_id, baseline.job_id);
+    assert.equal(packet.previous_rejection?.job_id, failed.job_id);
+    assert.deepEqual(packet.material_delta?.map(entry => [entry.path, entry.status]), [["proposal.md", "modified"]]);
+    assert.deepEqual((packet.report_skeleton as { review_scope: { checked_paths: string[] } }).review_scope.checked_paths, ["proposal.md"]);
+
+    const omitted = recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, retry.job_id, reviewerReport("critic", []));
+    assert.equal(omitted.accepted, false);
+    const accepted = recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, retry.job_id, reviewerReport("critic", ["proposal.md"]));
+    assert.equal(accepted.accepted, true, accepted.message);
+  } finally { fx.cleanup(); }
+});
+
+test("计划审查复审：specs 增删子文件时目录绑定不得豁免", () => {
+  const fx = enterProposeWithSpecs();
+  try {
+    proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    acceptAllProposeJobs(fx);
+
+    mkdirSync(join(fx.changeRoot, "specs", "billing"), { recursive: true });
+    writeFileSync(join(fx.changeRoot, "specs", "billing", "spec.md"), "# Billing Spec\n");
+    assert.equal(proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal").outcome, "job_created");
+    const added = openProposeJob(fx);
+    const addedPacket = jobsPacket(fx.projectRoot, fx.change, added.job_id).packet;
+    assert.ok(addedPacket);
+    assert.deepEqual(addedPacket.material_delta?.map(entry => [entry.path, entry.status]), [["specs/billing/spec.md", "added"]]);
+    assert.deepEqual((addedPacket.report_skeleton as { review_scope: { checked_paths: string[] } }).review_scope.checked_paths, ["specs/"]);
+    assert.equal(recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, added.job_id, reviewerReport("critic", ["proposal.md"])).accepted, false);
+    assert.equal(recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, added.job_id, reviewerReport("critic", ["specs/"])).accepted, true);
+
+    rmSync(join(fx.changeRoot, "specs", "billing", "spec.md"));
+    assert.equal(proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal").outcome, "job_created");
+    const removed = openProposeJob(fx);
+    const removedPacket = jobsPacket(fx.projectRoot, fx.change, removed.job_id).packet;
+    assert.ok(removedPacket);
+    assert.equal(removed.review_baseline?.job_id, added.job_id);
+    assert.deepEqual(removedPacket.material_delta?.map(entry => [entry.path, entry.status]), [["specs/billing/spec.md", "removed"]]);
+    assert.deepEqual((removedPacket.report_skeleton as { review_scope: { checked_paths: string[] } }).review_scope.checked_paths, ["specs/"]);
+    assert.equal(recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, removed.job_id, reviewerReport("critic", [])).accepted, false);
+    assert.equal(recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, removed.job_id, reviewerReport("critic", ["specs/"])).accepted, true);
+  } finally { fx.cleanup(); }
+});
+
+test("计划审查复审：缺少材料快照时差异不可用，变化的绑定文件仍要回执", () => {
+  const fx = enterProposeWithSpecs();
+  try {
+    proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    const baseline = openProposeJob(fx);
+    acceptAllProposeJobs(fx);
+
+    const proposalSha = baseline.material_manifest?.find(file => file.path === "proposal.md")?.sha;
+    assert.ok(proposalSha);
+    rmSync(join(fx.projectRoot, ".superspec", "changes", fx.change, "material-blobs", `${proposalSha.replace(/^sha256:/, "")}.md`));
+    writeFileSync(join(fx.changeRoot, "proposal.md"), "# Proposal\n\nTest.\n\n无快照修订\n");
+    assert.equal(proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal").outcome, "job_created");
+    const recheck = openProposeJob(fx);
+    const packet = jobsPacket(fx.projectRoot, fx.change, recheck.job_id).packet;
+    assert.ok(packet);
+    assert.deepEqual(packet.material_delta?.map(entry => [entry.path, entry.status, Boolean(entry.diff), entry.diff_unavailable]), [
+      ["proposal.md", "modified", false, "缺少材料快照，请完整阅读该文件"],
+    ]);
+    assert.deepEqual((packet.report_skeleton as { review_scope: { checked_paths: string[] } }).review_scope.checked_paths, ["proposal.md"]);
+    assert.equal(recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, recheck.job_id, reviewerReport("critic", [])).accepted, false);
+    assert.equal(recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, recheck.job_id, reviewerReport("critic", ["proposal.md"])).accepted, true);
+  } finally { fx.cleanup(); }
+});
+
+test("计划审查：审查进行中修改绑定材料，新建工作项时显式作废旧工作项，旧报告不再被接受", () => {
+  const fx = enterProposeWithSpecs();
+  try {
+    proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    const running = openProposeJob(fx);
+    writeFileSync(join(fx.changeRoot, "proposal.md"), "# Proposal\n\nTest.\n\n补充\n");
+
+    const recreated = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.equal(recreated.outcome, "job_created");
+    const superseded = (recreated.details as { superseded_jobs?: { job_id: string }[] } | undefined)?.superseded_jobs;
+    assert.deepEqual(superseded?.map(item => item.job_id), [running.job_id]);
+    const invalidated = readEvents(fx.projectRoot, fx.change).findLast(event => event.event_type === "job_invalidated");
+    assert.equal((invalidated?.payload as { job_id?: string }).job_id, running.job_id);
+    assert.deepEqual((invalidated?.payload as { superseded_by?: string[] }).superseded_by, recreated.created_jobs);
+
+    const eventsBefore = readEvents(fx.projectRoot, fx.change).length;
+    const late = recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, running.job_id, reviewerReport("critic", running.boundFiles.map(file => file.path)));
+    assert.equal(late.accepted, false);
+    assert.ok(late.message.includes(recreated.created_jobs[0]));
+    assert.equal(readEvents(fx.projectRoot, fx.change).length, eventsBefore);
+  } finally { fx.cleanup(); }
+});
+
+test("计划审查：上一轮报告引用的代码文件在下一轮标出是否变化", () => {
+  const fx = enterProposeWithSpecs();
+  try {
+    execFileSync("git", ["init", "-q"], { cwd: fx.projectRoot });
+    mkdirSync(join(fx.projectRoot, "src", "app"), { recursive: true });
+    mkdirSync(join(fx.projectRoot, "src", "lib"), { recursive: true });
+    writeFileSync(join(fx.projectRoot, "src", "app", "Foo.java"), "class Foo {}\n");
+    writeFileSync(join(fx.projectRoot, "src", "lib", "Bar.java"), "class Bar {}\n");
+
+    proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    const first = openProposeJob(fx);
+    const failed = recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, first.job_id, JSON.stringify({
+      role: "critic",
+      verdict: "fail",
+      findings: [{ id: "CR-1", blocking: true, evidence: "Bar.java:3 的写法与 spec 不符" }],
+      evidence_refs: ["src/app/Foo.java:1 `class Foo`"],
+      summary: "锚点已核实",
+      review_scope: { checked_paths: first.boundFiles.map(file => file.path) },
+      reviewer: { kind: "subagent", id: "critic-1" },
+    }));
+    assert.equal(failed.accepted, false);
+    const rejected = readEvents(fx.projectRoot, fx.change).findLast(event => event.event_type === "job_rejected");
+    assert.deepEqual(
+      ((rejected?.payload as { evidence_code_files?: { path: string }[] }).evidence_code_files ?? []).map(file => file.path),
+      ["src/app/Foo.java", "src/lib/Bar.java"],
+    );
+
+    writeFileSync(join(fx.projectRoot, "src", "lib", "Bar.java"), "class Bar { int changed; }\n");
+    writeFileSync(join(fx.changeRoot, "proposal.md"), "# Proposal\n\nTest.\n\n修正\n");
+    assert.equal(proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal").outcome, "job_created");
+    const evidence = jobsPacket(fx.projectRoot, fx.change, openProposeJob(fx).job_id).packet?.previous_review_evidence;
+    assert.equal(evidence?.job_id, first.job_id);
+    assert.equal(evidence?.verdict, "fail");
+    assert.deepEqual(evidence?.code_files, [
+      { path: "src/app/Foo.java", unchanged: true },
+      { path: "src/lib/Bar.java", unchanged: false },
+    ]);
+  } finally { fx.cleanup(); }
+});
+
+test("计划审查：packet 带上工作项创建前有效登记的 Explore/Propose 答复", () => {
+  const fx = enterProposeWithSpecs();
+  try {
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "user_decision_recorded", {
+      accepted: true,
+      scope: "explore_open_question:sha256:round:Q-001",
+      question: "是否截断已有划线？",
+      answer: "B",
+      explore_open_question: { question_id: "Q-001" },
+    }));
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "user_decision_recorded", {
+      accepted: false,
+      scope: "propose_open_question:sha256:round:DEC-001",
+      answer: "A",
+      reason: "stale",
+    }));
+    proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    const decisions = jobsPacket(fx.projectRoot, fx.change, openProposeJob(fx).job_id).packet?.confirmed_decisions;
+    assert.deepEqual(decisions?.map(item => [item.phase, item.question_id, item.answer]), [["explore", "Q-001", "B"]]);
+  } finally { fx.cleanup(); }
+});
+
 test("specs 容错：specs/ 中指向外部目录的 symlink 不参与指纹", () => {
   const fx = setupProposeWithSpecs();
   try {
