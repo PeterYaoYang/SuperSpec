@@ -993,6 +993,7 @@ test("code_state_check：已审 dirty 文件未变化不算差异，后续修改
     assert.equal(codeReview.outcome, "job_created");
     const codeReviewPacket = jobsPacket(fx.projectRoot, fx.change, codeReview.created_jobs[0]);
     assert.deepEqual((codeReviewPacket.packet?.boundFiles as { path: string }[]).map(file => file.path), ["src/a.ts"]);
+    assert.deepEqual(codeReviewPacket.packet?.boundFiles.map(file => file.project_path), ["src/a.ts"]);
 
     assert.equal(submitCodeReviewerPass(fx.projectRoot, fx.change, fx.changeRoot, codeReview.created_jobs[0]).accepted, true);
     assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot).to_state, "review");
@@ -2165,7 +2166,7 @@ test("code-reviewer：删除代码文件也保留在绑定范围", () => {
     const created = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(created.outcome, "job_created");
     const packet = jobsPacket(fx.projectRoot, fx.change, created.created_jobs[0]);
-    assert.deepEqual(packet.packet?.boundFiles, [{ path: "src/deleted.ts", sha: "sha256:missing" }]);
+    assert.deepEqual(packet.packet?.boundFiles, [{ path: "src/deleted.ts", sha: "sha256:missing", project_path: "src/deleted.ts" }]);
 
     const submitted = submitCodeReviewerReport(
       fx.projectRoot,

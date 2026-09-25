@@ -1807,7 +1807,7 @@ function packetFieldDescriptions(): Record<string, string> {
   return {
     job_id: "工作项 ID，用于提交本次审查或验证报告。",
     packet_digest: "工作项说明摘要，用于证明报告对应的是当前这份工作项说明。",
-    boundFiles: "本工作项绑定的文件清单；审查报告必须说明这些文件是否都看过。计划材料的 path 相对 change 目录，project_path 是同一文件相对项目根的路径；回执时两种写法都接受。",
+    boundFiles: "本工作项绑定的文件清单；审查报告必须说明这些文件是否都看过。计划材料的 path 相对 change 目录，代码文件的 path 相对项目根；project_path 统一是同一文件相对项目根的路径；回执时两种写法都接受。",
     review_scope: "报告中的审查覆盖范围；普通 reviewer/verifier 无 review_baseline 时用 checked_paths 回执全部绑定文件，有 review_baseline 时只需回执相对基线发生变化的绑定文件；code-reviewer 还需按专用协议说明未检查项。",
     code_review_scope: "代码审查范围：从已审基点到当前 HEAD 的提交改动、工作区改动和未跟踪代码文件。",
     task_execution_index: "按任务汇总的执行证据：每个任务（task）的执行依据、有效证据要求、声明测试、测试证据和改动文件。",
@@ -1873,9 +1873,10 @@ export function jobsPacket(
       role: job.role,
       ...(job.gate_id ? { gate_id: job.gate_id } : {}),
       recommended_agent: recommendedAgentForRole(job.role),
-      boundFiles: isCodeReviewer
-        ? job.boundFiles
-        : job.boundFiles.map(file => ({ ...file, project_path: `${changePrefix}/${file.path}` })),
+      boundFiles: job.boundFiles.map(file => ({
+        ...file,
+        project_path: isCodeReviewer ? file.path : `${changePrefix}/${file.path}`,
+      })),
         ...(isReviewer && reviewTargets.length > 0 ? { review_targets: reviewTargets } : {}),
         ...(isReviewer && readOnlyRefs.length > 0 ? { read_only_refs: readOnlyRefs } : {}),
         ...(job.review_evidence_digest ? { review_evidence_digest: job.review_evidence_digest } : {}),
