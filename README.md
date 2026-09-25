@@ -6,7 +6,7 @@
 
 AI 写代码很快。真正慢的是之后：范围悄悄变大、完成全凭一张嘴、review 时问一句「这里为什么要改」它才承认不该改。
 
-SuperSpec 是一套跑在 AI 编程代理（Codex 等）下的需求变更工作流引擎。它把「不要乱改、别过度设计、做完要有证据」从 prompt 劝说升级成**机器门禁**——约束写在 CLI 和数据契约里，不靠模型自觉。
+SuperSpec 是一套跑在 AI 编程代理（Codex、Claude Code、OMP）下的需求变更工作流引擎。它把「不要乱改、别过度设计、做完要有证据」从 prompt 劝说升级成**机器门禁**——约束写在 CLI 和数据契约里，不靠模型自觉。
 
 ```text
 Explore → Propose → Apply → Review → Accepted
@@ -35,7 +35,9 @@ superspec install
 
 `superspec install` 会把工作流入口、角色配置和运行时目录同步到当前项目，并准备 [OpenSpec](https://github.com/Fission-AI/OpenSpec) 依赖。
 
-然后在 Codex 里对它说话：
+宿主可交互选择，也可以用 `--hosts codex,omp,claude` 指定（可多选）。选 Claude Code 时，入口和角色写到 `.claude/skills`、`.claude/agents`，`CLAUDE.md` 会导入 `AGENTS.md`，并在 `.claude/settings.json` 中只放行 `superspec` 命令；不想改权限就加 `--no-claude-permissions`。之后换宿主，SuperSpec 只清理自己写入且没被改过的文件。这份写入记录是本机文件（`.superspec/install-manifest.json`，不提交），所以新克隆的仓库或从旧版本首次升级时没有记录，换宿主前留下的旧文件需要手动删除。
+
+然后在所选宿主（Codex、Claude Code 或 OMP）里对它说话：
 
 ```text
 superspec-explore change <change-name>。<你的需求>

@@ -52,8 +52,9 @@ export function createDirectorSpawner(actionLog) {
     return await new Promise((resolve, reject) => {
       const stdoutChunks = [];
       const stderrChunks = [];
-      const stdoutFile = options.stdoutPath ? createWriteStream(options.stdoutPath, { mode: 0o600 }) : null;
-      const stderrFile = options.stderrPath ? createWriteStream(options.stderrPath, { mode: 0o600 }) : null;
+      const outputMode = options.outputMode ?? 0o600;
+      const stdoutFile = options.stdoutPath ? createWriteStream(options.stdoutPath, { mode: outputMode }) : null;
+      const stderrFile = options.stderrPath ? createWriteStream(options.stderrPath, { mode: outputMode }) : null;
       let settled = false;
 
       const closeFiles = callback => {

@@ -1,10 +1,8 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import {
-  chmodSync,
-  copyFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -18,11 +16,15 @@ import {
 import { tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { recordedWorkerHost } from "./hosts/index.mjs";
+import { DEFAULT_JUDGE_HOST_ID, getJudgeHost, judgeIdentity } from "./judges/index.mjs";
+import { createInterruptController, createTempDirRegistry, sweepStaleTempDirs } from "./lib/interrupt.mjs";
+import { currentEvaluatorDigest } from "./lib/provenance.mjs";
+import { commandText, eventsOfKind } from "./lib/trace.mjs";
 
 const EVAL_ROOT = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(EVAL_ROOT, "..");
 const RUNS_ROOT = join(EVAL_ROOT, "runs");
-const PROVIDER_ALLOWED_KEYS = new Set(["name", "base_url", "env_key", "wire_api", "requires_openai_auth"]);
 const REASONING_LEVELS = new Set(["none", "low", "medium", "high", "xhigh", "max"]);
 const REVIEW_TRANSCRIPT_LIMIT = 50;
 const REVIEW_CHUNK_CHARS = 8_000;
@@ -31,22 +33,9 @@ const REVIEW_DIFF_CHUNKS = 8;
 const REVIEW_CHANGED_FILE_LIMIT = 80;
 const REVIEW_CHANGED_FILE_CHUNKS = 1;
 const REVIEW_TEST_OUTPUT_CHARS = 3_000;
-const activeReviewerChildren = new Set();
+const USAGE_EXIT_CODE = 64;
 
-function killProcessTree(child, signal) {
-  if (!child?.pid) return;
-  if (process.platform !== "win32") {
-    try { process.kill(-child.pid, signal); return; } catch {}
-  }
-  try { child.kill(signal); } catch {}
-}
-
-function terminateReviewers(signal = "SIGTERM") {
-  for (const child of activeReviewerChildren) killProcessTree(child, signal);
-}
-
-process.once("SIGINT", () => terminateReviewers("SIGTERM"));
-process.once("SIGTERM", () => terminateReviewers("SIGTERM"));
+class UsageError extends Error {}
 
 function parseArgs(argv) {
   const result = {
@@ -59,6 +48,7 @@ function parseArgs(argv) {
     reviewerBReasoning: "high",
     validateFaults: false,
     output: null,
+    judgeHost: DEFAULT_JUDGE_HOST_ID,
   };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--task") result.task = argv[++i] ?? null;
@@ -79,16 +69,18 @@ function parseArgs(argv) {
     else if (argv[i] === "--reviewer-a-reasoning") result.reviewerAReasoning = argv[++i] ?? "";
     else if (argv[i] === "--reviewer-b-reasoning") result.reviewerBReasoning = argv[++i] ?? "";
     else if (argv[i] === "--output") result.output = argv[++i] ?? null;
+    else if (argv[i] === "--judge-host") result.judgeHost = argv[++i] ?? "";
     else if (argv[i] === "--validate-faults") result.validateFaults = true;
-    else throw new Error(`unknown argument: ${argv[i]}`);
+    else throw new UsageError(`unknown argument: ${argv[i]}`);
   }
-  if (!result.validateFaults && (!result.task || !result.replay)) throw new Error("--task and --replay are required");
-  if (!/^[A-Za-z0-9_-]+$/.test(result.provider)) throw new Error(`invalid provider: ${result.provider}`);
+  if (!result.validateFaults && (!result.task || !result.replay)) throw new UsageError("--task and --replay are required");
+  try { getJudgeHost(result.judgeHost); } catch (error) { throw new UsageError(error.message); }
+  if (!/^[A-Za-z0-9_-]+$/.test(result.provider)) throw new UsageError(`invalid provider: ${result.provider}`);
   for (const [name, model] of [["reviewer A", result.reviewerAModel], ["reviewer B", result.reviewerBModel]]) {
-    if (!/^[A-Za-z0-9._-]+$/.test(model)) throw new Error(`invalid ${name} model: ${model}`);
+    if (!/^[A-Za-z0-9._-]+$/.test(model)) throw new UsageError(`invalid ${name} model: ${model}`);
   }
   for (const [name, reasoning] of [["reviewer A", result.reviewerAReasoning], ["reviewer B", result.reviewerBReasoning]]) {
-    if (!REASONING_LEVELS.has(reasoning)) throw new Error(`invalid ${name} reasoning: ${reasoning}`);
+    if (!REASONING_LEVELS.has(reasoning)) throw new UsageError(`invalid ${name} reasoning: ${reasoning}`);
   }
   return result;
 }
@@ -111,10 +103,7 @@ function hashFile(path) {
 }
 
 function evaluatorSourceDigest() {
-  return sha256(JSON.stringify({
-    probe: hashFile(join(EVAL_ROOT, "probe.mjs")),
-    spawn: hashFile(join(EVAL_ROOT, "lib", "spawn.mjs")),
-  }));
+  return currentEvaluatorDigest();
 }
 
 function withinRoot(path, root) {
@@ -135,101 +124,6 @@ function safeRegularWithin(path, root) {
   }
 }
 
-function stripTomlComment(line) {
-  let quote = null;
-  let escaped = false;
-  for (let i = 0; i < line.length; i++) {
-    const char = line[i];
-    if (escaped) { escaped = false; continue; }
-    if (quote === '"' && char === "\\") { escaped = true; continue; }
-    if (char === '"' || char === "'") { quote = quote === char ? null : quote ?? char; continue; }
-    if (char === "#" && quote === null) return line.slice(0, i);
-  }
-  return line;
-}
-
-function parseTomlScalar(raw, key) {
-  const value = stripTomlComment(raw).trim();
-  if (value.startsWith('"') && value.endsWith('"')) return JSON.parse(value);
-  if (value.startsWith("'") && value.endsWith("'")) return value.slice(1, -1);
-  if (value === "true") return true;
-  if (value === "false") return false;
-  throw new Error(`unsupported provider config value for ${key}`);
-}
-
-function tomlLiteral(value) {
-  return typeof value === "boolean" ? String(value) : JSON.stringify(value);
-}
-
-function providerProfile(provider) {
-  if (provider === "openai") {
-    return { id: provider, requires_openai_auth: true, env_keys: [], cli_args: ["-c", `model_provider=${tomlLiteral(provider)}`] };
-  }
-  const codexHome = process.env.CODEX_HOME ?? join(process.env.HOME ?? "", ".codex");
-  const configPath = join(codexHome, "config.toml");
-  if (!existsSync(configPath)) throw new Error(`Codex provider config unavailable for ${provider}`);
-  const section = `[model_providers.${provider}]`;
-  const selected = {};
-  let active = false;
-  for (const rawLine of readFileSync(configPath, "utf8").split(/\r?\n/)) {
-    const line = stripTomlComment(rawLine).trim();
-    if (line.startsWith("[") && line.endsWith("]")) { active = line === section; continue; }
-    if (!active || !line) continue;
-    const match = /^([A-Za-z0-9_-]+)\s*=\s*(.+)$/.exec(line);
-    if (match && PROVIDER_ALLOWED_KEYS.has(match[1])) selected[match[1]] = parseTomlScalar(match[2], match[1]);
-  }
-  if (typeof selected.base_url !== "string" || typeof selected.env_key !== "string" || typeof selected.wire_api !== "string") {
-    throw new Error(`provider ${provider} configuration is incomplete`);
-  }
-  const baseUrl = new URL(selected.base_url);
-  if (!["http:", "https:"].includes(baseUrl.protocol) || baseUrl.username || baseUrl.password || baseUrl.search || baseUrl.hash) {
-    throw new Error(`provider ${provider} base_url is unsafe`);
-  }
-  if (!/^[A-Z][A-Z0-9_]*$/.test(selected.env_key) || !process.env[selected.env_key]) throw new Error(`provider credential unavailable: ${selected.env_key}`);
-  if (!["responses", "chat"].includes(selected.wire_api)) throw new Error(`provider ${provider} wire_api is unsupported`);
-  const normalized = {
-    name: typeof selected.name === "string" && selected.name ? selected.name : provider,
-    base_url: selected.base_url,
-    env_key: selected.env_key,
-    wire_api: selected.wire_api,
-    requires_openai_auth: selected.requires_openai_auth ?? false,
-  };
-  const prefix = `model_providers.${provider}`;
-  return {
-    id: provider,
-    requires_openai_auth: normalized.requires_openai_auth,
-    env_keys: [normalized.env_key],
-    cli_args: [
-      "-c", `model_provider=${tomlLiteral(provider)}`,
-      "-c", `${prefix}.name=${tomlLiteral(normalized.name)}`,
-      "-c", `${prefix}.base_url=${tomlLiteral(normalized.base_url)}`,
-      "-c", `${prefix}.env_key=${tomlLiteral(normalized.env_key)}`,
-      "-c", `${prefix}.wire_api=${tomlLiteral(normalized.wire_api)}`,
-      "-c", `${prefix}.requires_openai_auth=${tomlLiteral(normalized.requires_openai_auth)}`,
-    ],
-  };
-}
-
-function commandOnPath(name) {
-  for (const dir of (process.env.PATH ?? "").split(process.platform === "win32" ? ";" : ":")) {
-    const candidate = join(dir, name);
-    if (existsSync(candidate)) return candidate;
-  }
-  return null;
-}
-
-function traceThreadIds(path) {
-  if (!existsSync(path)) return [];
-  const ids = [];
-  for (const line of readFileSync(path, "utf8").split("\n").filter(Boolean)) {
-    try {
-      const event = JSON.parse(line);
-      const id = event.thread_id ?? event.thread?.id;
-      if ((event.type === "thread.started" || event.type === "thread.resumed") && typeof id === "string") ids.push(id);
-    } catch {}
-  }
-  return [...new Set(ids)];
-}
 
 function writeM2Manifest(outputRoot, metadata) {
   const files = Object.fromEntries(readdirSync(outputRoot).sort().flatMap(name => {
@@ -242,119 +136,6 @@ function writeM2Manifest(outputRoot, metadata) {
     ...metadata,
     files,
   });
-}
-
-function isolatedModelEnvironment(id, profile) {
-  const home = mkdtempSync(join(tmpdir(), `superspec-m2-home-${id}-`));
-  const codexHome = mkdtempSync(join(tmpdir(), `superspec-m2-codex-${id}-`));
-  chmodSync(home, 0o700);
-  chmodSync(codexHome, 0o700);
-  if (profile.requires_openai_auth) {
-    const source = join(process.env.CODEX_HOME ?? join(process.env.HOME ?? "", ".codex"), "auth.json");
-    if (!existsSync(source)) throw new Error("Codex auth.json unavailable for M2 reviewer");
-    copyFileSync(source, join(codexHome, "auth.json"));
-    chmodSync(join(codexHome, "auth.json"), 0o600);
-  }
-  const env = {};
-  for (const key of ["PATH", "TMPDIR", "LANG", "LC_ALL", "TERM", "USER", "SHELL", "SSL_CERT_FILE", "SSL_CERT_DIR", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", ...profile.env_keys]) {
-    if (process.env[key] != null) env[key] = process.env[key];
-  }
-  env.HOME = home;
-  env.CODEX_HOME = codexHome;
-  env.TERM = env.TERM ?? "dumb";
-  return { home, codexHome, env };
-}
-
-function parseAgentJson(jsonl) {
-  const messages = [];
-  for (const line of jsonl.split("\n").filter(Boolean)) {
-    try {
-      const event = JSON.parse(line);
-      if (event?.type === "item.completed" && event.item?.type === "agent_message" && typeof event.item.text === "string") messages.push(event.item.text);
-    } catch {}
-  }
-  const text = messages.at(-1) ?? "";
-  const candidates = [text, text.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1], text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1)].filter(Boolean);
-  for (const candidate of candidates) {
-    try { return JSON.parse(candidate.trim()); } catch {}
-  }
-  throw new Error("reviewer did not return parseable JSON");
-}
-
-async function runReviewer({ id, codex, profile, model, reasoning, cwd, prompt, tracePath, stderrPath }) {
-  const isolated = isolatedModelEnvironment(id, profile);
-  try {
-    const catalogPath = join(isolated.codexHome, "model-catalog.json");
-    const catalog = spawnSync(codex, ["debug", "models"], {
-      cwd,
-      env: process.env,
-      encoding: "utf8",
-      maxBuffer: 4 * 1024 * 1024,
-    });
-    if (catalog.status !== 0) throw new Error(`reviewer ${id} model catalog unavailable: ${catalog.stderr.trim()}`);
-    let catalogJson;
-    try { catalogJson = JSON.parse(catalog.stdout); } catch { throw new Error(`reviewer ${id} model catalog is malformed`); }
-    if (!Array.isArray(catalogJson?.models) || !catalogJson.models.some(item => item?.slug === model)) {
-      throw new Error(`reviewer ${id} model is absent from the local Codex catalog: ${model}`);
-    }
-    writeFileSync(catalogPath, `${JSON.stringify(catalogJson)}\n`, { mode: 0o600 });
-    const args = [
-      "exec", "--json", "--ephemeral", "--ignore-user-config", "--strict-config",
-      "--sandbox", "read-only", "-m", model,
-      ...profile.cli_args,
-      "-c", `model_catalog_json=${tomlLiteral(catalogPath)}`,
-      "-c", `model_reasoning_effort=${tomlLiteral(reasoning)}`,
-      "-c", "approval_policy=\"never\"",
-      "--enable", "multi_agent",
-      "-C", cwd,
-      "-",
-    ];
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      const result = await new Promise((resolvePromise, reject) => {
-        const child = spawn(codex, args, {
-          cwd,
-          env: isolated.env,
-          shell: false,
-          detached: process.platform !== "win32",
-          stdio: ["pipe", "pipe", "pipe"],
-        });
-        activeReviewerChildren.add(child);
-        const stdout = [];
-        const stderr = [];
-        let killTimer = null;
-        const timeout = setTimeout(() => {
-          killProcessTree(child, "SIGTERM");
-          killTimer = setTimeout(() => killProcessTree(child, "SIGKILL"), 2_000);
-        }, 600_000);
-        child.stdout.on("data", chunk => stdout.push(chunk));
-        child.stderr.on("data", chunk => stderr.push(chunk));
-        child.stdin.end(prompt);
-        child.on("error", reject);
-        child.on("close", code => {
-          clearTimeout(timeout);
-          if (killTimer) clearTimeout(killTimer);
-          activeReviewerChildren.delete(child);
-          resolvePromise({ code, stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8") });
-        });
-      });
-      const attemptSuffix = attempt === 1 ? ".attempt-1" : "";
-      writeFileSync(`${tracePath}${attemptSuffix}`, result.stdout, { mode: 0o600 });
-      writeFileSync(`${stderrPath}${attemptSuffix}`, result.stderr, { mode: 0o600 });
-      if (result.code === 0) {
-        if (attempt === 1) {
-          writeFileSync(tracePath, result.stdout, { mode: 0o600 });
-          writeFileSync(stderrPath, result.stderr, { mode: 0o600 });
-        }
-        return parseAgentJson(result.stdout);
-      }
-      const transient = /stream disconnected|stream closed before response\.completed|timed out/iu.test(`${result.stderr}\n${result.stdout}`);
-      if (!transient || attempt === 2) throw new Error(`reviewer ${id} exited ${result.code} after ${attempt} attempt(s): ${result.stderr.trim()}`);
-    }
-    throw new Error(`reviewer ${id} exhausted its retry budget`);
-  } finally {
-    rmSync(isolated.home, { recursive: true, force: true });
-    rmSync(isolated.codexHome, { recursive: true, force: true });
-  }
 }
 
 function preferredCapability(runRoot) {
@@ -530,6 +311,8 @@ function isGeneratedReviewPath(path) {
 function testEvidenceFromRun(runRoot) {
   const evidenceRoot = join(runRoot, "evidence");
   if (!existsSync(evidenceRoot)) return [];
+  const manifest = existsSync(join(runRoot, "manifest.json")) ? json(join(runRoot, "manifest.json")) : {};
+  const host = recordedWorkerHost(manifest);
   const turnFiles = readdirSync(evidenceRoot)
     .flatMap(name => {
       const match = /^turn-(\d+)\.jsonl$/.exec(name);
@@ -540,23 +323,19 @@ function testEvidenceFromRun(runRoot) {
   for (const { name, turn } of turnFiles) {
     const path = join(evidenceRoot, name);
     if (!safeRegularWithin(path, runRoot)) continue;
-    const lines = readFileSync(path, "utf8").split("\n").filter(Boolean);
-    for (let index = 0; index < lines.length; index++) {
-      let event;
-      try { event = JSON.parse(lines[index]); } catch { continue; }
-      const item = event?.item;
-      if (event?.type !== "item.completed" || item?.type !== "command_execution") continue;
-      const command = typeof item.command === "string" ? item.command : JSON.stringify(item.argv ?? "");
+    const parsed = host.parseTrace(path);
+    for (const event of eventsOfKind(parsed, "command")) {
+      const command = commandText(event);
       if (!isTestCommand(command)) continue;
-      const output = String(item.aggregated_output ?? item.output ?? "");
+      const output = String(event.output ?? "");
       const includedOutput = boundedTestOutput(output);
       tests.push({
-        ref: `test:turn-${turn}:event-${index + 1}`,
+        ref: `test:turn-${turn}:event-${event.raw_ref.nonblank_line}`,
         source: "worker_command",
         turn,
         command,
-        exit_code: item.exit_code ?? null,
-        status: item.status ?? null,
+        exit_code: event.exit_code ?? null,
+        status: event.status ?? null,
         output_digest: sha256(output),
         output_chars: output.length,
         included_output_chars: Math.min(output.length, REVIEW_TEST_OUTPUT_CHARS),
@@ -919,20 +698,6 @@ function finalStatus(hardStatus, merged) {
   return merged.issues.length > 0 || merged.workflow_optimizations.length > 0 ? "DONE_BUT_FLAWED" : "DONE";
 }
 
-function reviewerFailure(tracePath, error) {
-  let detail = error instanceof Error ? error.message.split("\n")[0] : String(error);
-  if (existsSync(tracePath)) {
-    for (const line of readFileSync(tracePath, "utf8").split("\n").filter(Boolean)) {
-      try {
-        const event = JSON.parse(line);
-        if (event?.type === "error" && typeof event.message === "string") detail = event.message;
-        if (event?.type === "turn.failed" && typeof event.error?.message === "string") detail = event.error.message;
-      } catch {}
-    }
-  }
-  return detail;
-}
-
 function reviewPrompt(bundle, reviewerId) {
   const refs = [...validEvidenceRefs(bundle)].sort();
   return [
@@ -1119,6 +884,18 @@ function validateFaultMappings() {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.validateFaults) { validateFaultMappings(); return 0; }
+  const judgeHost = getJudgeHost(args.judgeHost);
+  const tempDirs = createTempDirRegistry();
+  sweepStaleTempDirs({ rules: judgeHost.stale_temp_dir_rules });
+  let judge = null;
+  const interrupt = createInterruptController({
+    onInterrupt() { judge?.terminateAll("SIGTERM"); },
+    onForcedExit() {
+      judge?.terminateAll("SIGKILL");
+      tempDirs.removeAll();
+    },
+  });
+  try {
   const taskPath = resolve(REPO_ROOT, args.task);
   const replayRoot = resolve(REPO_ROOT, args.replay);
   const sealedRunsRoot = join(REPO_ROOT, ".eval-runs");
@@ -1177,29 +954,27 @@ async function main() {
     };
     writeJson(join(outputRoot, "m2-result.json"), result);
     writeFileSync(join(outputRoot, "report.md"), reportMarkdown(result), { mode: 0o600 });
-    writeM2Manifest(outputRoot, { task_path: relative(REPO_ROOT, taskPath), task_digest: taskDigest, source_run: replayRoot, capability_digest: hashFile(capabilitySource.path), final_status: result.final_status });
+    writeM2Manifest(outputRoot, { task_path: relative(REPO_ROOT, taskPath), task_digest: taskDigest, source_run: replayRoot, capability_digest: hashFile(capabilitySource.path), final_status: result.final_status, judge_host: judgeIdentity(judgeHost) });
     process.stdout.write(`${JSON.stringify({ run: outputRoot, final_status: result.final_status, hard_status: hard.status }, null, 2)}\n`);
     return hard.status === "NEEDS_HUMAN" ? 0 : hard.status === "UNKNOWN" ? 3 : 1;
   }
 
-  const codex = commandOnPath("codex");
-  if (!codex) throw new Error("codex executable unavailable for M2 reviewers");
-  const profile = providerProfile(args.provider);
+  if (interrupt.interrupted) return interruptedExit(outputRoot, interrupt);
+  judge = judgeHost.createRunner({ role: "reviewer", provider: args.provider, registry: tempDirs });
   const reviewerConfigs = [
     { id: "A", model: args.reviewerAModel, reasoning: args.reviewerAReasoning },
     { id: "B", model: args.reviewerBModel, reasoning: args.reviewerBReasoning },
   ];
-  const settledReviews = await Promise.allSettled(reviewerConfigs.map(config => runReviewer({
+  const settledReviews = await Promise.allSettled(reviewerConfigs.map(config => judge.run({
     id: `${runId}-${config.id}`,
-    codex,
-    profile,
     model: config.model,
     reasoning: config.reasoning,
     cwd: outputRoot,
     prompt: reviewPrompt(bundle, config.id),
     tracePath: join(outputRoot, `review-${config.id.toLowerCase()}.jsonl`),
     stderrPath: join(outputRoot, `review-${config.id.toLowerCase()}.stderr.log`),
-  })));
+  }).then(result => result.json)));
+  if (interrupt.interrupted) return interruptedExit(outputRoot, interrupt);
   const refs = validEvidenceRefs(bundle);
   const reviews = [];
   const reviewerDetails = {};
@@ -1207,7 +982,7 @@ async function main() {
     const config = reviewerConfigs[index];
     const key = config.id;
     const tracePath = join(outputRoot, `review-${key.toLowerCase()}.jsonl`);
-    const threadIds = traceThreadIds(tracePath);
+    const threadIds = judgeHost.sessionIds(tracePath);
     const settled = settledReviews[index];
     if (settled.status === "fulfilled") {
       const review = normalizeReview(settled.value, key, refs);
@@ -1215,7 +990,7 @@ async function main() {
       writeJson(join(outputRoot, `review-${key.toLowerCase()}.json`), review);
       reviewerDetails[key] = { status: "completed", model: config.model, reasoning: config.reasoning, thread_ids: threadIds };
     } else {
-      const failure = reviewerFailure(tracePath, settled.reason);
+      const failure = judgeHost.failureDetail(tracePath, settled.reason);
       writeJson(join(outputRoot, `review-${key.toLowerCase()}.failure.json`), { reviewer_id: key, model: config.model, reasoning: config.reasoning, failure });
       reviewerDetails[key] = { status: "failed", model: config.model, reasoning: config.reasoning, thread_ids: threadIds, failure };
     }
@@ -1252,9 +1027,27 @@ async function main() {
   };
   writeJson(join(outputRoot, "m2-result.json"), result);
   writeFileSync(join(outputRoot, "report.md"), reportMarkdown(result), { mode: 0o600 });
-  writeM2Manifest(outputRoot, { task_path: relative(REPO_ROOT, taskPath), task_digest: taskDigest, source_run: replayRoot, capability_digest: hashFile(capabilitySource.path), final_status: result.final_status });
+  writeM2Manifest(outputRoot, { task_path: relative(REPO_ROOT, taskPath), task_digest: taskDigest, source_run: replayRoot, capability_digest: hashFile(capabilitySource.path), final_status: result.final_status, judge_host: judgeIdentity(judgeHost) });
   process.stdout.write(`${JSON.stringify({ run: outputRoot, final_status: result.final_status, hard_status: hard.status }, null, 2)}\n`);
   return ["DONE", "DONE_BUT_FLAWED", "NEEDS_HUMAN"].includes(result.final_status) ? 0 : result.final_status === "UNKNOWN" ? 3 : 1;
+  } finally {
+    judge?.terminateAll("SIGKILL");
+    tempDirs.removeAll();
+    tempDirs.dispose();
+    interrupt.dispose();
+  }
 }
 
-process.exitCode = await main();
+/** Interrupted reviews are never graded: no m2-result, only an interruption marker. */
+function interruptedExit(outputRoot, interrupt) {
+  writeJson(join(outputRoot, "interrupted.json"), { interrupted: true, signal: interrupt.signal, at: interrupt.at, final_status: "INVALID" });
+  process.stderr.write(`M2 interrupted by ${interrupt.signal}; no semantic result was recorded\n`);
+  return interrupt.exitCode();
+}
+
+try {
+  process.exitCode = await main();
+} catch (error) {
+  process.stderr.write(`M2 failed: ${error instanceof Error ? error.message : String(error)}\n`);
+  process.exitCode = error instanceof UsageError ? USAGE_EXIT_CODE : 1;
+}

@@ -5,7 +5,14 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { installProject, WORKFLOW_AGENTS, WORKFLOW_MARKDOWN_AGENTS, WORKFLOW_PROMPTS, WORKFLOW_SKILLS } from "../src/install.ts";
+import {
+  installProject,
+  WORKFLOW_AGENTS,
+  WORKFLOW_MARKDOWN_AGENTS,
+  WORKFLOW_PROMPTS,
+  WORKFLOW_ROLES,
+  WORKFLOW_SKILLS,
+} from "../src/install.ts";
 
 const PACKAGE_VERSION = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version as string;
 const OPENSPEC_REQUIRED_VERSION = "1.4.1";
@@ -96,7 +103,10 @@ test("installProject installs engine, workflow skills, role prompts, and agents"
     assert.deepEqual(JSON.parse(readFileSync(join(projectRoot, ".superspec", "config.json"), "utf8")), {
       workflow: { mode: "normal", hosts: ["codex"] },
     });
-    assert.equal(readFileSync(join(projectRoot, ".superspec", ".gitignore"), "utf8"), "changes/\n*.log\n*.tmp\n");
+    assert.equal(
+      readFileSync(join(projectRoot, ".superspec", ".gitignore"), "utf8"),
+      "changes/\n*.log\n*.tmp\ninstall-manifest.json\n",
+    );
 
     for (const skill of WORKFLOW_SKILLS) {
       const skillPath = join(projectRoot, ".codex", "skills", skill, "SKILL.md");
@@ -458,6 +468,7 @@ test("CLI update refreshes installed workflow templates without backups", () => 
     const deprecatedSkillPath = join(projectRoot, ".codex", "skills", "superspec-archive", "SKILL.md");
     const promptPath = join(projectRoot, ".codex", "prompts", "explore.md");
     const agentPath = join(projectRoot, ".codex", "agents", "explore.toml");
+    const renderedAgent = readFileSync(agentPath, "utf8");
     writeFileSync(skillPath, "stale skill template\n");
     mkdirSync(join(projectRoot, ".codex", "skills", "superspec-archive"), { recursive: true });
     writeFileSync(deprecatedSkillPath, "stale archive skill\n");
@@ -483,10 +494,7 @@ test("CLI update refreshes installed workflow templates without backups", () => 
       readFileSync(promptPath, "utf8"),
       readFileSync(new URL("../templates/workflow/prompts/explore.md", import.meta.url), "utf8"),
     );
-    assert.equal(
-      readFileSync(agentPath, "utf8"),
-      readFileSync(new URL("../templates/workflow/agents/explore.toml", import.meta.url), "utf8"),
-    );
+    assert.equal(readFileSync(agentPath, "utf8"), renderedAgent);
     assert.equal(existsSync(`${skillPath}.bak`), false);
     assert.equal(existsSync(deprecatedSkillPath), false);
     assert.equal(existsSync(`${promptPath}.bak`), false);
@@ -535,15 +543,10 @@ test("installProject rejects AGENTS.md workflow template without SuperSpec marke
       mkdirSync(dir, { recursive: true });
       writeFileSync(join(dir, prompt), "# Prompt\n");
     }
-    for (const agent of WORKFLOW_AGENTS) {
-      const dir = join(templateRoot, "agents");
+    for (const role of WORKFLOW_ROLES) {
+      const dir = join(templateRoot, "roles");
       mkdirSync(dir, { recursive: true });
-      writeFileSync(join(dir, agent), "# Agent\n");
-    }
-    for (const agent of WORKFLOW_MARKDOWN_AGENTS) {
-      const dir = join(templateRoot, "agents-md");
-      mkdirSync(dir, { recursive: true });
-      writeFileSync(join(dir, agent), "# Agent\n");
+      writeFileSync(join(dir, `${role}.md`), "# Role\n");
     }
     writeFileSync(join(templateRoot, "AGENTS.md"), "# Missing markers\n");
 
@@ -1104,11 +1107,9 @@ test("installProject writes OMP markdown agents only into an existing user home"
     assert.equal(existsSync(join(projectRoot, ".codex", "config.toml")), false);
     assert.equal(existsSync(join(projectRoot, ".omp")), false);
     for (const agent of WORKFLOW_MARKDOWN_AGENTS) {
-      assert.equal(
-        readFileSync(join(ompHome, "agents", agent), "utf8"),
-        readFileSync(new URL(`../templates/workflow/agents-md/${agent}`, import.meta.url), "utf8"),
-        agent,
-      );
+      const content = readFileSync(join(ompHome, "agents", agent), "utf8");
+      assert.match(content, /^---\nname: /, agent);
+      assert.equal(content.includes(".codex/"), false, agent);
     }
     assert.deepEqual(JSON.parse(readFileSync(join(projectRoot, ".superspec", "config.json"), "utf8")), {
       workflow: { mode: "normal", hosts: ["omp"] },
@@ -1136,6 +1137,7 @@ test("CLI update refreshes persisted OMP hosts without creating project .omp", (
     mkdirSync(join(ompHome, "agents"), { recursive: true });
     installProject(projectRoot, { hosts: ["codex", "omp"], ompHome });
     const explorePath = join(ompHome, "agents", "explore.md");
+    const renderedExplore = readFileSync(explorePath, "utf8");
     writeFileSync(explorePath, "stale omp agent\n");
 
     const output = execFileSync(process.execPath, [cliPath(), "update", "--skip-self-update", "--omp-home", ompHome], {
@@ -1148,10 +1150,7 @@ test("CLI update refreshes persisted OMP hosts without creating project .omp", (
     assert.equal(result.ok, true);
     assert.deepEqual(result.installed.hosts, ["codex", "omp"]);
     assert.equal(result.installed.omp.dest, ompHome);
-    assert.equal(
-      readFileSync(explorePath, "utf8"),
-      readFileSync(new URL("../templates/workflow/agents-md/explore.md", import.meta.url), "utf8"),
-    );
+    assert.equal(readFileSync(explorePath, "utf8"), renderedExplore);
     assert.equal(existsSync(join(projectRoot, ".codex", "agents", "explore.toml")), true);
     assert.equal(existsSync(join(projectRoot, ".omp")), false);
     assert.deepEqual(JSON.parse(readFileSync(join(projectRoot, ".superspec", "config.json"), "utf8")).workflow.hosts, [

@@ -571,8 +571,10 @@ function parseHostPromptAnswer(raw: string): WorkflowHost[] {
   for (const token of tokens) {
     if (token === "1" || token === "codex") selected.push("codex");
     else if (token === "2" || token === "omp") selected.push("omp");
-    else if (token === "both" || token === "all") selected.push("codex", "omp");
-    else throw new WorkflowConfigError(`无法识别的宿主选项：${token}。可用 1/codex、2/omp，或 both`);
+    else if (token === "3" || token === "claude" || token === "claude-code") selected.push("claude");
+    else if (token === "both") selected.push("codex", "omp");
+    else if (token === "all") selected.push("codex", "omp", "claude");
+    else throw new WorkflowConfigError(`无法识别的宿主选项：${token}。可用 1/codex、2/omp、3/claude，或 both（Codex+OMP）、all`);
   }
   return parseWorkflowHostsFlag(selected.join(","));
 }
@@ -589,18 +591,45 @@ async function resolveInstallHosts(projectRoot: string, opts: Record<string, str
 
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   try {
-    const answer = await rl.question("选择 SuperSpec 入口宿主：1) Codex  2) OMP。可多选，例如 1,2；直接回车默认 Codex。 ");
+    const answer = await rl.question("选择 SuperSpec 入口宿主：1) Codex  2) OMP  3) Claude Code。可多选，例如 1,3；直接回车默认 Codex。 ");
     return parseHostPromptAnswer(answer);
   } finally {
     rl.close();
   }
 }
 
+function claudePermissionsFromCli(opts: Record<string, string>): boolean | undefined {
+  const enable = opts["claude-permissions"] !== undefined;
+  const disable = opts["no-claude-permissions"] !== undefined;
+  if (enable && disable) {
+    throw new WorkflowConfigError("--claude-permissions 与 --no-claude-permissions 不能同时使用");
+  }
+  for (const flag of ["claude-permissions", "no-claude-permissions"]) {
+    if (opts[flag] !== undefined && opts[flag] !== "true") {
+      throw new WorkflowConfigError(`--${flag} 不接受取值（收到 ${opts[flag]}）；开启用 --claude-permissions，关闭用 --no-claude-permissions`);
+    }
+  }
+  if (enable) return true;
+  if (disable) return false;
+  return undefined;
+}
+
+/** 自升级后由新版 CLI 重跑，需要原样转交本次安装选择。 */
+function installRerunFlags(opts: Record<string, string>, hosts: WorkflowHost[]): string[] {
+  const flags = ["--hosts", hosts.join(",")];
+  if (opts["omp-home"]) flags.push("--omp-home", opts["omp-home"]);
+  const claudePermissions = claudePermissionsFromCli(opts);
+  if (claudePermissions !== undefined) flags.push(claudePermissions ? "--claude-permissions" : "--no-claude-permissions");
+  return flags;
+}
+
 function installOptionsFromCli(opts: Record<string, string>, hosts: WorkflowHost[], allowLegacyState = false) {
+  const claudePermissions = claudePermissionsFromCli(opts);
   return {
     hosts,
     allowLegacyState,
     ...(opts["omp-home"] ? { ompHome: opts["omp-home"] } : {}),
+    ...(claudePermissions !== undefined ? { claudePermissions } : {}),
   };
 }
 
@@ -620,10 +649,16 @@ function topLevelHelp(): string {
   transition <子命令> --change <C>  状态流转（见下）
   record <子命令> --change <C>      登记证据（见下）
   jobs <子命令> --change <C>        工作项管理（见下）
-  install [--hosts codex,omp]       安装项目工作流入口
+  install [安装选项]                安装项目工作流入口
   init --scope project              install 的兼容别名
-  update [--hosts codex,omp]        升级 CLI 到 npm latest 并同步已选宿主入口
+  update [安装选项]                 升级 CLI 到 npm latest 并同步已选宿主入口
   version                           版本号
+
+安装选项（install / update）：
+  --hosts codex,omp,claude          选择入口宿主，可多选；claude 即 Claude Code。未指定时沿用项目已选宿主或交互选择
+  --omp-home <DIR>                  OMP 用户目录，默认 ~/.omp/agent
+  --no-claude-permissions           不向 .claude/settings.json 写入 Bash(superspec *) 许可，并记住该选择
+  --claude-permissions              恢复写入上述许可
 
 工作流配置见 .superspec/config.json（workflow.budget；历史 change 仍可读 workflow.mode）。新 change 的模式按 change 独立选择，不接受 --risk/--mode。
 
@@ -741,8 +776,7 @@ async function main(argv: string[]): Promise<number> {
     try {
       const hosts = await resolveInstallHosts(projectRoot, opts, "install");
       if (opts["skip-self-update"] !== "true") {
-        const hostArgs = ["--hosts", hosts.join(",")];
-        if (opts["omp-home"]) hostArgs.push("--omp-home", opts["omp-home"]);
+        const hostArgs = installRerunFlags(opts, hosts);
         const rerunArgs = command === "init"
           ? ["init", "--scope", "project", "--skip-self-update", ...hostArgs]
           : ["install", "--skip-self-update", ...hostArgs];
@@ -774,8 +808,7 @@ async function main(argv: string[]): Promise<number> {
     try {
       const hosts = await resolveInstallHosts(projectRoot, opts, "update");
       if (opts["skip-self-update"] !== "true") {
-        const hostArgs = ["--hosts", hosts.join(",")];
-        if (opts["omp-home"]) hostArgs.push("--omp-home", opts["omp-home"]);
+        const hostArgs = installRerunFlags(opts, hosts);
         const selfUpdate = updateSelfIfNeeded(projectRoot, ["update", "--skip-self-update", ...hostArgs]);
         if (selfUpdate.updated) {
           const rerun = updatedCliOutput(selfUpdate.output, selfUpdate.latest);

@@ -19,6 +19,9 @@ import {
 import { tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { DEFAULT_WORKER_HOST_ID, getWorkerHost, recordedWorkerHost, registeredWorkerHostIds, workerHostDefaultsText } from "./hosts/index.mjs";
+import { DEFAULT_JUDGE_HOST_ID, getJudgeHost, recordedJudgeHost, registeredJudgeHostIds } from "./judges/index.mjs";
+import { summarizeUsageObservations } from "./lib/trace.mjs";
 
 const EVAL_ROOT = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(EVAL_ROOT, "..");
@@ -30,16 +33,33 @@ const FIXED_EVALUATOR_FILES = [
   "evals/arena.mjs",
   "evals/m2.mjs",
   "evals/lib/spawn.mjs",
+  "evals/lib/trace.mjs",
+  "evals/lib/interrupt.mjs",
+  "evals/lib/provenance.mjs",
+  "evals/lib/trace-semantics.mjs",
+  "evals/hosts/index.mjs",
+  "evals/hosts/codex.mjs",
+  "evals/hosts/claude.mjs",
+  "evals/hosts/omp.mjs",
+  "evals/judges/index.mjs",
+  "evals/judges/codex.mjs",
+  "evals/judges/claude.mjs",
+  "evals/judges/omp.mjs",
+  "evals/judges/runtime.mjs",
+  "evals/lib/host-adapters-test.mjs",
   "build.js",
 ];
 const HARNESS_DIGEST_FILES = [...FIXED_EVALUATOR_FILES, "node_modules/typescript/package.json"];
+const USAGE_EXIT_CODE = 64;
+
+class UsageError extends Error {}
 
 function parseArgs(argv) {
   const result = {
     suite: DEFAULT_SUITE,
     repetitions: null,
-    provider: "openai",
-    model: "gpt-5.6-terra",
+    provider: null,
+    model: null,
     reasoning: "medium",
     reviewerAModel: "gpt-5.6-sol",
     reviewerAReasoning: "high",
@@ -55,6 +75,8 @@ function parseArgs(argv) {
     baselineRef: null,
     candidateRef: null,
     suiteWasExplicit: false,
+    host: DEFAULT_WORKER_HOST_ID,
+    judgeHost: null,
   };
 
   for (let index = 0; index < argv.length; index++) {
@@ -80,31 +102,41 @@ function parseArgs(argv) {
     else if (arg === "--compare-candidate") result.compareCandidate = resolve(argv[++index] ?? "");
     else if (arg === "--baseline-ref") result.baselineRef = argv[++index] ?? "";
     else if (arg === "--candidate-ref") result.candidateRef = argv[++index] ?? "";
+    else if (arg === "--host") result.host = argv[++index] ?? "";
+    else if (arg === "--judge-host") result.judgeHost = argv[++index] ?? "";
     else if (arg === "--help" || arg === "-h") result.help = true;
-    else throw new Error("unknown argument: " + arg);
+    else throw new UsageError("unknown argument: " + arg);
   }
 
   if (result.help) return result;
+  try {
+    const workerHost = getWorkerHost(result.host);
+    result.provider ??= workerHost.eval_defaults.provider;
+    result.model ??= workerHost.eval_defaults.model;
+    if (result.judgeHost != null) getJudgeHost(result.judgeHost);
+  } catch (error) {
+    throw new UsageError(error.message);
+  }
   if (Boolean(result.baselineRef) !== Boolean(result.candidateRef)) {
-    throw new Error("--baseline-ref and --candidate-ref must be provided together");
+    throw new UsageError("--baseline-ref and --candidate-ref must be provided together");
   }
   if ((result.baselineRef || result.candidateRef) && (result.compareBaseline || result.compareCandidate)) {
-    throw new Error("Git ref comparison and report comparison are mutually exclusive");
+    throw new UsageError("Git ref comparison and report comparison are mutually exclusive");
   }
   if ((result.baselineRef || result.candidateRef) && result.dryRun) {
-    throw new Error("--dry-run cannot be combined with Git ref comparison");
+    throw new UsageError("--dry-run cannot be combined with Git ref comparison");
   }
   if (result.validateFaults || result.dryRun || result.compareBaseline || result.compareCandidate) return result;
   if (!Number.isInteger(result.repetitions)) result.repetitions = result.releaseGate ? 2 : 1;
-  if (result.repetitions < 1 || result.repetitions > 20) throw new Error("--repetitions must be between 1 and 20");
-  if (!/^[A-Za-z0-9_-]+$/.test(result.provider)) throw new Error("invalid provider: " + result.provider);
-  if (!/^[A-Za-z0-9._-]+$/.test(result.model)) throw new Error("invalid model: " + result.model);
+  if (result.repetitions < 1 || result.repetitions > 20) throw new UsageError("--repetitions must be between 1 and 20");
+  if (!/^[A-Za-z0-9_-]+$/.test(result.provider)) throw new UsageError("invalid provider: " + result.provider);
+  if (!/^[A-Za-z0-9._-]+$/.test(result.model)) throw new UsageError("invalid model: " + result.model);
   for (const [name, value] of [
     ["reasoning", result.reasoning],
     ["reviewer-a-reasoning", result.reviewerAReasoning],
     ["reviewer-b-reasoning", result.reviewerBReasoning],
   ]) {
-    if (!REASONING_LEVELS.has(value)) throw new Error("invalid " + name + ": " + value);
+    if (!REASONING_LEVELS.has(value)) throw new UsageError("invalid " + name + ": " + value);
   }
   return result;
 }
@@ -119,8 +151,10 @@ function help() {
     "选项：",
     "  --suite <file>                  回归集 JSON，默认 evals/regression-suite.json",
     "  --repetitions <n>               每个任务重复次数，默认 1；--release-gate 默认 2",
-    "  --provider <name>               Worker/Reviewer Provider",
-    "  --model <name>                  Worker 模型",
+    `  --provider <name>               Worker/Reviewer Provider（默认按宿主：${workerHostDefaultsText("provider")}）`,
+    `  --host <id>                     Worker host adapter (default ${DEFAULT_WORKER_HOST_ID}; registered: ${registeredWorkerHostIds().join(", ")})`,
+    `  --judge-host <id>               Judge host for the Probe AI simulated user and M2 reviewers (default: simulated user follows --host, M2 uses ${DEFAULT_JUDGE_HOST_ID}; registered: ${registeredJudgeHostIds().join(", ")})`,
+    `  --model <name>                  Worker 模型（默认按宿主：${workerHostDefaultsText("model")}）`,
     "  --reasoning <level>             Worker 推理强度",
     "  --with-m2                       每次 Probe 后执行 Arena + M2 双审",
     "  --release-gate                  启用稳定性和硬门禁映射自校验发布门",
@@ -192,7 +226,8 @@ function executionEnvironment(runRoot) {
     // sealed package digest below is the stable identity we compare instead.
     realpath: name === "superspec" ? null : value?.realpath ?? null,
   }]));
-  const requiredExecutables = ["codex", "node", "git", "openspec", "superspec"];
+  const host = recordedWorkerHost(manifest);
+  const requiredExecutables = [...host.required_tools, "node", "git", "openspec", "superspec"];
   const missingExecutables = requiredExecutables.flatMap(name => {
     const value = executables[name];
     return !value?.version || (name !== "superspec" && !value.realpath) ? [name] : [];
@@ -397,6 +432,8 @@ function runProbe(sourceRoot, input, options, timeoutMs = null) {
   const script = join(sourceRoot, "evals", "probe.mjs");
   const args = [
     "--scenario", input.scenarioPath,
+    "--host", options.host ?? DEFAULT_WORKER_HOST_ID,
+    ...(options.judgeHost ? ["--judge-host", options.judgeHost] : []),
     "--provider", options.provider,
     "--model", options.model,
     "--reasoning", options.reasoning,
@@ -419,6 +456,7 @@ function runM2(sourceRoot, input, replayRoot, options, timeoutMs = null) {
     "--task", input.taskPath,
     "--replay", replayRoot,
     "--output", outputRoot,
+    "--judge-host", options.judgeHost ?? DEFAULT_JUDGE_HOST_ID,
     "--provider", options.provider,
     "--reviewer-a-model", options.reviewerAModel,
     "--reviewer-a-reasoning", options.reviewerAReasoning,
@@ -439,47 +477,29 @@ function runM2(sourceRoot, input, replayRoot, options, timeoutMs = null) {
   }
 }
 
-function usageFromObject(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const number = keys => {
-    for (const key of keys) {
-      if (Number.isFinite(value[key])) return Number(value[key]);
-    }
-    return null;
-  };
-  const total = number(["total_tokens", "totalTokens"]);
-  const input = number(["input_tokens", "inputTokens", "prompt_tokens", "promptTokens"]);
-  const output = number(["output_tokens", "outputTokens", "completion_tokens", "completionTokens"]);
-  if (total !== null || input !== null || output !== null) {
-    return { total_tokens: total ?? ((input ?? 0) + (output ?? 0)), input_tokens: input, output_tokens: output };
+function sumTraceUsage(host, paths) {
+  const observations = [];
+  for (const path of paths) {
+    if (!existsSync(path)) continue;
+    observations.push(...host.usageObservations(host.parseTrace(path)));
   }
-  if (value.usage && typeof value.usage === "object") return usageFromObject(value.usage);
-  return null;
+  return summarizeUsageObservations(observations);
 }
 
-function latestTraceUsage(path) {
-  let latest = null;
-  for (const record of readJsonl(path)) {
-    const candidate = usageFromObject(record);
-    if (candidate) latest = candidate;
+function sessionIndexUsage(runRoot) {
+  const indexPath = join(runRoot, "evidence", "host-sessions", "index.json");
+  if (!existsSync(indexPath)) return { observed: false, total_tokens: null, turns_with_usage: 0, series: 0 };
+  try {
+    const index = JSON.parse(readFileSync(indexPath, "utf8"));
+    if (index?.usage && typeof index.usage === "object") return index.usage;
+    return summarizeUsageObservations((index?.files ?? []).flatMap(file => (
+      file.kind === "subagent" && file.usage && file.thread_id
+        ? [{ agent_id: file.thread_id, thread_id: file.thread_id, ...file.usage }]
+        : []
+    )));
+  } catch {
+    return { observed: false, total_tokens: null, turns_with_usage: 0, series: 0 };
   }
-  return latest;
-}
-
-function sumTraceUsage(paths) {
-  const values = paths.map(latestTraceUsage).filter(Boolean);
-  if (values.length === 0) return { observed: false, total_tokens: null, turns_with_usage: 0 };
-  return {
-    observed: true,
-    total_tokens: values.reduce((sum, value) => sum + value.total_tokens, 0),
-    input_tokens: values.every(value => value.input_tokens !== null)
-      ? values.reduce((sum, value) => sum + value.input_tokens, 0)
-      : null,
-    output_tokens: values.every(value => value.output_tokens !== null)
-      ? values.reduce((sum, value) => sum + value.output_tokens, 0)
-      : null,
-    turns_with_usage: values.length,
-  };
 }
 
 function tracePaths(root, prefix) {
@@ -517,6 +537,11 @@ function metricsCapabilitySource(runRoot, m2RunRoot = null, arenaRunRoot = null)
 }
 
 function runMetrics(runRoot, m2RunRoot = null, arenaRunRoot = null) {
+  const probeManifest = existsSync(join(runRoot, "manifest.json")) ? readJson(join(runRoot, "manifest.json")) : {};
+  const host = recordedWorkerHost(probeManifest);
+  const judgeHost = m2RunRoot && existsSync(join(m2RunRoot, "m2-manifest.json"))
+    ? recordedJudgeHost(readJson(join(m2RunRoot, "m2-manifest.json")))
+    : getJudgeHost(DEFAULT_JUDGE_HOST_ID);
   const capabilitySource = metricsCapabilitySource(runRoot, m2RunRoot, arenaRunRoot);
   const capability = existsSync(capabilitySource.path) ? readJson(capabilitySource.path) : {};
   const events = readJsonl(join(runRoot, "evidence", "events.jsonl"));
@@ -563,8 +588,9 @@ function runMetrics(runRoot, m2RunRoot = null, arenaRunRoot = null) {
       ?? capability.scripted_two_turn?.final_state
       ?? null,
     dynamic_stop: stop?.action ?? null,
-    worker_tokens: sumTraceUsage(workerTracePaths),
-    reviewer_tokens: sumTraceUsage(reviewerTracePaths),
+    worker_tokens: sumTraceUsage(host, workerTracePaths),
+    reviewer_tokens: sumTraceUsage(judgeHost, reviewerTracePaths),
+    subagent_tokens: sessionIndexUsage(runRoot),
   };
 }
 
@@ -826,6 +852,7 @@ function runAttempt(entry, sourceRoot, inputsRoot, outputRoot, options, repeat) 
     dynamic_stop: null,
     worker_tokens: { observed: false, total_tokens: null, turns_with_usage: 0 },
     reviewer_tokens: { observed: false, total_tokens: null, turns_with_usage: 0 },
+    subagent_tokens: { observed: false, total_tokens: null, turns_with_usage: 0 },
   };
   const errors = [];
   if (!probe.result) errors.push("Probe output did not contain a sealed run result");
@@ -1811,5 +1838,5 @@ try {
   process.exitCode = main();
 } catch (error) {
   process.stderr.write("M3 regression failed: " + (error instanceof Error ? error.message : String(error)) + "\n");
-  process.exitCode = 3;
+  process.exitCode = error instanceof UsageError ? USAGE_EXIT_CODE : 3;
 }

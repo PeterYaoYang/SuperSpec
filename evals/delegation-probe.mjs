@@ -6,7 +6,6 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
-  readFileSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -14,7 +13,9 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { getWorkerHost } from "./hosts/index.mjs";
 import { createDirectorSpawner } from "./lib/spawn.mjs";
+import { eventsOfKind, traceAgentMessages, turnCompletion } from "./lib/trace.mjs";
 
 const EVAL_ROOT = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(EVAL_ROOT, "..");
@@ -30,12 +31,6 @@ function commandOnPath(name) {
     if (existsSync(candidate)) return realpathSync(candidate);
   }
   return null;
-}
-
-function readJsonl(path) {
-  return readFileSync(path, "utf8").split("\n").filter(Boolean).flatMap(line => {
-    try { return [JSON.parse(line)]; } catch { return []; }
-  });
 }
 
 function isoForPath() {
@@ -107,7 +102,10 @@ const env = {
 };
 
 const run = createDirectorSpawner(actionLog);
+const host = getWorkerHost("codex");
 let worker;
+let sessionIndex = null;
+const workerWindow = { started_at: new Date().toISOString(), ended_at: null };
 try {
   worker = await run(codex, args, {
     phase: "worker.delegation",
@@ -118,22 +116,24 @@ try {
     stdin: prompt,
     timeoutMs: 600_000,
   });
+  workerWindow.ended_at = new Date().toISOString();
 } finally {
   run.terminateAll("SIGKILL");
+  try {
+    sessionIndex = host.collectSessionArtifacts({ home, hostHome: codexHome, codexHome }, join(evidenceDir, "host-sessions"));
+  } catch {}
   rmSync(home, { recursive: true, force: true });
   rmSync(codexHome, { recursive: true, force: true });
 }
 
-const events = readJsonl(tracePath);
-const completedCollab = events.flatMap(event => {
-  const item = event?.item;
-  return event?.type === "item.completed" && item?.type === "collab_tool_call" && item.status === "completed" ? [item] : [];
-});
-const spawnCalls = completedCollab.filter(item => /spawn|delegate/i.test(String(item.tool ?? "")));
-const receiverThreadIds = [...new Set(spawnCalls.flatMap(item => Array.isArray(item.receiver_thread_ids) ? item.receiver_thread_ids : []).filter(Boolean))];
-const waits = completedCollab.filter(item => item.tool === "wait");
-const messages = events.flatMap(event => event?.type === "item.completed" && event.item?.type === "agent_message" ? [String(event.item.text ?? "")] : []);
-const turnCompleted = events.some(event => event?.type === "turn.completed");
+const trace = host.parseTrace(tracePath);
+const independent = host.independentAgentAudit(trace, { sessionIndex, window: workerWindow });
+const completedCollab = eventsOfKind(trace, "agent_coordination").filter(event => event.status === "completed");
+const spawnCalls = completedCollab.filter(event => /spawn|delegate/i.test(String(event.tool ?? "")));
+const receiverThreadIds = independent.receiver_thread_ids;
+const waits = completedCollab.filter(event => event.tool === "wait");
+const messages = traceAgentMessages(trace);
+const completion = turnCompletion(trace, { timedOut: worker.timedOut === true });
 const result = {
   schema_version: 1,
   run: runRoot,
@@ -143,7 +143,9 @@ const result = {
   worker_exit_code: worker.code,
   worker_signal: worker.signal,
   timed_out: worker.timedOut,
-  turn_completed: turnCompleted,
+  turn_completed: completion.finished,
+  turn_completion: completion,
+  collected_subagent_count: independent.collected_subagent_count,
   spawn_call_count: spawnCalls.length,
   receiver_thread_ids: receiverThreadIds,
   wait_calls: waits.map(item => ({ receiver_thread_ids: item.receiver_thread_ids ?? [], agents_states: item.agents_states ?? null })),

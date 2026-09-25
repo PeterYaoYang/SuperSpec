@@ -79,7 +79,9 @@ npm run eval:probe -- \
   --reasoning high
 ```
 
-成功启动后，运行目录写入 `.eval-runs/<run-id>/`。Probe 会输出正式能力结果和退出码。
+Worker 运行期间，运行目录位于系统临时目录下的独立父目录中，Worker 无法经由相对路径触及 eval 源码、场景隐藏事实或其他运行；结束后整个运行目录归档到 `.eval-runs/<run-id>/`，`manifest.json` 的 `run_layout.worker_run_root` 记录 Worker 实际看到的根路径，供离线重评解释 trace 中的路径。Probe 会输出正式能力结果和退出码。
+
+每个 Worker 回合结束时，Director 都会先检查证据目录和受保护文件的锁定权限是否仍然有效，再恢复权限；检查结果记录在 `director-actions.jsonl` 中。只要有一次检查发现锁已失效，`controlled_environment` 就不能判为通过，最多记为 `unavailable`。
 
 ### 3. 回放密封运行
 

@@ -13,170 +13,117 @@ import {
   readlinkSync,
   readdirSync,
   realpathSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { DEFAULT_WORKER_HOST_ID, getWorkerHost, hostIdentity, recordedWorkerHost, registeredWorkerHostIds, workerHostDefaultsText } from "./hosts/index.mjs";
+import { getJudgeHost, judgeIdentity, registeredJudgeHostIds } from "./judges/index.mjs";
+import { createInterruptController, createTempDirRegistry, processAlive, sweepStaleTempDirs } from "./lib/interrupt.mjs";
+import { currentEvaluatorDigest, isRecoveredSessionPath } from "./lib/provenance.mjs";
 import { createDirectorSpawner } from "./lib/spawn.mjs";
+import { commandText, eventsOfKind, parseLastJson, traceAgentMessages, traceCompletedFileChanges, traceThreadIds, turnCompletion } from "./lib/trace.mjs";
+import { validateHostAdapters } from "./lib/host-adapters-test.mjs";
+import { validateTraceSemantics } from "./lib/trace-semantics.mjs";
 
 const EVAL_ROOT = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(EVAL_ROOT, "..");
 const RUNS_ROOT = join(REPO_ROOT, ".eval-runs");
 const SCENARIO_PATH = join(EVAL_ROOT, "scenarios", "probe-explore.json");
-const AUTH_ALLOWED_KEYS = new Set(["OPENAI_API_KEY", "auth_mode", "last_refresh", "tokens"]);
-const ENV_ALLOWLIST = [
-  "PATH", "HOME", "CODEX_HOME", "ZDOTDIR", "TMPDIR", "LANG", "LC_ALL", "TERM", "USER", "SHELL",
-  "SSL_CERT_FILE", "SSL_CERT_DIR", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
-];
-const REQUIRED_TOOLS = ["codex", "node", "git", "openspec", "rg", process.platform === "win32" ? "cmd.exe" : "sh"];
+const BASE_REQUIRED_TOOLS = ["node", "git", "openspec", "rg", process.platform === "win32" ? "cmd.exe" : "sh"];
 const CORE_GATES = ["process", "controlled_environment", "authenticity", "scope", "artifact", "state", "stop_boundary"];
 const AUDIT_FORBIDDEN_WORKER_COMMANDS = [
   { family: "superspec_record_user_decision" },
   { family: "superspec_transition_except", allowed_subcommands: ["next", "explore"] },
 ];
-const PROVIDER_ALLOWED_KEYS = new Set(["name", "base_url", "env_key", "wire_api", "requires_openai_auth"]);
 const REASONING_LEVELS = new Set(["none", "low", "medium", "high", "xhigh", "max"]);
+const USAGE_EXIT_CODE = 64;
+
+class UsageError extends Error {}
+
+function usage() {
+  return [
+    "SuperSpec Probe",
+    "",
+    "  node evals/probe.mjs [--scenario <file>] [--host <id>] [--judge-host <id>] [--provider <name>] [--model <name>] [--reasoning <level>] [--judge-provider <name>] [--judge-model <name>] [--judge-reasoning <level>] [--inject <fault>]",
+    "  node evals/probe.mjs --regrade <run-dir>",
+    "  node evals/probe.mjs --validate-faults",
+    "",
+    "Options:",
+    "  --scenario <file>     Scenario JSON (default evals/scenarios/probe-explore.json)",
+    `  --host <id>           Worker host adapter (default ${DEFAULT_WORKER_HOST_ID}; registered: ${registeredWorkerHostIds().join(", ")})`,
+    `  --judge-host <id>     Judge host adapter for AI simulated user (default: the Worker host; registered: ${registeredJudgeHostIds().join(", ")})`,
+    `  --provider <name>     Model provider (default per host: ${workerHostDefaultsText("provider")})`,
+    `  --model <name>        Worker model (default per host: ${workerHostDefaultsText("model")})`,
+    "  --reasoning <level>   none|low|medium|high|xhigh|max (default medium)",
+    "  --judge-provider <name>, --judge-model <name>, --judge-reasoning <level>",
+    "                        AI simulated user provider/model/reasoning (default: the Worker values)",
+    "  --inject <fault>      Development fault injection; never a product baseline",
+    "  --regrade <run-dir>   Re-grade a sealed run offline without re-running the Worker",
+    "  --validate-faults     Deterministic evaluator self-checks (no model calls)",
+    "",
+    `Exit codes: 0 PASS/GO, 2 PASS/GO_WITH_LIMITATIONS, 1 FAIL, 3 INVALID, 130/143 interrupted (unsealed, INVALID), ${USAGE_EXIT_CODE} usage error.`,
+    "",
+  ].join("\n");
+}
 
 function parseArgs(argv) {
   const result = {
+    help: false,
     validateFaults: false,
     inject: null,
     regrade: null,
-    provider: "openai",
-    model: "gpt-5.6-terra",
+    host: DEFAULT_WORKER_HOST_ID,
+    judgeHost: null,
+    provider: null,
+    model: null,
     reasoning: "medium",
+    judgeProvider: null,
+    judgeModel: null,
+    judgeReasoning: null,
     scenario: SCENARIO_PATH,
   };
   for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === "--validate-faults") result.validateFaults = true;
+    if (argv[i] === "--help" || argv[i] === "-h") result.help = true;
+    else if (argv[i] === "--validate-faults") result.validateFaults = true;
     else if (argv[i] === "--inject") result.inject = argv[++i] ?? null;
     else if (argv[i] === "--regrade") result.regrade = argv[++i] ?? null;
+    else if (argv[i] === "--host") result.host = argv[++i] ?? "";
+    else if (argv[i] === "--judge-host") result.judgeHost = argv[++i] ?? "";
     else if (argv[i] === "--provider") result.provider = argv[++i] ?? "";
     else if (argv[i] === "--model") result.model = argv[++i] ?? "";
     else if (argv[i] === "--reasoning") result.reasoning = argv[++i] ?? "";
+    else if (argv[i] === "--judge-provider") result.judgeProvider = argv[++i] ?? "";
+    else if (argv[i] === "--judge-model") result.judgeModel = argv[++i] ?? "";
+    else if (argv[i] === "--judge-reasoning") result.judgeReasoning = argv[++i] ?? "";
     else if (argv[i] === "--scenario") result.scenario = resolve(argv[++i] ?? "");
-    else throw new Error(`unknown argument: ${argv[i]}`);
+    else throw new UsageError(`unknown argument: ${argv[i]}`);
   }
-  if (!/^[A-Za-z0-9_-]+$/.test(result.provider)) throw new Error(`invalid provider: ${result.provider}`);
-  if (!/^[A-Za-z0-9._-]+$/.test(result.model)) throw new Error(`invalid model: ${result.model}`);
-  if (!REASONING_LEVELS.has(result.reasoning)) throw new Error(`invalid reasoning: ${result.reasoning}`);
+  if (result.help) return result;
+  let workerHost;
+  try { workerHost = getWorkerHost(result.host); } catch (error) { throw new UsageError(error.message); }
+  result.provider ??= workerHost.eval_defaults.provider;
+  result.model ??= workerHost.eval_defaults.model;
+  result.judgeHost ??= result.host;
+  result.judgeProvider ??= result.provider;
+  result.judgeModel ??= result.model;
+  result.judgeReasoning ??= result.reasoning;
+  try { getJudgeHost(result.judgeHost); } catch (error) { throw new UsageError(error.message); }
+  for (const [label, value] of [["provider", result.provider], ["judge provider", result.judgeProvider]]) {
+    if (!/^[A-Za-z0-9_-]+$/.test(value)) throw new UsageError(`invalid ${label}: ${value}`);
+  }
+  for (const [label, value] of [["model", result.model], ["judge model", result.judgeModel]]) {
+    if (!/^[A-Za-z0-9._-]+$/.test(value)) throw new UsageError(`invalid ${label}: ${value}`);
+  }
+  for (const [label, value] of [["reasoning", result.reasoning], ["judge reasoning", result.judgeReasoning]]) {
+    if (!REASONING_LEVELS.has(value)) throw new UsageError(`invalid ${label}: ${value}`);
+  }
   return result;
-}
-
-function stripTomlComment(line) {
-  let quote = null;
-  let escaped = false;
-  for (let i = 0; i < line.length; i++) {
-    const char = line[i];
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (quote === '"' && char === "\\") {
-      escaped = true;
-      continue;
-    }
-    if (char === '"' || char === "'") {
-      quote = quote === char ? null : quote ?? char;
-      continue;
-    }
-    if (char === "#" && quote === null) return line.slice(0, i);
-  }
-  return line;
-}
-
-function parseTomlScalar(raw, key) {
-  const value = stripTomlComment(raw).trim();
-  if (value.startsWith('"') && value.endsWith('"')) return JSON.parse(value);
-  if (value.startsWith("'") && value.endsWith("'")) return value.slice(1, -1);
-  if (value === "true") return true;
-  if (value === "false") return false;
-  throw new Error(`unsupported provider config value for ${key}`);
-}
-
-function tomlLiteral(value) {
-  return typeof value === "boolean" ? String(value) : JSON.stringify(value);
-}
-
-function controlledProviderProfile(provider, options = {}) {
-  if (provider === "openai") {
-    return {
-      id: provider,
-      source_type: "codex_builtin_provider",
-      requires_openai_auth: true,
-      env_keys: [],
-      config_digest: sha256(JSON.stringify({ provider })),
-      cli_args: ["-c", `model_provider=${tomlLiteral(provider)}`],
-      selected_config_keys: [],
-    };
-  }
-
-  const sourceEnv = options.env ?? process.env;
-  const codexHome = sourceEnv.CODEX_HOME ?? join(sourceEnv.HOME ?? "", ".codex");
-  const configPath = options.configPath ?? join(codexHome, "config.toml");
-  if (!existsSync(configPath)) throw new Error(`Codex provider config unavailable for ${provider}`);
-  const section = `[model_providers.${provider}]`;
-  const selected = {};
-  let active = false;
-  for (const rawLine of readFileSync(configPath, "utf8").split(/\r?\n/)) {
-    const line = stripTomlComment(rawLine).trim();
-    if (line.startsWith("[") && line.endsWith("]")) {
-      active = line === section;
-      continue;
-    }
-    if (!active || !line || line.startsWith("#")) continue;
-    const match = /^([A-Za-z0-9_-]+)\s*=\s*(.+)$/.exec(line);
-    if (!match || !PROVIDER_ALLOWED_KEYS.has(match[1])) continue;
-    selected[match[1]] = parseTomlScalar(match[2], match[1]);
-  }
-
-  const name = typeof selected.name === "string" && selected.name ? selected.name : provider;
-  if (typeof selected.base_url !== "string") throw new Error(`provider ${provider} has no valid base_url`);
-  let baseUrl;
-  try { baseUrl = new URL(selected.base_url); } catch { throw new Error(`provider ${provider} has no valid base_url`); }
-  if (!["http:", "https:"].includes(baseUrl.protocol) || baseUrl.username || baseUrl.password || baseUrl.search || baseUrl.hash) {
-    throw new Error(`provider ${provider} base_url must be credential-free http(s) without query or fragment`);
-  }
-  if (typeof selected.env_key !== "string" || !/^[A-Z][A-Z0-9_]*$/.test(selected.env_key)) throw new Error(`provider ${provider} has no valid env_key`);
-  if (typeof selected.wire_api !== "string" || !["responses", "chat"].includes(selected.wire_api)) throw new Error(`provider ${provider} has unsupported wire_api`);
-  if (selected.requires_openai_auth != null && typeof selected.requires_openai_auth !== "boolean") throw new Error(`provider ${provider} has invalid requires_openai_auth`);
-  if (!sourceEnv[selected.env_key]) throw new Error(`provider credential environment variable is unavailable: ${selected.env_key}`);
-
-  const normalized = {
-    name,
-    base_url: selected.base_url,
-    env_key: selected.env_key,
-    wire_api: selected.wire_api,
-    requires_openai_auth: selected.requires_openai_auth ?? false,
-  };
-  const prefix = `model_providers.${provider}`;
-  return {
-    id: provider,
-    source_type: "host_codex_provider_whitelist",
-    requires_openai_auth: normalized.requires_openai_auth,
-    env_keys: [normalized.env_key],
-    config_digest: sha256(JSON.stringify(normalized)),
-    cli_args: [
-      "-c", `model_provider=${tomlLiteral(provider)}`,
-      "-c", `${prefix}.name=${tomlLiteral(normalized.name)}`,
-      "-c", `${prefix}.base_url=${tomlLiteral(normalized.base_url)}`,
-      "-c", `${prefix}.env_key=${tomlLiteral(normalized.env_key)}`,
-      "-c", `${prefix}.wire_api=${tomlLiteral(normalized.wire_api)}`,
-      "-c", `${prefix}.requires_openai_auth=${tomlLiteral(normalized.requires_openai_auth)}`,
-    ],
-    selected_config_keys: Object.keys(normalized).sort(),
-    metadata: {
-      env_key: normalized.env_key,
-      wire_api: normalized.wire_api,
-      requires_openai_auth: normalized.requires_openai_auth,
-      base_url_digest: sha256(normalized.base_url),
-      base_url_protocol: new URL(normalized.base_url).protocol,
-    },
-  };
 }
 
 function isoForPath() {
@@ -189,13 +136,6 @@ function sha256(data) {
 
 function hashFile(path) {
   return sha256(readFileSync(path));
-}
-
-function currentEvaluatorDigest() {
-  return sha256(JSON.stringify({
-    probe: hashFile(fileURLToPath(import.meta.url)),
-    spawn: hashFile(join(EVAL_ROOT, "lib", "spawn.mjs")),
-  }));
 }
 
 function json(path) {
@@ -255,34 +195,6 @@ function inventory(root) {
   return walk(root, { exclude: path => path === ".git" || path.startsWith(".git/") });
 }
 
-function directoryStructure(root, exclude = new Set()) {
-  if (!existsSync(root)) return [];
-  const entries = [];
-  const visit = (current, rel) => {
-    for (const name of readdirSync(current).sort()) {
-      const childRel = rel ? `${rel}/${name}` : name;
-      if (exclude.has(childRel)) continue;
-      const full = join(current, name);
-      const stat = lstatSync(full);
-      entries.push({ path: childRel, type: stat.isDirectory() ? "directory" : stat.isFile() ? "file" : stat.isSymbolicLink() ? "symlink" : "other", mode: stat.mode & 0o7777 });
-      if (stat.isDirectory()) visit(full, childRel);
-    }
-  };
-  visit(root, "");
-  return entries;
-}
-
-function sessionStorageEvidence(codexHome, threadId) {
-  const structure = directoryStructure(codexHome, new Set(["auth.json"]));
-  const sessionFiles = structure.filter(entry => entry.type === "file" && entry.path.includes(threadId));
-  return {
-    non_auth_entry_count: structure.length,
-    matching_session_file_count: sessionFiles.length,
-    matching_session_paths: sessionFiles.map(entry => entry.path),
-    stored: sessionFiles.length > 0,
-  };
-}
-
 function inventoryChanges(before, after) {
   const left = new Map(before.map(entry => [entry.path, entry]));
   const right = new Map(after.map(entry => [entry.path, entry]));
@@ -304,12 +216,14 @@ function commandOnPath(name, pathValue) {
   return null;
 }
 
-function resolveHostTools(injection) {
+function requiredToolNames(host) {
+  return [...host.required_tools, ...BASE_REQUIRED_TOOLS];
+}
+
+function resolveHostTools(host, injection) {
   const hostPath = process.env.PATH ?? "";
-  const tools = {};
-  for (const name of REQUIRED_TOOLS) {
-    tools[name] = injection === "missing-codex" && name === "codex" ? null : commandOnPath(name, hostPath);
-  }
+  const tools = host.resolveTools(name => commandOnPath(name, hostPath), { injection });
+  for (const name of BASE_REQUIRED_TOOLS) tools[name] = commandOnPath(name, hostPath);
   for (const extra of ["zsh", "ls", "cat", "sed", "find", "mkdir", "cp", "mv", "rm", "pwd", "head", "tail", "sort", "wc", "xargs"]) {
     const found = commandOnPath(extra, hostPath);
     if (found) tools[extra] = found;
@@ -339,59 +253,11 @@ function materializeToolShims(localBin, tools, run) {
   return shims;
 }
 
-function isolatedAuthHome(runId, requiresOpenaiAuth = true) {
-  const home = mkdtempSync(join(tmpdir(), `superspec-probe-home-${runId}-`));
-  const codexHome = mkdtempSync(join(tmpdir(), `superspec-probe-codex-${runId}-`));
-  chmodSync(home, 0o700);
-  chmodSync(codexHome, 0o700);
-  const source = join(process.env.CODEX_HOME ?? join(process.env.HOME ?? "", ".codex"), "auth.json");
-  const target = join(codexHome, "auth.json");
-  let auth = requiresOpenaiAuth
-    ? { source_type: "missing", exists: false, required: true, mode_ok: false, top_level_keys: [] }
-    : { source_type: "not_required", exists: false, required: false, mode_ok: true, top_level_keys: [] };
-  if (requiresOpenaiAuth && existsSync(source)) {
-    const parsed = json(source);
-    const keys = Object.keys(parsed).filter(key => AUTH_ALLOWED_KEYS.has(key)).sort();
-    copyFileSync(source, target);
-    chmodSync(target, 0o600);
-    auth = {
-      source_type: "codex_auth_json_copy",
-      exists: true,
-      required: true,
-      mode_ok: (statSync(target).mode & 0o777) === 0o600,
-      top_level_keys: keys,
-    };
-  }
-  return { home, codexHome, auth };
-}
-
-function controlledEnv(home, codexHome, zdotdir, pathValue, systemShell, providerEnvKeys = []) {
-  const source = process.env;
-  const env = {};
-  for (const key of ENV_ALLOWLIST) {
-    if (source[key] != null) env[key] = source[key];
-  }
-  for (const key of providerEnvKeys) {
-    if (source[key] != null) env[key] = source[key];
-  }
-  env.PATH = pathValue;
-  env.HOME = home;
-  env.CODEX_HOME = codexHome;
-  env.ZDOTDIR = zdotdir;
-  env.TMPDIR = source.TMPDIR ?? tmpdir();
-  env.LANG = source.LANG ?? "en_US.UTF-8";
-  env.LC_ALL = source.LC_ALL ?? "en_US.UTF-8";
-  env.TERM = source.TERM ?? "dumb";
-  env.USER = source.USER ?? "probe";
-  env.SHELL = systemShell;
-  return env;
-}
-
 function gate(status, evidence, detail, evidenceLevel = status === "unavailable" ? "unavailable" : "correlated") {
   return { status, evidence, evidence_level: evidenceLevel, ...(detail ? { detail } : {}) };
 }
 
-function workerProcessStatus(codes, timeouts, timeoutRecoveries, label = "Codex") {
+function workerProcessStatus(codes, timeouts, timeoutRecoveries, label = "Worker") {
   const recoveredTimeoutCount = timeouts.filter((timedOut, index) => timedOut && timeoutRecoveries[index] === true).length;
   const unrecoveredTimeoutCount = timeouts.filter((timedOut, index) => timedOut && timeoutRecoveries[index] !== true).length;
   const exitedCleanly = codes.every(code => code === 0) && unrecoveredTimeoutCount === 0;
@@ -542,12 +408,13 @@ function boundedShellCommand(raw) {
   return canonicalSuperspecArgv(inner);
 }
 
-function exactCommand(command, workspace, executableIdentities = [], bareResolutionProven = false) {
+/** Classifies one normalized command event as grading evidence. */
+function exactCommand(command, workspace, executableIdentities = [], bareResolutionProven = false, { inheritLaunchCwd = false } = {}) {
   if (!command || typeof command !== "object") return { kind: "unknown" };
   const status = command.status;
-  const exitCode = command.exit_code ?? command.exitCode;
-  const cwd = command.cwd ?? command.workdir ?? command.working_directory;
-  const output = command.aggregated_output ?? command.output ?? "";
+  const exitCode = command.exit_code ?? command.legacy_exit_code ?? undefined;
+  const cwd = command.cwd;
+  const output = command.output ?? "";
   const argv = Array.isArray(command.argv)
     ? command.argv
     : Array.isArray(command.command)
@@ -562,7 +429,7 @@ function exactCommand(command, workspace, executableIdentities = [], bareResolut
     const canonical = canonicalSuperspecArgv(raw);
     if (bounded) parsedArgv = bounded;
     else if (canonical) parsedArgv = canonical;
-    else if (/^(?:\/bin\/(?:zsh|sh)|zsh|sh)\s+-[a-z]*c\b/.test(raw)) {
+    else if (/^(?:(?:\/usr)?\/bin\/(?:zsh|sh|bash)|zsh|sh|bash)\s+-[a-z]*c\b/.test(raw)) {
       return { kind: "shell_wrapper", raw, status, exitCode, output };
     }
     else if (!raw || /(?:&&|\|\||[;|<>\n\r])/.test(raw)) return { kind: "unsafe_string", raw };
@@ -575,7 +442,14 @@ function exactCommand(command, workspace, executableIdentities = [], bareResolut
   if (status !== "completed") return { kind: "non_completed", argv: parsedArgv, status, output };
   if (!Number.isInteger(exitCode)) return { kind: "missing_exit_code", argv: parsedArgv, output };
   if (exitCode !== 0) return { kind: "failed", argv: parsedArgv, exitCode, output };
-  const effectiveCwd = typeof cwd === "string" ? cwd : boundedShellCommand(command.command ?? "") ? workspace : null;
+  // Hosts whose shell tool never records cwd (Claude/OMP Bash) declare that
+  // commands run in the controlled Worker launch cwd; others must record it
+  // unless the bounded login-zsh wrapper proves the launch cwd.
+  const effectiveCwd = typeof cwd === "string"
+    ? cwd
+    : boundedShellCommand(command.command ?? "") || (inheritLaunchCwd && parsedArgv)
+      ? workspace
+      : null;
   if (effectiveCwd == null) return { kind: "missing_cwd", argv: parsedArgv, output };
   if (resolve(effectiveCwd) !== resolve(workspace)) return { kind: "wrong_cwd", argv: parsedArgv, cwd: effectiveCwd, output };
   return {
@@ -588,67 +462,71 @@ function exactCommand(command, workspace, executableIdentities = [], bareResolut
   };
 }
 
-function commandObjects(event) {
-  if (event?.type === "item.completed" && event.item?.type === "command_execution") return [event.item];
-  if (event?.type === "command_execution" || event?.type === "command.completed") return [event];
-  if (event?.item?.type === "command_execution" && event?.item?.status === "completed") return [event.item];
-  return [];
+/**
+ * Parses Worker trace file(s) through the host adapter and classifies every
+ * normalized command event for grading.
+ */
+function loadSessionIndex(runRoot) {
+  const path = join(runRoot, "evidence", "host-sessions", "index.json");
+  if (!existsSync(path) || isRecoveredSessionPath(path)) return null;
+  try { return json(path); } catch { return null; }
 }
 
-function parseTrace(tracePath, workspace, injection, executableIdentities, bareResolutionProven, recordMutation) {
+function readDirectorActions(actionLog) {
+  if (!existsSync(actionLog)) return [];
+  return readFileSync(actionLog, "utf8").split("\n").filter(Boolean).flatMap(line => {
+    try { return [JSON.parse(line)]; } catch { return []; }
+  });
+}
+
+/** Director-recorded start/end of one Worker turn (the only clock used to attribute child sessions to it). */
+function workerTurnWindow(actions, turn) {
+  const phase = turn === 1 ? "worker.turn-1" : `worker.turn-${turn}-resume`;
+  const started = actions.find(entry => entry.phase === phase && entry.event === "started");
+  if (!started?.started_at) return null;
+  const completed = actions.find(entry => entry.phase === phase && entry.event === "completed");
+  return { turn, started_at: started.started_at, ended_at: completed?.ended_at ?? null };
+}
+
+function collectWorkerSessions(host, isolation, evidenceDir) {
+  if (!isolation || typeof host.collectSessionArtifacts !== "function") return null;
+  try {
+    return host.collectSessionArtifacts(isolation, join(evidenceDir, "host-sessions"));
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error), files: [], agents: [] };
+  }
+}
+
+function parseTrace(host, tracePath, workspace, injection, executableIdentities, bareResolutionProven, recordMutation) {
   const tracePaths = Array.isArray(tracePath) ? tracePath : [tracePath];
-  const rawLines = tracePaths.flatMap(path => existsSync(path) ? readFileSync(path, "utf8").split("\n").filter(Boolean) : []);
+  const appendLines = [];
   if (injection === "unknown-jsonl") {
     const injected = JSON.stringify({ type: "future.event", payload: { retained: true } });
+    appendLines.push({ file: tracePaths[0], text: injected });
+  }
+  const trace = host.parseTrace(tracePaths, { appendLines });
+  if (injection === "unknown-jsonl") {
     const injectionPath = tracePaths[0];
-    writeFileSync(injectionPath, `${readFileSync(injectionPath, "utf8")}${injected}\n`, { mode: 0o600 });
-    rawLines.push(injected);
+    writeFileSync(injectionPath, `${readFileSync(injectionPath, "utf8")}${appendLines[0].text}\n`, { mode: 0o600 });
     recordMutation?.("injection.trace.unknown-jsonl", injectionPath, { injection });
   }
-  const events = [];
-  let malformed = 0;
-  for (const line of rawLines) {
-    try { events.push(JSON.parse(line)); } catch { malformed++; }
-  }
-  const commands = events.flatMap(commandObjects).map(item => exactCommand(item, workspace, executableIdentities, bareResolutionProven));
+  const commands = eventsOfKind(trace, "command").map(item => exactCommand(item, workspace, executableIdentities, bareResolutionProven, {
+    inheritLaunchCwd: host.commands_inherit_launch_cwd === true,
+  }));
   const direct = commands.filter(item => item.kind === "direct");
   if (injection === "hide-required-command") {
     direct.splice(0, 1);
     recordMutation?.("injection.trace.hide-required-command", tracePaths[0], { injection });
   }
-  const commandSchemaRecognized = events.some(event =>
-    event?.type === "item.started" ||
-    event?.type === "item.completed" ||
-    event?.type === "command_execution" ||
-    event?.type === "command.completed" ||
-    event?.item?.type === "command_execution"
-  );
-  return { events, commands, direct, malformed, raw_event_count: rawLines.length, commandSchemaRecognized };
-}
-
-function traceThreadIds(tracePath) {
-  if (!existsSync(tracePath)) return [];
-  const ids = [];
-  for (const line of readFileSync(tracePath, "utf8").split("\n").filter(Boolean)) {
-    try {
-      const event = JSON.parse(line);
-      const id = event.thread_id ?? event.thread?.id;
-      if ((event.type === "thread.started" || event.type === "thread.resumed") && typeof id === "string") ids.push(id);
-    } catch {}
-  }
-  return [...new Set(ids)];
-}
-
-function traceAgentMessages(tracePath) {
-  if (!existsSync(tracePath)) return [];
-  const messages = [];
-  for (const line of readFileSync(tracePath, "utf8").split("\n").filter(Boolean)) {
-    try {
-      const event = JSON.parse(line);
-      if (event?.type === "item.completed" && event.item?.type === "agent_message" && typeof event.item.text === "string") messages.push(event.item.text);
-    } catch {}
-  }
-  return messages;
+  return {
+    trace,
+    events: trace.events,
+    commands,
+    direct,
+    malformed: trace.malformed_line_count,
+    raw_event_count: trace.raw_event_count,
+    commandSchemaRecognized: trace.command_schema_recognized,
+  };
 }
 
 function turnTracePath(evidenceDir, turn) {
@@ -843,18 +721,18 @@ function simulatedUserTurnFromOutput(nextOutput, scenario) {
   };
 }
 
-function agentMessageRequestsUserReply(tracePath) {
-  const message = traceAgentMessages(tracePath).at(-1)?.trim() ?? "";
+function agentMessageRequestsUserReply(trace) {
+  const message = traceAgentMessages(trace).at(-1)?.trim() ?? "";
   if (message === "") return null;
   const requestsReply = /(?:请|需要|等待|等你|由你).{0,32}(?:回复|答复|选择|确认|决定)|(?:回复|答复|选择|确认)[：:]|请选择|(?:please|need you to|waiting for you to).{0,48}(?:reply|respond|choose|confirm|decide)/iu.test(message);
   return requestsReply ? message : null;
 }
 
-function simulatedUserTurnFromTrace(tracePath, workspace, executableIdentities, bareResolutionProven, scenario) {
-  const trace = parseTrace(tracePath, workspace, null, executableIdentities, bareResolutionProven, null);
+function simulatedUserTurnFromTrace(host, tracePath, workspace, executableIdentities, bareResolutionProven, scenario) {
+  const trace = parseTrace(host, tracePath, workspace, null, executableIdentities, bareResolutionProven, null);
   const boundary = observedWorkflowBoundary(trace);
   if (!boundary && scenario.simulated_user?.mode === "ai") {
-    const question = agentMessageRequestsUserReply(tracePath);
+    const question = agentMessageRequestsUserReply(trace.trace);
     if (question != null) {
       return simulatedUserTurnFromOutput({
         path: "ask_user",
@@ -869,20 +747,6 @@ function simulatedUserTurnFromTrace(tracePath, workspace, executableIdentities, 
   return simulatedUserTurnFromOutput(boundary?.output ?? null, scenario);
 }
 
-function parseAgentMessageJson(tracePath) {
-  const messages = traceAgentMessages(tracePath);
-  const text = messages.at(-1) ?? "";
-  const candidates = [
-    text,
-    text.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1],
-    text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1),
-  ].filter(Boolean);
-  for (const candidate of candidates) {
-    try { return JSON.parse(candidate.trim()); } catch {}
-  }
-  throw new Error("simulated user did not return parseable JSON");
-}
-
 async function resolveSimulatedUserTurn({
   turn,
   tracePath,
@@ -890,16 +754,13 @@ async function resolveSimulatedUserTurn({
   executableIdentities,
   bareResolutionProven,
   scenario,
-  run,
-  codex,
-  providerProfile,
+  host,
+  judge,
   model,
   reasoning,
-  pathValue,
-  systemShell,
   runRoot,
 }) {
-  const policyTurn = simulatedUserTurnFromTrace(tracePath, workspace, executableIdentities, bareResolutionProven, scenario);
+  const policyTurn = simulatedUserTurnFromTrace(host, tracePath, workspace, executableIdentities, bareResolutionProven, scenario);
   if (scenario.simulated_user?.mode !== "ai"
     || policyTurn.action === "complete"
     || policyTurn.source === "configured_stop_scope"
@@ -911,9 +772,6 @@ async function resolveSimulatedUserTurn({
   if (nextOutput?.path !== "ask_user") return policyTurn;
   const userTracePath = join(runRoot, "evidence", `user-turn-${turn}.jsonl`);
   const userStderrPath = join(runRoot, "evidence", `user-turn-${turn}.stderr.log`);
-  const userWorkspace = mkdtempSync(join(tmpdir(), `superspec-sim-user-${turn}-`));
-  const userAuth = isolatedAuthHome(`${basename(runRoot)}-user-${turn}`, providerProfile.requires_openai_auth);
-  const userEnv = controlledEnv(userAuth.home, userAuth.codexHome, join(runRoot, "zdot"), pathValue, systemShell, providerProfile.env_keys);
   const advanceUntilTerminal = scenario.simulated_user?.advance_until_terminal !== false;
   const prompt = [
     "你是评测考场中的独立模拟用户。你不是开发者，不得读取工作区、日志、源码或隐藏文件，也不得调用工具。",
@@ -928,156 +786,98 @@ async function resolveSimulatedUserTurn({
     `已知事实：${JSON.stringify(scenario.simulated_user?.known_facts ?? {})}`,
     `当前问题：${JSON.stringify(nextOutput.ask_user)}`,
   ].join("\n\n");
-  const userArgs = [
-    "exec", "--json", "--ephemeral", "--skip-git-repo-check", "--ignore-user-config", "--strict-config",
-    "--sandbox", "read-only",
-    "-m", scenario.simulated_user?.model ?? model,
-    ...providerProfile.cli_args,
-    "-c", `model_reasoning_effort=${tomlLiteral(scenario.simulated_user?.reasoning ?? reasoning)}`,
-    "-c", "approval_policy=\"never\"",
-    "--disable", "multi_agent",
-    "-C", userWorkspace,
-    "-",
-  ];
-  try {
-    const result = await run(codex, userArgs, {
-      phase: `simulated-user.turn-${turn}`,
-      actor: "simulated_user",
-      cwd: userWorkspace,
-      env: userEnv,
-      stdoutPath: userTracePath,
-      stderrPath: userStderrPath,
-      stdin: prompt,
-      timeoutMs: 600_000,
-    });
-    if (result.code !== 0) throw new Error(`simulated user turn ${turn} exited ${result.code}: ${result.stderr.trim()}`);
-    const raw = parseAgentMessageJson(userTracePath);
-    const allowedAnswers = nextOutput.ask_user.allowed_answers ?? [];
-    if (raw?.action === "needs_human") {
-      if (advanceUntilTerminal) throw new Error(`simulated user turn ${turn} stopped although advance_until_terminal is enabled`);
-      return { action: "needs_human", reason: String(raw.reason ?? "simulated user requires human input"), next_output: nextOutput, source: "ai_user", model_evidence: `evidence/user-turn-${turn}.jsonl` };
-    }
-    if (raw?.action !== "reply"
-      || typeof raw.answer !== "string"
-      || raw.answer.trim() === ""
-      || allowedAnswers.length > 0 && !allowedAnswers.includes(raw.answer)) {
-      throw new Error(`simulated user turn ${turn} returned an unauthorized answer`);
-    }
-    const workerPromptOriginal = raw.answer;
-    return {
-      action: "reply",
-      answer: raw.answer,
-      reason: String(raw.reason ?? ""),
-      question: String(nextOutput.ask_user.question ?? ""),
-      scope: String(nextOutput.ask_user.scope ?? ""),
-      source: "ai_user",
-      next_output: nextOutput,
-      model_evidence: `evidence/user-turn-${turn}.jsonl`,
-      worker_prompt_original: workerPromptOriginal,
-      worker_prompt: evalWorkerPrompt(workerPromptOriginal),
-    };
-  } finally {
-    rmSync(userWorkspace, { recursive: true, force: true });
-    rmSync(userAuth.home, { recursive: true, force: true });
-    rmSync(userAuth.codexHome, { recursive: true, force: true });
-  }
-}
-
-function traceCompletedFileChanges(tracePath) {
-  if (!existsSync(tracePath)) return [];
-  const changes = [];
-  for (const line of readFileSync(tracePath, "utf8").split("\n").filter(Boolean)) {
-    try {
-      const event = JSON.parse(line);
-      if (event?.type === "item.completed" && event.item?.type === "file_change" && event.item.status === "completed") {
-        for (const change of event.item.changes ?? []) changes.push(change);
-      }
-    } catch {}
-  }
-  return changes;
-}
-
-function independentAgentAudit(events) {
-  const completedCalls = events.flatMap(event => {
-    const item = event?.item;
-    return event?.type === "item.completed" && item?.type === "collab_tool_call" && item.status === "completed" ? [item] : [];
+  const { json: raw } = await judge.run({
+    turn,
+    model: scenario.simulated_user?.model ?? model,
+    reasoning: scenario.simulated_user?.reasoning ?? reasoning,
+    prompt,
+    tracePath: userTracePath,
+    stderrPath: userStderrPath,
   });
-  const spawnCalls = completedCalls.filter(item => /spawn|delegate/i.test(String(item.tool ?? "")));
-  const receiverIds = [...new Set(spawnCalls.flatMap(item => Array.isArray(item.receiver_thread_ids) ? item.receiver_thread_ids : []).filter(id => typeof id === "string" && id !== ""))];
+  const allowedAnswers = nextOutput.ask_user.allowed_answers ?? [];
+  if (raw?.action === "needs_human") {
+    if (advanceUntilTerminal) throw new Error(`simulated user turn ${turn} stopped although advance_until_terminal is enabled`);
+    return { action: "needs_human", reason: String(raw.reason ?? "simulated user requires human input"), next_output: nextOutput, source: "ai_user", model_evidence: `evidence/user-turn-${turn}.jsonl` };
+  }
+  if (raw?.action !== "reply"
+    || typeof raw.answer !== "string"
+    || raw.answer.trim() === ""
+    || allowedAnswers.length > 0 && !allowedAnswers.includes(raw.answer)) {
+    throw new Error(`simulated user turn ${turn} returned an unauthorized answer`);
+  }
+  const workerPromptOriginal = raw.answer;
   return {
-    ok: receiverIds.length > 0,
-    spawn_call_count: spawnCalls.length,
-    receiver_thread_ids: receiverIds,
-    empty_wait_count: completedCalls.filter(item => item.tool === "wait" && (!Array.isArray(item.receiver_thread_ids) || item.receiver_thread_ids.length === 0)).length,
+    action: "reply",
+    answer: raw.answer,
+    reason: String(raw.reason ?? ""),
+    question: String(nextOutput.ask_user.question ?? ""),
+    scope: String(nextOutput.ask_user.scope ?? ""),
+    source: "ai_user",
+    next_output: nextOutput,
+    model_evidence: `evidence/user-turn-${turn}.jsonl`,
+    worker_prompt_original: workerPromptOriginal,
+    worker_prompt: evalWorkerPrompt(workerPromptOriginal),
   };
 }
 
-function traceCompletedCommand(tracePath, expectedCommand) {
-  if (!existsSync(tracePath)) return null;
-  for (const line of readFileSync(tracePath, "utf8").split("\n").filter(Boolean)) {
-    try {
-      const event = JSON.parse(line);
-      for (const item of commandObjects(event)) {
-        const raw = Array.isArray(item.argv) ? item.argv.join(" ") : String(item.command ?? "");
-        if (item.status === "completed" && item.exit_code === 0 && unwrapCommandForPolicy(raw).trim() === expectedCommand) return item;
-      }
-    } catch {}
+function commandEvents(events) {
+  return events.filter(event => event?.kind === "command");
+}
+
+function traceCompletedCommand(trace, expectedCommand) {
+  for (const item of eventsOfKind(trace, "command")) {
+    if (item.status === "completed" && item.exit_code === 0 && unwrapCommandForPolicy(commandText(item)).trim() === expectedCommand) return item;
   }
   return null;
 }
 
+function recordedAggregatedOutput(command) {
+  return command?.output_field === "aggregated_output" ? command.output : null;
+}
+
 function superspecInvocationAudit(events, executableIdentities = [], bareResolutionProven = false) {
   const violations = [];
-  for (const event of events) {
-    for (const item of commandObjects(event)) {
-      const raw = Array.isArray(item.argv) ? item.argv.join(" ") : String(item.command ?? "");
-      if (Array.isArray(item.argv)) {
-        const argv = item.argv;
-        if (typeof argv[0] === "string" && executableAllowed(argv[0], executableIdentities, bareResolutionProven)) {
-          violations.push({ command: raw, executable: argv[0] });
-          continue;
-        }
-        if (typeof argv[1] === "string" && executableAllowed(argv[1], executableIdentities, false)) {
-          violations.push({ command: raw, executable: argv[1] });
-        }
+  for (const item of commandEvents(events)) {
+    const raw = commandText(item);
+    if (Array.isArray(item.argv)) {
+      const argv = item.argv;
+      if (typeof argv[0] === "string" && executableAllowed(argv[0], executableIdentities, bareResolutionProven)) {
+        violations.push({ command: raw, executable: argv[0] });
         continue;
       }
-      const command = unwrapCommandForPolicy(raw);
-      for (const segment of command.split(/&&|\|\||;|\|/)) {
-        const match = segment.trim().match(/^(?:env(?:\s+[A-Za-z_][A-Za-z0-9_]*=[^\s]+)*\s+)?(?:command\s+)?([^\s]+)(?:\s+([^\s]+))?/);
-        if (!match) continue;
-        const executable = match[1].replace(/^['"]|['"]$/g, "");
-        const firstArg = match[2]?.replace(/^['"]|['"]$/g, "");
-        if (executableAllowed(executable, executableIdentities, bareResolutionProven)
-          || (firstArg && executableAllowed(firstArg, executableIdentities, false))) {
-          violations.push({ command: raw, executable: executableAllowed(executable, executableIdentities, bareResolutionProven) ? executable : firstArg });
-        }
+      if (typeof argv[1] === "string" && executableAllowed(argv[1], executableIdentities, false)) {
+        violations.push({ command: raw, executable: argv[1] });
+      }
+      continue;
+    }
+    const command = unwrapCommandForPolicy(raw);
+    for (const segment of command.split(/&&|\|\||;|\|/)) {
+      const match = segment.trim().match(/^(?:env(?:\s+[A-Za-z_][A-Za-z0-9_]*=[^\s]+)*\s+)?(?:command\s+)?([^\s]+)(?:\s+([^\s]+))?/);
+      if (!match) continue;
+      const executable = match[1].replace(/^['"]|['"]$/g, "");
+      const firstArg = match[2]?.replace(/^['"]|['"]$/g, "");
+      if (executableAllowed(executable, executableIdentities, bareResolutionProven)
+        || (firstArg && executableAllowed(firstArg, executableIdentities, false))) {
+        violations.push({ command: raw, executable: executableAllowed(executable, executableIdentities, bareResolutionProven) ? executable : firstArg });
       }
     }
   }
   return { ok: violations.length === 0, violations };
 }
 
-function negativeVerificationEvidence(tracePath, scenario) {
+function negativeVerificationEvidence(trace, scenario) {
   const required = scenario.assertions.required_verification_commands ?? [];
   const completedProof = expectedCommand => {
-    if (!existsSync(tracePath)) return null;
-    for (const line of readFileSync(tracePath, "utf8").split("\n").filter(Boolean)) {
-      try {
-        const event = JSON.parse(line);
-        for (const item of commandObjects(event)) {
-          if (item.status !== "completed" || item.exit_code !== 0) continue;
-          const raw = Array.isArray(item.argv) ? item.argv.join(" ") : String(item.command ?? "");
-          const command = unwrapCommandForPolicy(raw).trim();
-          if (command === expectedCommand) return { item, proof: "exact" };
-          if (/[;|<>\n\r]/.test(command)) continue;
-          const segments = command.split(/\s*&&\s*/);
-          const changesDirectory = segments.some(segment => /^(?:cd|pushd|popd)(?:\s|$)/.test(segment));
-          if (segments.length > 1 && segments.every(Boolean) && !changesDirectory && segments.includes(expectedCommand)) {
-            return { item, proof: "successful_and_chain" };
-          }
-        }
-      } catch {}
+    for (const item of eventsOfKind(trace, "command")) {
+      if (item.status !== "completed" || item.exit_code !== 0) continue;
+      const command = unwrapCommandForPolicy(commandText(item)).trim();
+      if (command === expectedCommand) return { item, proof: "exact" };
+      if (/[;|<>\n\r]/.test(command)) continue;
+      const segments = command.split(/\s*&&\s*/);
+      const changesDirectory = segments.some(segment => /^(?:cd|pushd|popd)(?:\s|$)/.test(segment));
+      if (segments.length > 1 && segments.every(Boolean) && !changesDirectory && segments.includes(expectedCommand)) {
+        return { item, proof: "successful_and_chain" };
+      }
     }
     return null;
   };
@@ -1139,17 +939,23 @@ function isSafeSuperspecStdinPayload(command, candidate) {
 }
 
 function stripSafeSuperspecJsonPayloads(command) {
-  return command.replace(
-    /printf\s+'%s(?:\\n)?'\s+'(\{[^']*\}|\[[^']*\])'\s*\|\s*(?:(?:[^\s'"]*\/)?superspec)\s+record\s+(?:user-decision|job-submit|test-run)\b/g,
-    (match, payload) => {
-      try {
-        JSON.parse(payload);
-        return match.replace(payload, "{}");
-      } catch {
-        return match;
-      }
-    },
-  );
+  const stripValidJson = (match, payload) => {
+    try {
+      JSON.parse(payload);
+      return match.replace(payload, "{}");
+    } catch {
+      return match;
+    }
+  };
+  return command
+    .replace(
+      /printf\s+'%s(?:\\n)?'\s+'(\{[^']*\}|\[[^']*\])'\s*\|\s*(?:(?:[^\s'"]*\/)?superspec)\s+record\s+(?:user-decision|job-submit|test-run)\b/g,
+      stripValidJson,
+    )
+    .replace(
+      /(?:(?:[^\s'"]*\/)?superspec)\s+record\s+job-submit\b[^;&|<>`']*--report-json\s+'(\{[^']*\})'/g,
+      stripValidJson,
+    );
 }
 
 function isAwkRegexLiteral(command, candidate) {
@@ -1164,58 +970,121 @@ function traceEnvironmentAudit(events, {
   packageRoot,
   binRoot,
   controlledHome,
-  controlledCodexHome,
+  controlledHostHome,
   controlledZdotdir,
+  hostSensitiveEnvKeys = [],
   sensitiveEnvKeys = [],
+  harnessRoots = [],
+  hostSecretRoots = defaultHostSecretRoots(),
 }) {
+  // Only evaluation validity and credentials are policed: harness fixtures/evidence and
+  // secrets fail the gate; other host paths (listing dirs, global packages, /tmp) are observations.
   const violations = [];
+  const observations = [];
   const allowedRoots = [workspace, packageRoot, binRoot].map(normalizedAuditPath);
-  const restrictedRoots = [controlledHome, controlledCodexHome, controlledZdotdir].map(normalizedAuditPath);
+  const restrictedRoots = [controlledHome, controlledHostHome, controlledZdotdir].map(normalizedAuditPath);
+  const secretRoots = hostSecretRoots.filter(Boolean).map(normalizedAuditPath);
+  const protectedRoots = harnessRoots.filter(Boolean).map(normalizedAuditPath);
   const systemRoots = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"].map(normalizedAuditPath);
-  const sensitiveNames = [...new Set(["CODEX_HOME", "ZDOTDIR", "OPENAI_API_KEY", ...sensitiveEnvKeys])];
-  for (const event of events) {
-    for (const item of commandObjects(event)) {
-      const raw = Array.isArray(item.argv) ? item.argv.join(" ") : String(item.command ?? "");
-      if (/\bnpm\s+root(?:\s+-g)?\b/.test(raw) || raw.includes("/lib/node_modules/")) {
-        violations.push({ reason: "global_package_lookup", command: raw });
-      }
-      const unwrapped = unwrapCommandForPolicy(raw);
-      const sourceTextSearch = !hasShellControlSyntax(unwrapped) && !/--pre(?:=|\s)/.test(unwrapped)
-        && /^(?:(?:[^\s'"]*\/)?(?:rg|grep)|git\s+grep)(?:\s|$)/.test(unwrapped.trim());
-      const expandsSensitiveEnvironment = sensitiveNames.some(name =>
-        raw.includes(`$${name}`) || raw.includes(`\${${name}}`)
-      );
-      const referencesSensitiveEnvironment = expandsSensitiveEnvironment || !sourceTextSearch && sensitiveNames.some(name =>
-        new RegExp(`\\b${name}\\b`).test(raw)
-      );
-      const inspectsEnvironment = /(?:^|[\s/])(?:env|printenv)(?:\s|$)/.test(raw)
-        || !sourceTextSearch && /process\.env|os\.environ|System\.getenv|getenv\s*\(/.test(raw);
-      if (referencesSensitiveEnvironment || inspectsEnvironment || /(?:^|[\s'"=(])~(?:\/|\s|$)/.test(raw)) {
-        violations.push({ reason: "controlled_home_reference", command: raw });
-      }
-      const auditRaw = stripSafeSuperspecJsonPayloads(unwrapped);
-      const absolutePaths = [...auditRaw.matchAll(/(?:^|[\s'"=(])((?:\/[A-Za-z0-9._@+,=:\-]+){2,})/g)].map(match => match[1]);
-      for (const candidate of absolutePaths) {
-        const cleaned = candidate.replace(/[),;]+$/, "");
-        if (isLeadingSearchPattern(unwrapped, cleaned)
-          || isSafeSuperspecStdinPayload(unwrapped, cleaned)
-          || isAwkRegexLiteral(unwrapped, cleaned)) continue;
-        const normalized = normalizedAuditPath(cleaned);
-        if (restrictedRoots.some(root => pathWithin(normalized, root))) {
-          violations.push({ reason: "controlled_home_path", path: cleaned, normalized_path: normalized, command: raw });
-          continue;
-        }
-        const allowed = allowedRoots.some(root => pathWithin(normalized, root))
-          || systemRoots.some(root => pathWithin(normalized, root))
-          || normalized === "/dev/null";
-        if (!allowed) violations.push({ reason: "absolute_path_outside_allowlist", path: cleaned, normalized_path: normalized, command: raw });
-      }
-      if (/(?:^|\s)\.\.(?:\/|\s|$)/.test(raw) || /(?:scenario\.json|manifest\.json|capability\.json|director-actions|turn-1\.jsonl)/.test(raw)) {
-        violations.push({ reason: "relative_harness_traversal", command: raw });
-      }
+  const sensitiveNames = [...new Set(["ZDOTDIR", ...hostSensitiveEnvKeys, ...sensitiveEnvKeys])];
+  const classify = (normalized, { contentSearch }) => {
+    if (restrictedRoots.some(root => pathWithin(normalized, root))) return "controlled_home_path";
+    if (secretRoots.some(root => pathWithin(normalized, root))) return "host_secret_path";
+    if (allowedRoots.some(root => pathWithin(normalized, root))
+      || systemRoots.some(root => pathWithin(normalized, root))
+      || normalized === "/dev/null") return null;
+    const ancestorOfAllowed = allowedRoots.some(root => pathWithin(root, normalized));
+    const containsHarness = protectedRoots.some(root => pathWithin(root, normalized));
+    if (ancestorOfAllowed) return contentSearch && containsHarness ? "harness_content_search" : "observed";
+    if (protectedRoots.some(root => pathWithin(normalized, root))) return "harness_path";
+    if (contentSearch && containsHarness) return "harness_content_search";
+    return "observed";
+  };
+  const record = (reason, entry, { listingOnly = false, blocked = false } = {}) => {
+    if (reason === "observed" || (listingOnly && (reason === "harness_path" || reason === "harness_content_search"))) {
+      observations.push({ reason: reason === "observed" ? "host_path_outside_workspace" : "harness_listing", ...entry });
+    } else if (reason && blocked) {
+      observations.push({ reason: "blocked_attempt", blocked_reason: reason, ...entry });
+    } else if (reason) violations.push({ reason, ...entry });
+  };
+  for (const item of commandEvents(events)) {
+    const raw = commandText(item);
+    if (/\bnpm\s+root(?:\s+-g)?\b/.test(raw) || raw.includes("/lib/node_modules/")) {
+      observations.push({ reason: "global_package_lookup", command: raw });
+    }
+    const unwrapped = unwrapCommandForPolicy(raw);
+    const sourceTextSearch = !hasShellControlSyntax(unwrapped) && !/--pre(?:=|\s)/.test(unwrapped)
+      && /^(?:(?:[^\s'"]*\/)?(?:rg|grep)|git\s+grep)(?:\s|$)/.test(unwrapped.trim());
+    const expandsSensitiveEnvironment = sensitiveNames.some(name =>
+      raw.includes(`$${name}`) || raw.includes(`\${${name}}`)
+    );
+    const referencesSensitiveEnvironment = expandsSensitiveEnvironment || !sourceTextSearch && sensitiveNames.some(name =>
+      new RegExp(`\\b${name}\\b`).test(raw)
+    );
+    const inspectsEnvironment = /(?:^|[\s/])(?:env|printenv)(?:\s|$)/.test(raw)
+      || !sourceTextSearch && /process\.env|os\.environ|System\.getenv|getenv\s*\(/.test(raw);
+    if (referencesSensitiveEnvironment || inspectsEnvironment || /(?:^|[\s'"=(])~(?:\/|\s|$)/.test(raw)) {
+      violations.push({ reason: "controlled_home_reference", command: raw });
+    }
+    const auditRaw = stripSafeSuperspecJsonPayloads(unwrapped);
+    const contentSearch = /(?:^|[\s;&|(])(?:(?:[^\s'";&|]*\/)?(?:rg|ag)|git\s+grep|(?:[^\s'";&|]*\/)?grep\s+(?:-\S+\s+)*-[^\s-]*[rR]\S*)(?:\s|$)/.test(auditRaw);
+    const commandCwd = typeof item.cwd === "string" && isAbsolute(item.cwd) ? item.cwd : workspace;
+    const listingOnly = !/[<>`$]/.test(auditRaw) && auditRaw.split(/\s*(?:&&|\|\||;)\s*/).every(segment =>
+      /^(?:(?:[^\s'"]*\/)?ls|cd|pwd|echo)(?:\s[^|]*)?$/.test(segment.trim()));
+    // A chained command may have read content before a later part was denied, so only single commands count as blocked.
+    const blocked = item.status === "failed" && !hasShellControlSyntax(auditRaw)
+      && /operation not permitted|permission denied|sandbox/i.test(String(item.output ?? ""));
+    const absolutePaths = [...auditRaw.matchAll(/(?:^|[\s'"=(])((?:\/[A-Za-z0-9._@+,=:\-]+){2,})/g)].map(match => match[1]);
+    for (const candidate of absolutePaths) {
+      const cleaned = candidate.replace(/[),;]+$/, "");
+      if (isLeadingSearchPattern(unwrapped, cleaned)
+        || isSafeSuperspecStdinPayload(unwrapped, cleaned)
+        || isAwkRegexLiteral(unwrapped, cleaned)) continue;
+      const normalized = normalizedAuditPath(cleaned);
+      record(classify(normalized, { contentSearch }), { path: cleaned, normalized_path: normalized, command: raw }, { listingOnly, blocked });
+    }
+    for (const match of auditRaw.matchAll(/(?:^|[\s'"=(])(\.\.(?:\/[^\s'";&|<>)]*)?)(?=$|[\s'";&|<>)])/g)) {
+      const normalized = normalizedAuditPath(resolve(commandCwd, match[1]));
+      record(classify(normalized, { contentSearch }), { path: match[1], normalized_path: normalized, command: raw }, { listingOnly, blocked });
+    }
+    if (!listingOnly && /(?<![\w.-])(?:scenario\.json|manifest\.json|capability\.json|director-actions|turn-1\.jsonl)/.test(raw)) {
+      record("relative_harness_traversal", { command: raw }, { blocked });
     }
   }
-  return { ok: violations.length === 0, violations };
+  // Host file tools (read/search/edit) bypass the shell; their paths get the same boundary.
+  for (const item of events.filter(event => event?.kind === "file_access")) {
+    const contentSearch = /^(?:grep|Grep)$/.test(String(item.tool ?? ""));
+    const blocked = item.status === "failed";
+    for (const candidate of Array.isArray(item.paths) ? item.paths : []) {
+      if (typeof candidate !== "string" || candidate === "") continue;
+      if (/^~(?:\/|$)/.test(candidate)) {
+        record("controlled_home_reference", { path: candidate, tool: item.tool }, { blocked });
+        continue;
+      }
+      const normalized = normalizedAuditPath(isAbsolute(candidate) ? candidate : resolve(workspace, candidate));
+      record(classify(normalized, { contentSearch }), { path: candidate, normalized_path: normalized, tool: item.tool }, { blocked });
+    }
+  }
+  return { ok: violations.length === 0, violations, observations };
+}
+
+function environmentObservationNote(audit) {
+  const count = audit.observations?.length ?? 0;
+  return count > 0 ? `; ${count} non-blocking host path observation(s) outside the workspace` : "";
+}
+
+function environmentViolationReasons(audit) {
+  return [...new Set(audit.violations.map(item => item.reason))].join(", ");
+}
+
+/** Real host credential stores; the Worker runs with an isolated HOME and must never reach these. */
+function defaultHostSecretRoots(env = process.env) {
+  const home = homedir();
+  return [
+    join(home, ".codex"), join(home, ".claude"), join(home, ".omp"), join(home, ".ssh"),
+    join(home, ".config", "gh"), join(home, ".aws"), join(home, ".npmrc"),
+    env.CODEX_HOME, env.CLAUDE_CONFIG_DIR,
+  ].filter(Boolean);
 }
 
 function unwrapCommandForPolicy(raw) {
@@ -1232,22 +1101,20 @@ function workerCommandPolicyAudit(events, assertions, executableIdentities = [],
   const violations = [];
   const enabled = new Set((assertions.forbidden_worker_commands ?? []).map(rule => rule.family));
   const transitionRule = (assertions.forbidden_worker_commands ?? []).find(rule => rule.family === "superspec_transition_except");
-  for (const event of events) {
-    for (const item of commandObjects(event)) {
-      const raw = Array.isArray(item.argv) ? item.argv.join(" ") : String(item.command ?? "");
-      const command = unwrapCommandForPolicy(raw);
-      const matches = command.matchAll(/(?:^|\s)([^\s'";&|<>]+)\s+(record|transition)\s+([^\s'";&|<>]+)/g);
-      for (const match of matches) {
-        const executable = match[1];
-        if (!executableAllowed(executable, executableIdentities, bareResolutionProven)) continue;
-        const family = match[2];
-        const subcommand = match[3];
-        if (enabled.has("superspec_record_user_decision") && family === "record" && subcommand === "user-decision") {
-          violations.push({ family: "superspec_record_user_decision", executable, command: raw });
-        }
-        if (transitionRule && family === "transition" && !transitionRule.allowed_subcommands.includes(subcommand)) {
-          violations.push({ family: "superspec_transition_except", executable, subcommand, command: raw });
-        }
+  for (const item of commandEvents(events)) {
+    const raw = commandText(item);
+    const command = unwrapCommandForPolicy(raw);
+    const matches = command.matchAll(/(?:^|\s)([^\s'";&|<>]+)\s+(record|transition)\s+([^\s'";&|<>]+)/g);
+    for (const match of matches) {
+      const executable = match[1];
+      if (!executableAllowed(executable, executableIdentities, bareResolutionProven)) continue;
+      const family = match[2];
+      const subcommand = match[3];
+      if (enabled.has("superspec_record_user_decision") && family === "record" && subcommand === "user-decision") {
+        violations.push({ family: "superspec_record_user_decision", executable, command: raw });
+      }
+      if (transitionRule && family === "transition" && !transitionRule.allowed_subcommands.includes(subcommand)) {
+        violations.push({ family: "superspec_transition_except", executable, subcommand, command: raw });
       }
     }
   }
@@ -1365,46 +1232,6 @@ function classifyAuthenticity(trace, required, workerCode, executableIdentities 
   };
 }
 
-function parseLastJson(text) {
-  const trimmed = String(text ?? "").trim();
-  if (!trimmed) return null;
-  try { return JSON.parse(trimmed); } catch {}
-
-  let last = null;
-  let start = -1;
-  let depth = 0;
-  let quote = false;
-  let escaped = false;
-  for (let index = 0; index < trimmed.length; index++) {
-    const char = trimmed[index];
-    if (start < 0) {
-      if (char === "{" || char === "[") {
-        start = index;
-        depth = 1;
-        quote = false;
-        escaped = false;
-      }
-      continue;
-    }
-    if (quote) {
-      if (escaped) escaped = false;
-      else if (char === "\\") escaped = true;
-      else if (char === '"') quote = false;
-      continue;
-    }
-    if (char === '"') {
-      quote = true;
-      continue;
-    }
-    if (char === "{" || char === "[") depth++;
-    else if (char === "}" || char === "]") depth--;
-    if (depth !== 0) continue;
-    try { last = JSON.parse(trimmed.slice(start, index + 1)); } catch {}
-    start = -1;
-  }
-  return last;
-}
-
 function directStatusResult(trace, expectedArgv, executableIdentities, bareResolutionProven) {
   const command = [...trace.direct].reverse().find(item =>
     sameArgv(item.argv, expectedArgv, executableIdentities, bareResolutionProven)
@@ -1461,7 +1288,16 @@ function pathAllowed(path, allowed) {
     : path === pattern);
 }
 
-function inventoryChangeAllowed(change, allowed) {
+/** Directories the host CLI itself creates in the workspace (never files the Worker chose to write). */
+function hostWorkspaceNoise(change, host) {
+  const dirs = host?.workspace_noise_dirs ?? [];
+  const isDirectory = entry => entry == null || entry.type === "directory";
+  if (!isDirectory(change.before) || !isDirectory(change.after)) return false;
+  return dirs.some(dir => change.path === dir || dir.startsWith(`${change.path}/`));
+}
+
+function inventoryChangeAllowed(change, allowed, host = null) {
+  if (hostWorkspaceNoise(change, host)) return true;
   if (pathAllowed(change.path, allowed)) return true;
   const type = change.after?.type ?? change.before?.type;
   if (type !== "directory") return false;
@@ -1622,35 +1458,102 @@ function restoreEvidenceAfterWorker(evidenceDir, paths) {
   for (const path of paths) if (existsSync(path)) chmodSync(path, 0o600);
 }
 
-function parseFeatureList(output) {
-  const features = new Map();
-  for (const line of output.split("\n")) {
-    const match = /^([A-Za-z0-9_]+)\s+(stable|experimental|deprecated|removed|under development)\s+(true|false)\s*$/.exec(line.trim());
-    if (match && match[2] !== "removed") features.set(match[1], { stage: match[2], enabled: match[3] === "true" });
-  }
-  return features;
+/**
+ * Modes that no longer match the Worker lock when the Worker exits. Some
+ * filesystems (for example iCloud-synced folders) silently reset modes, so the
+ * lock only counts as enforced when it is still in place afterwards.
+ */
+function evidenceLockDrift(evidenceDir, paths) {
+  const drift = [];
+  const check = (path, expected) => {
+    let mode = null;
+    try { mode = statSync(path).mode & 0o777; } catch (error) {
+      if (error?.code === "ENOENT") return;
+    }
+    if (mode !== expected) {
+      drift.push({ path: posix(relative(dirname(evidenceDir), path)), expected: expected.toString(8), actual: mode == null ? null : mode.toString(8) });
+    }
+  };
+  check(evidenceDir, 0o300);
+  for (const path of paths) check(path, 0o200);
+  return drift;
 }
 
-function normalizeUnsupportedProjectFeatures(configPath, supported, run) {
-  const original = readFileSync(configPath, "utf8");
-  const removed = [];
-  const normalized = original.split("\n").filter(line => {
-    const match = /^\s*([A-Za-z0-9_]+)\s*=/.exec(line);
-    if (match && !supported.has(match[1]) && match[1] === "child_agents_md") {
-      removed.push(line);
-      return false;
+function evidenceLockFailures(actions) {
+  return actions.filter(entry => entry.action_kind === "injected_mutation"
+    && typeof entry.phase === "string"
+    && entry.phase.startsWith("evidence-lock.")
+    && entry.detail?.intact !== true);
+}
+
+/** A passing environment gate cannot stand when the evidence lock did not hold for a Worker turn. */
+function withEvidenceLockStatus(environmentGate, actions) {
+  if (environmentGate.status !== "pass") return environmentGate;
+  const failures = evidenceLockFailures(actions);
+  if (failures.length === 0) return environmentGate;
+  const detail = failures.map(entry => `${entry.phase.slice("evidence-lock.".length)}: ${(entry.detail?.drift ?? []).map(item => `${item.path} ${item.actual ?? "?"}≠${item.expected}`).join(", ")}`).join("; ");
+  return gate("unavailable", ["evidence/director-actions.jsonl"], `evidence lock was not intact when the Worker exited, so Worker isolation from evidence cannot be proven: ${detail}`);
+}
+
+/**
+ * Live runs execute outside the repository so a Worker cannot reach the eval
+ * sources, sibling runs or hidden scenario facts through relative paths; the
+ * finished run is archived under `.eval-runs`.
+ */
+function createLiveRunRoot(runId) {
+  return join(realpathSync(mkdtempSync(join(tmpdir(), `superspec-live-${runId}-`))), runId);
+}
+
+/**
+ * Concurrent probes share the repository `dist/`, which the build deletes and
+ * regenerates, so building and copying the package must not interleave.
+ */
+async function withRepositoryBuildLock(action, { lockDir = join(tmpdir(), `superspec-build-lock-${sha256(REPO_ROOT).slice(0, 16)}`), timeoutMs = 600_000, pollMs = 250, abandonedAfterMs = 60_000 } = {}) {
+  const ownerPath = join(lockDir, "owner");
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      mkdirSync(lockDir);
+      writeFileSync(ownerPath, String(process.pid));
+      break;
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      let owner = NaN;
+      try { owner = Number(readFileSync(ownerPath, "utf8")); } catch {}
+      let age = 0;
+      try { age = Date.now() - statSync(lockDir).mtimeMs; } catch { continue; }
+      const ownerGone = Number.isInteger(owner) && owner > 0 ? !processAlive(owner) : age > abandonedAfterMs;
+      if (ownerGone) {
+        rmSync(lockDir, { recursive: true, force: true });
+        continue;
+      }
+      if (Date.now() > deadline) throw new Error(`timed out waiting for repository build lock ${lockDir}`);
+      await new Promise(resolve => setTimeout(resolve, pollMs));
     }
-    return true;
-  }).join("\n");
-  if (normalized !== original) {
-    writeFileSync(configPath, normalized);
-    run.recordMutation("setup.config.normalize-unsupported-features", configPath, { removed });
   }
-  return {
-    original_digest: sha256(original),
-    normalized_digest: sha256(normalized),
-    removed,
-  };
+  try {
+    return await action();
+  } finally {
+    rmSync(lockDir, { recursive: true, force: true });
+  }
+}
+
+/** Root the Worker actually saw; runs recorded before live roots existed ran in place. */
+function recordedWorkerRunRoot(manifest, runRoot) {
+  const recorded = manifest?.run_layout?.worker_run_root;
+  return typeof recorded === "string" && isAbsolute(recorded) ? recorded : runRoot;
+}
+
+function archiveLiveRun(liveRoot, archiveRoot) {
+  mkdirSync(dirname(archiveRoot), { recursive: true });
+  if (existsSync(archiveRoot)) throw new Error(`archive run directory already exists: ${archiveRoot}`);
+  try {
+    renameSync(liveRoot, archiveRoot);
+  } catch (error) {
+    if (error?.code !== "EXDEV") throw error;
+    cpSync(liveRoot, archiveRoot, { recursive: true, verbatimSymlinks: true, preserveTimestamps: true, errorOnExist: true, force: false });
+  }
+  rmSync(dirname(liveRoot), { recursive: true, force: true });
 }
 
 function directorSafe(actionLog, workerStartedAt, superspecIdentities) {
@@ -1692,6 +1595,9 @@ function normalizeEvidencePaths(capability, runRoot) {
 
 async function validateFaultMappings() {
   const outcomes = [];
+  const codexHost = getWorkerHost("codex");
+  const codexEvents = records => codexHost.normalizeRecords(records).events;
+  const codexCommand = item => codexHost.normalizeCommandItem(item);
   const make = statuses => {
     const cap = emptyCapability("synthetic");
     for (const [name, status] of Object.entries(statuses)) cap.gates[name] = gate(status, ["synthetic"]);
@@ -1720,17 +1626,17 @@ async function validateFaultMappings() {
   outcomes.push({ name: "regrade-prompt-difference-caps-go", result: [limitedPass.capability_verdict, limitedPass.exit_code] });
 
   const workspace = "/tmp/workspace";
-  const future = commandObjects({ type: "future.event", payload: { retained: true } });
-  if (future.length !== 0) throw new Error("unknown event compatibility failed");
-  const wrapper = exactCommand({ status: "completed", exit_code: 0, command: "/bin/zsh -lc 'superspec transition next --change x'" }, workspace, [], true);
+  const future = codexHost.normalizeRecords([{ type: "future.event", payload: { retained: true } }]);
+  if (eventsOfKind(future, "command").length !== 0 || future.events[0]?.kind !== "unknown") throw new Error("unknown event compatibility failed");
+  const wrapper = exactCommand(codexCommand({ status: "completed", exit_code: 0, command: "/bin/zsh -lc 'superspec transition next --change x'" }), workspace, [], true);
   if (wrapper.kind !== "direct" || wrapper.cwd_source !== "controlled_worker_launch") throw new Error("bounded canonical shell wrapper must count as direct evidence");
-  const doubleWrapper = exactCommand({ status: "completed", exit_code: 0, command: "/bin/zsh -lc \"superspec transition next --change \\\"x\\\"\"" }, workspace, [], true);
+  const doubleWrapper = exactCommand(codexCommand({ status: "completed", exit_code: 0, command: "/bin/zsh -lc \"superspec transition next --change \\\"x\\\"\"" }), workspace, [], true);
   if (doubleWrapper.kind !== "direct") throw new Error("bounded double-quoted shell wrapper must count as direct evidence");
-  const taskWrapper = exactCommand({ status: "completed", exit_code: 0, command: "/bin/zsh -lc 'superspec transition task-start --change x --task 1.1'" }, workspace, [], true);
+  const taskWrapper = exactCommand(codexCommand({ status: "completed", exit_code: 0, command: "/bin/zsh -lc 'superspec transition task-start --change x --task 1.1'" }), workspace, [], true);
   if (taskWrapper.kind !== "direct" || !sameArgv(taskWrapper.argv, ["superspec", "transition", "task-start", "--change", "x", "--task", "1.1"], [], true)) {
     throw new Error("bounded task transition shell wrapper must count as direct evidence");
   }
-  const chainedWrapper = exactCommand({ status: "completed", exit_code: 0, command: "/bin/zsh -lc 'superspec transition next --change x && git status'" }, workspace);
+  const chainedWrapper = exactCommand(codexCommand({ status: "completed", exit_code: 0, command: "/bin/zsh -lc 'superspec transition next --change x && git status'" }), workspace);
   if (chainedWrapper.kind !== "shell_wrapper") throw new Error("chained shell wrapper must be rejected");
   if (canonicalSuperspecArgv("superspec transition next --change 'x;rm'") !== null) throw new Error("unsafe quoted change must be rejected");
   outcomes.push({ name: "bounded-shell-wrapper-only", result: true });
@@ -1744,6 +1650,17 @@ async function validateFaultMappings() {
     [".superspec/changes/x/**"],
   );
   if (!allowedWildcardParent) throw new Error("wildcard state parent directory must be in scope");
+  const claudeHost = getWorkerHost("claude");
+  const noiseCases = [
+    [{ path: ".claude/.cc-writes", before: null, after: { type: "directory" } }, claudeHost, true],
+    [{ path: ".claude", before: { type: "directory", size: 160 }, after: { type: "directory", size: 192 } }, claudeHost, true],
+    [{ path: ".claude/.cc-writes/tmp", before: null, after: { type: "file" } }, claudeHost, false],
+    [{ path: ".claude/settings.json", before: { type: "file" }, after: { type: "file" } }, claudeHost, false],
+    [{ path: ".claude/.cc-writes", before: null, after: { type: "directory" } }, codexHost, false],
+  ];
+  for (const [change, noiseHost, expected] of noiseCases) {
+    if (inventoryChangeAllowed(change, [], noiseHost) !== expected) throw new Error(`host workspace noise misclassified: ${noiseHost.id} ${change.path}`);
+  }
   outcomes.push({ name: "artifact-parent-directory-allowed", result: true });
 
   const required = [
@@ -1795,7 +1712,7 @@ async function validateFaultMappings() {
     ["missing-exit", { status: "completed", cwd: workspace, command: "superspec transition next --change x" }],
     ["non-completed", { status: "in_progress", exit_code: 0, cwd: workspace, command: "superspec transition next --change x" }],
   ]) {
-    const parsed = exactCommand(command, workspace, [], true);
+    const parsed = exactCommand(codexCommand(command), workspace, [], true);
     const result = classifyAuthenticity({
       direct: [],
       commands: [parsed],
@@ -1805,12 +1722,12 @@ async function validateFaultMappings() {
     if (result.status !== "unavailable") throw new Error(`${name} must be INVALID/unavailable`);
     outcomes.push({ name: `${name}-invalid`, result: result.status });
   }
-  const explicitNonzero = exactCommand({
+  const explicitNonzero = exactCommand(codexCommand({
     status: "completed",
     exit_code: 7,
     cwd: workspace,
     command: "superspec transition next --change x",
-  }, workspace, [], true);
+  }), workspace, [], true);
   const explicitNonzeroResult = classifyAuthenticity({
     direct: [],
     commands: [explicitNonzero],
@@ -1820,10 +1737,10 @@ async function validateFaultMappings() {
   if (explicitNonzeroResult.status !== "fail") throw new Error("explicit nonzero exit must be FAIL");
   outcomes.push({ name: "explicit-nonzero-exit-fails", result: explicitNonzeroResult.status });
 
-  const nonlocal = exactCommand({
+  const nonlocal = exactCommand(codexCommand({
     status: "completed", exit_code: 0, cwd: workspace,
     argv: ["/opt/not-run-local/superspec", "transition", "next", "--change", "x"],
-  }, workspace, ["/tmp/run/package/dist/cli.js"]);
+  }), workspace, ["/tmp/run/package/dist/cli.js"]);
   if (nonlocal.executable_allowed !== false) throw new Error("absolute nonlocal superspec must be rejected");
   outcomes.push({ name: "absolute-nonlocal-superspec-rejected", result: true });
 
@@ -1849,9 +1766,11 @@ async function validateFaultMappings() {
     JSON.stringify({ type: "item.completed", item: { type: "command_execution", command: "/bin/zsh -lc 'superspec status --change resume-session-check'", aggregated_output: "{\"state\":\"explore\"}\n", exit_code: 0, status: "completed" } }),
     "",
   ].join("\n"));
-  if (traceThreadIds(resumeTraceOne)[0] !== traceThreadIds(resumeTraceTwo)[0]) throw new Error("resume thread identity parsing failed");
+  const resumeOne = codexHost.parseTrace(resumeTraceOne);
+  const resumeTwo = codexHost.parseTrace(resumeTraceTwo);
+  if (traceThreadIds(resumeOne)[0] !== traceThreadIds(resumeTwo)[0]) throw new Error("resume thread identity parsing failed");
   if (canonicalSuperspecArgv("superspec status --change resume-session-check")?.join(" ") !== "superspec status --change resume-session-check") throw new Error("resume status command parsing failed");
-  if (!traceCompletedCommand(resumeTraceOne, "pwd") || !traceAgentMessages(resumeTraceOne).some(message => message.includes("RESUME_RULE_ACTIVE"))) throw new Error("resume trace evidence parsing failed");
+  if (!traceCompletedCommand(resumeOne, "pwd") || !traceAgentMessages(resumeOne).some(message => message.includes("RESUME_RULE_ACTIVE"))) throw new Error("resume trace evidence parsing failed");
   outcomes.push({ name: "resume-thread-cwd-rule-evidence", result: true });
 
   const resumeScenario = {
@@ -1878,16 +1797,16 @@ async function validateFaultMappings() {
     "",
   ].join("\n"));
   const negativeScenario = { assertions: { required_verification_commands: ["node --test tests/format-label.test.mjs"] } };
-  const negativeEvidence = negativeVerificationEvidence(negativeTrace, negativeScenario);
+  const negativeEvidence = negativeVerificationEvidence(codexHost.parseTrace(negativeTrace), negativeScenario);
   const wrongCwdTrace = join(fixtureRoot, "negative-wrong-cwd.jsonl");
   writeFileSync(wrongCwdTrace, `${JSON.stringify({ type: "item.completed", item: { type: "command_execution", command: "/bin/zsh -lc 'cd /tmp && node --test tests/format-label.test.mjs'", exit_code: 0, status: "completed" } })}\n`);
-  const wrongCwdEvidence = negativeVerificationEvidence(wrongCwdTrace, negativeScenario);
-  const cleanActivation = superspecInvocationAudit([
+  const wrongCwdEvidence = negativeVerificationEvidence(codexHost.parseTrace(wrongCwdTrace), negativeScenario);
+  const cleanActivation = superspecInvocationAudit(codexEvents([
     { type: "item.completed", item: { type: "command_execution", command: "/bin/zsh -lc 'node --test tests/format-label.test.mjs'" } },
-  ], [], true);
-  const forbiddenActivation = superspecInvocationAudit([
+  ]), [], true);
+  const forbiddenActivation = superspecInvocationAudit(codexEvents([
     { type: "item.completed", item: { type: "command_execution", command: "/bin/zsh -lc 'superspec status --change unexpected'" } },
-  ], [], true);
+  ]), [], true);
   const cleanState = negativeActivationState([{ path: "src/format-label.mjs" }], cleanActivation);
   const dirtyState = negativeActivationState([{ path: ".superspec/changes/unexpected/events.jsonl" }], cleanActivation);
   if (!negativeEvidence.ok || negativeEvidence.matched[0].proof !== "successful_and_chain" || wrongCwdEvidence.ok || !cleanActivation.ok || forbiddenActivation.ok || !cleanState.ok || dirtyState.ok) {
@@ -2138,8 +2057,8 @@ async function validateFaultMappings() {
     || dynamicRecommendedReply.worker_prompt !== dynamicRecommendedReply.worker_prompt_original
     || evalWorkerPrompt("真实用户短提示") !== "真实用户短提示"
     || dynamicNeedsHuman.action !== "needs_human"
-    || agentMessageRequestsUserReply(explicitReplyTrace) == null
-    || agentMessageRequestsUserReply(completedMessageTrace) != null
+    || agentMessageRequestsUserReply(codexHost.parseTrace(explicitReplyTrace)) == null
+    || agentMessageRequestsUserReply(codexHost.parseTrace(completedMessageTrace)) != null
     || !invalidBudgetRejected) {
     throw new Error("dynamic arbitrary-turn boundary validation failed");
   }
@@ -2177,14 +2096,26 @@ async function validateFaultMappings() {
   }
   outcomes.push({ name: "recoverable-timeout-is-performance-evidence", result: true });
 
-  const emptyIndependent = independentAgentAudit([
+  const emptyIndependent = codexHost.independentAgentAudit(codexHost.normalizeRecords([
     { type: "item.completed", item: { type: "collab_tool_call", tool: "wait", receiver_thread_ids: [], status: "completed" } },
-  ]);
-  const spawnedIndependent = independentAgentAudit([
+  ]));
+  const spawnedIndependent = codexHost.independentAgentAudit(codexHost.normalizeRecords([
     { type: "item.completed", item: { type: "collab_tool_call", tool: "spawn_agent", receiver_thread_ids: ["child-thread-1"], status: "completed" } },
-  ]);
-  if (emptyIndependent.ok || emptyIndependent.empty_wait_count !== 1 || !spawnedIndependent.ok) {
+  ]));
+  if (emptyIndependent.ok || emptyIndependent.empty_wait_count !== 1 || !spawnedIndependent.ok || codexHost.independentAgentAudit(null).ok) {
     throw new Error("independent agent provenance audit failed");
+  }
+  const windowActions = [
+    { phase: "worker.turn-1", event: "started", started_at: "2026-01-01T00:00:00.000Z" },
+    { phase: "worker.turn-1", event: "completed", ended_at: "2026-01-01T00:04:00.000Z" },
+    { phase: "worker.turn-2-resume", event: "started", started_at: "2026-01-01T00:05:00.000Z" },
+    { phase: "worker.turn-2-resume", event: "completed", ended_at: "2026-01-01T00:09:00.000Z" },
+  ];
+  const earlyChildIndex = { files: [{ kind: "subagent", thread_id: "child-early", started_at: "2026-01-01T00:01:00.000Z" }] };
+  const reviewTurnAudit = codexHost.independentAgentAudit(codexHost.normalizeRecords([]), { sessionIndex: earlyChildIndex, window: workerTurnWindow(windowActions, 2) });
+  const firstTurnAudit = codexHost.independentAgentAudit(codexHost.normalizeRecords([]), { sessionIndex: earlyChildIndex, window: workerTurnWindow(windowActions, 1) });
+  if (reviewTurnAudit.ok || !firstTurnAudit.ok || workerTurnWindow(windowActions, 3) !== null) {
+    throw new Error("independent review must only attribute child sessions started inside the audited Worker turn");
   }
   outcomes.push({ name: "independent-agent-provenance", result: true });
 
@@ -2201,7 +2132,7 @@ async function validateFaultMappings() {
     "base_url = \"http://127.0.0.1:9/should-not-overwrite\"",
     "",
   ].join("\n"));
-  const providerProfile = controlledProviderProfile("fixtureproxy", {
+  const providerProfile = codexHost.providerProfile("fixtureproxy", {
     configPath: providerConfig,
     env: { FIXTURE_PROXY_KEY: "fixture-secret" },
   });
@@ -2218,7 +2149,7 @@ async function validateFaultMappings() {
   ].join("\n"));
   let credentialUrlRejected = false;
   try {
-    controlledProviderProfile("credentialproxy", {
+    codexHost.providerProfile("credentialproxy", {
       configPath: credentialUrlConfig,
       env: { CREDENTIAL_PROXY_KEY: "fixture-secret" },
     });
@@ -2226,12 +2157,11 @@ async function validateFaultMappings() {
     credentialUrlRejected = true;
   }
   if (!credentialUrlRejected) throw new Error("credential-bearing provider base_url must be rejected");
-  const noAuthDirs = isolatedAuthHome("fixture-no-openai-auth", false);
-  if (!noAuthDirs.auth.mode_ok || noAuthDirs.auth.required || existsSync(join(noAuthDirs.codexHome, "auth.json"))) {
+  const noAuthDirs = codexHost.createIsolation({ runId: "fixture-no-openai-auth", providerProfile: { requires_openai_auth: false } });
+  if (!noAuthDirs.auth.mode_ok || noAuthDirs.auth.required || existsSync(join(noAuthDirs.hostHome, "auth.json"))) {
     throw new Error("provider without OpenAI auth requirement must receive an empty isolated CODEX_HOME");
   }
-  rmSync(noAuthDirs.home, { recursive: true, force: true });
-  rmSync(noAuthDirs.codexHome, { recursive: true, force: true });
+  for (const dir of noAuthDirs.tempDirs) rmSync(dir, { recursive: true, force: true });
   outcomes.push({ name: "controlled-provider-whitelist", result: true });
 
   const fixtureWorkspace = join(fixtureRoot, "workspace");
@@ -2277,6 +2207,63 @@ async function validateFaultMappings() {
   if (readAttempt.code === 0 || existsSync(join(fixtureRoot, "scenario.json"))) throw new Error("Worker-visible harness evidence/scenario isolation failed");
   outcomes.push({ name: "scenario-absent-evidence-unreadable", result: true });
 
+  const lockedOutputPath = join(hiddenEvidenceDir, "turn-2.jsonl");
+  const lockedPaths = [hiddenTrace, lockedOutputPath];
+  secureEvidenceForWorker(hiddenEvidenceDir, lockedPaths);
+  const lockedOutput = await permissionRun(process.execPath, ["-e", "process.stdout.write('trace')"], { phase: "test.locked-output", stdoutPath: lockedOutputPath, outputMode: 0o200 });
+  const intactDrift = evidenceLockDrift(hiddenEvidenceDir, lockedPaths);
+  chmodSync(hiddenEvidenceDir, 0o700);
+  const resetDrift = evidenceLockDrift(hiddenEvidenceDir, lockedPaths);
+  restoreEvidenceAfterWorker(hiddenEvidenceDir, lockedPaths);
+  if (lockedOutput.code !== 0 || intactDrift.length !== 0 || readFileSync(lockedOutputPath, "utf8") !== "trace") {
+    throw new Error(`Worker output created under the lock must stay write-only: ${JSON.stringify(intactDrift)}`);
+  }
+  if (!resetDrift.some(item => item.path === "evidence" && item.actual === "700")) throw new Error("a reset evidence directory mode must be reported as lock drift");
+  const passingEnvironment = gate("pass", ["manifest.json"], "verified");
+  const lockRecord = (phase, intact) => ({ action_kind: "injected_mutation", event: "completed", phase: `evidence-lock.${phase}`, detail: { intact, drift: intact ? [] : resetDrift } });
+  if (withEvidenceLockStatus(passingEnvironment, []).status !== "pass") throw new Error("runs recorded without lock checks must keep their environment verdict");
+  if (withEvidenceLockStatus(passingEnvironment, [lockRecord("worker.turn-1", true)]).status !== "pass") throw new Error("an intact evidence lock must not change the environment verdict");
+  if (withEvidenceLockStatus(passingEnvironment, [lockRecord("worker.turn-1", true), lockRecord("worker.turn-2-resume", false)]).status !== "unavailable") {
+    throw new Error("a broken evidence lock in any Worker turn must make the environment unprovable");
+  }
+  if (withEvidenceLockStatus(gate("fail", [], "violation"), [lockRecord("worker.turn-1", false)]).status !== "fail") throw new Error("a broken lock must not mask an environment violation");
+  outcomes.push({ name: "evidence-lock-drift-unprovable", result: true });
+
+  const liveRunRoot = createLiveRunRoot("archive-case-1");
+  mkdirSync(join(liveRunRoot, "bin"), { recursive: true });
+  if (withinRoot(liveRunRoot, REPO_ROOT) || !withinRoot(liveRunRoot, realpathSync(tmpdir()))) throw new Error(`live run root must be outside the repository: ${liveRunRoot}`);
+  writeFileSync(join(liveRunRoot, "sealed.json"), "{}\n");
+  chmodSync(join(liveRunRoot, "sealed.json"), 0o400);
+  symlinkSync(join(liveRunRoot, "sealed.json"), join(liveRunRoot, "bin", "link"));
+  const archivedRunRoot = join(fixtureRoot, "archive", "archive-case-1");
+  archiveLiveRun(liveRunRoot, archivedRunRoot);
+  if (existsSync(dirname(liveRunRoot)) || readFileSync(join(archivedRunRoot, "sealed.json"), "utf8") !== "{}\n" || readlinkSync(join(archivedRunRoot, "bin", "link")) !== join(liveRunRoot, "sealed.json")) {
+    throw new Error("archiving a live run must move it intact and remove the live parent");
+  }
+  if (recordedWorkerRunRoot({}, "/archive/r") !== "/archive/r"
+    || recordedWorkerRunRoot({ run_layout: { worker_run_root: "/live/r" } }, "/archive/r") !== "/live/r"
+    || recordedWorkerRunRoot({ run_layout: { worker_run_root: "live/r" } }, "/archive/r") !== "/archive/r") {
+    throw new Error("regrade must interpret trace paths against the recorded Worker run root");
+  }
+  outcomes.push({ name: "live-run-outside-repository", result: true });
+
+  const buildLockDir = join(fixtureRoot, "build-lock");
+  let activeBuilds = 0;
+  let overlappingBuilds = false;
+  const lockedBuild = () => withRepositoryBuildLock(async () => {
+    activeBuilds++;
+    if (activeBuilds > 1) overlappingBuilds = true;
+    await new Promise(resolve => setTimeout(resolve, 30));
+    activeBuilds--;
+  }, { lockDir: buildLockDir, pollMs: 5 });
+  await Promise.all([lockedBuild(), lockedBuild(), lockedBuild()]);
+  if (overlappingBuilds || existsSync(buildLockDir)) throw new Error("concurrent package builds must not interleave");
+  mkdirSync(buildLockDir);
+  writeFileSync(join(buildLockDir, "owner"), "999999999");
+  await withRepositoryBuildLock(async () => {}, { lockDir: buildLockDir, pollMs: 5, timeoutMs: 1_000 });
+  if (existsSync(buildLockDir)) throw new Error("a build lock left by a dead process must be reclaimed");
+  outcomes.push({ name: "package-build-serialized", result: true });
+
   const transitionEventBase = { event_id: "E1", event_type: "transition_commit", payload: { to_state: "explore" } };
   const transitionEvent = { ...transitionEventBase, event_digest: digestOfExact(eventBase(transitionEventBase)) };
   const laterEventBase = { event_id: "E2", event_type: "user_decision_recorded", payload: { accepted: true } };
@@ -2300,154 +2287,238 @@ async function validateFaultMappings() {
   if (hidden.status !== "unavailable") throw new Error("hidden required evidence must be unavailable");
   outcomes.push({ name: "hide-required-evidence-invalid", result: hidden.status });
 
-  const audit = traceEnvironmentAudit([
+  const audit = traceEnvironmentAudit(codexEvents([
     { type: "item.completed", item: { type: "command_execution", status: "completed", command: "/bin/zsh -lc 'npm root -g'" } },
-  ], {
+  ]), {
     workspace: "/controlled/workspace", packageRoot: "/controlled/package", binRoot: "/controlled/bin",
-    controlledHome: "/controlled/home", controlledCodexHome: "/controlled/codex", controlledZdotdir: "/controlled/zdot",
+    controlledHome: "/controlled/home", controlledHostHome: "/controlled/codex", controlledZdotdir: "/controlled/zdot",
+    hostSensitiveEnvKeys: codexHost.sensitive_env_keys,
   }, [], true);
-  if (audit.ok || audit.violations[0]?.reason !== "global_package_lookup") throw new Error("global package lookup must fail controlled environment audit");
-  const tempAudit = traceEnvironmentAudit([
+  if (!audit.ok || audit.observations[0]?.reason !== "global_package_lookup") throw new Error("global package lookup is a non-blocking observation");
+  const tempAudit = traceEnvironmentAudit(codexEvents([
     { type: "item.completed", item: { type: "command_execution", status: "completed", command: "/bin/zsh -lc 'sed -n 1,2p /tmp/leak'" } },
-  ], {
+  ]), {
     workspace: "/controlled/workspace", packageRoot: "/controlled/package", binRoot: "/controlled/bin",
-    controlledHome: "/controlled/home", controlledCodexHome: "/controlled/codex", controlledZdotdir: "/controlled/zdot",
+    controlledHome: "/controlled/home", controlledHostHome: "/controlled/codex", controlledZdotdir: "/controlled/zdot",
+    hostSensitiveEnvKeys: codexHost.sensitive_env_keys,
   });
-  if (tempAudit.ok || !tempAudit.violations.some(item => item.reason === "absolute_path_outside_allowlist")) throw new Error("generic /tmp absolute path must fail audit");
-  const relativeAudit = traceEnvironmentAudit([
+  if (!tempAudit.ok || !tempAudit.observations.some(item => item.normalized_path.endsWith("/tmp/leak"))) throw new Error("generic /tmp absolute path is a non-blocking observation");
+  const relativeAudit = traceEnvironmentAudit(codexEvents([
     { type: "item.completed", item: { type: "command_execution", status: "completed", command: "/bin/zsh -lc 'sed -n 1,2p docs/export.md && find . -path */artifacts/*'" } },
-  ], {
+  ]), {
     workspace: "/controlled/workspace", packageRoot: "/controlled/package", binRoot: "/controlled/bin",
-    controlledHome: "/controlled/home", controlledCodexHome: "/controlled/codex", controlledZdotdir: "/controlled/zdot",
+    controlledHome: "/controlled/home", controlledHostHome: "/controlled/codex", controlledZdotdir: "/controlled/zdot",
+    hostSensitiveEnvKeys: codexHost.sensitive_env_keys,
   });
   if (!relativeAudit.ok) throw new Error("relative workspace paths must not be misclassified as absolute host paths");
-  const sensitiveSourceSearchAudit = traceEnvironmentAudit([
-    { type: "item.completed", item: { type: "command_execution", status: "completed", command: "/bin/zsh -lc \"rg 'process.env|OPENAI_API_KEY|System.getenv' src\"" } },
-  ], {
+  const harnessNameAudit = command => traceEnvironmentAudit(codexEvents([
+    { type: "item.completed", item: { type: "command_execution", status: "completed", command } },
+  ]), {
     workspace: "/controlled/workspace", packageRoot: "/controlled/package", binRoot: "/controlled/bin",
-    controlledHome: "/controlled/home", controlledCodexHome: "/controlled/codex", controlledZdotdir: "/controlled/zdot",
+    controlledHome: "/controlled/home", controlledHostHome: "/controlled/codex", controlledZdotdir: "/controlled/zdot",
+    hostSensitiveEnvKeys: codexHost.sensitive_env_keys,
+  });
+  if (!harnessNameAudit("/bin/zsh -lc 'cat .superspec/install-manifest.json'").ok) throw new Error("workspace install manifest must not be mistaken for the harness manifest");
+  if (harnessNameAudit("/bin/zsh -lc 'cat manifest.json'").ok) throw new Error("harness manifest references must fail audit");
+  const sensitiveSourceSearchAudit = traceEnvironmentAudit(codexEvents([
+    { type: "item.completed", item: { type: "command_execution", status: "completed", command: "/bin/zsh -lc \"rg 'process.env|OPENAI_API_KEY|System.getenv' src\"" } },
+  ]), {
+    workspace: "/controlled/workspace", packageRoot: "/controlled/package", binRoot: "/controlled/bin",
+    controlledHome: "/controlled/home", controlledHostHome: "/controlled/codex", controlledZdotdir: "/controlled/zdot",
+    hostSensitiveEnvKeys: codexHost.sensitive_env_keys,
   });
   if (!sensitiveSourceSearchAudit.ok) throw new Error("workspace source searches for sensitive API names must remain allowed");
-  const chainedSensitiveSourceSearchAudit = traceEnvironmentAudit([
+  const chainedSensitiveSourceSearchAudit = traceEnvironmentAudit(codexEvents([
     { type: "item.completed", item: { type: "command_execution", status: "completed", command: "/bin/zsh -lc \"rg 'process.env' src && node -e 'console.log(process.env.CODEX_HOME)'\"" } },
-  ], {
+  ]), {
     workspace: "/controlled/workspace", packageRoot: "/controlled/package", binRoot: "/controlled/bin",
-    controlledHome: "/controlled/home", controlledCodexHome: "/controlled/codex", controlledZdotdir: "/controlled/zdot",
+    controlledHome: "/controlled/home", controlledHostHome: "/controlled/codex", controlledZdotdir: "/controlled/zdot",
+    hostSensitiveEnvKeys: codexHost.sensitive_env_keys,
   });
   if (chainedSensitiveSourceSearchAudit.ok || !chainedSensitiveSourceSearchAudit.violations.some(item => item.reason === "controlled_home_reference")) {
     throw new Error("source-search exemption must not cover chained environment reads");
   }
-  const awkRegexAudit = traceEnvironmentAudit([
+  const awkRegexAudit = traceEnvironmentAudit(codexEvents([
     { type: "item.completed", item: { type: "command_execution", status: "completed", command: "/bin/zsh -lc \"awk '/CSV or JSON format/{ok=1} /--output/{override=1}' docs/export.md\"" } },
-  ], {
+  ]), {
     workspace: "/controlled/workspace", packageRoot: "/controlled/package", binRoot: "/controlled/bin",
-    controlledHome: "/controlled/home", controlledCodexHome: "/controlled/codex", controlledZdotdir: "/controlled/zdot",
+    controlledHome: "/controlled/home", controlledHostHome: "/controlled/codex", controlledZdotdir: "/controlled/zdot",
+    hostSensitiveEnvKeys: codexHost.sensitive_env_keys,
   });
   if (!awkRegexAudit.ok) throw new Error("awk regex literals must not be misclassified as absolute host paths");
-  const pipedRgRegexAudit = traceEnvironmentAudit([
+  const pipedRgRegexAudit = traceEnvironmentAudit(codexEvents([
     { type: "item.completed", item: { type: "command_execution", status: "completed", command: "/bin/zsh -lc \"rg --files | rg '/src/test/'\"" } },
-  ], {
+  ]), {
     workspace: "/controlled/workspace", packageRoot: "/controlled/package", binRoot: "/controlled/bin",
-    controlledHome: "/controlled/home", controlledCodexHome: "/controlled/codex", controlledZdotdir: "/controlled/zdot",
+    controlledHome: "/controlled/home", controlledHostHome: "/controlled/codex", controlledZdotdir: "/controlled/zdot",
+    hostSensitiveEnvKeys: codexHost.sensitive_env_keys,
   });
   if (!pipedRgRegexAudit.ok) throw new Error("piped rg regex literals must not be misclassified as absolute host paths");
-  const reviewPayloadPathAudit = traceEnvironmentAudit([
+  const reviewPayloadPathAudit = traceEnvironmentAudit(codexEvents([
     { type: "item.completed", item: { type: "command_execution", status: "completed", command: "/bin/zsh -lc \"printf '%s' '{\\\"reviewer\\\":{\\\"id\\\":\\\"/root/critic\\\"},\\\"route\\\":\\\"/2ndparty/api/getPersonalLimit\\\"}' | superspec record job-submit --change x --job j --report -\"" } },
     { type: "item.completed", item: { type: "command_execution", status: "completed", command: "/bin/zsh -lc \"printf '%s\\\\n' '{\\\"reviewer\\\":{\\\"id\\\":\\\"/root/critic-rerun\\\"}}' | superspec record job-submit --change x --job j --report -; superspec transition next --change x\"" } },
-  ], {
+    { type: "item.completed", item: { type: "command_execution", status: "completed", command: "/bin/zsh -lc \"superspec record job-submit --change x --job j --report-json '{\\\"reviewer\\\":{\\\"id\\\":\\\"/root/critic-inline\\\"}}'\"" } },
+  ]), {
     workspace: "/controlled/workspace", packageRoot: "/controlled/package", binRoot: "/controlled/bin",
-    controlledHome: "/controlled/home", controlledCodexHome: "/controlled/codex", controlledZdotdir: "/controlled/zdot",
+    controlledHome: "/controlled/home", controlledHostHome: "/controlled/codex", controlledZdotdir: "/controlled/zdot",
+    hostSensitiveEnvKeys: codexHost.sensitive_env_keys,
   });
   if (!reviewPayloadPathAudit.ok) throw new Error(`review payload path literals must not be treated as host access: ${JSON.stringify(reviewPayloadPathAudit.violations)}`);
-  const embeddedNodePathAudit = traceEnvironmentAudit([
+  const embeddedNodePathAudit = traceEnvironmentAudit(codexEvents([
     { type: "item.completed", item: { type: "command_execution", status: "completed", command: "/bin/zsh -lc \"node -e 'require(\\\"fs\\\").readFileSync(\\\"/outside/secret.json\\\")'\"" } },
     { type: "item.completed", item: { type: "command_execution", status: "completed", command: "/bin/zsh -lc 'tool --config=/outside/config.json'" } },
     { type: "item.completed", item: { type: "command_execution", status: "completed", command: "/bin/zsh -lc 'printf data > /outside/output.txt'" } },
     { type: "item.completed", item: { type: "command_execution", status: "completed", command: "/bin/zsh -lc 'reader --json '\"'\"'{\"path\":\"/outside/from-json.json\"}'\"'\"''" } },
     { type: "item.completed", item: { type: "command_execution", status: "completed", command: "/bin/zsh -lc \"awk 'BEGIN { getline x < \\\"/outside/from-awk.txt\\\" }'\"" } },
     { type: "item.completed", item: { type: "command_execution", status: "completed", command: "/bin/zsh -lc \"printf '%s' '{\\\"x\\\":\\\"'; cat /outside/from-quote-injection.txt; echo '\\\"}' | superspec record user-decision --change x --input -\"" } },
-  ], {
+  ]), {
     workspace: "/controlled/workspace", packageRoot: "/controlled/package", binRoot: "/controlled/bin",
-    controlledHome: "/controlled/home", controlledCodexHome: "/controlled/codex", controlledZdotdir: "/controlled/zdot",
+    controlledHome: "/controlled/home", controlledHostHome: "/controlled/codex", controlledZdotdir: "/controlled/zdot",
+    hostSensitiveEnvKeys: codexHost.sensitive_env_keys,
+    harnessRoots: ["/outside"],
   });
-  if (embeddedNodePathAudit.ok || embeddedNodePathAudit.violations.filter(item => item.reason === "absolute_path_outside_allowlist").length < 6) {
-    throw new Error("embedded, option-assigned, redirected, JSON, awk-read, and quote-injected paths outside the allowlist must fail audit");
+  if (embeddedNodePathAudit.ok || embeddedNodePathAudit.violations.filter(item => item.reason === "harness_path").length < 6) {
+    throw new Error("embedded, option-assigned, redirected, JSON, awk-read, and quote-injected harness paths must fail audit");
   }
-  const explicitSearchRootAudit = traceEnvironmentAudit([
-    { type: "item.completed", item: { type: "command_execution", status: "completed", command: "/bin/zsh -lc \"rg -n 'user-decision' /outside/.eval-runs/run-1\"" } },
-  ], {
-    workspace: "/controlled/workspace", packageRoot: "/controlled/package", binRoot: "/controlled/bin",
-    controlledHome: "/controlled/home", controlledCodexHome: "/controlled/codex", controlledZdotdir: "/controlled/zdot",
+  const harnessAudit = command => traceEnvironmentAudit(codexEvents([
+    { type: "item.completed", item: { type: "command_execution", status: "completed", command: `/bin/zsh -lc '${command}'` } },
+  ]), {
+    workspace: "/h/runs/r1/workspace", packageRoot: "/h/runs/r1/package", binRoot: "/h/runs/r1/bin",
+    controlledHome: "/controlled/home", controlledHostHome: "/controlled/codex", controlledZdotdir: "/h/runs/r1/zdot",
+    hostSensitiveEnvKeys: codexHost.sensitive_env_keys,
+    harnessRoots: ["/h/runs/r1", "/h/runs", "/h/repo/evals"],
+    hostSecretRoots: ["/h/home/.codex"],
   });
-  if (explicitSearchRootAudit.ok || !explicitSearchRootAudit.violations.some(item => item.reason === "absolute_path_outside_allowlist")) {
-    throw new Error("explicit rg search roots outside the allowlist must fail audit");
+  const harnessCases = [
+    ["ls -la /h/runs/r1", null],
+    ["ls /h/repo /h/runs", null],
+    ["cd .. && ls", null],
+    ["ls /usr/local/lib/node_modules/@fission-ai/openspec", null],
+    ["grep -rn export /h/runs/r1", "harness_content_search"],
+    ["rg -n user-decision /h/runs/r0", "harness_path"],
+    ["cat /h/runs/r1/evidence/director-actions.jsonl", "harness_path"],
+    ["sed -n 1,5p ../evidence/events.jsonl", "harness_path"],
+    ["cat /h/repo/evals/scenarios/probe.json", "harness_path"],
+    ["ls -la /h/runs/r1/evidence /h/runs/r1/bin", null],
+    ["cd .. && ls evidence", null],
+    ["ls /h/runs/r1/evidence && cat /h/runs/r1/evidence/turn-1.jsonl", "harness_path"],
+    ["ls /h/runs/r1/evidence | xargs cat", "harness_path"],
+    ["cat /h/runs/r1/workspace/../scenario.json", "harness_path"],
+    ["cat /h/home/.codex/auth.json", "host_secret_path"],
+  ];
+  for (const [command, reason] of harnessCases) {
+    const result = harnessAudit(command);
+    if (reason === null ? !result.ok : result.ok || !result.violations.some(item => item.reason === reason)) {
+      throw new Error(`harness boundary misclassified ${command}: ${JSON.stringify(result.violations)}`);
+    }
   }
-  const traversalAudit = traceEnvironmentAudit([
-    { type: "item.completed", item: { type: "command_execution", status: "completed", command: "/bin/zsh -lc 'ls /bin/../etc'" } },
-  ], {
-    workspace: "/controlled/workspace", packageRoot: "/controlled/package", binRoot: "/controlled/bin",
-    controlledHome: "/controlled/home", controlledCodexHome: "/controlled/codex", controlledZdotdir: "/controlled/zdot",
-  });
-  if (traversalAudit.ok || !traversalAudit.violations.some(item => item.reason === "absolute_path_outside_allowlist")) throw new Error("normalized absolute path traversal must fail audit");
-  const controlledHomeVariableAudit = traceEnvironmentAudit([
+  if (harnessAudit("ls -la /h/runs/r1").observations.length === 0) throw new Error("listing harness ancestors must stay observable");
+  const controlledHomeVariableAudit = traceEnvironmentAudit(codexEvents([
     { type: "item.completed", item: { type: "command_execution", status: "completed", command: "/bin/zsh -lc 'sed -n 1,2p $CODEX_HOME/auth.json'" } },
-  ], {
+  ]), {
     workspace: "/controlled/workspace", packageRoot: "/controlled/package", binRoot: "/controlled/bin",
-    controlledHome: "/controlled/home", controlledCodexHome: "/controlled/codex", controlledZdotdir: "/controlled/zdot",
+    controlledHome: "/controlled/home", controlledHostHome: "/controlled/codex", controlledZdotdir: "/controlled/zdot",
+    hostSensitiveEnvKeys: codexHost.sensitive_env_keys,
   });
   if (controlledHomeVariableAudit.ok || !controlledHomeVariableAudit.violations.some(item => item.reason === "controlled_home_reference")) {
     throw new Error("controlled home environment references must fail audit");
   }
-  const controlledHomeCacheAudit = traceEnvironmentAudit([
+  const controlledHomeCacheAudit = traceEnvironmentAudit(codexEvents([
     { type: "item.completed", item: { type: "command_execution", status: "completed", command: "/bin/zsh -lc 'find \"$HOME/.m2/repository\" -type f | head'" } },
-  ], {
+  ]), {
     workspace: "/controlled/workspace", packageRoot: "/controlled/package", binRoot: "/controlled/bin",
-    controlledHome: "/controlled/home", controlledCodexHome: "/controlled/codex", controlledZdotdir: "/controlled/zdot",
+    controlledHome: "/controlled/home", controlledHostHome: "/controlled/codex", controlledZdotdir: "/controlled/zdot",
+    hostSensitiveEnvKeys: codexHost.sensitive_env_keys,
   });
   if (!controlledHomeCacheAudit.ok) throw new Error("ordinary controlled HOME cache lookup must remain available to realistic workers");
-  const indirectControlledHomeAudit = traceEnvironmentAudit([
+  const indirectControlledHomeAudit = traceEnvironmentAudit(codexEvents([
     { type: "item.completed", item: { type: "command_execution", status: "completed", command: "/bin/zsh -lc 'sed -n 1,2p \"$(printenv CODEX_HOME)/auth.json\"'" } },
     { type: "item.completed", item: { type: "command_execution", status: "completed", command: "/usr/bin/node -e 'require(\"fs\").readFileSync(process.env.CODEX_HOME+\"/auth.json\")'" } },
-  ], {
+  ]), {
     workspace: "/controlled/workspace", packageRoot: "/controlled/package", binRoot: "/controlled/bin",
-    controlledHome: "/controlled/home", controlledCodexHome: "/controlled/codex", controlledZdotdir: "/controlled/zdot",
+    controlledHome: "/controlled/home", controlledHostHome: "/controlled/codex", controlledZdotdir: "/controlled/zdot",
+    hostSensitiveEnvKeys: codexHost.sensitive_env_keys,
   });
   if (indirectControlledHomeAudit.ok || indirectControlledHomeAudit.violations.filter(item => item.reason === "controlled_home_reference").length < 2) {
     throw new Error("indirect controlled home references must fail audit");
   }
-  const controlledHomePathAudit = traceEnvironmentAudit([
+  const controlledHomePathAudit = traceEnvironmentAudit(codexEvents([
     { type: "item.completed", item: { type: "command_execution", status: "completed", command: "/bin/zsh -lc 'sed -n 1,2p /controlled/codex/auth.json'" } },
-  ], {
+  ]), {
     workspace: "/controlled/workspace", packageRoot: "/controlled/package", binRoot: "/controlled/bin",
-    controlledHome: "/controlled/home", controlledCodexHome: "/controlled/codex", controlledZdotdir: "/controlled/zdot",
+    controlledHome: "/controlled/home", controlledHostHome: "/controlled/codex", controlledZdotdir: "/controlled/zdot",
+    hostSensitiveEnvKeys: codexHost.sensitive_env_keys,
   });
   if (controlledHomePathAudit.ok || !controlledHomePathAudit.violations.some(item => item.reason === "controlled_home_path")) {
     throw new Error("controlled home absolute paths must fail audit");
   }
-  const tildeHomeAudit = traceEnvironmentAudit([
+  const tildeHomeAudit = traceEnvironmentAudit(codexEvents([
     { type: "item.completed", item: { type: "command_execution", status: "completed", command: "/bin/zsh -lc 'sed -n 1,2p ~/.codex/auth.json'" } },
-  ], {
+  ]), {
     workspace: "/controlled/workspace", packageRoot: "/controlled/package", binRoot: "/controlled/bin",
-    controlledHome: "/controlled/home", controlledCodexHome: "/controlled/codex", controlledZdotdir: "/controlled/zdot",
+    controlledHome: "/controlled/home", controlledHostHome: "/controlled/codex", controlledZdotdir: "/controlled/zdot",
+    hostSensitiveEnvKeys: codexHost.sensitive_env_keys,
   });
   if (tildeHomeAudit.ok || !tildeHomeAudit.violations.some(item => item.reason === "controlled_home_reference")) {
     throw new Error("tilde home references must fail audit");
   }
+  const fileToolAudit = (paths, tool = "Read") => traceEnvironmentAudit([{ kind: "file_access", tool, status: "completed", paths }], {
+    workspace: "/controlled/workspace", packageRoot: "/controlled/package", binRoot: "/controlled/bin",
+    controlledHome: "/controlled/home", controlledHostHome: "/controlled/claude", controlledZdotdir: "/controlled/zdot",
+    harnessRoots: ["/controlled"],
+    hostSecretRoots: ["/Users/someone/.claude"],
+  });
+  for (const [paths, tool] of [[["docs/export.md", "/controlled/workspace/README.md"], "Read"], [["/opt/lib/openspec/README.md"], "Read"], [["/controlled"], "Glob"]]) {
+    if (!fileToolAudit(paths, tool).ok) throw new Error(`file-tool ${tool} access to ${paths[0]} must not fail audit`);
+  }
+  const fileToolViolations = [
+    [["/Users/someone/.claude/.credentials.json"], "Read", "host_secret_path"],
+    [["/controlled/claude/settings.json"], "Read", "controlled_home_path"],
+    [["../manifest.json"], "Read", "harness_path"],
+    [["/controlled"], "Grep", "harness_content_search"],
+    [["~/.codex/auth.json"], "Read", "controlled_home_reference"],
+  ];
+  for (const [paths, tool, reason] of fileToolViolations) {
+    const audit = fileToolAudit(paths, tool);
+    if (audit.ok || !audit.violations.some(item => item.reason === reason)) throw new Error(`file-tool ${tool} access to ${paths[0]} must fail audit with ${reason}`);
+  }
+  const blockedRead = traceEnvironmentAudit([{ kind: "file_access", tool: "Read", status: "failed", paths: ["/controlled/evidence/director-actions.jsonl"] }], {
+    workspace: "/controlled/workspace", packageRoot: "/controlled/package", binRoot: "/controlled/bin",
+    controlledHome: "/controlled/home", controlledHostHome: "/controlled/claude", controlledZdotdir: "/controlled/zdot",
+    harnessRoots: ["/controlled"],
+  });
+  if (!blockedRead.ok || !blockedRead.observations.some(item => item.reason === "blocked_attempt" && item.blocked_reason === "harness_path")) {
+    throw new Error("a file-tool read the host refused must be a non-blocking observation");
+  }
+  const blockedCommand = (command, output) => traceEnvironmentAudit([{ kind: "command", status: "failed", exit_code: 1, command, output }], {
+    workspace: "/h/runs/r1/workspace", packageRoot: "/h/runs/r1/package", binRoot: "/h/runs/r1/bin",
+    controlledHome: "/controlled/home", controlledHostHome: "/controlled/codex", controlledZdotdir: "/h/runs/r1/zdot",
+    harnessRoots: ["/h/runs/r1"], hostSecretRoots: ["/h/home/.codex"],
+  });
+  if (!blockedCommand("cat /h/home/.codex/auth.json", "cat: /h/home/.codex/auth.json: Operation not permitted").ok) {
+    throw new Error("a single command denied by the sandbox must be a non-blocking observation");
+  }
+  if (blockedCommand("cat /h/runs/r1/scenario.json; cat /h/home/.codex/auth.json", "{...}\ncat: /h/home/.codex/auth.json: Operation not permitted").ok) {
+    throw new Error("a chained command that was only partly denied must still fail");
+  }
+  if (blockedCommand("cat /h/runs/r1/scenario.json", "cat: /h/runs/r1/scenario.json: No such file or directory").ok) {
+    throw new Error("an ordinary command failure is not a sandbox block");
+  }
   outcomes.push({ name: "host-path-audit-fails", result: true });
 
-  const policy = workerCommandPolicyAudit([
+  const policy = workerCommandPolicyAudit(codexEvents([
     { type: "item.completed", item: { type: "command_execution", command: "/bin/zsh -lc 'superspec record user-decision --change x --input ack.json'" } },
     { type: "item.completed", item: { type: "command_execution", command: "/bin/zsh -lc 'superspec transition propose-ready --change x'" } },
-  ], {
+  ]), {
     forbidden_worker_commands: [
       { family: "superspec_record_user_decision" },
       { family: "superspec_transition_except", allowed_subcommands: ["next", "explore"] },
     ],
   }, [], true);
   if (policy.ok || policy.violations.length !== 2) throw new Error("forbidden Worker SuperSpec commands must fail policy audit");
-  const absolutePolicy = workerCommandPolicyAudit([
+  const absolutePolicy = workerCommandPolicyAudit(codexEvents([
     { type: "item.completed", item: { type: "command_execution", command: `/bin/zsh -lc '${localExecutable} transition review-ready --change x'` } },
-  ], {
+  ]), {
     forbidden_worker_commands: [{ family: "superspec_transition_except", allowed_subcommands: ["next", "explore"] }],
   }, [realpathSync(localExecutable)], false);
   if (absolutePolicy.ok || absolutePolicy.violations.length !== 1) throw new Error("absolute run-local superspec must be policy audited");
@@ -2623,6 +2694,36 @@ async function validateFaultMappings() {
   rmSync(fixtureRoot, { recursive: true, force: true });
   if (existsSync(fixtureRoot)) throw new Error("fixture cleanup failed");
   outcomes.push({ name: "timeout-and-cleanup", result: true });
+
+  const interruptRoot = mkdtempSync(join(tmpdir(), "superspec-interrupt-case-"));
+  const interruptLog = join(interruptRoot, "interrupt-actions.jsonl");
+  const interruptDirector = createDirectorSpawner(interruptLog);
+  const interruptResult = await interruptDirector(process.execPath, [join(EVAL_ROOT, "interrupt-self-test.mjs"), interruptRoot], {
+    phase: "test.interrupt",
+    timeoutMs: 10_000,
+  });
+  interruptDirector.terminateAll("SIGKILL");
+  if (![130, 143].includes(interruptResult.code)) {
+    throw new Error(`interrupt self-test exited ${interruptResult.code}: ${interruptResult.stderr || interruptResult.stdout}`);
+  }
+  if (existsSync(join(interruptRoot, "evidence-seal.json"))) throw new Error("interrupted run must remain unsealed");
+  const interruptCapability = json(join(interruptRoot, "capability.json"));
+  if (interruptCapability.scenario_result !== "INVALID" || !interruptCapability.interrupted?.signal) {
+    throw new Error("interrupted capability must be INVALID and marked interrupted");
+  }
+  if (!CORE_GATES.every(name => interruptCapability.gates?.[name]?.status === "unavailable")) {
+    throw new Error("interrupted capability must mark every core gate unavailable");
+  }
+  for (const dir of json(join(interruptRoot, "tracked-dirs.json"))) {
+    if (existsSync(dir)) throw new Error(`interrupt left isolated temp dir: ${dir}`);
+  }
+  rmSync(interruptRoot, { recursive: true, force: true });
+
+  validateTraceSemantics();
+  outcomes.push({ name: "trace-semantics-deltas-sessions-completion", result: true });
+  validateHostAdapters();
+  outcomes.push({ name: "host-adapters-claude-omp", result: true });
+
   process.stdout.write(`${JSON.stringify({ ok: true, cases: outcomes }, null, 2)}\n`);
 }
 
@@ -2966,17 +3067,34 @@ function rejectedRegrade(runRoot, scenarioId, reason, metadata = {}) {
 
 async function regradeExistingRun(inputRunDir) {
   const runRoot = resolve(inputRunDir);
+  if (isRecoveredSessionPath(runRoot)) throw new UsageError("regrade refuses recovered unsealed session paths");
+  if (!existsSync(runRoot)) throw new UsageError(`regrade run directory does not exist: ${runRoot}`);
   const evidenceDir = join(runRoot, "evidence");
-  const workspace = join(runRoot, "workspace");
   const packageRoot = join(runRoot, "package");
-  const localBin = join(runRoot, "bin");
   const actionLog = join(evidenceDir, "director-actions.jsonl");
-  const originalManifest = json(join(runRoot, "manifest.json"));
-  const originalScenarioBytes = readFileSync(join(runRoot, "scenario.json"));
-  const originalScenario = JSON.parse(originalScenarioBytes.toString("utf8"));
+  const originalCapabilityPath = join(runRoot, "capability.json");
+  let recordedCapability = null;
+  try { recordedCapability = existsSync(originalCapabilityPath) ? json(originalCapabilityPath) : null; } catch {}
+  const recordedScenarioId = typeof recordedCapability?.scenario_id === "string" ? recordedCapability.scenario_id : basename(runRoot);
+  if (recordedCapability?.interrupted) {
+    return rejectedRegrade(runRoot, recordedScenarioId, "probe was interrupted; evidence was never sealed");
+  }
+  let originalManifest;
+  let originalScenarioBytes;
+  let originalScenario;
+  try {
+    originalManifest = json(join(runRoot, "manifest.json"));
+    originalScenarioBytes = readFileSync(join(runRoot, "scenario.json"));
+    originalScenario = JSON.parse(originalScenarioBytes.toString("utf8"));
+  } catch (error) {
+    return rejectedRegrade(runRoot, recordedScenarioId, `recorded manifest or scenario is unavailable: ${error instanceof Error ? error.message : String(error)}`);
+  }
   const currentScenarioPath = join(EVAL_ROOT, "scenarios", `${originalScenario.id}.json`);
   const currentScenarioBytes = existsSync(currentScenarioPath) ? readFileSync(currentScenarioPath) : originalScenarioBytes;
   const currentScenario = JSON.parse(currentScenarioBytes.toString("utf8"));
+  const host = recordedWorkerHost(originalManifest);
+  const workerRunRoot = recordedWorkerRunRoot(originalManifest, runRoot);
+  const workerWorkspace = join(workerRunRoot, "workspace");
   const sealVerification = verifyEvidenceSeal({ runRoot, packageRoot, actionLog });
   if (!sealVerification.ok && !sealVerification.historicalUnsealed) {
     return rejectedRegrade(runRoot, originalScenario.id, `evidence seal verification failed: ${sealVerification.reason}`, {
@@ -3022,13 +3140,13 @@ async function regradeExistingRun(inputRunDir) {
     : scriptedFourTurnMode
     ? [tracePath, resumeTracePath, thirdTracePath, fourthTracePath]
     : scriptedThreeTurnMode ? [tracePath, resumeTracePath, thirdTracePath] : persistentMode ? [tracePath, resumeTracePath] : [tracePath];
-  const trace = parseTrace(tracePaths, workspace, null, executableIdentities, bareResolutionProven, null);
-  const turn1Trace = persistentMode ? parseTrace(tracePath, workspace, null, executableIdentities, bareResolutionProven, null) : trace;
-  const turn2Trace = persistentMode ? parseTrace(resumeTracePath, workspace, null, executableIdentities, bareResolutionProven, null) : null;
-  const turn3Trace = scriptedThreeTurnMode || scriptedFourTurnMode ? parseTrace(thirdTracePath, workspace, null, executableIdentities, bareResolutionProven, null) : null;
-  const turn4Trace = scriptedFourTurnMode ? parseTrace(fourthTracePath, workspace, null, executableIdentities, bareResolutionProven, null) : null;
+  const trace = parseTrace(host, tracePaths, workerWorkspace, null, executableIdentities, bareResolutionProven, null);
+  const turn1Trace = persistentMode ? parseTrace(host, tracePath, workerWorkspace, null, executableIdentities, bareResolutionProven, null) : trace;
+  const turn2Trace = persistentMode ? parseTrace(host, resumeTracePath, workerWorkspace, null, executableIdentities, bareResolutionProven, null) : null;
+  const turn3Trace = scriptedThreeTurnMode || scriptedFourTurnMode ? parseTrace(host, thirdTracePath, workerWorkspace, null, executableIdentities, bareResolutionProven, null) : null;
+  const turn4Trace = scriptedFourTurnMode ? parseTrace(host, fourthTracePath, workerWorkspace, null, executableIdentities, bareResolutionProven, null) : null;
   const dynamicTurnTraces = dynamicUserMode
-    ? tracePaths.map(path => parseTrace(path, workspace, null, executableIdentities, bareResolutionProven, null))
+    ? tracePaths.map(path => parseTrace(host, path, workerWorkspace, null, executableIdentities, bareResolutionProven, null))
     : [];
   const actions = readFileSync(actionLog, "utf8").split("\n").filter(Boolean).map(JSON.parse);
   const workerStarted = actions.find(entry => entry.phase === "worker.turn-1" && entry.event === "started");
@@ -3053,20 +3171,22 @@ async function regradeExistingRun(inputRunDir) {
       })
     : [];
   const environmentAudit = traceEnvironmentAudit(trace.events, {
-    workspace,
-    packageRoot,
-    binRoot: localBin,
+    workspace: workerWorkspace,
+    packageRoot: join(workerRunRoot, "package"),
+    binRoot: join(workerRunRoot, "bin"),
     controlledHome: join(runRoot, "__deleted_controlled_home__"),
-    controlledCodexHome: join(runRoot, "__deleted_controlled_codex_home__"),
-    controlledZdotdir: originalManifest.launch?.zdotdir ?? join(runRoot, "zdot"),
+    controlledHostHome: join(runRoot, "__deleted_controlled_codex_home__"),
+    controlledZdotdir: originalManifest.launch?.zdotdir ?? join(workerRunRoot, "zdot"),
+    hostSensitiveEnvKeys: host.sensitive_env_keys,
     sensitiveEnvKeys: originalManifest.control?.provider?.environment_keys ?? [],
+    harnessRoots: [...new Set([workerRunRoot, runRoot, RUNS_ROOT, EVAL_ROOT])],
   });
   const commandPolicyAudit = workerCommandPolicyAudit(trace.events, overlay.assertions, executableIdentities, bareResolutionProven);
   const activationAudit = negativeActivationMode
     ? superspecInvocationAudit(trace.events, executableIdentities, bareResolutionProven)
     : null;
   const verificationEvidence = negativeActivationMode
-    ? negativeVerificationEvidence(tracePath, originalScenario)
+    ? negativeVerificationEvidence(trace.trace, originalScenario)
     : null;
   const turn1Authenticity = persistentMode && !dynamicUserMode
     ? classifyAuthenticity(turn1Trace, originalScenario.assertions.turn_1_required_worker_commands, workerCode, executableIdentities, bareResolutionProven, null)
@@ -3106,7 +3226,10 @@ async function regradeExistingRun(inputRunDir) {
     : classifyAuthenticity(trace, originalScenario.assertions.required_worker_commands, workerCode, executableIdentities, bareResolutionProven, null);
   const independentReviewTrace = dynamicUserMode ? dynamicTurnTraces.at(-1) : turn4Trace;
   const independentReview = (scriptedFourTurnMode || dynamicUserMode) && originalScenario.assertions.require_independent_review === true
-    ? independentAgentAudit(independentReviewTrace?.events ?? [])
+    ? host.independentAgentAudit(independentReviewTrace?.trace ?? null, {
+        sessionIndex: loadSessionIndex(runRoot),
+        window: workerTurnWindow(actions, dynamicUserMode ? dynamicTurnTraces.length : 4),
+      })
     : null;
   if (independentReview && authenticity.status === "pass" && !independentReview.ok) {
     authenticity = {
@@ -3142,10 +3265,11 @@ async function regradeExistingRun(inputRunDir) {
     : gate("unavailable", workerStderrEvidence, processStatus.detail);
   if (processStatus.recoveredTimeoutCount > 0) capability.limitations.push(`${processStatus.recoveredTimeoutCount} recorded Worker turn(s) timed out but later workflow evidence remained recoverable`);
   capability.gates.controlled_environment = processStatus.exitedCleanly && director.ok && environmentAudit.ok
-    ? gate("pass", workerTraceEvidence, "offline audit found no forbidden director action or host-path access")
+    ? gate("pass", workerTraceEvidence, `offline audit found no forbidden director action or host-path access${environmentObservationNote(environmentAudit)}`)
     : !environmentAudit.ok
-      ? gate("fail", ["evidence/turn-1.jsonl"], `recorded Worker accessed disallowed paths: ${environmentAudit.violations.map(item => item.reason).join(", ")}`)
+      ? gate("fail", ["evidence/turn-1.jsonl"], `recorded Worker accessed disallowed paths: ${environmentViolationReasons(environmentAudit)}`)
       : gate("unavailable", ["evidence/director-actions.jsonl"], "recorded controlled environment cannot be proven");
+  capability.gates.controlled_environment = withEvidenceLockStatus(capability.gates.controlled_environment, actions);
   capability.gates.authenticity = gate(
     authenticity.status,
     [...tracePaths.map((_, index) => `evidence/turn-${index + 1}.jsonl`), "manifest.json"],
@@ -3164,7 +3288,7 @@ async function regradeExistingRun(inputRunDir) {
 
   const changes = frozen.storedChanges;
   const activationState = negativeActivationMode ? negativeActivationState(changes, activationAudit) : null;
-  const scopeViolations = changes.filter(change => !inventoryChangeAllowed(change, originalScenario.assertions.allowed_worker_changes));
+  const scopeViolations = changes.filter(change => !inventoryChangeAllowed(change, originalScenario.assertions.allowed_worker_changes, host));
   capability.gates.scope = scopeViolations.length === 0
     ? gate("pass", ["evidence/workspace-before.json", "evidence/workspace-after.json", "evidence/git-after.json", "evidence/git.diff"])
     : gate("fail", ["evidence/workspace-before.json", "evidence/workspace-after.json", "evidence/git-after.json", "evidence/git.diff"], `out-of-scope paths: ${scopeViolations.map(item => item.path).join(", ")}`);
@@ -3242,7 +3366,7 @@ async function regradeExistingRun(inputRunDir) {
       capability.gates.stop_boundary = gate("pass", ["evidence/turn-1.jsonl", "evidence/verifier.json", "evidence/workspace-changes.json"], "recorded ordinary request completed and stopped without activating SuperSpec", "direct");
     }
   } else if (dynamicUserMode) {
-    const turnIds = tracePaths.map(path => traceThreadIds(path));
+    const turnIds = dynamicTurnTraces.map(parsed => traceThreadIds(parsed.trace));
     const threadId = turnIds[0]?.[0] ?? null;
     const sameThread = threadId != null
       && turnIds.every(ids => ids.length === 1 && ids[0] === threadId)
@@ -3311,10 +3435,10 @@ async function regradeExistingRun(inputRunDir) {
       capability.gates.stop_boundary = gate("fail", stopEvidence, `unsupported recorded dynamic stop action: ${effectiveStop.action}`, "direct");
     }
   } else if (scriptedMode) {
-    const turn1Ids = traceThreadIds(tracePath);
-    const turn2Ids = traceThreadIds(resumeTracePath);
-    const turn3Ids = scriptedThreeTurnMode || scriptedFourTurnMode ? traceThreadIds(thirdTracePath) : [];
-    const turn4Ids = scriptedFourTurnMode ? traceThreadIds(fourthTracePath) : [];
+    const turn1Ids = traceThreadIds(turn1Trace.trace);
+    const turn2Ids = traceThreadIds(turn2Trace.trace);
+    const turn3Ids = scriptedThreeTurnMode || scriptedFourTurnMode ? traceThreadIds(turn3Trace.trace) : [];
+    const turn4Ids = scriptedFourTurnMode ? traceThreadIds(turn4Trace.trace) : [];
     const sameThread = turn1Ids.length === 1
       && turn2Ids.length === 1
       && turn1Ids[0] === turn2Ids[0]
@@ -3350,7 +3474,7 @@ async function regradeExistingRun(inputRunDir) {
       ...(scriptedFourTurnMode ? { entered_archive: enteredArchive } : {}),
     };
     const decisionStopFacts = originalScenario.stop.mode === "apply_decision"
-      ? applyDecisionStopFacts(events, traceAgentMessages(finalTracePath))
+      ? applyDecisionStopFacts(events, traceAgentMessages(finalTrace.trace))
       : null;
     const repairRouteFacts = originalScenario.stop.mode === "repair_routing"
       ? repairRoutingFacts(events, originalScenario.stop)
@@ -3390,23 +3514,23 @@ async function regradeExistingRun(inputRunDir) {
         : "recorded same thread accepted the Explore boundary, reached propose_ready, and stopped before Apply");
     }
   } else if (resumeMode) {
-    const turn1Ids = traceThreadIds(tracePath);
-    const turn2Ids = traceThreadIds(resumeTracePath);
+    const turn1Ids = traceThreadIds(turn1Trace.trace);
+    const turn2Ids = traceThreadIds(turn2Trace.trace);
     const sameThread = turn1Ids.length === 1 && turn2Ids.length === 1 && turn1Ids[0] === turn2Ids[0] && originalManifest.session?.same_thread === true;
-    const turn1PwdItem = traceCompletedCommand(tracePath, "pwd");
-    const turn2PwdItem = traceCompletedCommand(resumeTracePath, "pwd");
-    const turn1Pwd = String(turn1PwdItem?.aggregated_output ?? turn1PwdItem?.output ?? "").trim();
-    const turn2Pwd = String(turn2PwdItem?.aggregated_output ?? turn2PwdItem?.output ?? "").trim();
-    const cwdPreserved = resolve(turn1Pwd || "/") === resolve(workspace) && resolve(turn2Pwd || "/") === resolve(workspace);
-    const projectRulesPreserved = traceAgentMessages(tracePath).some(message => message.includes(originalScenario.stop.turn_1_rule_marker))
-      && traceAgentMessages(resumeTracePath).some(message => message.includes(originalScenario.stop.turn_2_rule_marker));
+    const turn1PwdItem = traceCompletedCommand(turn1Trace.trace, "pwd");
+    const turn2PwdItem = traceCompletedCommand(turn2Trace.trace, "pwd");
+    const turn1Pwd = String(recordedAggregatedOutput(turn1PwdItem) ?? turn1PwdItem?.output ?? "").trim();
+    const turn2Pwd = String(recordedAggregatedOutput(turn2PwdItem) ?? turn2PwdItem?.output ?? "").trim();
+    const cwdPreserved = resolve(turn1Pwd || "/") === resolve(workerWorkspace) && resolve(turn2Pwd || "/") === resolve(workerWorkspace);
+    const projectRulesPreserved = traceAgentMessages(turn1Trace.trace).some(message => message.includes(originalScenario.stop.turn_1_rule_marker))
+      && traceAgentMessages(turn2Trace.trace).some(message => message.includes(originalScenario.stop.turn_2_rule_marker));
     const turn2AgentsEvidencePath = join(evidenceDir, "resume-turn-2-AGENTS.md");
     const resumedRuleEvidence = safeRegularWithin(turn2AgentsEvidencePath, evidenceDir).ok
       && readFileSync(turn2AgentsEvidencePath, "utf8").includes(originalScenario.stop.turn_2_rule_marker)
       && hashFile(turn2AgentsEvidencePath) === originalManifest.session?.turn_2_project_rule_digest;
-    const turn2MarkerChanged = traceCompletedFileChanges(resumeTracePath).some(change =>
+    const turn2MarkerChanged = traceCompletedFileChanges(turn2Trace.trace).some(change =>
       typeof change.path === "string"
-      && resolve(change.path) === resolve(workspace, "resume-turn-2.txt")
+      && resolve(change.path) === resolve(workerWorkspace, "resume-turn-2.txt")
       && ["add", "update"].includes(change.kind)
     );
     const workspaceWritePreserved = markerContentErrors.length === 0
@@ -3482,10 +3606,7 @@ async function regradeExistingRun(inputRunDir) {
     finalizeCapability(capability);
   }
 
-  const evaluatorDigest = sha256(JSON.stringify({
-    probe: hashFile(fileURLToPath(import.meta.url)),
-    spawn: hashFile(join(EVAL_ROOT, "lib", "spawn.mjs")),
-  }));
+  const evaluatorDigest = currentEvaluatorDigest();
   const rawEvidenceFiles = [
     "turn-1.jsonl", "turn-1.stderr.log", "trace-summary.json",
     "workspace-before.json", "workspace-after.json", "workspace-changes.json",
@@ -3551,13 +3672,43 @@ async function regradeExistingRun(inputRunDir) {
   return capability.exit_code;
 }
 
+function writeInterruptedCapability({ capabilityPath, manifestPath, runId, scenario, signal, at }) {
+  const capability = emptyCapability(scenario?.id ?? "interrupted");
+  capability.interrupted = { signal, at };
+  capability.limitations.push(`probe was interrupted by ${signal}; evidence was never sealed`);
+  for (const name of CORE_GATES) {
+    capability.gates[name] = gate("unavailable", [], `probe interrupted by ${signal}`);
+  }
+  finalizeCapability(capability);
+  writeJson(capabilityPath, capability);
+  if (!existsSync(manifestPath)) {
+    writeJson(manifestPath, {
+      schema_version: 1,
+      run_id: runId,
+      created_at: at,
+      interrupted: { signal, at },
+    });
+  }
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  if (args.help) {
+    process.stdout.write(usage());
+    return 0;
+  }
   if (args.validateFaults) {
     await validateFaultMappings();
     return 0;
   }
   if (args.regrade) return await regradeExistingRun(args.regrade);
+
+  const host = getWorkerHost(args.host);
+  const judgeHost = getJudgeHost(args.judgeHost);
+  const staleSweep = sweepStaleTempDirs({
+    rules: [...host.stale_temp_dir_rules, ...judgeHost.stale_temp_dir_rules],
+  });
+  const tempDirs = createTempDirRegistry();
 
   if (!existsSync(args.scenario)) throw new Error(`scenario unavailable: ${args.scenario}`);
   const scenarioBytes = readFileSync(args.scenario);
@@ -3574,7 +3725,8 @@ async function main() {
   const workerTimeoutMs = workerTurnTimeoutMs(scenario);
   const negativeActivationMode = scenario.session_mode === "single_turn_negative_activation";
   const runId = `${scenario.id}-${isoForPath()}-${process.pid}`;
-  const runRoot = join(RUNS_ROOT, runId);
+  const archiveRunRoot = join(RUNS_ROOT, runId);
+  const runRoot = createLiveRunRoot(runId);
   const workspace = join(runRoot, "workspace");
   const packageRoot = join(runRoot, "package");
   const localBin = join(runRoot, "bin");
@@ -3602,11 +3754,13 @@ async function main() {
   const run = createDirectorSpawner(actionLog);
   const capability = emptyCapability(scenario.id);
   let authDirs = null;
+  let sessionIndex = null;
   let workerStartedAt = null;
-  let signalReceived = null;
   let evidenceSecured = false;
   let evidenceCollectionReady = false;
   let manifestSourceRepository = null;
+  let judge = null;
+  let interrupt = null;
   const protectedEvidencePaths = dynamicUserMode
     ? [actionLog, ...dynamicTracePaths(evidenceDir, dynamicMaxTurns).flatMap((path, index) => [path, turnStderrPath(evidenceDir, index + 1)]), simulatedUserPath, ...simulatedUserModelPaths]
     : scriptedFourTurnMode
@@ -3616,37 +3770,74 @@ async function main() {
     : persistentMode
     ? [actionLog, tracePath, stderrPath, resumeTracePath, resumeStderrPath]
     : [actionLog, tracePath, stderrPath];
-  const onSignal = signal => {
-    signalReceived = signal;
-    run.terminateAll("SIGTERM");
+  interrupt = createInterruptController({
+    onInterrupt() {
+      run.terminateAll("SIGTERM");
+      judge?.terminateAll("SIGTERM");
+    },
+    onForcedExit(firstSignal) {
+      run.terminateAll("SIGKILL");
+      judge?.terminateAll("SIGKILL");
+      if (evidenceSecured) {
+        try { restoreEvidenceAfterWorker(evidenceDir, protectedEvidencePaths); } catch {}
+      }
+      try { if (!sessionIndex && authDirs) sessionIndex = collectWorkerSessions(host, authDirs, evidenceDir); } catch {}
+      tempDirs.removeAll();
+      writeInterruptedCapability({
+        capabilityPath,
+        manifestPath,
+        runId,
+        scenario,
+        signal: firstSignal,
+        at: interrupt.at,
+      });
+      try { archiveLiveRun(runRoot, archiveRunRoot); } catch {}
+    },
+  });
+  const assertNotInterrupted = () => {
+    if (interrupt.interrupted) throw new Error(`probe interrupted by ${interrupt.signal}`);
   };
-  const sigintHandler = () => onSignal("SIGINT");
-  const sigtermHandler = () => onSignal("SIGTERM");
-  process.once("SIGINT", sigintHandler);
-  process.once("SIGTERM", sigtermHandler);
+  const runWorkerWithLockedEvidence = async (executable, argv, options) => {
+    assertNotInterrupted();
+    secureEvidenceForWorker(evidenceDir, protectedEvidencePaths);
+    evidenceSecured = true;
+    try {
+      return await run(executable, argv, { ...options, outputMode: 0o200 });
+    } finally {
+      const drift = evidenceLockDrift(evidenceDir, protectedEvidencePaths);
+      restoreEvidenceAfterWorker(evidenceDir, protectedEvidencePaths);
+      evidenceSecured = false;
+      run.recordMutation(`evidence-lock.${options.phase}`, "evidence", { intact: drift.length === 0, drift });
+    }
+  };
 
   try {
-    const tools = resolveHostTools(args.inject);
-    const missing = REQUIRED_TOOLS.filter(name => !tools[name]);
+    const tools = resolveHostTools(host, args.inject);
+    const missing = requiredToolNames(host).filter(name => !tools[name]);
     if (missing.length) throw new Error(`required executables unavailable: ${missing.join(", ")}`);
 
-    const build = await run(tools.node, [join(REPO_ROOT, "build.js")], { phase: "setup.build", cwd: REPO_ROOT, env: process.env });
-    if (build.code !== 0) throw new Error(`build failed: ${build.stderr || build.stdout}`);
+    const { sourcePackageDigest, isolatedPackageDigest } = await withRepositoryBuildLock(async () => {
+      const build = await run(tools.node, [join(REPO_ROOT, "build.js")], { phase: "setup.build", cwd: REPO_ROOT, env: process.env });
+      if (build.code !== 0) throw new Error(`build failed: ${build.stderr || build.stdout}`);
 
-    for (const name of ["dist", "templates"]) cpSync(join(REPO_ROOT, name), join(packageRoot, name), { recursive: true });
-    for (const name of ["package.json", "README.md"]) copyFileSync(join(REPO_ROOT, name), join(packageRoot, name));
-    run.recordMutation("setup.package.materialize", packageRoot, { source: REPO_ROOT });
-    const sourcePackageDigest = sha256(JSON.stringify({
-      dist: treeDigest(join(REPO_ROOT, "dist")),
-      templates: treeDigest(join(REPO_ROOT, "templates")),
-      package: hashFile(join(REPO_ROOT, "package.json")),
-    }));
-    const isolatedPackageDigest = sha256(JSON.stringify({
-      dist: treeDigest(join(packageRoot, "dist")),
-      templates: treeDigest(join(packageRoot, "templates")),
-      package: hashFile(join(packageRoot, "package.json")),
-    }));
-    if (sourcePackageDigest !== isolatedPackageDigest) throw new Error("isolated package digest mismatch");
+      for (const name of ["dist", "templates"]) cpSync(join(REPO_ROOT, name), join(packageRoot, name), { recursive: true });
+      for (const name of ["package.json", "README.md"]) copyFileSync(join(REPO_ROOT, name), join(packageRoot, name));
+      run.recordMutation("setup.package.materialize", packageRoot, { source: REPO_ROOT });
+      const digests = {
+        sourcePackageDigest: sha256(JSON.stringify({
+          dist: treeDigest(join(REPO_ROOT, "dist")),
+          templates: treeDigest(join(REPO_ROOT, "templates")),
+          package: hashFile(join(REPO_ROOT, "package.json")),
+        })),
+        isolatedPackageDigest: sha256(JSON.stringify({
+          dist: treeDigest(join(packageRoot, "dist")),
+          templates: treeDigest(join(packageRoot, "templates")),
+          package: hashFile(join(packageRoot, "package.json")),
+        })),
+      };
+      if (digests.sourcePackageDigest !== digests.isolatedPackageDigest) throw new Error("isolated package digest mismatch");
+      return digests;
+    });
 
     const shim = join(localBin, process.platform === "win32" ? "superspec.cmd" : "superspec");
     if (process.platform === "win32") throw new Error("first probe currently requires POSIX symlink semantics");
@@ -3657,8 +3848,8 @@ async function main() {
 
     const toolShims = materializeToolShims(localBin, tools, run);
     const pathValue = makeControlledPath(localBin);
-    const providerProfile = controlledProviderProfile(args.provider);
-    authDirs = isolatedAuthHome(runId, providerProfile.requires_openai_auth);
+    const providerProfile = host.providerProfile(args.provider);
+    authDirs = host.createIsolation({ runId, providerProfile, registry: tempDirs });
     const systemShell = tools.sh;
     if (!systemShell || !["/bin/sh", "/bin/zsh"].includes(systemShell)) throw new Error("controlled system shell unavailable");
     const zdotdir = join(runRoot, "zdot");
@@ -3666,17 +3857,14 @@ async function main() {
     const zprofilePath = join(zdotdir, ".zprofile");
     writeFileSync(zprofilePath, `export PATH='${pathValue}'\n`, { mode: 0o600 });
     run.recordMutation("setup.shell.pin-login-path", zprofilePath, { path: pathValue });
-    const env = controlledEnv(authDirs.home, authDirs.codexHome, zdotdir, pathValue, systemShell, providerProfile.env_keys);
-    if (!authDirs.auth.mode_ok) throw new Error("isolated Codex authentication is unavailable");
+    const env = host.controlledEnv({ isolation: authDirs, zdotdir, pathValue, systemShell, providerProfile, model: args.model });
+    host.assertIsolationReady(authDirs);
     if (commandOnPath("superspec", pathValue) !== shimRealpath) throw new Error("run-local superspec is not first on PATH");
     const zshResolution = await run(tools.zsh, ["-lc", "command -v superspec"], { phase: "setup.shell-resolution", cwd: workspace, env });
     const bareResolutionProven = zshResolution.code === 0 && resolve(zshResolution.stdout.trim()) === resolve(shim);
     if (!bareResolutionProven) throw new Error(`login zsh did not resolve run-local superspec: ${zshResolution.stdout.trim() || zshResolution.stderr.trim()}`);
 
-    const featureResult = await run(tools.codex, ["features", "list"], { phase: "setup.codex-features", cwd: workspace, env });
-    if (featureResult.code !== 0) throw new Error(`Codex feature negotiation failed: ${featureResult.stderr || featureResult.stdout}`);
-    const supportedFeatures = parseFeatureList(featureResult.stdout);
-    if (!supportedFeatures.has("multi_agent")) throw new Error("Codex does not expose required multi_agent feature control");
+    const features = await host.negotiateFeatures({ run, executable: tools[host.executable], cwd: workspace, env });
 
     let sourceRepository = null;
     if (typeof scenario.fixture.source_repository === "string") {
@@ -3718,21 +3906,24 @@ async function main() {
     }
     run.recordMutation("setup.fixture.materialize", workspace, { files: fixtureFiles });
 
-    const install = await run(shim, ["install", "--skip-self-update"], { phase: "setup.fixture.install", cwd: workspace, env });
+    const install = await run(shim, ["install", "--skip-self-update", ...host.installArgs({ isolation: authDirs })], { phase: "setup.fixture.install", cwd: workspace, env });
     if (install.code !== 0) throw new Error(`fixture install failed: ${install.stderr || install.stdout}`);
-    const projectConfigPath = join(workspace, ".codex", "config.toml");
-    const configNormalization = normalizeUnsupportedProjectFeatures(projectConfigPath, supportedFeatures, run);
+    const projectConfigNormalization = host.prepareWorkspace({ workspace, features, run });
     const workflowConfigPath = join(workspace, ".superspec", "config.json");
     const installedWorkflowConfig = json(workflowConfigPath);
-    if (installedWorkflowConfig?.workflow?.mode !== scenario.fixture.workflow_mode) {
-      writeJson(workflowConfigPath, { workflow: { mode: scenario.fixture.workflow_mode } });
+    const scenarioPinsWorkflowMode = scenario.fixture.workflow_mode !== undefined;
+    if (scenarioPinsWorkflowMode && installedWorkflowConfig?.workflow?.mode !== scenario.fixture.workflow_mode) {
+      writeJson(workflowConfigPath, {
+        ...installedWorkflowConfig,
+        workflow: { ...installedWorkflowConfig?.workflow, mode: scenario.fixture.workflow_mode },
+      });
       run.recordMutation("setup.fixture.workflow-mode", workflowConfigPath, {
         installed_mode: installedWorkflowConfig?.workflow?.mode ?? null,
         scenario_mode: scenario.fixture.workflow_mode,
       });
     }
     const configured = json(workflowConfigPath);
-    if (configured?.workflow?.mode !== scenario.fixture.workflow_mode) throw new Error("fixture workflow mode mismatch");
+    if (scenarioPinsWorkflowMode && configured?.workflow?.mode !== scenario.fixture.workflow_mode) throw new Error("fixture workflow mode mismatch");
     const discoveryPath = join(workspace, "openspec", "changes", scenario.fixture.change, ".superspec", "artifacts", "discovery.md");
     if (existsSync(discoveryPath) !== Boolean(scenario.fixture.discovery_exists)) throw new Error("fixture discovery.md presence mismatch");
 
@@ -3757,7 +3948,14 @@ async function main() {
     if (sha256(JSON.stringify(inventory(workspace))) !== fixtureDigest) throw new Error("fixture digest changed before Worker launch");
 
     const versions = {};
-    for (const [name, versionArgs] of [["codex", ["--version"]], ["node", ["--version"]], ["git", ["--version"]], ["openspec", ["--version"]], ["superspec", ["--version"]]]) {
+    const versionProbes = new Map([
+      ...host.versionProbes(),
+      ["node", ["--version"]],
+      ["git", ["--version"]],
+      ["openspec", ["--version"]],
+      ["superspec", ["--version"]],
+    ]);
+    for (const [name, versionArgs] of versionProbes) {
       const executable = name === "superspec" ? shim : tools[name];
       const result = await run(executable, versionArgs, { phase: "setup.version", cwd: workspace, env });
       versions[name] = { exit_code: result.code, stdout: result.stdout.trim(), stderr: result.stderr.trim(), realpath: realpathSync(executable) };
@@ -3767,49 +3965,55 @@ async function main() {
     const statusBefore = await run(tools.git, ["status", "--porcelain=v1", "--untracked-files=all"], { phase: "setup.git-before", cwd: workspace, env });
     writeJson(join(evidenceDir, "git-before.json"), { head: head.stdout.trim(), status: statusBefore.stdout.split("\n").filter(Boolean) });
 
-    const guidanceFiles = beforeInventory.filter(entry => entry.type === "file" && (
-      entry.path === "AGENTS.md" || entry.path === ".codex/config.toml" || /^\.codex\/(skills|agents|prompts)\//.test(entry.path)
-    ));
+    const guidanceFiles = beforeInventory.filter(entry => entry.type === "file" && host.isGuidanceFile(entry.path));
     const multiAgentEnabled = multiAgentEnabledForScenario(scenario);
-    const featureControlArgs = [multiAgentEnabled ? "--enable" : "--disable", "multi_agent"];
-    if (supportedFeatures.has("child_agents_md")) featureControlArgs.push("--disable", "child_agents_md");
-    const initialWorkerPrompt = evalWorkerPrompt(scenario.initial_prompt);
+    const launchFeatures = host.launchFeatures({
+      features,
+      multiAgentEnabled,
+      projectConfigNormalization,
+    });
+    const initialWorkerPrompt = host.translateWorkerPrompt(evalWorkerPrompt(scenario.initial_prompt));
     const workerPromptAdditions = [];
     const workerPromptEvidenceRecords = [workerPromptEvidence(
       1,
       scenario.initial_prompt,
       initialWorkerPrompt,
-      { kind: "scenario", field: "initial_prompt" },
+      {
+        kind: "scenario",
+        field: "initial_prompt",
+        ...(initialWorkerPrompt !== scenario.initial_prompt ? { host_syntax: host.id } : {}),
+      },
     )];
-    const launchArgv = [
-      "exec", "--json",
-      ...(!persistentMode ? ["--ephemeral"] : []),
-      "--ignore-user-config", "--strict-config",
-      "--sandbox", "workspace-write",
-      "-m", args.model,
-      ...providerProfile.cli_args,
-      "-c", `model_reasoning_effort=${tomlLiteral(args.reasoning)}`,
-      "-c", "approval_policy=\"never\"",
-      ...featureControlArgs,
-      "-C", workspace,
-      "-",
-    ];
+    const launchArgv = host.freshLaunchArgs({
+      persistent: persistentMode,
+      model: args.model,
+      reasoning: args.reasoning,
+      providerProfile,
+      launchFeatures,
+      workspace,
+      isolation: authDirs,
+    });
+    const workerExecutable = tools[host.executable];
     const manifest = {
       schema_version: 1,
       run_id: runId,
       created_at: new Date().toISOString(),
+      host: hostIdentity(host),
+      run_layout: { worker_run_root: runRoot },
+      temp_dir_sweep: staleSweep,
       scenario: { id: scenario.id, path: "scenario.json", digest: sha256(scenarioBytes), materialized_after_worker: true, frozen_before_setup: true },
       fixture: {
         change: scenario.fixture.change,
-        workflow_mode: configured.workflow.mode,
+        workflow_mode: configured?.workflow?.mode ?? null,
+        workflow_mode_source: scenarioPinsWorkflowMode ? "scenario" : "installed",
         initial_state: scenario.fixture.initial_state ?? "init",
         discovery_exists: Boolean(scenario.fixture.discovery_exists),
         digest: fixtureDigest,
         ...(manifestSourceRepository ? { source_repository: manifestSourceRepository } : {}),
       },
       launch: {
-        provider: args.provider, model: args.model, reasoning: args.reasoning, sandbox: "workspace-write",
-        approval: "never", session: persistentMode ? "persistent_isolated_resume" : "ephemeral", argv: [tools.codex, ...launchArgv],
+        provider: args.provider, model: args.model, reasoning: args.reasoning, sandbox: host.launch_policy.sandbox,
+        approval: host.launch_policy.approval, session: persistentMode ? "persistent_isolated_resume" : "ephemeral", argv: [workerExecutable, ...launchArgv],
         environment_keys: Object.keys(env).sort(), path_entries: pathValue.split(":"),
         shell: systemShell,
         zdotdir,
@@ -3817,39 +4021,16 @@ async function main() {
         bare_superspec_resolution: { proven: bareResolutionProven, stdout: zshResolution.stdout.trim(), expected: shim },
         tool_shims: toolShims,
       },
-      control: {
-        home_isolated: authDirs.home !== process.env.HOME,
-        codex_home_isolated: authDirs.codexHome !== (process.env.CODEX_HOME ?? join(process.env.HOME ?? "", ".codex")),
-        auth_isolation: authDirs.auth.mode_ok,
-        auth: authDirs.auth,
-        ignored_user_config: true,
-        provider: {
-          id: providerProfile.id,
-          source_type: providerProfile.source_type,
-          selected_config_keys: providerProfile.selected_config_keys,
-          config_digest: providerProfile.config_digest,
-          environment_keys: providerProfile.env_keys,
-          ...(providerProfile.metadata ? { metadata: providerProfile.metadata } : {}),
-        },
-        features: {
-          supported: [...supportedFeatures.keys()].sort(),
-          enabled: featureControlArgs.flatMap((value, index) => value === "--enable" ? [featureControlArgs[index + 1]] : []),
-          disabled: featureControlArgs.flatMap((value, index) => value === "--disable" ? [featureControlArgs[index + 1]] : []),
-          multi_agent: multiAgentEnabled ? "enabled_by_default" : "disabled_by_scenario",
-          child_agents_md: supportedFeatures.has("child_agents_md") ? "disabled" : "unsupported_omitted",
-        },
-        project_config_normalization: configNormalization,
-      },
+      control: host.controlManifest({ isolation: authDirs, providerProfile, features: launchFeatures }),
       package: { source_digest: sourcePackageDigest, isolated_digest: isolatedPackageDigest, root: posix(relative(runRoot, packageRoot)), shim_realpath: shimRealpath },
       executables: versions,
       guidance: guidanceFiles,
       repository: { source_head: (await run(tools.git, ["rev-parse", "HEAD"], { phase: "setup.source-head", cwd: REPO_ROOT, env: process.env })).stdout.trim() },
       injection: args.inject,
     };
+    assertNotInterrupted();
     workerStartedAt = new Date().toISOString();
-    secureEvidenceForWorker(evidenceDir, protectedEvidencePaths);
-    evidenceSecured = true;
-    const worker = await run(tools.codex, launchArgv, {
+    const worker = await runWorkerWithLockedEvidence(workerExecutable, launchArgv, {
       phase: "worker.turn-1",
       cwd: workspace,
       env,
@@ -3858,8 +4039,6 @@ async function main() {
       stdin: initialWorkerPrompt,
       timeoutMs: workerTimeoutMs,
     });
-    restoreEvidenceAfterWorker(evidenceDir, protectedEvidencePaths);
-    evidenceSecured = false;
     let resumeWorker = null;
     let thirdWorker = null;
     let fourthWorker = null;
@@ -3867,13 +4046,31 @@ async function main() {
     const dynamicWorkerTracePaths = dynamicUserMode ? [tracePath] : [];
     let dynamicStop = null;
     const simulatedUserTurns = [];
+    if (dynamicUserMode && scenario.simulated_user?.mode === "ai") {
+      // Reuse the Worker's resolved CLI and provider only when the judge speaks the same host and provider.
+      const judgeSharesWorker = judgeHost.id === host.id && args.judgeProvider === args.provider;
+      judge = judgeHost.createRunner({
+        role: "simulated_user",
+        ...(judgeSharesWorker ? { executable: workerExecutable, providerProfile } : {}),
+        provider: args.judgeProvider,
+        spawnDirector: run,
+        pathValue,
+        systemShell,
+        zdotdir,
+        runLabel: basename(runRoot),
+        registry: tempDirs,
+      });
+      manifest.judge_host = judgeIdentity(judgeHost);
+      manifest.simulated_user_judge = { provider: args.judgeProvider, model: args.judgeModel, reasoning: args.judgeReasoning };
+    }
+    assertNotInterrupted();
     if (persistentMode && worker.code === 0) {
-      const turn1ThreadIds = traceThreadIds(tracePath);
+      const turn1ThreadIds = traceThreadIds(host.parseTrace(tracePath));
       if (turn1ThreadIds.length !== 1) throw new Error(`resume probe requires one persisted thread id, got ${turn1ThreadIds.length}`);
       const threadId = turn1ThreadIds[0];
-      const sessionBeforeResume = sessionStorageEvidence(authDirs.codexHome, threadId);
+      const sessionBeforeResume = host.sessionStorageEvidence(authDirs, threadId);
       const storedBeforeResume = sessionBeforeResume.stored;
-      if (!storedBeforeResume) throw new Error("persistent session file was not found in isolated CODEX_HOME before resume");
+      if (!storedBeforeResume) throw new Error(host.sessionNotStoredMessage);
       if (dynamicUserMode) {
         manifest.launch.resume_argvs = [];
         manifest.session = {
@@ -3889,7 +4086,7 @@ async function main() {
         let currentTracePath = tracePath;
         let currentWorker = worker;
         while (currentWorker.code === 0) {
-          const currentTrace = parseTrace(currentTracePath, workspace, null, [shimRealpath], bareResolutionProven, null);
+          const currentTrace = parseTrace(host, currentTracePath, workspace, null, [shimRealpath], bareResolutionProven, null);
           const currentClassification = classifyDynamicTurn(currentTrace, currentWorker.code);
           if (currentClassification.status !== "pass") {
             dynamicStop = dynamicExecutionStop(currentTurn, currentClassification);
@@ -3898,6 +4095,7 @@ async function main() {
             break;
           }
           const nextTurn = currentTurn + 1;
+          assertNotInterrupted();
           const observed = await resolveSimulatedUserTurn({
             turn: nextTurn,
             tracePath: currentTracePath,
@@ -3905,13 +4103,10 @@ async function main() {
             executableIdentities: [shimRealpath],
             bareResolutionProven,
             scenario,
-            run,
-            codex: tools.codex,
-            providerProfile,
-            model: args.model,
-            reasoning: args.reasoning,
-            pathValue,
-            systemShell,
+            host,
+            judge,
+            model: args.judgeModel,
+            reasoning: args.judgeReasoning,
             runRoot,
           });
           if (["complete", "needs_human"].includes(observed.action)) {
@@ -3943,39 +4138,29 @@ async function main() {
             observed.worker_prompt,
             { kind: "simulated_user", evidence: "evidence/simulated-user-turns.json", after_worker_turn: currentTurn },
           ));
-          const resumeArgv = [
-            "exec", "resume", "--json", "--ignore-user-config", "--strict-config",
-            "-m", args.model,
-            ...providerProfile.cli_args,
-            "-c", `model_reasoning_effort=${tomlLiteral(args.reasoning)}`,
-            "-c", "approval_policy=\"never\"",
-            "-c", "sandbox_mode=\"workspace-write\"",
-            ...featureControlArgs,
-            threadId,
-            "-",
-          ];
-          manifest.launch.resume_argvs.push([tools.codex, ...resumeArgv]);
+          const resumeArgv = host.resumeLaunchArgs({
+            model: args.model,
+            reasoning: args.reasoning,
+            providerProfile,
+            launchFeatures,
+            sessionId: threadId,
+            isolation: authDirs,
+          });
+          manifest.launch.resume_argvs.push([workerExecutable, ...resumeArgv]);
           const nextTracePath = turnTracePath(evidenceDir, nextTurn);
           const nextStderrPath = turnStderrPath(evidenceDir, nextTurn);
-          secureEvidenceForWorker(evidenceDir, protectedEvidencePaths);
-          evidenceSecured = true;
-          try {
-            currentWorker = await run(tools.codex, resumeArgv, {
-              phase: `worker.turn-${nextTurn}-resume`,
-              cwd: workspace,
-              env,
-              stdoutPath: nextTracePath,
-              stderrPath: nextStderrPath,
-              stdin: observed.worker_prompt,
-              timeoutMs: workerTimeoutMs,
-            });
-          } finally {
-            restoreEvidenceAfterWorker(evidenceDir, protectedEvidencePaths);
-            evidenceSecured = false;
-          }
+          currentWorker = await runWorkerWithLockedEvidence(workerExecutable, resumeArgv, {
+            phase: `worker.turn-${nextTurn}-resume`,
+            cwd: workspace,
+            env,
+            stdoutPath: nextTracePath,
+            stderrPath: nextStderrPath,
+            stdin: observed.worker_prompt,
+            timeoutMs: workerTimeoutMs,
+          });
           dynamicWorkers.push(currentWorker);
           dynamicWorkerTracePaths.push(nextTracePath);
-          const resumedIds = traceThreadIds(nextTracePath);
+          const resumedIds = traceThreadIds(host.parseTrace(nextTracePath));
           manifest.session.same_thread = manifest.session.same_thread === true
             && resumedIds.length === 1
             && resumedIds[0] === threadId;
@@ -3986,7 +4171,7 @@ async function main() {
             timed_out: currentWorker.timedOut,
             resumed_thread_ids: resumedIds,
           });
-          manifest.session.storage_after_resume = sessionStorageEvidence(authDirs.codexHome, threadId);
+          manifest.session.storage_after_resume = host.sessionStorageEvidence(authDirs, threadId);
           currentTurn = nextTurn;
           currentTracePath = nextTracePath;
         }
@@ -4018,24 +4203,21 @@ async function main() {
           marker: scenario.stop.turn_2_rule_marker,
         });
       }
-      const resumeArgv = [
-        "exec", "resume", "--json", "--ignore-user-config", "--strict-config",
-        "-m", args.model,
-        ...providerProfile.cli_args,
-        "-c", `model_reasoning_effort=${tomlLiteral(args.reasoning)}`,
-        "-c", "approval_policy=\"never\"",
-        "-c", "sandbox_mode=\"workspace-write\"",
-        ...featureControlArgs,
-        threadId,
-        "-",
-      ];
+      const resumeArgv = host.resumeLaunchArgs({
+        model: args.model,
+        reasoning: args.reasoning,
+        providerProfile,
+        launchFeatures,
+        sessionId: threadId,
+        isolation: authDirs,
+      });
       workerPromptEvidenceRecords.push(workerPromptEvidence(
         2,
         scenario.resume_prompt,
         scenario.resume_prompt,
         { kind: "scenario", field: "resume_prompt" },
       ));
-      manifest.launch.resume_argv = [tools.codex, ...resumeArgv];
+      manifest.launch.resume_argv = [workerExecutable, ...resumeArgv];
       manifest.session = {
         mode: scenario.session_mode,
         thread_id: threadId,
@@ -4047,10 +4229,8 @@ async function main() {
           turn_2_project_rule_digest: hashFile(agentsPath),
         } : {}),
       };
-      secureEvidenceForWorker(evidenceDir, protectedEvidencePaths);
-      evidenceSecured = true;
       try {
-        resumeWorker = await run(tools.codex, resumeArgv, {
+        resumeWorker = await runWorkerWithLockedEvidence(workerExecutable, resumeArgv, {
           phase: "worker.turn-2-resume",
           cwd: workspace,
           env,
@@ -4060,8 +4240,6 @@ async function main() {
           timeoutMs: workerTimeoutMs,
         });
       } finally {
-        restoreEvidenceAfterWorker(evidenceDir, protectedEvidencePaths);
-        evidenceSecured = false;
         if (resumeMode && agentsPath && originalAgentsBytes) {
           writeFileSync(agentsPath, originalAgentsBytes);
           run.recordMutation("post-resume.project-rule-restored", agentsPath, {
@@ -4070,10 +4248,10 @@ async function main() {
           });
         }
       }
-      const turn2ThreadIds = traceThreadIds(resumeTracePath);
+      const turn2ThreadIds = traceThreadIds(host.parseTrace(resumeTracePath));
       manifest.session.resumed_thread_ids = turn2ThreadIds;
       manifest.session.same_thread = turn2ThreadIds.length === 1 && turn2ThreadIds[0] === threadId;
-      manifest.session.storage_after_resume = sessionStorageEvidence(authDirs.codexHome, threadId);
+      manifest.session.storage_after_resume = host.sessionStorageEvidence(authDirs, threadId);
       if ((scriptedThreeTurnMode || scriptedFourTurnMode) && resumeWorker?.code === 0) {
         const beforeTurn3Files = scenario.fixture.before_turn_3_files ?? {};
         const turn3FixtureUpdates = [];
@@ -4094,40 +4272,30 @@ async function main() {
           thirdPrompt,
           { kind: "scenario", field: "third_prompt" },
         ));
-        const thirdResumeArgv = [
-          "exec", "resume", "--json", "--ignore-user-config", "--strict-config",
-          "-m", args.model,
-          ...providerProfile.cli_args,
-          "-c", `model_reasoning_effort=${tomlLiteral(args.reasoning)}`,
-          "-c", "approval_policy=\"never\"",
-          "-c", "sandbox_mode=\"workspace-write\"",
-          ...featureControlArgs,
-          threadId,
-          "-",
-        ];
-        manifest.launch.third_resume_argv = [tools.codex, ...thirdResumeArgv];
-        secureEvidenceForWorker(evidenceDir, protectedEvidencePaths);
-        evidenceSecured = true;
-        try {
-          thirdWorker = await run(tools.codex, thirdResumeArgv, {
-            phase: "worker.turn-3-resume",
-            cwd: workspace,
-            env,
-            stdoutPath: thirdTracePath,
-            stderrPath: thirdStderrPath,
-            stdin: thirdPrompt,
-            timeoutMs: workerTimeoutMs,
-          });
-        } finally {
-          restoreEvidenceAfterWorker(evidenceDir, protectedEvidencePaths);
-          evidenceSecured = false;
-        }
-        const turn3ThreadIds = traceThreadIds(thirdTracePath);
+        const thirdResumeArgv = host.resumeLaunchArgs({
+          model: args.model,
+          reasoning: args.reasoning,
+          providerProfile,
+          launchFeatures,
+          sessionId: threadId,
+          isolation: authDirs,
+        });
+        manifest.launch.third_resume_argv = [workerExecutable, ...thirdResumeArgv];
+        thirdWorker = await runWorkerWithLockedEvidence(workerExecutable, thirdResumeArgv, {
+          phase: "worker.turn-3-resume",
+          cwd: workspace,
+          env,
+          stdoutPath: thirdTracePath,
+          stderrPath: thirdStderrPath,
+          stdin: thirdPrompt,
+          timeoutMs: workerTimeoutMs,
+        });
+        const turn3ThreadIds = traceThreadIds(host.parseTrace(thirdTracePath));
         manifest.session.third_resumed_thread_ids = turn3ThreadIds;
         manifest.session.same_thread = manifest.session.same_thread === true
           && turn3ThreadIds.length === 1
           && turn3ThreadIds[0] === threadId;
-        manifest.session.storage_after_third_resume = sessionStorageEvidence(authDirs.codexHome, threadId);
+        manifest.session.storage_after_third_resume = host.sessionStorageEvidence(authDirs, threadId);
       }
       if (scriptedFourTurnMode && thirdWorker?.code === 0) {
         const beforeTurn4Files = scenario.fixture.before_turn_4_files ?? {};
@@ -4149,40 +4317,30 @@ async function main() {
           fourthPrompt,
           { kind: "scenario", field: "fourth_prompt" },
         ));
-        const fourthResumeArgv = [
-          "exec", "resume", "--json", "--ignore-user-config", "--strict-config",
-          "-m", args.model,
-          ...providerProfile.cli_args,
-          "-c", `model_reasoning_effort=${tomlLiteral(args.reasoning)}`,
-          "-c", "approval_policy=\"never\"",
-          "-c", "sandbox_mode=\"workspace-write\"",
-          ...featureControlArgs,
-          threadId,
-          "-",
-        ];
-        manifest.launch.fourth_resume_argv = [tools.codex, ...fourthResumeArgv];
-        secureEvidenceForWorker(evidenceDir, protectedEvidencePaths);
-        evidenceSecured = true;
-        try {
-          fourthWorker = await run(tools.codex, fourthResumeArgv, {
-            phase: "worker.turn-4-resume",
-            cwd: workspace,
-            env,
-            stdoutPath: fourthTracePath,
-            stderrPath: fourthStderrPath,
-            stdin: fourthPrompt,
-            timeoutMs: workerTimeoutMs,
-          });
-        } finally {
-          restoreEvidenceAfterWorker(evidenceDir, protectedEvidencePaths);
-          evidenceSecured = false;
-        }
-        const turn4ThreadIds = traceThreadIds(fourthTracePath);
+        const fourthResumeArgv = host.resumeLaunchArgs({
+          model: args.model,
+          reasoning: args.reasoning,
+          providerProfile,
+          launchFeatures,
+          sessionId: threadId,
+          isolation: authDirs,
+        });
+        manifest.launch.fourth_resume_argv = [workerExecutable, ...fourthResumeArgv];
+        fourthWorker = await runWorkerWithLockedEvidence(workerExecutable, fourthResumeArgv, {
+          phase: "worker.turn-4-resume",
+          cwd: workspace,
+          env,
+          stdoutPath: fourthTracePath,
+          stderrPath: fourthStderrPath,
+          stdin: fourthPrompt,
+          timeoutMs: workerTimeoutMs,
+        });
+        const turn4ThreadIds = traceThreadIds(host.parseTrace(fourthTracePath));
         manifest.session.fourth_resumed_thread_ids = turn4ThreadIds;
         manifest.session.same_thread = manifest.session.same_thread === true
           && turn4ThreadIds.length === 1
           && turn4ThreadIds[0] === threadId;
-        manifest.session.storage_after_fourth_resume = sessionStorageEvidence(authDirs.codexHome, threadId);
+        manifest.session.storage_after_fourth_resume = host.sessionStorageEvidence(authDirs, threadId);
       }
       }
     }
@@ -4303,35 +4461,52 @@ async function main() {
       }
     }
 
+    assertNotInterrupted();
     const executableIdentities = [shimRealpath];
     const tracePaths = dynamicUserMode
       ? dynamicWorkerTracePaths
       : scriptedFourTurnMode
       ? [tracePath, resumeTracePath, thirdTracePath, fourthTracePath]
       : scriptedThreeTurnMode ? [tracePath, resumeTracePath, thirdTracePath] : persistentMode ? [tracePath, resumeTracePath] : [tracePath];
-    const trace = parseTrace(tracePaths, workspace, args.inject, executableIdentities, bareResolutionProven, run.recordMutation);
+    const trace = parseTrace(host, tracePaths, workspace, args.inject, executableIdentities, bareResolutionProven, run.recordMutation);
     const environmentAudit = traceEnvironmentAudit(trace.events, {
       workspace,
       packageRoot,
       binRoot: localBin,
       controlledHome: authDirs.home,
-      controlledCodexHome: authDirs.codexHome,
+      controlledHostHome: authDirs.hostHome ?? authDirs.codexHome,
       controlledZdotdir: zdotdir,
+      hostSensitiveEnvKeys: host.sensitive_env_keys,
       sensitiveEnvKeys: providerProfile.env_keys,
+      harnessRoots: [runRoot, RUNS_ROOT, EVAL_ROOT],
     });
     const commandPolicyAudit = workerCommandPolicyAudit(trace.events, scenario.assertions, executableIdentities, bareResolutionProven);
     const activationAudit = negativeActivationMode
       ? superspecInvocationAudit(trace.events, executableIdentities, bareResolutionProven)
       : null;
     const verificationEvidence = negativeActivationMode
-      ? negativeVerificationEvidence(tracePath, scenario)
+      ? negativeVerificationEvidence(trace.trace, scenario)
       : null;
     const activationState = negativeActivationMode
       ? negativeActivationState(changes, activationAudit)
       : null;
+    sessionIndex = collectWorkerSessions(host, authDirs, evidenceDir);
     writeJson(join(evidenceDir, "trace-summary.json"), {
       raw_event_count: trace.raw_event_count,
       malformed_lines: trace.malformed,
+      turn_completion: tracePaths.map((path, index) => ({
+        turn: index + 1,
+        ...turnCompletion(host.parseTrace(path), {
+          timedOut: (dynamicUserMode ? dynamicWorkers[index] : [worker, resumeWorker, thirdWorker, fourthWorker][index])?.timedOut === true,
+        }),
+      })),
+      session_artifacts: sessionIndex
+        ? {
+            file_count: sessionIndex.files?.length ?? 0,
+            subagent_count: sessionIndex.files?.filter(file => file.kind === "subagent").length ?? 0,
+            error: sessionIndex.error ?? null,
+          }
+        : null,
       command_evidence: trace.commands.map(item => ({ ...item, output: item.output ? "<preserved in Worker JSONL evidence>" : "" })),
       controlled_environment_audit: environmentAudit,
       worker_command_policy_audit: commandPolicyAudit,
@@ -4342,45 +4517,51 @@ async function main() {
           state: activationState,
         },
       } : {}),
-      ...(resumeMode ? {
-        resume: {
-          turn_1_thread_ids: traceThreadIds(tracePath),
-          turn_2_thread_ids: traceThreadIds(resumeTracePath),
-          turn_1_pwd: traceCompletedCommand(tracePath, "pwd")?.aggregated_output ?? null,
-          turn_2_pwd: traceCompletedCommand(resumeTracePath, "pwd")?.aggregated_output ?? null,
-          turn_1_rule_marker: traceAgentMessages(tracePath).some(message => message.includes(scenario.stop.turn_1_rule_marker)),
-          turn_2_rule_marker: traceAgentMessages(resumeTracePath).some(message => message.includes(scenario.stop.turn_2_rule_marker)),
-          turn_2_marker_file_change: traceCompletedFileChanges(resumeTracePath).some(change => typeof change.path === "string" && resolve(change.path) === resolve(workspace, "resume-turn-2.txt")),
-        },
-      } : {}),
+      ...(resumeMode ? (() => {
+        const turn1Parsed = host.parseTrace(tracePath);
+        const turn2Parsed = host.parseTrace(resumeTracePath);
+        const turn1Pwd = traceCompletedCommand(turn1Parsed, "pwd");
+        const turn2Pwd = traceCompletedCommand(turn2Parsed, "pwd");
+        return {
+          resume: {
+            turn_1_thread_ids: traceThreadIds(turn1Parsed),
+            turn_2_thread_ids: traceThreadIds(turn2Parsed),
+            turn_1_pwd: recordedAggregatedOutput(turn1Pwd) ?? turn1Pwd?.output ?? null,
+            turn_2_pwd: recordedAggregatedOutput(turn2Pwd) ?? turn2Pwd?.output ?? null,
+            turn_1_rule_marker: traceAgentMessages(turn1Parsed).some(message => message.includes(scenario.stop.turn_1_rule_marker)),
+            turn_2_rule_marker: traceAgentMessages(turn2Parsed).some(message => message.includes(scenario.stop.turn_2_rule_marker)),
+            turn_2_marker_file_change: traceCompletedFileChanges(turn2Parsed).some(change => typeof change.path === "string" && resolve(change.path) === resolve(workspace, "resume-turn-2.txt")),
+          },
+        };
+      })() : {}),
       ...(scriptedTwoTurnMode ? {
         scripted_two_turn: {
-          turn_1_thread_ids: traceThreadIds(tracePath),
-          turn_2_thread_ids: traceThreadIds(resumeTracePath),
+          turn_1_thread_ids: traceThreadIds(host.parseTrace(tracePath)),
+          turn_2_thread_ids: traceThreadIds(host.parseTrace(resumeTracePath)),
           same_thread: manifest.session?.same_thread === true,
         },
       } : {}),
       ...(scriptedThreeTurnMode ? {
         scripted_three_turn: {
-          turn_1_thread_ids: traceThreadIds(tracePath),
-          turn_2_thread_ids: traceThreadIds(resumeTracePath),
-          turn_3_thread_ids: traceThreadIds(thirdTracePath),
+          turn_1_thread_ids: traceThreadIds(host.parseTrace(tracePath)),
+          turn_2_thread_ids: traceThreadIds(host.parseTrace(resumeTracePath)),
+          turn_3_thread_ids: traceThreadIds(host.parseTrace(thirdTracePath)),
           same_thread: manifest.session?.same_thread === true,
         },
       } : {}),
       ...(scriptedFourTurnMode ? {
         scripted_four_turn: {
-          turn_1_thread_ids: traceThreadIds(tracePath),
-          turn_2_thread_ids: traceThreadIds(resumeTracePath),
-          turn_3_thread_ids: traceThreadIds(thirdTracePath),
-          turn_4_thread_ids: traceThreadIds(fourthTracePath),
+          turn_1_thread_ids: traceThreadIds(host.parseTrace(tracePath)),
+          turn_2_thread_ids: traceThreadIds(host.parseTrace(resumeTracePath)),
+          turn_3_thread_ids: traceThreadIds(host.parseTrace(thirdTracePath)),
+          turn_4_thread_ids: traceThreadIds(host.parseTrace(fourthTracePath)),
           same_thread: manifest.session?.same_thread === true,
         },
       } : {}),
       ...(dynamicUserMode ? {
         dynamic_user: {
           worker_turn_count: dynamicWorkerTracePaths.length,
-          thread_ids_by_turn: dynamicWorkerTracePaths.map(path => traceThreadIds(path)),
+          thread_ids_by_turn: dynamicWorkerTracePaths.map(path => traceThreadIds(host.parseTrace(path))),
           same_thread: manifest.session?.same_thread === true,
           stop: dynamicStop,
         },
@@ -4390,12 +4571,12 @@ async function main() {
     // capability.json has been written so the hard result itself is covered by
     // the same immutable evidence boundary.
     evidenceCollectionReady = true;
-    const turn1Trace = persistentMode ? parseTrace(tracePath, workspace, null, executableIdentities, bareResolutionProven, null) : trace;
-    const turn2Trace = persistentMode ? parseTrace(resumeTracePath, workspace, null, executableIdentities, bareResolutionProven, null) : null;
-    const turn3Trace = scriptedThreeTurnMode || scriptedFourTurnMode ? parseTrace(thirdTracePath, workspace, null, executableIdentities, bareResolutionProven, null) : null;
-    const turn4Trace = scriptedFourTurnMode ? parseTrace(fourthTracePath, workspace, null, executableIdentities, bareResolutionProven, null) : null;
+    const turn1Trace = persistentMode ? parseTrace(host, tracePath, workspace, null, executableIdentities, bareResolutionProven, null) : trace;
+    const turn2Trace = persistentMode ? parseTrace(host, resumeTracePath, workspace, null, executableIdentities, bareResolutionProven, null) : null;
+    const turn3Trace = scriptedThreeTurnMode || scriptedFourTurnMode ? parseTrace(host, thirdTracePath, workspace, null, executableIdentities, bareResolutionProven, null) : null;
+    const turn4Trace = scriptedFourTurnMode ? parseTrace(host, fourthTracePath, workspace, null, executableIdentities, bareResolutionProven, null) : null;
     const dynamicTurnTraces = dynamicUserMode
-      ? dynamicWorkerTracePaths.map(path => parseTrace(path, workspace, null, executableIdentities, bareResolutionProven, null))
+      ? dynamicWorkerTracePaths.map(path => parseTrace(host, path, workspace, null, executableIdentities, bareResolutionProven, null))
       : [];
     const turn1Authenticity = persistentMode && !dynamicUserMode
       ? classifyAuthenticity(turn1Trace, scenario.assertions.turn_1_required_worker_commands, worker.code, executableIdentities, bareResolutionProven, null)
@@ -4435,7 +4616,10 @@ async function main() {
       : classifyAuthenticity(trace, scenario.assertions.required_worker_commands, worker.code, executableIdentities, bareResolutionProven, args.inject);
     const independentReviewTrace = dynamicUserMode ? dynamicTurnTraces.at(-1) : turn4Trace;
     const independentReview = (scriptedFourTurnMode || dynamicUserMode) && scenario.assertions.require_independent_review === true
-      ? independentAgentAudit(independentReviewTrace?.events ?? [])
+      ? host.independentAgentAudit(independentReviewTrace?.trace ?? null, {
+          sessionIndex,
+          window: workerTurnWindow(readDirectorActions(actionLog), dynamicUserMode ? dynamicTurnTraces.length : 4),
+        })
       : null;
     if (independentReview && authenticity.status === "pass" && !independentReview.ok) {
       authenticity = {
@@ -4466,12 +4650,13 @@ async function main() {
       : gate("unavailable", workerEvidence, processStatus.detail);
     if (processStatus.recoveredTimeoutCount > 0) capability.limitations.push(`${processStatus.recoveredTimeoutCount} Worker turn(s) timed out but later workflow evidence remained recoverable`);
     capability.gates.controlled_environment = director.ok && processStatus.exitedCleanly && environmentAudit.ok
-      ? gate("pass", ["manifest.json", "evidence/director-actions.jsonl", "evidence/workspace-before.json"], "isolated HOME/CODEX_HOME/PATH, package digest, fixture baseline, launch contract, and director command boundary verified")
+      ? gate("pass", ["manifest.json", "evidence/director-actions.jsonl", "evidence/workspace-before.json"], `isolated HOME/CODEX_HOME/PATH, package digest, fixture baseline, launch contract, and director command boundary verified${environmentObservationNote(environmentAudit)}`)
       : !environmentAudit.ok
-        ? gate("fail", ["evidence/turn-1.jsonl", "evidence/trace-summary.json"], `Worker accessed disallowed host paths: ${environmentAudit.violations.map(item => item.reason).join(", ")}`)
+        ? gate("fail", ["evidence/turn-1.jsonl", "evidence/trace-summary.json"], `Worker accessed disallowed host paths: ${environmentViolationReasons(environmentAudit)}`)
       : director.ok
         ? gate("unavailable", ["manifest.json", ...workerEvidence], `frozen launch contract was not runnable: ${worker.stderr.trim() || resumeWorker?.stderr?.trim() || `exit ${worker.code}`}`)
       : gate(director.unavailable ? "unavailable" : "fail", ["evidence/director-actions.jsonl"], "director executed a forbidden workflow command after Worker launch");
+    capability.gates.controlled_environment = withEvidenceLockStatus(capability.gates.controlled_environment, readDirectorActions(actionLog));
     capability.gates.authenticity = gate(
       authenticity.status,
       [...tracePaths.map((_, index) => `evidence/turn-${index + 1}.jsonl`), "evidence/trace-summary.json"],
@@ -4479,8 +4664,8 @@ async function main() {
       authenticity.status === "pass" ? "direct" : authenticity.status === "unavailable" ? "unavailable" : "direct",
     );
     capability.gates.authenticity.components = authenticity.status === "pass" ? {
-      command: { evidence_level: "direct", source: "completed command_execution event" },
-      exit_code: { evidence_level: "direct", source: "completed command_execution event" },
+      command: { evidence_level: "direct", source: host.command_evidence_source },
+      exit_code: { evidence_level: "direct", source: host.command_evidence_source },
       cwd: { evidence_level: "correlated", source: "controlled Worker launch cwd; bounded wrapper contains no cd or chaining" },
       executable_identity: negativeActivationMode
         ? { evidence_level: "correlated", source: "controlled PATH and complete Worker command trace" }
@@ -4490,7 +4675,7 @@ async function main() {
     };
     if (independentReview) capability.independent_review = independentReview;
 
-    const scopeViolations = changes.filter(change => !inventoryChangeAllowed(change, scenario.assertions.allowed_worker_changes));
+    const scopeViolations = changes.filter(change => !inventoryChangeAllowed(change, scenario.assertions.allowed_worker_changes, host));
     capability.gates.scope = !processStatus.exitedCleanly
       ? gate("unavailable", ["evidence/workspace-before.json", "evidence/workspace-after.json", "evidence/workspace-changes.json"], "Worker did not start successfully")
       : args.inject === "forbidden-path"
@@ -4570,7 +4755,7 @@ async function main() {
         capability.gates.stop_boundary = gate("pass", ["evidence/turn-1.jsonl", "evidence/verifier.json", "evidence/workspace-changes.json"], "ordinary request completed and stopped without activating SuperSpec", "direct");
       }
     } else if (dynamicUserMode) {
-      const turnIds = dynamicWorkerTracePaths.map(path => traceThreadIds(path));
+      const turnIds = dynamicTurnTraces.map(parsed => traceThreadIds(parsed.trace));
       const threadId = turnIds[0]?.[0] ?? null;
       const sameThread = threadId != null
         && turnIds.every(ids => ids.length === 1 && ids[0] === threadId)
@@ -4624,10 +4809,10 @@ async function main() {
         capability.gates.stop_boundary = gate("fail", stopEvidence, `unsupported dynamic stop action: ${dynamicStop.action}`, "direct");
       }
     } else if (scriptedMode) {
-      const turn1Ids = traceThreadIds(tracePath);
-      const turn2Ids = traceThreadIds(resumeTracePath);
-      const turn3Ids = scriptedThreeTurnMode || scriptedFourTurnMode ? traceThreadIds(thirdTracePath) : [];
-      const turn4Ids = scriptedFourTurnMode ? traceThreadIds(fourthTracePath) : [];
+      const turn1Ids = traceThreadIds(turn1Trace.trace);
+      const turn2Ids = traceThreadIds(turn2Trace.trace);
+      const turn3Ids = scriptedThreeTurnMode || scriptedFourTurnMode ? traceThreadIds(turn3Trace.trace) : [];
+      const turn4Ids = scriptedFourTurnMode ? traceThreadIds(turn4Trace.trace) : [];
       const sameThread = turn1Ids.length === 1
         && turn2Ids.length === 1
         && turn1Ids[0] === turn2Ids[0]
@@ -4663,7 +4848,7 @@ async function main() {
         ...(scriptedFourTurnMode ? { entered_archive: enteredArchive } : {}),
       };
       const decisionStopFacts = scenario.stop.mode === "apply_decision"
-        ? applyDecisionStopFacts(events, traceAgentMessages(finalTracePath))
+        ? applyDecisionStopFacts(events, traceAgentMessages(finalTrace.trace))
         : null;
       const repairRouteFacts = scenario.stop.mode === "repair_routing"
         ? repairRoutingFacts(events, scenario.stop)
@@ -4703,21 +4888,21 @@ async function main() {
           : "same thread accepted the Explore boundary, reached propose_ready, and stopped before Apply");
       }
     } else if (resumeMode) {
-      const turn1Ids = traceThreadIds(tracePath);
-      const turn2Ids = traceThreadIds(resumeTracePath);
+      const turn1Ids = traceThreadIds(turn1Trace.trace);
+      const turn2Ids = traceThreadIds(turn2Trace.trace);
       const sameThread = turn1Ids.length === 1 && turn2Ids.length === 1 && turn1Ids[0] === turn2Ids[0] && manifest.session?.same_thread === true;
-      const turn1PwdItem = traceCompletedCommand(tracePath, "pwd");
-      const turn2PwdItem = traceCompletedCommand(resumeTracePath, "pwd");
-      const turn1Pwd = String(turn1PwdItem?.aggregated_output ?? turn1PwdItem?.output ?? "").trim();
-      const turn2Pwd = String(turn2PwdItem?.aggregated_output ?? turn2PwdItem?.output ?? "").trim();
+      const turn1PwdItem = traceCompletedCommand(turn1Trace.trace, "pwd");
+      const turn2PwdItem = traceCompletedCommand(turn2Trace.trace, "pwd");
+      const turn1Pwd = String(recordedAggregatedOutput(turn1PwdItem) ?? turn1PwdItem?.output ?? "").trim();
+      const turn2Pwd = String(recordedAggregatedOutput(turn2PwdItem) ?? turn2PwdItem?.output ?? "").trim();
       const cwdPreserved = resolve(turn1Pwd || "/") === resolve(workspace) && resolve(turn2Pwd || "/") === resolve(workspace);
-      const projectRulesPreserved = traceAgentMessages(tracePath).some(message => message.includes(scenario.stop.turn_1_rule_marker))
-        && traceAgentMessages(resumeTracePath).some(message => message.includes(scenario.stop.turn_2_rule_marker));
+      const projectRulesPreserved = traceAgentMessages(turn1Trace.trace).some(message => message.includes(scenario.stop.turn_1_rule_marker))
+        && traceAgentMessages(turn2Trace.trace).some(message => message.includes(scenario.stop.turn_2_rule_marker));
       const turn2AgentsEvidencePath = join(evidenceDir, "resume-turn-2-AGENTS.md");
       const resumedRuleEvidence = safeRegularWithin(turn2AgentsEvidencePath, evidenceDir).ok
         && readFileSync(turn2AgentsEvidencePath, "utf8").includes(scenario.stop.turn_2_rule_marker)
         && hashFile(turn2AgentsEvidencePath) === manifest.session?.turn_2_project_rule_digest;
-      const turn2MarkerChanged = traceCompletedFileChanges(resumeTracePath).some(change =>
+      const turn2MarkerChanged = traceCompletedFileChanges(turn2Trace.trace).some(change =>
         typeof change.path === "string"
         && resolve(change.path) === resolve(workspace, "resume-turn-2.txt")
         && ["add", "update"].includes(change.kind)
@@ -4778,24 +4963,33 @@ async function main() {
     capability.gates.controlled_environment = gate("unavailable", ["evidence/director-actions.jsonl"], capability.limitations.at(-1));
     finalizeCapability(capability);
   } finally {
-    process.removeListener("SIGINT", sigintHandler);
-    process.removeListener("SIGTERM", sigtermHandler);
     run.terminateAll("SIGKILL");
+    judge?.terminateAll("SIGKILL");
     if (evidenceSecured) {
       try { restoreEvidenceAfterWorker(evidenceDir, protectedEvidencePaths); } catch {}
     }
+    try { if (!sessionIndex && authDirs) sessionIndex = collectWorkerSessions(host, authDirs, evidenceDir); } catch {}
+    tempDirs.removeAll();
     if (authDirs) {
-      rmSync(authDirs.home, { recursive: true, force: true });
-      rmSync(authDirs.codexHome, { recursive: true, force: true });
+      for (const dir of [authDirs.home, authDirs.codexHome, authDirs.hostHome]) {
+        if (!dir) continue;
+        try { rmSync(dir, { recursive: true, force: true }); } catch {}
+        tempDirs.forget(dir);
+      }
     }
-    if (signalReceived) {
-      capability.limitations.push(`probe received ${signalReceived}`);
-      capability.gates.process = gate("unavailable", ["evidence/director-actions.jsonl"], `probe interrupted by ${signalReceived}`);
+    tempDirs.dispose();
+    interrupt?.dispose();
+    if (interrupt?.interrupted) {
+      capability.interrupted = { signal: interrupt.signal, at: interrupt.at };
+      capability.limitations.push(`probe received ${interrupt.signal}`);
+      for (const name of CORE_GATES) {
+        capability.gates[name] = gate("unavailable", ["evidence/director-actions.jsonl"], `probe interrupted by ${interrupt.signal}`);
+      }
       finalizeCapability(capability);
     }
     normalizeEvidencePaths(capability, runRoot);
     writeJson(capabilityPath, capability);
-    if (evidenceCollectionReady) {
+    if (evidenceCollectionReady && !interrupt?.interrupted) {
       try {
         createEvidenceSeal({ runRoot, packageRoot, actionLog, run });
       } catch (error) {
@@ -4808,9 +5002,25 @@ async function main() {
         writeJson(capabilityPath, capability);
       }
     }
-    process.stdout.write(`${JSON.stringify({ run: runRoot, capability }, null, 2)}\n`);
+    let reportedRunRoot = archiveRunRoot;
+    try {
+      archiveLiveRun(runRoot, archiveRunRoot);
+    } catch (error) {
+      reportedRunRoot = runRoot;
+      process.stderr.write(`probe run could not be archived to ${archiveRunRoot}; evidence remains at ${runRoot}: ${error instanceof Error ? error.message : String(error)}\n`);
+    }
+    process.stdout.write(`${JSON.stringify({ run: reportedRunRoot, capability }, null, 2)}\n`);
   }
-  return capability.exit_code;
+  return interrupt?.interrupted ? interrupt.exitCode() : capability.exit_code;
 }
 
-process.exitCode = await main();
+try {
+  process.exitCode = await main();
+} catch (error) {
+  if (error instanceof UsageError) {
+    process.stderr.write(`${error.message}\n`);
+    process.exitCode = USAGE_EXIT_CODE;
+  } else {
+    throw error;
+  }
+}

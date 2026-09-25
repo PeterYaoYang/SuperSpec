@@ -15,6 +15,8 @@ import {
 import { tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { recordedWorkerHost } from "./hosts/index.mjs";
+import { currentEvaluatorDigest, isRecoveredSessionPath } from "./lib/provenance.mjs";
 
 const EVAL_ROOT = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(EVAL_ROOT, "..");
@@ -77,10 +79,7 @@ function frozenPackageDigest(packageRoot) {
 }
 
 function evaluatorSourceDigest() {
-  return sha256(JSON.stringify({
-    probe: hashFile(join(EVAL_ROOT, "probe.mjs")),
-    spawn: hashFile(join(EVAL_ROOT, "lib", "spawn.mjs")),
-  }));
+  return currentEvaluatorDigest();
 }
 
 function writeJson(path, value) {
@@ -306,6 +305,7 @@ function inspectState(runRoot) {
 }
 
 function transcriptFromRun(runRoot, scenario, manifest) {
+  const host = recordedWorkerHost(manifest);
   const transcript = [];
   let sequence = 1;
   const workerPromptEvidencePath = join(runRoot, "evidence", "worker-prompts.json");
@@ -383,45 +383,43 @@ function transcriptFromRun(runRoot, scenario, manifest) {
         } : {}),
       });
     }
-    const trace = readJsonl(join(runRoot, "evidence", `${name}.jsonl`));
-    traceHealth.push(trace.malformed);
-    for (let index = 0; index < trace.records.length; index++) {
-      const event = trace.records[index];
-      const item = event?.item;
-      if (event?.type === "item.completed" && item?.type === "command_execution") {
+    const parsed = host.parseTrace(join(runRoot, "evidence", `${name}.jsonl`));
+    traceHealth.push(parsed.invalid_json_line_count);
+    for (const event of parsed.events) {
+      if (event.kind === "command") {
         transcript.push({
           sequence: sequence++,
           actor: "worker",
           kind: "command_observation",
           turn: name,
-          command: item.command ?? item.argv ?? null,
-          exit_code: item.exit_code ?? null,
-          status: item.status ?? null,
-          output_digest: sha256(String(item.aggregated_output ?? item.output ?? "")),
-          output_excerpt: String(item.aggregated_output ?? item.output ?? "").slice(0, 500),
-          evidence_ref: `trajectory:${name}:${index + 1}`,
+          command: event.command ?? event.argv ?? null,
+          exit_code: event.exit_code ?? null,
+          status: event.status ?? null,
+          output_digest: sha256(String(event.output ?? "")),
+          output_excerpt: String(event.output ?? "").slice(0, 500),
+          evidence_ref: `trajectory:${name}:${event.raw_ref.record}`,
         });
-      } else if (event?.type === "item.completed" && item?.type === "agent_message") {
+      } else if (event.kind === "message") {
         transcript.push({
           sequence: sequence++,
           actor: "worker",
           kind: "message",
           turn: name,
-          content: item.text ?? "",
-          evidence_ref: `trajectory:${name}:${index + 1}`,
+          content: event.text ?? "",
+          evidence_ref: `trajectory:${name}:${event.raw_ref.record}`,
         });
-      } else if (event?.type === "item.completed" && item?.type === "collab_tool_call") {
+      } else if (event.kind === "agent_coordination") {
         transcript.push({
           sequence: sequence++,
           actor: "worker",
           kind: "agent_coordination",
           turn: name,
-          tool: item.tool ?? null,
-          sender_thread_id: item.sender_thread_id ?? null,
-          receiver_thread_ids: Array.isArray(item.receiver_thread_ids) ? item.receiver_thread_ids : [],
-          agents_states: item.agents_states ?? null,
-          status: item.status ?? null,
-          evidence_ref: `trajectory:${name}:${index + 1}`,
+          tool: event.tool ?? null,
+          sender_thread_id: event.sender_thread_id ?? null,
+          receiver_thread_ids: Array.isArray(event.receiver_thread_ids) ? event.receiver_thread_ids : [],
+          agents_states: event.agents_states ?? null,
+          status: event.status ?? null,
+          evidence_ref: `trajectory:${name}:${event.raw_ref.record}`,
         });
       }
     }
@@ -727,6 +725,7 @@ if (args.validateFaults) {
 }
 const taskPath = resolve(REPO_ROOT, args.task);
 const sourceRun = resolve(REPO_ROOT, args.replay);
+if (isRecoveredSessionPath(sourceRun)) throw new Error("arena refuses recovered unsealed session paths");
 if (!safeRegularWithin(taskPath, REPO_ROOT)) throw new Error(`task unavailable or unsafe: ${taskPath}`);
 if (!existsSync(sourceRun)) throw new Error(`source run unavailable: ${sourceRun}`);
 const task = json(taskPath);

@@ -19,10 +19,11 @@ export type WorkflowBudget = {
   tests: number | null;
   review_fix_rounds: number | null;
 };
-export const WORKFLOW_HOSTS = ["codex", "omp"] as const;
+export const WORKFLOW_HOSTS = ["codex", "omp", "claude"] as const;
 export type WorkflowHost = (typeof WORKFLOW_HOSTS)[number];
 /** 未声明 hosts 的旧项目按 Codex 入口处理。 */
 export const DEFAULT_WORKFLOW_HOSTS: WorkflowHost[] = ["codex"];
+const WORKFLOW_HOST_ALIASES: Record<string, WorkflowHost> = { "claude-code": "claude" };
 
 export class WorkflowConfigError extends Error {
   constructor(message: string) {
@@ -75,7 +76,7 @@ export function workflowBudgetForRisk(projectRoot: string, risk: ReviewRisk): Wo
 }
 
 function isWorkflowHost(value: unknown): value is WorkflowHost {
-  return value === "codex" || value === "omp";
+  return typeof value === "string" && (WORKFLOW_HOSTS as readonly string[]).includes(value);
 }
 
 export function normalizeWorkflowHosts(values: readonly string[]): WorkflowHost[] {
@@ -85,7 +86,8 @@ export function normalizeWorkflowHosts(values: readonly string[]): WorkflowHost[
 }
 
 export function parseWorkflowHostsFlag(raw: string): WorkflowHost[] {
-  const hosts = normalizeWorkflowHosts(raw.split(/[,\s]+/).filter(Boolean));
+  const tokens = raw.toLowerCase().split(/[,\s]+/).filter(Boolean);
+  const hosts = normalizeWorkflowHosts(tokens.map(token => WORKFLOW_HOST_ALIASES[token] ?? token));
   if (hosts.length === 0) {
     throw new WorkflowConfigError(`hosts 只能是 ${WORKFLOW_HOSTS.join("、")}，至少选一个`);
   }
@@ -133,13 +135,26 @@ export function workflowHostsForProject(projectRoot: string): WorkflowHost[] {
   return hostsFromWorkflow(workflowObject(readWorkflowConfigObject(projectRoot)));
 }
 
-export function persistWorkflowHosts(projectRoot: string, hosts: WorkflowHost[]): string {
+/** Claude Code 项目权限默认开启；只有用户显式关闭时配置中才记录 false。 */
+export function workflowClaudePermissionsForProject(projectRoot: string): boolean {
+  const value = workflowObject(readWorkflowConfigObject(projectRoot))?.claude_permissions;
+  if (value === undefined) return true;
+  if (typeof value !== "boolean") {
+    throw new WorkflowConfigError(`${WORKFLOW_CONFIG_PATH} 的 workflow.claude_permissions 必须是 boolean`);
+  }
+  return value;
+}
+
+/** claudePermissions 仅在用户显式选择时传入；未传入时保留项目已有选择。 */
+export function persistWorkflowHosts(projectRoot: string, hosts: WorkflowHost[], claudePermissions?: boolean): string {
   const configPath = join(projectRoot, WORKFLOW_CONFIG_PATH);
   mkdirSync(dirname(configPath), { recursive: true });
   const parsed = readWorkflowConfigObject(projectRoot) ?? {};
   const workflow = workflowObject(parsed) ?? {};
   if (workflow.mode === undefined) workflow.mode = DEFAULT_WORKFLOW_RISK;
   workflow.hosts = normalizeWorkflowHosts(hosts);
+  if (claudePermissions === false) workflow.claude_permissions = false;
+  else if (claudePermissions === true) delete workflow.claude_permissions;
   parsed.workflow = workflow;
   writeFileSync(configPath, `${JSON.stringify(parsed, null, 2)}\n`);
   return WORKFLOW_CONFIG_PATH;
