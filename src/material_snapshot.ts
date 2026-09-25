@@ -1,4 +1,4 @@
-// 计划材料快照：审查工作项按内容指纹保存材料正文，后续复审据此计算相对已通过基线的差异。
+// 计划材料快照：审查工作项按内容指纹保存材料正文，后续复审据此计算相对审查基线的差异。
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";

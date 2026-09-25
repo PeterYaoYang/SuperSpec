@@ -56,7 +56,19 @@ export const COVERAGE_MESSAGES = {
   uncheckedNotArray: "代码审查覆盖范围里的 unchecked 必须是数组",
   uncheckedItemNotObject: "代码审查覆盖范围里的未检查项必须是包含 path/reason 的对象",
   passWithUncheckedBoundFile: "代码审查结论为 pass 时不能包含未检查的绑定文件",
+  passWithoutEvidence: "报告结论为 pass 时 evidence_refs 至少包含一条可定位的证据引用（如 文件:行、执行过的命令及结果、测试记录）",
 } as const;
+
+/** 审查/验证类报告的 pass 结论必须能追溯到至少一条证据。 */
+export function hasEvidenceRef(value: unknown): boolean {
+  return Array.isArray(value) && value.some(item => nonEmptyEvidenceValue(item));
+}
+
+function nonEmptyEvidenceValue(value: unknown): boolean {
+  if (typeof value === "string") return value.trim() !== "";
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  return Object.values(value).some(field => typeof field === "string" && field.trim() !== "");
+}
 
 export interface ReportFieldContract {
   type: "string" | "array" | "object";
@@ -97,6 +109,7 @@ export function reportSchemaForJob(job: Job): ReportSchemaContract {
     open_questions: { type: "array" },
   };
   const conditions: string[] = ["verdict 只能是 pass 或 fail。"];
+  if (isReviewRole(job.role)) conditions.push("verdict=pass 时 evidence_refs 至少包含一条可定位的证据引用。");
 
   if (requiresReviewer(job.role)) {
     fields.reviewer = { type: "object", required: true };
@@ -167,6 +180,7 @@ export function reportSkeletonForJob(job: Job): Record<string, unknown> {
     role: job.role,
     verdict: "pass",
     findings: [],
+    ...(isReviewRole(job.role) ? { evidence_refs: [] } : {}),
   };
   if (requiresReviewer(job.role)) {
     skeleton.reviewer = { kind: "subagent", id: "<agent-id>" };
@@ -185,7 +199,7 @@ export function reportSkeletonForJob(job: Job): Record<string, unknown> {
   return skeleton;
 }
 
-/** 普通 reviewer / verifier 必须在 checked_paths 中回执的绑定文件：有通过基线时只含相对基线有变化的部分。 */
+/** 普通 reviewer / verifier 必须在 checked_paths 中回执的绑定文件：有审查基线时只含相对基线有变化的部分。 */
 export function requiredCheckedBoundPaths(job: Job): string[] {
   const unchanged = baselineUnchangedBoundPaths(job);
   return job.boundFiles.map(file => file.path).filter(path => !unchanged.has(path));
@@ -194,6 +208,7 @@ export function requiredCheckedBoundPaths(job: Job): string[] {
 /** 骨架中必须由审查者替换的空值，供 packet 与 CLI 给出同一份填写提示。 */
 export function reportSkeletonFillItems(job: Job): string[] {
   const items = ["verdict", "findings"];
+  if (isReviewRole(job.role)) items.push("evidence_refs");
   if (requiresReviewer(job.role)) items.push("reviewer.id");
   if (job.role === "code-reviewer") {
     items.push("review_scope.checked_paths", "review_scope.checked_docs", "review_scope.unchecked");
@@ -201,19 +216,32 @@ export function reportSkeletonFillItems(job: Job): string[] {
   return items;
 }
 
+/** 回执路径可以相对项目根或 change 根书写；同一文件的两种写法视为同一路径。 */
+export function reportedPathAliases(paths: Iterable<string>, changePrefix: string): Set<string> {
+  const prefix = `${changePrefix}/`;
+  const aliases = new Set<string>();
+  for (const raw of paths) {
+    const path = raw.replace(/^\.\//, "");
+    aliases.add(path);
+    aliases.add(path.startsWith(prefix) ? path.slice(prefix.length) : `${prefix}${path}`);
+  }
+  return aliases;
+}
+
 /** 报告里声明"未检查"且不属于绑定文件的条目（pass 的置信边界，供事件流与门禁透出）。 */
 export function outOfScopeUncheckedFromReport(
   report: Record<string, unknown> | null,
   boundFiles: { path: string }[],
+  changePrefix: string,
 ): { path: string; reason: string }[] {
   const scope = report?.review_scope as { unchecked?: unknown } | undefined;
   if (!scope || !Array.isArray(scope.unchecked)) return [];
-  const bound = new Set(boundFiles.map(file => file.path));
+  const bound = reportedPathAliases(boundFiles.map(file => file.path), changePrefix);
   const items: { path: string; reason: string }[] = [];
   for (const raw of scope.unchecked) {
     const item = raw as { path?: unknown; reason?: unknown };
     if (typeof item?.path !== "string" || typeof item?.reason !== "string") continue;
-    if (bound.has(item.path)) continue;
+    if (bound.has(item.path.replace(/^\.\//, ""))) continue;
     items.push({ path: item.path, reason: item.reason });
   }
   return items;

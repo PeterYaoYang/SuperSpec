@@ -255,7 +255,7 @@ export function workflowModeSelectionAction(change: string, upgradePending = fal
     record_argv: ["superspec", "record", "workflow-mode", "--change", change, "--input", "-"],
     record_input: { mode: null, source: "agent", reason: null },
     user_record_input: { mode: null, source: "user", reason: null, user_request: null },
-    instruction: "用户明确指定优先：使用 user_record_input 并原样填写真实 user_request；否则使用 record_input，根据已有初步调查选择 minimal 或 normal 并简短告知，不新增评估角色或默认问答。目标明确、影响局部且验收直接可选 minimal；存在实质不确定性或共享影响选 normal，不按文件或方法数量打分。reason 说明实际依据。",
+    instruction: "用户明确指定优先：使用 user_record_input 并原样填写真实 user_request；否则使用 record_input，根据已有初步调查选择 minimal 或 normal 并简短告知，不新增评估角色或默认问答。两档的差别只是 normal 在 Explore 和 Propose 各多一道独立 critic 审查，并启用计划规模与修复轮次上限；discovery、测试契约、代码审查和最终验证两档相同。涉及需要用户拍板的业务口径或关键取舍，或会改变对外契约、兼容性时选 normal；否则选 minimal，受影响的调用方、文件或方法数量本身不是选 normal 的依据。minimal 之后出现推翻依据的新事实时可以 reopen 回 Explore 升级到 normal；normal 进入计划或审查后不能降档。reason 说明实际依据。",
   };
 }
 

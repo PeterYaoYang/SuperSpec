@@ -120,6 +120,7 @@ function reviewerReportForJob(projectRoot: string, change: string, jobId: string
   return JSON.stringify({
     role: packet.role,
     verdict: "pass",
+    evidence_refs: ["test:evidence"],
     findings: [],
     review_scope: { checked_paths: packet.boundFiles.map(file => file.path) },
     reviewer: { kind: "codex-subagent", id: "test-reviewer" },

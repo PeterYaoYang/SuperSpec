@@ -101,7 +101,7 @@ function passJobs(fx: Change, ids: string[]): void {
     const packet = jobsPacket(fx.projectRoot, fx.change, id).packet;
     assert.ok(packet);
     const result = recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, id, JSON.stringify({
-      role: packet.role, verdict: "pass", findings: [],
+      role: packet.role, verdict: "pass", evidence_refs: ["test:evidence"], findings: [],
       review_scope: {
         checked_paths: packet.boundFiles.map(file => file.path),
         ...(packet.role === "code-reviewer" ? {
@@ -199,6 +199,12 @@ test("minimal 跳过计划 critic 但代码审查和最终 verifier 仍阻止提
   assert.equal(proposeReady(root, fx.change, fx.changeRoot).to_state, "propose_ready");
   confirm(fx);
   assert.equal(startApply(root, fx.change, fx.changeRoot).to_state, "apply");
+  const startApplyCommit = readEvents(root, fx.change).findLast(event =>
+    event.event_type === "transition_commit" && (event.payload as { transition?: string }).transition === "start-apply");
+  assert.deepEqual((startApplyCommit?.payload as { review_policy?: unknown }).review_policy, {
+    review_risk: "minimal",
+    requires_verifier: true,
+  });
   taskStart(root, fx.change, fx.changeRoot, "TASK-001");
   writeFileSync(join(root, "src", "settings.ts"), "// The supported feature is enabled.\nexport const enabled = true;\n");
   const completed = taskComplete(root, fx.change, fx.changeRoot, "TASK-001");
@@ -208,7 +214,7 @@ test("minimal 跳过计划 critic 但代码审查和最终 verifier 仍阻止提
   assert.equal(accept(root, fx.change, fx.changeRoot).to_state, "apply_done");
   assert.equal(reviewReady(root, fx.change, fx.changeRoot).to_state, "apply_done");
   passJobs(fx, codeReview);
-  confirm(fx);
+  assert.equal(next(root, fx.change, fx.changeRoot).path, "next_command");
   assert.equal(reviewReady(root, fx.change, fx.changeRoot).to_state, "review");
   assert.equal(accept(root, fx.change, fx.changeRoot).to_state, "review");
   const verifier = expectJobs(fx, reviewReady(root, fx.change, fx.changeRoot), ["verifier"]);

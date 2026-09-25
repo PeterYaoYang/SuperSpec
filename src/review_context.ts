@@ -3,6 +3,7 @@
 import { existsSync, statSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { codeFileContentSha, gitLines, isCodeLikePath } from "./git_state.ts";
+import { openQuestionDecisionClosure } from "./format.ts";
 import type { ConfirmedDecision, EvidenceCodeFile, Event, Job, PreviousReviewEvidence } from "./types.ts";
 
 const MAX_EVIDENCE_CODE_FILES = 300;
@@ -113,17 +114,26 @@ export function confirmedDecisions(events: Event[], job: Job): ConfirmedDecision
   for (const ev of priorEvents) {
     if (ev.event_type !== "user_decision_recorded") continue;
     const payload = ev.payload as Record<string, unknown>;
-    if (payload.accepted !== true || typeof payload.scope !== "string") continue;
+    if (payload.accepted !== true || typeof payload.scope !== "string" || openQuestionDecisionClosure(payload) !== "closed") continue;
     const phase = payload.scope.startsWith("explore_open_question:")
       ? "explore"
       : payload.scope.startsWith("propose_open_question:") ? "propose" : null;
     if (!phase || typeof payload.answer !== "string" || payload.answer.trim() === "") continue;
     const identity = payload[`${phase}_open_question`] as { question_id?: unknown } | undefined;
+    const earlierAnswers = Array.isArray(payload.earlier_answers)
+      ? payload.earlier_answers.flatMap(item => {
+        const earlier = item as { answer?: unknown; followup?: unknown };
+        return typeof earlier.answer === "string"
+          ? [{ answer: earlier.answer, ...(typeof earlier.followup === "string" ? { followup: earlier.followup } : {}) }]
+          : [];
+      })
+      : [];
     latest.set(payload.scope, {
       phase,
       question_id: typeof identity?.question_id === "string" ? identity.question_id : null,
       question: typeof payload.question === "string" ? payload.question : "",
       answer: payload.answer,
+      ...(earlierAnswers.length > 0 ? { earlier_answers: earlierAnswers } : {}),
       event_id: ev.event_id,
     });
   }

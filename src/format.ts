@@ -6,7 +6,16 @@
 import { readFileSync, existsSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { sha256Text } from "./store.ts";
-import { GREEN_ONLY_NO_TDD_REASON, type ExecutionContract, type ExecutionPolicy, type StructureChangeEntry, type StructureChangeLedger } from "./types.ts";
+import {
+  GREEN_ONLY_NO_TDD_REASON,
+  type Event,
+  type ExecutionContract,
+  type ExecutionPolicy,
+  type OpenQuestionAnswerRecord,
+  type OpenQuestionClosure,
+  type StructureChangeEntry,
+  type StructureChangeLedger,
+} from "./types.ts";
 
 // ===== discovery.md =====
 //
@@ -289,6 +298,144 @@ export function validateDiscovery(changeRoot: string): { ok: boolean; message: s
   };
 }
 
+/**
+ * 正文里的 Q-001 / DEC-001 / SC-001 引用必须对应已定义编号。只核对编号是否存在，
+ * 不解读引用语义；只识别数字开头的编号，避免把普通英文词误当成引用；围栏代码块不参与核对。
+ */
+export function undefinedIdReferences(
+  content: string,
+  prefix: "Q" | "DEC" | "SC" | "D",
+  defined: ReadonlySet<string>,
+): string[] {
+  const pattern = new RegExp(idTokenPattern(prefix), "g");
+  const missing = new Set<string>();
+  for (const match of withoutFencedCode(content).matchAll(pattern)) {
+    if (!defined.has(match[0])) missing.add(match[0]);
+  }
+  return [...missing];
+}
+
+function idTokenPattern(prefix: string): string {
+  return `(?<![A-Za-z0-9_-])${prefix}-\\d[A-Za-z0-9]*(?:[_-][A-Za-z0-9]+)*`;
+}
+
+function withoutFencedCode(content: string): string {
+  let fence: string | null = null;
+  return content.split("\n").map(line => {
+    const marker = /^\s*(`{3,}|~{3,})/.exec(line)?.[1];
+    if (fence == null) {
+      if (!marker) return line;
+      fence = marker;
+      return "";
+    }
+    if (marker && marker[0] === fence[0] && marker.length >= fence.length) fence = null;
+    return "";
+  }).join("\n");
+}
+
+/**
+ * 待确认段内每个 checklist 条目自身的编号，允许编号前有粗体、行内代码或 [标签]。
+ * 只供引用校验把这些条目视为已定义；问题 ID 仍按原规则识别，不影响已登记答复的 scope。
+ */
+function checklistItemIdsInSection(content: string, headings: readonly string[], prefix: "Q" | "DEC"): string[] {
+  const body = sectionBodyByHeadings(content, headings);
+  if (body == null) return [];
+  const leadingId = new RegExp(`^\\s*(?:(?:\\[[^\\]\\n]*\\]|【[^】\\n]*】|[*_\`~]+)\\s*)*(${idTokenPattern(prefix)})`);
+  const ids: string[] = [];
+  for (const match of body.matchAll(/^\s*-\s+\[[ xX]\]\s+(.*?)\s*$/gm)) {
+    const id = leadingId.exec(match[1])?.[1];
+    if (id) ids.push(id);
+  }
+  return ids;
+}
+
+export function discoveryChecklistItemIds(content: string): string[] {
+  return checklistItemIdsInSection(content, DISCOVERY_QUESTION_HEADINGS, "Q");
+}
+
+export function proposeChecklistItemIds(changeRoot: string): string[] {
+  return PROPOSE_CONFIRMATION_DOCS.flatMap(path => {
+    const fullPath = join(changeRoot, path);
+    return existsSync(fullPath)
+      ? checklistItemIdsInSection(readFileSync(fullPath, "utf8"), PROPOSE_CONFIRMATION_HEADINGS, "DEC")
+      : [];
+  });
+}
+
+// ===== discovery 留待计划阶段 =====
+//
+// 格式（explore skill 定义，可选）：
+//   ## 留待计划阶段
+//   - D-001 需要在计划中决定的事项
+//
+// 条目不是用户问题，而是推迟到计划阶段的可追踪事项：计划必须在 design.md 中按
+// 编号说明每一项的去向，确认开始实现时逐项展示给用户。
+
+const DISCOVERY_DEFERRED_HEADINGS = ["留待计划阶段"] as const;
+const DESIGN_NON_GOAL_HEADINGS = ["非目标"] as const;
+
+export interface DeferredItem {
+  id: string;
+  text: string;
+}
+
+export function hasDiscoveryDeferredSection(content: string): boolean {
+  return sectionRangeByHeadings(content, DISCOVERY_DEFERRED_HEADINGS) != null;
+}
+
+export function parseDiscoveryDeferredItems(content: string): DeferredItem[] {
+  const body = sectionBodyByHeadings(content, DISCOVERY_DEFERRED_HEADINGS);
+  if (body == null) return [];
+  const item = new RegExp(`^\\s*[-*]\\s+(${idTokenPattern("D")})[\\s:：.、]*(.*?)\\s*$`, "gm");
+  const seen = new Set<string>();
+  const items: DeferredItem[] = [];
+  for (const match of body.matchAll(item)) {
+    if (seen.has(match[1])) continue;
+    seen.add(match[1]);
+    items.push({ id: match[1], text: match[2] });
+  }
+  return items;
+}
+
+export type DeferredItemDispositionKind = "user_decision" | "non_goal" | "plan";
+
+export interface DeferredItemReference {
+  kind: DeferredItemDispositionKind;
+  heading: string | null;
+  line: string;
+}
+
+/** design.md 中按编号引用某个推迟项的位置；按所在标题区分交给用户决定、列为非目标或纳入方案。 */
+export function deferredItemReferences(designContent: string, id: string): DeferredItemReference[] {
+  const token = new RegExp(`(?<![A-Za-z0-9_-])${escapeRegex(id)}(?![A-Za-z0-9_-])`);
+  const decisionHeadings = new Set<string>(PROPOSE_CONFIRMATION_HEADINGS);
+  const nonGoalHeadings = new Set<string>(DESIGN_NON_GOAL_HEADINGS);
+  const references: DeferredItemReference[] = [];
+  let heading: string | null = null;
+  for (const raw of designContent.split(/\r?\n/)) {
+    const headingMatch = /^#{1,6}\s+(.+?)(?:\s+#+)?\s*$/.exec(raw);
+    if (headingMatch) heading = headingMatch[1].trim();
+    if (!token.test(raw)) continue;
+    const kind: DeferredItemDispositionKind = heading != null && decisionHeadings.has(heading)
+      ? "user_decision"
+      : heading != null && nonGoalHeadings.has(heading)
+        ? "non_goal"
+        : "plan";
+    references.push({ kind, heading, line: raw.trim() });
+  }
+  return references;
+}
+
+/** design.md“非目标”段落的条目；供阶段确认展示，不校验内容。 */
+export function designNonGoals(designContent: string): string[] {
+  const body = sectionBodyByHeadings(designContent, DESIGN_NON_GOAL_HEADINGS);
+  if (body == null) return [];
+  return body
+    .split(/\r?\n/)
+    .map(line => line.replace(/^\s*[-*]\s+/, "").trim())
+    .filter(line => line !== "" && !line.startsWith("<!--"));
+}
+
 // ===== propose 待用户确认 =====
 //
 // 格式（状态机校验，propose skill 负责生成）：
@@ -442,6 +589,7 @@ export const STRUCTURE_CHANGE_CATEGORIES = [
   "新增公共接口",
   "删除既有路径",
   "改既有公共签名",
+  "扩展既有公共签名",
   "改变既有数据语义",
   "新增公共类型",
 ] as const;
@@ -1261,6 +1409,30 @@ export function tasksStructureDigest(content: string, sha256Text: (s: string) =>
 //   }
 //
 // 引擎校验：决策范围（scope）+ 答复内容（answer）必填
+//
+// Explore / Propose 待确认问题的答复可选 closure：closed（默认）表示答复已经
+// 确定这件事；needs_followup 表示答复尚不足以确定，followup 写明还需补充什么，
+// 问题保持待确认并在同一 scope 下继续询问。
+
+export type { OpenQuestionAnswerRecord, OpenQuestionClosure };
+
+/** 待确认问题答复的闭环状态；早期登记没有该字段，一律视为已闭环。 */
+export function openQuestionDecisionClosure(payload: object): OpenQuestionClosure {
+  return (payload as { closure?: unknown }).closure === "needs_followup" ? "needs_followup" : "closed";
+}
+
+export function openQuestionAnswerRecord(event: Event, currentRevision: boolean): OpenQuestionAnswerRecord | null {
+  const payload = event.payload as { answer?: unknown; closure?: unknown; followup?: unknown };
+  if (typeof payload.answer !== "string") return null;
+  const closure = openQuestionDecisionClosure(payload);
+  return {
+    event_id: event.event_id,
+    answer: payload.answer,
+    closure,
+    ...(closure === "needs_followup" && typeof payload.followup === "string" ? { followup: payload.followup } : {}),
+    current_revision: currentRevision,
+  };
+}
 
 export function validateUserDecision(d: Record<string, unknown>): { ok: boolean; message: string } {
   if (!d.scope) return { ok: false, message: "决策文件缺少决策范围（scope）" };

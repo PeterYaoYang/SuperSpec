@@ -5,7 +5,18 @@ import { historicalProposeReadyRoles, reviewEvidenceDigest, reviewGateRoleResolu
 import { EXPLORE_DISCOVERY_REVIEW_GATE, PROPOSE_FINAL_REVIEW_GATE, type ReviewGateRule } from "./review_job_gates.ts";
 import { changeRoot as openspecChangeRoot } from "./openspec.ts";
 import { findLatestEvent, sha256Text } from "./store.ts";
-import { parseExecutionRequirements, parseTasksMd, parseTestContractEntries, parseStructureChangeLedger, formatStructureChangeLedgerSummary, type ParsedTask } from "./format.ts";
+import {
+  deferredItemReferences,
+  designNonGoals,
+  formatStructureChangeLedgerSummary,
+  parseDiscoveryDeferredItems,
+  parseExecutionRequirements,
+  parseStructureChangeLedger,
+  parseTasksMd,
+  parseTestContractEntries,
+  type DeferredItemDispositionKind,
+  type ParsedTask,
+} from "./format.ts";
 import type { AskUser, AskUserAction, Event, JobRole, Snapshot, State } from "./types.ts";
 import {
   hasFrozenWorkflowModeForProposeRound,
@@ -106,10 +117,46 @@ function proposeTaskDeliverySummary(changeRoot: string): string | null {
   const taskSummary = `执行计划概览\n\n${status}${items.join("\n\n")}`;
 
   const designPath = join(changeRoot, "design.md");
-  const ledgerSummary = existsSync(designPath)
-    ? formatStructureChangeLedgerSummary(parseStructureChangeLedger(readFileSync(designPath, "utf8")))
+  const designContent = existsSync(designPath) ? readFileSync(designPath, "utf8") : null;
+  const ledgerSummary = designContent != null
+    ? formatStructureChangeLedgerSummary(parseStructureChangeLedger(designContent))
     : null;
-  return ledgerSummary ? `${taskSummary}\n\n${ledgerSummary}` : taskSummary;
+  return [taskSummary, ledgerSummary, nonGoalSummary(designContent), deferredItemSummary(changeRoot, designContent)]
+    .filter((part): part is string => part != null)
+    .join("\n\n");
+}
+
+function nonGoalSummary(designContent: string | null): string | null {
+  const nonGoals = designContent == null ? [] : designNonGoals(designContent);
+  return nonGoals.length === 0
+    ? null
+    : ["本次明确不做", "", ...nonGoals.map(item => `- ${item}`)].join("\n");
+}
+
+const DEFERRED_DISPOSITION_LABELS: Record<DeferredItemDispositionKind, string> = {
+  user_decision: "交由用户决定",
+  non_goal: "本次不做",
+  plan: "纳入方案",
+};
+
+/** 推迟项在 design.md 中的去向；用户据此核对“留到计划阶段”的事项是否被静默收窄。 */
+function deferredItemSummary(changeRoot: string, designContent: string | null): string | null {
+  const discoveryPath = join(changeRoot, ".superspec", "artifacts", "discovery.md");
+  if (!existsSync(discoveryPath)) return null;
+  const items = parseDiscoveryDeferredItems(readFileSync(discoveryPath, "utf8"));
+  if (items.length === 0) return null;
+  const lines = items.flatMap(item => {
+    const references = designContent == null ? [] : deferredItemReferences(designContent, item.id);
+    const head = `- ${item.id} ${item.text}`.trimEnd();
+    if (references.length === 0) return [head, "  - 去向：计划中未说明"];
+    return [head, ...references.map(reference => {
+      const label = reference.kind === "plan" && reference.heading
+        ? `${DEFERRED_DISPOSITION_LABELS.plan}（${reference.heading}）`
+        : DEFERRED_DISPOSITION_LABELS[reference.kind];
+      return `  - ${label}：${reference.line.replace(/^[-*]\s+(?:\[[ xX]\]\s+)?/, "")}`;
+    })];
+  });
+  return ["探索阶段留待计划的事项及去向", "", ...lines].join("\n");
 }
 
 export interface PhaseDecisionAction extends AskUserAction {
@@ -373,6 +420,8 @@ export function phaseConfirmationForBoundary(
   snapshot: Snapshot,
   boundary: PhaseBoundary,
   risk?: ReviewRisk,
+  /** 需要用户留意的事实（例如不能自动推进的原因），展示在确认问题之前；不参与 scope。 */
+  notices: readonly string[] = [],
 ): PhaseConfirmation | null {
   const spec = SPECS[boundary];
   if (snapshot.state !== spec.state) return null;
@@ -383,7 +432,9 @@ export function phaseConfirmationForBoundary(
   const scope = `${spec.scopePrefix}:${epochEventId}:${digest}`;
   const summary = boundary === "propose_to_apply"
     ? proposeTaskDeliverySummary(openspecChangeRoot(projectRoot, snapshot.change_id))
-    : null;
+    : notices.length > 0
+      ? ["需要你留意", "", ...notices.map(notice => `- ${notice}`)].join("\n")
+      : null;
   const boundaryQuestion = `${boundaryQuestionText(boundary, snapshot)}\n\n${CURRENT_USER_DECISION_NOTICE}`;
   const question = summary ? `${summary}\n\n${boundaryQuestion}` : boundaryQuestion;
   const actions = buildActions(snapshot.change_id, boundary, scope, question, spec.actions, resolvedRisk);
@@ -458,13 +509,6 @@ export function latestAcceptedPhaseDecision(
   };
 }
 
-export function isPhaseAdvanceAuthorized(
-  events: Event[],
-  confirmation: PhaseConfirmation,
-): boolean {
-  return latestAcceptedPhaseDecision(events, confirmation)?.decision === "advance";
-}
-
 export function phaseConfirmationCommitPayload(
   confirmation: PhaseConfirmation,
   decision: PhaseConfirmationDecision,
@@ -481,6 +525,26 @@ export function phaseConfirmationCommitPayload(
       scope: confirmation.scope,
       decision_event_id: decision.event.event_id,
       review_risk: decision.review_risk,
+    },
+  };
+}
+
+/** 不经用户答复的阶段推进；留痕推进依据，没有对应的用户决定事件。 */
+export function phaseAutoAdvanceCommitPayload(
+  confirmation: PhaseConfirmation,
+  risk: ReviewRisk,
+  basis: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    phase_confirmation: {
+      boundary: confirmation.boundary,
+      decision: "advance",
+      mode: "auto",
+      epoch_event_id: confirmation.epoch_event_id,
+      material_digest: confirmation.material_digest,
+      scope: confirmation.scope,
+      review_risk: risk,
+      auto_basis: basis,
     },
   };
 }

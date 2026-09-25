@@ -23,15 +23,19 @@ export function confirmCurrentPhase(
   return output;
 }
 
+/** 测试中的 risk 参数模拟项目配置；生产 CLI 不接受 --risk。 */
+export function useTestWorkflowMode(projectRoot: string, risk: "minimal" | "normal" | "strict"): void {
+  mkdirSync(join(projectRoot, ".superspec"), { recursive: true });
+  writeFileSync(join(projectRoot, ".superspec", "config.json"), JSON.stringify({ workflow: { mode: risk } }));
+}
+
 export function prepareCurrentPhaseConfirmation(
   projectRoot: string,
   change: string,
   changeRoot: string,
   risk: "minimal" | "normal" | "strict" = "strict",
 ): Extract<NextOutput, { path: "ask_user" }> {
-  // 测试中的 risk 参数模拟项目配置；生产 CLI 不接受 --risk。
-  mkdirSync(join(projectRoot, ".superspec"), { recursive: true });
-  writeFileSync(join(projectRoot, ".superspec", "config.json"), JSON.stringify({ workflow: { mode: risk } }));
+  useTestWorkflowMode(projectRoot, risk);
   let output = next(projectRoot, change, changeRoot, risk);
   for (let attempts = 0; attempts < 10; attempts += 1) {
     if (output.path === "next_command" && /transition\s+explore/.test(output.next_command)) {
@@ -46,6 +50,7 @@ export function prepareCurrentPhaseConfirmation(
         const submitted = recordJobSubmitContent(projectRoot, change, changeRoot, required.job_id, JSON.stringify({
           role: packet.role,
           verdict: "pass",
+          evidence_refs: ["test:evidence"],
           findings: [],
           review_scope: { checked_paths: packet.boundFiles.map(file => file.path) },
           reviewer: { kind: "codex-subagent", id: "phase-confirmation-support" },

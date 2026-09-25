@@ -1,6 +1,6 @@
 // SuperSpec 流程引擎 — transition：提交协议 + 所有 transition 处理器
 
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import {
   ensureChangeLayout, readEvents, appendEvent, makeEvent,
@@ -13,7 +13,7 @@ import {
   assertCommitPayloadExtension,
   isFreshReviewVerifier,
   isReviewReadyVerifier,
-  latestAcceptedReviewBaseline,
+  latestReviewBaseline,
   latestReviewHistoryForGateRole,
   latestReviewTerminalForGateRole,
   readReviewPolicyFromEvents,
@@ -69,6 +69,8 @@ import { approvedRefTestIds, isCodeReviewClaimKind, reviewFixReason } from "./ap
 import {
   applyRequirementModeForCurrentRound,
   applyPlanningDocsChangedSinceBaseline,
+  applyToReviewAutoAdvance,
+  latestApplyPlanningBaseline,
   executionRequirementVersionForCurrentRound,
   blockingJobsForApplyDone,
   executionPolicyForCurrentRound,
@@ -85,6 +87,7 @@ import {
 } from "./phase_plan.ts";
 import {
   latestAcceptedPhaseDecision,
+  phaseAutoAdvanceCommitPayload,
   phaseConfirmationCommitPayload,
   phaseConfirmationForBoundary,
   phaseConfirmationMissingMessage,
@@ -99,7 +102,7 @@ import {
   workflowModeUpgradePending,
   workflowRiskForChange,
 } from "./workflow_config.ts";
-import type { CodeReviewScope, Event, Snapshot, State, Job, JobRole, TransitionResult, Ref, TaskAttempt, BoundarySnapshot, EffectiveEvidencePlan, ExecutionPolicy, FixDescriptor, ReviewPreviousRejection, TestEvidenceAction } from "./types.ts";
+import type { CodeReviewScope, Event, Snapshot, State, Job, JobRole, TransitionResult, Ref, TaskAttempt, BoundarySnapshot, EffectiveEvidencePlan, ExecutionPolicy, FixDescriptor, ReviewPreviousRejection, TestEvidenceAction, RequiredWorkflowArtifact } from "./types.ts";
 
 let transitionSeq = 0;
 function newTransitionId(): string { return `T-${Date.now()}-${++transitionSeq}`; }
@@ -124,7 +127,7 @@ function createReviewJobsForGate(
       .map(p => docRef(changeRoot, p));
     const previousRejection = latestReviewHistoryForGateRole(events, gate, role);
     const materialManifest = materialManifestForBound(changeRoot, boundPaths);
-    const reviewBaseline = latestAcceptedReviewBaseline(events, gate, role);
+    const reviewBaseline = latestReviewBaseline(events, gate, role);
     return {
       job_id: newJobId(change, role),
       role,
@@ -923,6 +926,8 @@ function authorizePhaseAdvance(input: {
   boundary: PhaseBoundary;
   risk: ReviewRisk;
   decision: Decision;
+  /** 满足自动推进判据时的依据；用户对当前确认明确选择过时仍以用户选择为准。 */
+  autoAdvanceBasis?: Record<string, unknown>;
 }): Decision | SkipDecision {
   const confirmation = phaseConfirmationForBoundary(
     input.projectRoot,
@@ -934,6 +939,16 @@ function authorizePhaseAdvance(input: {
   const phaseDecision = confirmation
     ? latestAcceptedPhaseDecision(input.events, confirmation)
     : null;
+  if (confirmation && phaseDecision == null && input.autoAdvanceBasis) {
+    return {
+      ...input.decision,
+      reason: `${input.decision.reason}（计划范围未变化，无需用户确认）`,
+      commitPayload: {
+        ...(input.decision.commitPayload ?? {}),
+        ...phaseAutoAdvanceCommitPayload(confirmation, input.risk, input.autoAdvanceBasis),
+      },
+    };
+  }
   if (!confirmation || phaseDecision?.decision !== "advance") {
     return {
       skip: true,
@@ -1204,6 +1219,22 @@ export function transitionInit(projectRoot: string, change: string, changeRoot: 
 // ===== explore =====
 
 export function transitionExplore(projectRoot: string, change: string, changeRoot: string, risk?: ReviewRisk): TransitionResult {
+  return withDiscoveryArtifactHint(projectRoot, changeRoot, commitExplore(projectRoot, change, changeRoot, risk));
+}
+
+/** 进入 explore 后直接给出 discovery.md 的项目相对路径，不让调用方从内部快照推断写入位置。 */
+function withDiscoveryArtifactHint(projectRoot: string, changeRoot: string, result: TransitionResult): TransitionResult {
+  const discoveryPath = join(changeRoot, ".superspec", "artifacts", "discovery.md");
+  if (result.to_state !== "explore" || existsSync(discoveryPath)) return result;
+  const artifact: RequiredWorkflowArtifact = {
+    kind: "discovery",
+    path: relative(projectRoot, discoveryPath).replaceAll("\\", "/"),
+    operation: "create_or_update",
+  };
+  return { ...result, details: { ...result.details, next_artifact: artifact } };
+}
+
+function commitExplore(projectRoot: string, change: string, changeRoot: string, risk?: ReviewRisk): TransitionResult {
   return commitTransition(projectRoot, change, changeRoot, {
     name: "explore", idempotencyInputs: { phase: "explore", risk },
     decide: (snapshot) => {
@@ -1374,22 +1405,6 @@ function invalidateOpenJobs(snapshot: Snapshot, to: State, reason: string): NonN
       reason: `reopen --to ${to}：${reason}`,
     },
   }));
-}
-
-function latestApplyPlanningBaseline(events: Event[]): Record<string, string> | null {
-  for (let index = events.length - 1; index >= 0; index--) {
-    const event = events[index];
-    if (event.event_type !== "transition_commit") continue;
-    const payload = event.payload as { transition?: unknown; apply_planning_baseline?: unknown };
-    if (payload.transition !== "start-apply") continue;
-    const baseline = payload.apply_planning_baseline;
-    if (!baseline || typeof baseline !== "object" || Array.isArray(baseline)) return null;
-    const entries = Object.entries(baseline as Record<string, unknown>);
-    return entries.every(([, digest]) => typeof digest === "string")
-      ? Object.fromEntries(entries) as Record<string, string>
-      : null;
-  }
-  return null;
 }
 
 function applyPlanningMaterialsChanged(changeRoot: string, events: Event[]): boolean {
@@ -1790,13 +1805,22 @@ export function reviewReady(projectRoot: string, change: string, changeRoot: str
           codeReviewDecision.fromState === "apply_done" &&
           codeReviewDecision.toState === "review"
         ) {
+          const gate = codeReviewDecision.commitPayload?.code_review_gate as { decision?: unknown; job_id?: unknown } | undefined;
+          const auto = gate?.decision === "passed" ? applyToReviewAutoAdvance(changeRoot, events) : null;
           return authorizePhaseAdvance({
             projectRoot,
             events,
-          snapshot,
-          boundary: "apply_to_review",
-          risk: policy.review_risk,
-          decision: codeReviewDecision,
+            snapshot,
+            boundary: "apply_to_review",
+            risk: policy.review_risk,
+            decision: codeReviewDecision,
+            ...(auto?.eligible ? {
+              autoAdvanceBasis: {
+                code_review_job_id: gate?.job_id,
+                planning_baseline: "unchanged",
+                scope_notes: auto.scope_note_count,
+              },
+            } : {}),
           });
         }
         return codeReviewDecision;

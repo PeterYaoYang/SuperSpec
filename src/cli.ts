@@ -636,7 +636,7 @@ transition 子命令：
   review-ready / accept
 
 record 子命令：
-  job-submit --job <J> --report <F|-> [--on-behalf]
+  job-submit --job <J> --report <F|-> | --report-json <JSON> [--on-behalf]
   user-decision --input <F|->
   test-run --input <F|->
   workflow-mode --input <F|->
@@ -662,15 +662,18 @@ function commandHelp(command: string | undefined, subcommand: string | undefined
 
 从 JSON 文件读取用户决定；--input - 表示从 stdin 读取。
 输入至少包含 scope 和 answer，工作流给出的 question 可一并保留。
+Explore / Propose 待确认问题的答复还不足以确定这件事时，加上 "closure":"needs_followup"
+和 "followup":"<还需要用户补充什么>"：问题保持待确认，next 会在同一事项下继续询问。
 
 示例：
   printf '%s' '{"scope":"<next 返回的 scope>","question":"<原问题>","answer":"<用户答复>"}' | superspec record user-decision --change <C> --input -
+  printf '%s' '{"scope":"<next 返回的 scope>","answer":"选 A","closure":"needs_followup","followup":"A 需要具体天数"}' | superspec record user-decision --change <C> --input -
 `;
   }
   if (command === "record" && subcommand === "job-submit") {
-    return `用法：superspec record job-submit --change <C> --job <J> --report <F|-> [--on-behalf]
+    return `用法：superspec record job-submit --change <C> --job <J> (--report <F|-> | --report-json <JSON>) [--on-behalf]
 
-提交 reviewer JSON 报告；--report - 表示从 stdin 读取。报告契约（report_schema）见 superspec jobs contract --change <C> --job <J>；packet 顶层给出预填骨架（report_skeleton）。
+提交 reviewer JSON 报告；--report - 表示从 stdin 读取，--report-json 直接以单行 JSON 参数提交（宿主只放行单条 superspec 命令、不允许 heredoc/管道/重定向时使用；放进单引号参数时，JSON 字符串中的单引号写成 \\u0027）。报告契约（report_schema）见 superspec jobs contract --change <C> --job <J>；packet 顶层给出预填骨架（report_skeleton）。
 需要落盘时写到 packet 的 report_file_path（.superspec/changes/<C>/jobs/<J>.report.json），不要放进 openspec/changes 计划材料目录。
 报告由执行工作项的审查角色自己登记；主流程代为登记人工、外部来源或无法运行命令的审查角色交回的原样报告时加 --on-behalf，事件会记录 submitted_by=main_process。
 返回的 result_kind 说明登记结果；结论（含 fail）已登记时退出码为 0，retryable 表示可修正后以同一工作项重交。
@@ -679,6 +682,7 @@ function commandHelp(command: string | undefined, subcommand: string | undefined
   superspec jobs packet --change <C> --job <J>
   superspec record job-submit --change <C> --job <J> --report -
   superspec record job-submit --change <C> --job <J> --report .superspec/changes/<C>/jobs/<J>.report.json
+  superspec record job-submit --change <C> --job <J> --report-json '{"role":"critic","verdict":"pass",...}'
 `;
   }
   if (command === "record" && subcommand === "test-run") {
@@ -964,14 +968,21 @@ async function main(argv: string[]): Promise<number> {
           case "job-submit": {
             const jobId = opts.job;
             const report = opts.report;
-            if (!jobId || !report) {
-              console.error("record job-submit 需要 --job 和 --report");
+            const inlineReport = opts["report-json"];
+            if (!jobId || (!report && !inlineReport)) {
+              console.error("record job-submit 需要 --job，以及 --report 或 --report-json 之一");
+              return 1;
+            }
+            if (report && inlineReport) {
+              console.error("record job-submit 的 --report 与 --report-json 只能二选一");
               return 1;
             }
             const submitOptions = { onBehalf: opts["on-behalf"] !== undefined };
             let result;
             try {
-              result = report === "-"
+              result = inlineReport
+                ? recordJobSubmitContent(projectRoot, change, cr, jobId, inlineReport, submitOptions)
+                : report === "-"
                 ? recordJobSubmitContent(projectRoot, change, cr, jobId, readStdinRecordContent("--report"), submitOptions)
                 : recordJobSubmit(projectRoot, change, cr, jobId, report, submitOptions);
             } catch (err) {

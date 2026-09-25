@@ -107,6 +107,7 @@ function reviewerReportForJob(projectRoot: string, change: string, jobId: string
     role: packet.role,
     findings: [],
     verdict: "pass",
+    evidence_refs: ["test:evidence"],
     review_scope: { checked_paths: packet.boundFiles.map(file => file.path) },
     reviewer: { kind: "codex-subagent", id: "test-reviewer" },
   });
@@ -228,6 +229,8 @@ test("next 返回 required_job 当有 open job", () => {
 
     const result = next(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     assert.equal(result.path, "required_job");
+    assert.equal(result.stop_allowed, false);
+    assert.ok(result.instruction, "等待工作项时自带“当前回合内等返回结果”说明，不依赖 AGENTS.md");
     assert.ok(result.required_jobs.length > 0);
     assert.equal(result.required_jobs[0].role, "critic");
     assert.ok(result.required_jobs[0].packet_command.includes("jobs packet"));
@@ -301,7 +304,7 @@ test("record job-submit：critic 缺 reviewer 会拒绝", () => {
     const tResult = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
     const jobId = tResult.created_jobs[0];
     const reportPath = join(fx.projectRoot, "report.json");
-    writeFileSync(reportPath, JSON.stringify({ role: "critic", findings: [], verdict: "pass" }));
+    writeFileSync(reportPath, JSON.stringify({ role: "critic", findings: [], verdict: "pass", evidence_refs: ["test:evidence"] }));
 
     const rResult = recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, jobId, reportPath);
     assert.equal(rResult.accepted, false);
@@ -320,6 +323,7 @@ test("record job-submit：critic reviewer kind/id 非法会拒绝", () => {
       role: "critic",
       findings: [],
       verdict: "pass",
+      evidence_refs: ["test:evidence"],
       reviewer: { kind: "self", id: "" },
     }));
 
@@ -343,6 +347,7 @@ test("record job-submit：critic reviewer kind=subagent 可通过", () => {
       role: packet.role,
       findings: [],
       verdict: "pass",
+      evidence_refs: ["test:evidence"],
       review_scope: { checked_paths: packet.boundFiles.map(file => file.path) },
       reviewer: { kind: "subagent", id: "omp-critic" },
     }));

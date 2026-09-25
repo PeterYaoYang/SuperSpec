@@ -450,6 +450,89 @@ test("propose_to_apply 确认问题：清单为无时含结构变更：无", () 
   } finally { fx.cleanup(); }
 });
 
+test("v2 round：向后兼容地扩展既有公共签名不要求 DEC", () => {
+  const fx = setupV2Propose({
+    designContent: designBody({
+      ledger: structureLedgerTable([{
+        id: "SC-005",
+        category: "扩展既有公共签名",
+        change: "Utils.calc 新增可选的精度参数",
+        basis: "TEST-001",
+        decision: "—",
+      }]),
+    }),
+  });
+  try {
+    assert.notEqual(next(fx.projectRoot, fx.change, fx.changeRoot, "minimal").path, "material_update_required");
+    assert.equal(proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal").to_state, "propose_ready");
+  } finally { fx.cleanup(); }
+});
+
+const DEFERRED_DISCOVERY = [
+  "# Discovery",
+  "",
+  "## 留待计划阶段",
+  "",
+  "- D-001 合计与行明细的舍入口径。依据：验收已明确行金额展示，合计路线属于设计取舍",
+  "- D-002 旧导出接口的兼容方式。依据：只影响迁移路线",
+  "",
+].join("\n");
+
+test("discovery 留待计划阶段的事项未在 design.md 说明去向时不能进入 propose_ready", () => {
+  const fx = setupV2Propose({ designContent: designBody({ ledger: "无", extra: "## 非目标\n\n- 不改变合计先汇总再舍入（D-001）" }) });
+  try {
+    writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "discovery.md"), DEFERRED_DISCOVERY);
+    const blocked = next(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    assert.equal(blocked.path, "material_update_required");
+    if (blocked.path !== "material_update_required") throw new Error("expected deferred item gate");
+    assert.ok(blocked.errors.some(error => error.includes("D-002") && !error.includes("D-001")));
+    assert.equal(proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal").events_written, 0);
+
+    writeFileSync(join(fx.changeRoot, "design.md"), designBody({
+      ledger: "无",
+      extra: "## 非目标\n\n- 不改变合计先汇总再舍入（D-001）\n- 旧导出接口按 D-002、D-009 保持原样",
+    }));
+    const undefinedRef = next(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    assert.equal(undefinedRef.path, "material_update_required");
+    if (undefinedRef.path !== "material_update_required") throw new Error("expected undefined reference");
+    assert.ok(undefinedRef.errors.some(error => error.includes("D-009")));
+  } finally { fx.cleanup(); }
+});
+
+test("propose_to_apply 确认问题展示非目标，以及每个留待计划事项在设计中的去向", () => {
+  const fx = setupV2Propose({
+    designContent: designBody({
+      ledger: "无",
+      extra: [
+        "## 非目标",
+        "",
+        "- 不改变合计先汇总再舍入（D-001）",
+        "",
+        "## 实现方案",
+        "",
+        "### 导出兼容",
+        "",
+        "旧导出接口保留原字段，新增字段追加在末尾（D-002）。",
+      ].join("\n"),
+    }),
+  });
+  try {
+    writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "discovery.md"), DEFERRED_DISCOVERY);
+    assert.notEqual(next(fx.projectRoot, fx.change, fx.changeRoot, "minimal").path, "material_update_required");
+    assert.equal(proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal").to_state, "propose_ready");
+    const question = prepareCurrentPhaseConfirmation(fx.projectRoot, fx.change, fx.changeRoot, "minimal").ask_user.question;
+    for (const expected of [
+      "不改变合计先汇总再舍入",
+      "D-001 合计与行明细的舍入口径",
+      "D-002 旧导出接口的兼容方式",
+      "旧导出接口保留原字段，新增字段追加在末尾",
+      "导出兼容",
+    ]) {
+      assert.ok(question.includes(expected), expected);
+    }
+  } finally { fx.cleanup(); }
+});
+
 test("v1 round：不拦截清单且 packet 无 structure_ledger", () => {
   const fx = setupV1Apply();
   try {

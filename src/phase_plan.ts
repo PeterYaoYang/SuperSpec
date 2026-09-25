@@ -6,6 +6,7 @@ import {
   answeredExploreQuestionRegisteredText,
   currentExploreRoundId,
   exploreAnswerRegistrationPayload,
+  exploreQuestionAnswerHistory,
   unregisteredClosedExploreQuestions,
   unresolvedPresentedExploreQuestionScopes,
 } from "./explore_round.ts";
@@ -15,6 +16,7 @@ import {
   currentProposeRoundId,
   isPlanningValidationProfile,
   proposeAnswerRegistrationPayload,
+  proposeQuestionAnswerHistory,
   unregisteredClosedProposeQuestions,
   unresolvedPresentedProposeQuestionScopes,
 } from "./propose_round.ts";
@@ -25,6 +27,14 @@ import {
   proposeOpenQuestionScope,
   parseExecutionRequirements,
   parseDiscoveryOpenQuestions,
+  parseDiscoveryQuestions,
+  collectProposeQuestions,
+  deferredItemReferences,
+  discoveryChecklistItemIds,
+  proposeChecklistItemIds,
+  hasDiscoveryDeferredSection,
+  parseDiscoveryDeferredItems,
+  undefinedIdReferences,
   parseTasksMd,
   parseTestContractEntries,
   isFixTaskId,
@@ -48,6 +58,7 @@ import {
   historicalProposeReadyRoles,
   latestReviewTerminalForGateRole,
   readReviewPolicyFromEvents,
+  startApplyReviewPolicy,
   reviewGateRoleResolution,
   reviewRejectionOverrideScope,
   reviewEvidenceDigest,
@@ -68,7 +79,6 @@ import {
   scanCodeChangesForReview,
 } from "./code_review.ts";
 import {
-  isPhaseAdvanceAuthorized,
   latestAcceptedPhaseDecision,
   phaseConfirmationCommitPayload,
   phaseConfirmationForBoundary,
@@ -83,6 +93,7 @@ import type {
   ExecutionPolicy,
   Job,
   JobRole,
+  OpenQuestionAnswerRecord,
   PlanningValidationProfile,
   ReviewFindingContext,
   WorkflowArtifactKind,
@@ -183,15 +194,54 @@ function requiredJobs(state: State, jobs: Job[], reason: string): NextStepPlan {
   return { kind: "required_jobs", state, jobs, reason };
 }
 
-function freeTextDecisionAsk(change: string, question: string, scope: string): AskUser {
+const OPEN_QUESTION_RECORD_INSTRUCTION = "答复与本问题不对应、仍有实质歧义或缺少必要的值时，仍按用户原话登记，把 closure 改为 needs_followup 并在 followup 写明还需补充什么，next 会在同一问题下继续询问；不要改写问题文本来追问。";
+
+function openQuestionAsk(change: string, question: string, scope: string, history: OpenQuestionAnswerRecord[]): AskUser {
   return {
     question,
     allowed_answers: [],
     scope,
     record_argv: ["superspec", "record", "user-decision", "--change", change, "--input", "-"],
-    record_input: { scope, question, answer: null },
+    record_input: { scope, question, answer: null, closure: "closed", followup: null },
     required_fields: ["answer"],
+    instruction: OPEN_QUESTION_RECORD_INSTRUCTION,
+    ...(history.length > 0 ? { answer_history: history } : {}),
   };
+}
+
+/** 同一问题下需要补充的答复和问题修订前的答复随提问展示；修订前的答复不自动适用。 */
+function openQuestionPrompt(lead: string, history: OpenQuestionAnswerRecord[], afterAnswer: string): string {
+  const pending = history.filter(record => record.current_revision && record.closure === "needs_followup");
+  const superseded = history.filter(record => !record.current_revision);
+  const context = [
+    pending.length > 0
+      ? `已收到的答复：${pending.map(record => `“${record.answer}”`).join("、")}。还需要补充：${pending.at(-1)!.followup ?? "请把这件事答完整"}`
+      : null,
+    superseded.length > 0
+      ? `这件事修订前收到过答复：${superseded.map(record => `“${record.answer}”`).join("、")}；问题已修订，请确认它是否仍然适用。`
+      : null,
+  ].filter((part): part is string => part !== null);
+  return [lead, ...context, `列出的候选只是参考，都不符合时可以直接说明你期望的结果。请只回答这一件事。${afterAnswer}`].join("\n\n");
+}
+
+function answeredOpenQuestion(history: OpenQuestionAnswerRecord[]): OpenQuestionAnswerRecord | null {
+  return history.find(record => record.current_revision && record.closure === "closed") ?? null;
+}
+
+function hasPendingFollowup(history: OpenQuestionAnswerRecord[]): boolean {
+  return history.some(record => record.current_revision && record.closure === "needs_followup");
+}
+
+function exploreQuestionLabel(question: Pick<DiscoveryQuestion, "id" | "ordinal">): string {
+  return question.id.startsWith("item-") ? `discovery.md 第 ${question.ordinal} 项待确认事项` : `discovery.md 中的 ${question.id}`;
+}
+
+function proposeQuestionLabel(question: ProposeQuestion): string {
+  return question.id.startsWith("item-") ? `${question.path} 第 ${question.ordinal} 项待确认问题` : `${question.path} 中的 ${question.id}`;
+}
+
+function answerAwaitingWritebackError(label: string, answer: OpenQuestionAnswerRecord, affected: string): string {
+  return `${label} 的答复已登记（“${answer.answer}”），尚未回写：把该行的 [ ] 改为 [x] 并保留原文，结论写在该行之外，同时更新${affected}`;
 }
 
 function requiredArtifact(
@@ -233,8 +283,11 @@ function missingProposeFirstBeatArtifact(
 }
 
 function unregisteredClosedExploreQuestionError(events: Event[], question: DiscoveryQuestion): string {
-  const label = question.id.startsWith("item-") ? `discovery.md 第 ${question.ordinal} 项待确认事项` : `discovery.md 中的 ${question.id}`;
+  const label = exploreQuestionLabel(question);
   const answered = answeredExploreQuestionRegisteredText(events, question);
+  if (!answered && hasPendingFollowup(exploreQuestionAnswerHistory(events, currentExploreRoundId(events), question))) {
+    return `${label} 已标记为已确认，但它的答复登记为需要补充、尚未闭环；请恢复为待确认，通过 next 继续询问并登记闭环答复后再回写 discovery.md`;
+  }
   if (!answered) {
     return `${label} 已标记为已确认，但本轮没有它的答复登记；请恢复为待确认，通过 next 向用户展示并登记真实答复后再回写 discovery.md`;
   }
@@ -243,8 +296,11 @@ function unregisteredClosedExploreQuestionError(events: Event[], question: Disco
 }
 
 function unregisteredClosedProposeQuestionError(events: Event[], question: ProposeQuestion): string {
-  const label = question.id.startsWith("item-") ? `${question.path} 第 ${question.ordinal} 项待确认问题` : `${question.path} 中的 ${question.id}`;
+  const label = proposeQuestionLabel(question);
   const answered = answeredProposeQuestionRegisteredText(events, question);
+  if (!answered && hasPendingFollowup(proposeQuestionAnswerHistory(events, currentProposeRoundId(events), question))) {
+    return `${label} 已标记为确认，但它的答复登记为需要补充、尚未闭环；请恢复为待确认，通过 next 继续询问并登记闭环答复后再回写计划材料`;
+  }
   if (!answered) {
     return `${label} 已标记为确认，但本轮没有它的答复登记；请恢复为待确认，通过 next 向用户展示并登记真实答复后再回写计划材料`;
   }
@@ -273,6 +329,7 @@ function phaseConfirmationStep(
   context: PhasePlanContext,
   boundary: PhaseBoundary,
   reason: string,
+  options: { autoAdvance?: ApplyToReviewAutoAdvance } = {},
 ): NextStepPlan | null {
   // 进入 propose_ready / apply 后，mode 来自本轮快照而非当前配置。
   const risk = workflowRiskForState(context.events, context.snapshot.state, context.mode.risk);
@@ -282,8 +339,13 @@ function phaseConfirmationStep(
     context.snapshot,
     boundary,
     risk,
+    options.autoAdvance?.reasons ?? [],
   );
-  if (!confirmation || isPhaseAdvanceAuthorized(context.events, confirmation)) return null;
+  if (!confirmation) return null;
+  const decision = latestAcceptedPhaseDecision(context.events, confirmation);
+  if (decision?.decision === "advance") return null;
+  // 用户对当前确认明确选择暂不推进时，不因满足自动推进判据而越过这次选择。
+  if (options.autoAdvance?.eligible && decision == null) return null;
   return {
     kind: "ask_user",
     state: context.snapshot.state,
@@ -492,6 +554,92 @@ function validateOpenSpecPlanningDocuments(
   return native.ok ? null : native.message;
 }
 
+/** 已登记答复的问题编号：问题项回写或改写后，正文仍可以按编号引用这些已确认事项。 */
+function registeredDecisionQuestionIds(events: Event[], phase: "explore" | "propose"): Set<string> {
+  const key = phase === "explore" ? "explore_open_question" : "propose_open_question";
+  const ids = new Set<string>();
+  for (const event of events) {
+    if (event.event_type !== "user_decision_recorded" || event.payload.accepted === false) continue;
+    const question = event.payload[key] as { question_id?: unknown } | undefined;
+    if (typeof question?.question_id === "string") ids.add(question.question_id);
+  }
+  return ids;
+}
+
+function definedDiscoveryQuestionIds(discoveryContent: string | null, events: Event[]): Set<string> {
+  const ids = registeredDecisionQuestionIds(events, "explore");
+  if (discoveryContent) {
+    for (const question of parseDiscoveryQuestions(discoveryContent)) ids.add(question.id);
+    for (const id of discoveryChecklistItemIds(discoveryContent)) ids.add(id);
+  }
+  return ids;
+}
+
+function discoveryReferenceErrors(discoveryContent: string, events: Event[]): string[] {
+  const errors: string[] = [];
+  const missing = undefinedIdReferences(discoveryContent, "Q", definedDiscoveryQuestionIds(discoveryContent, events));
+  if (missing.length > 0) {
+    errors.push(`discovery.md 引用了未在“待确认问题”段落中定义的编号 ${missing.join("、")}；需要用户确认的事项写成该段落内的 - [ ] 条目，不再需要的引用请删除`);
+  }
+  if (!hasDiscoveryDeferredSection(discoveryContent)) return errors;
+  const deferredIds = new Set(parseDiscoveryDeferredItems(discoveryContent).map(item => item.id));
+  const missingDeferred = undefinedIdReferences(discoveryContent, "D", deferredIds);
+  if (missingDeferred.length > 0) {
+    errors.push(`discovery.md 引用了未在“留待计划阶段”段落中定义的编号 ${missingDeferred.join("、")}；推迟到计划阶段的事项写成该段落内的 - D-xxx 条目，不再需要的引用请删除`);
+  }
+  return errors;
+}
+
+function readOptional(path: string): string | null {
+  return existsSync(path) ? readFileSync(path, "utf8") : null;
+}
+
+function readDiscovery(changeRoot: string): string | null {
+  return readOptional(join(changeRoot, ".superspec", "artifacts", "discovery.md"));
+}
+
+/** discovery 推迟到计划阶段的事项必须在 design.md 中按编号说明去向，确认开始实现时才能逐项展示。 */
+function unaddressedDeferredItemErrors(changeRoot: string): string[] {
+  const discoveryContent = readDiscovery(changeRoot);
+  if (discoveryContent == null) return [];
+  const items = parseDiscoveryDeferredItems(discoveryContent);
+  if (items.length === 0) return [];
+  const designContent = readOptional(join(changeRoot, "design.md")) ?? "";
+  const unaddressed = items.filter(item => deferredItemReferences(designContent, item.id).length === 0);
+  return unaddressed.length === 0
+    ? []
+    : [`discovery.md“留待计划阶段”中的 ${unaddressed.map(item => item.id).join("、")} 尚未在 design.md 中说明去向；请按编号写明它交给用户决定（在对应 DEC 中引用）、列为非目标（写明依据），或在方案中如何处理`];
+}
+
+function proposeReferenceErrors(changeRoot: string, events: Event[]): string[] {
+  const decisionIds = registeredDecisionQuestionIds(events, "propose");
+  for (const question of collectProposeQuestions(changeRoot)) decisionIds.add(question.id);
+  for (const id of proposeChecklistItemIds(changeRoot)) decisionIds.add(id);
+  const designContent = readOptional(join(changeRoot, "design.md"));
+  const structureIds = new Set(parseStructureChangeLedger(designContent ?? "").entries.map(entry => entry.id));
+  const discoveryContent = readDiscovery(changeRoot);
+  const discoveryIds = definedDiscoveryQuestionIds(discoveryContent, events);
+  const deferredIds = discoveryContent != null && hasDiscoveryDeferredSection(discoveryContent)
+    ? new Set(parseDiscoveryDeferredItems(discoveryContent).map(item => item.id))
+    : null;
+  const errors: string[] = [];
+  for (const path of ["proposal.md", "design.md", "tasks.md", ".superspec/artifacts/test-contract.md"]) {
+    const content = path === "design.md" ? designContent : readOptional(join(changeRoot, path));
+    if (content == null) continue;
+    const missing = [
+      ...undefinedIdReferences(content, "DEC", decisionIds),
+      ...undefinedIdReferences(content, "SC", structureIds),
+      ...undefinedIdReferences(content, "Q", discoveryIds),
+      ...(deferredIds ? undefinedIdReferences(content, "D", deferredIds) : []),
+    ];
+    if (missing.length > 0) {
+      errors.push(`${path} 引用了未定义的编号 ${missing.join("、")}；DEC 须在“## 待用户确认”中定义，SC 须在 design.md 的“## 结构变更清单”中定义，Q 须在 discovery.md 的“待确认问题”中定义，D 须在 discovery.md 的“留待计划阶段”中定义`);
+    }
+  }
+  errors.push(...unaddressedDeferredItemErrors(changeRoot));
+  return errors;
+}
+
 function validatePlanningPreflight(
   projectRoot: string,
   change: string,
@@ -499,6 +647,7 @@ function validatePlanningPreflight(
   risk: ReviewRisk,
   executionPolicy: ExecutionPolicy,
   profile: PlanningValidationProfile | null,
+  events: Event[],
 ): { error: string | null; errors: string[]; contractMode: boolean } {
   const executionRequirementVersion = profile?.version ?? 1;
   const errors: string[] = [];
@@ -518,6 +667,7 @@ function validatePlanningPreflight(
     const openSpecError = validateOpenSpecPlanningDocuments(projectRoot, change, changeRoot, profile);
     if (openSpecError) errors.push(openSpecError);
   }
+  errors.push(...proposeReferenceErrors(changeRoot, events));
 
   return {
     error: errors.length > 0 ? [...new Set(errors)].join("；") : null,
@@ -545,6 +695,65 @@ export function applyPlanningBaseline(changeRoot: string): Record<string, string
 export function applyPlanningDocsChangedSinceBaseline(changeRoot: string, baseline: Record<string, string>): boolean {
   const current = applyPlanningBaseline(changeRoot);
   return Object.entries(baseline).some(([path, digest]) => current[path] !== digest);
+}
+
+export function latestApplyPlanningBaseline(events: Event[]): Record<string, string> | null {
+  for (let index = events.length - 1; index >= 0; index--) {
+    const event = events[index];
+    if (event.event_type !== "transition_commit") continue;
+    const payload = event.payload as { transition?: unknown; apply_planning_baseline?: unknown };
+    if (payload.transition !== "start-apply") continue;
+    const baseline = payload.apply_planning_baseline;
+    if (!baseline || typeof baseline !== "object" || Array.isArray(baseline)) return null;
+    const entries = Object.entries(baseline as Record<string, unknown>);
+    return entries.every(([, digest]) => typeof digest === "string")
+      ? Object.fromEntries(entries) as Record<string, string>
+      : null;
+  }
+  return null;
+}
+
+export interface ApplyToReviewAutoAdvance {
+  eligible: boolean;
+  /** 不能自动进入最终审查的原因，供阶段确认向用户说明；eligible 为 true 时为空。 */
+  reasons: string[];
+  scope_note_count: number;
+}
+
+/**
+ * 代码审查通过后，计划材料仍与开始实现时一致、且没有任务声明超出执行依据边界时，
+ * 进入最终审查不需要用户再确认。调用方负责先确认代码审查已通过且仍对应当前代码。
+ */
+export function applyToReviewAutoAdvance(changeRoot: string, events: Event[]): ApplyToReviewAutoAdvance {
+  const reasons: string[] = [];
+  const baseline = latestApplyPlanningBaseline(events);
+  if (baseline == null) {
+    reasons.push("开始实现时没有冻结计划材料基线，无法确认计划范围未变化");
+  } else if (applyPlanningDocsChangedSinceBaseline(changeRoot, baseline)) {
+    reasons.push("计划材料在实现期间发生了变化");
+  }
+  const scopeNotes = currentApplyRoundScopeNotes(events);
+  for (const note of scopeNotes) {
+    reasons.push(`任务 ${note.task_id} 的实现超出了执行依据边界：${note.reason}（影响：${note.changed_area}；与计划的关系：${note.plan_alignment}）`);
+  }
+  return { eligible: reasons.length === 0, reasons, scope_note_count: scopeNotes.length };
+}
+
+function currentApplyRoundScopeNotes(events: Event[]): Array<{ task_id: string; reason: string; changed_area: string; plan_alignment: string }> {
+  const start = latestStartApplyIndex(events);
+  if (start < 0) return [];
+  return events.slice(start + 1).flatMap(event => {
+    if (event.event_type !== "task_completed") return [];
+    const payload = event.payload as { task_id?: unknown; scope_note?: unknown };
+    const note = payload.scope_note as { reason?: unknown; changed_area?: unknown; plan_alignment?: unknown } | null | undefined;
+    if (!note || typeof note !== "object" || typeof payload.task_id !== "string") return [];
+    return [{
+      task_id: payload.task_id,
+      reason: String(note.reason ?? ""),
+      changed_area: String(note.changed_area ?? ""),
+      plan_alignment: String(note.plan_alignment ?? ""),
+    }];
+  });
 }
 
 export function discoveryDocsBaseline(changeRoot: string): Record<string, string> {
@@ -972,22 +1181,50 @@ export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
       }
       const discoveryCheck = validateDiscovery(changeRoot);
       if (!discoveryCheck.ok) {
-        const ask: AskUser = {
-          question: discoveryCheck.message + "，请处理后继续",
-          allowed_answers: ["已处理"],
-          scope: "explore_discovery",
+        return {
+          kind: "material_update_required",
+          state: "explore",
+          errors: [discoveryCheck.message],
+          reason: discoveryCheck.message,
         };
-        return { kind: "ask_user", state: "explore", ask, reason: discoveryCheck.message };
       }
 
       const content = readFileSync(join(changeRoot, ".superspec", "artifacts", "discovery.md"), "utf8");
+      const referenceErrors = discoveryReferenceErrors(content, events);
+      if (referenceErrors.length > 0) {
+        return {
+          kind: "material_update_required",
+          state: "explore",
+          errors: referenceErrors,
+          reason: "discovery.md 引用了未定义的编号",
+        };
+      }
       const currentQuestion = parseDiscoveryOpenQuestions(content)[0];
       if (currentQuestion) {
-        const questionText = discoveryOpenQuestionDisplayText(currentQuestion);
-        const question = `现在有一件事需要你确认：${questionText}\n\n请只回答这一件事。主流程会先登记答复，再将结论回写 discovery.md；回写完成前会继续询问这一件事。`;
-        const scope = discoveryOpenQuestionScope(currentQuestion, currentExploreRoundId(events));
-        const ask = freeTextDecisionAsk(change, question, scope);
-        return { kind: "ask_user", state: "explore", ask, reason: "等待用户确认" };
+        const roundId = currentExploreRoundId(events);
+        const history = exploreQuestionAnswerHistory(events, roundId, currentQuestion);
+        const answered = answeredOpenQuestion(history);
+        if (answered) {
+          return {
+            kind: "material_update_required",
+            state: "explore",
+            errors: [answerAwaitingWritebackError(exploreQuestionLabel(currentQuestion), answered, "受影响的调查结论")],
+            reason: "答复已登记，等待回写 discovery.md",
+          };
+        }
+        const question = openQuestionPrompt(
+          `现在有一件事需要你确认：${discoveryOpenQuestionDisplayText(currentQuestion)}`,
+          history,
+          "主流程会先登记答复，再将结论回写 discovery.md。",
+        );
+        const scope = discoveryOpenQuestionScope(currentQuestion, roundId);
+        const ask = openQuestionAsk(change, question, scope, history);
+        return {
+          kind: "ask_user",
+          state: "explore",
+          ask,
+          reason: hasPendingFollowup(history) ? "上次答复需要补充，继续询问同一事项" : "等待用户确认",
+        };
       }
 
       const unregisteredClosedQuestions = unregisteredClosedExploreQuestions(events, content);
@@ -1038,10 +1275,30 @@ export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
       if (needsModeSelection) return modeSelectionRequiredStep(change, "propose", events);
       const currentQuestion = currentProposeOpenQuestion(changeRoot);
       if (currentQuestion) {
-        const question = `设计方案中有一件高影响取舍需要你决定：${proposeOpenQuestionDisplayText(currentQuestion)}\n\n请只回答这一件事。主流程会登记答复并将决定回写相关计划材料；回写完成前仍会停在当前事项。`;
-        const scope = proposeOpenQuestionScope(currentQuestion, currentProposeRoundId(events));
-        const ask = freeTextDecisionAsk(change, question, scope);
-        return { kind: "ask_user", state: "propose", ask, reason: "等待用户确认设计取舍" };
+        const roundId = currentProposeRoundId(events);
+        const history = proposeQuestionAnswerHistory(events, roundId, currentQuestion);
+        const answered = answeredOpenQuestion(history);
+        if (answered) {
+          return {
+            kind: "material_update_required",
+            state: "propose",
+            errors: [answerAwaitingWritebackError(proposeQuestionLabel(currentQuestion), answered, "受这项决定影响的计划材料")],
+            reason: "设计决定已登记，等待回写计划材料",
+          };
+        }
+        const question = openQuestionPrompt(
+          `设计方案中有一件高影响取舍需要你决定：${proposeOpenQuestionDisplayText(currentQuestion)}`,
+          history,
+          "主流程会登记答复并将决定回写相关计划材料。",
+        );
+        const scope = proposeOpenQuestionScope(currentQuestion, roundId);
+        const ask = openQuestionAsk(change, question, scope, history);
+        return {
+          kind: "ask_user",
+          state: "propose",
+          ask,
+          reason: hasPendingFollowup(history) ? "上次答复需要补充，继续询问同一设计决定" : "等待用户确认设计取舍",
+        };
       }
 
       const unregisteredClosed = unregisteredClosedProposeQuestions(events, changeRoot);
@@ -1068,6 +1325,16 @@ export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
         return requiredArtifact(projectRoot, change, changeRoot, "propose", firstBeat.kind, firstBeat.path, mode.risk, firstBeat.reason);
       }
 
+      const deferredErrors = unaddressedDeferredItemErrors(changeRoot);
+      if (deferredErrors.length > 0) {
+        return {
+          kind: "material_update_required",
+          state: "propose",
+          errors: deferredErrors,
+          reason: "留待计划阶段的事项尚未在设计中说明去向",
+        };
+      }
+
       const testContractPath = join(changeRoot, ".superspec", "artifacts", "test-contract.md");
       if (!existsSync(testContractPath)) {
         return requiredArtifact(projectRoot, change, changeRoot, "propose", "test_contract", ".superspec/artifacts/test-contract.md", mode.risk);
@@ -1084,6 +1351,7 @@ export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
         mode.risk,
         executionPolicyForRisk(mode.risk),
         planningProfile,
+        events,
       );
       if (preflight.error) {
         return {
@@ -1394,11 +1662,13 @@ function planApplyDoneNext(context: PhasePlanContext): NextStepPlan {
     acceptedCurrentHead === null ||
     (typeof acceptedCurrentHead === "string" && acceptedCurrentHead.trim() !== "")
   );
+  const autoAdvance = acceptedReviewReady ? applyToReviewAutoAdvance(changeRoot, events) : undefined;
   if (!codeScan.hasCodeChanges || acceptedReviewReady) {
     const confirmation = phaseConfirmationStep(
       context,
       "apply_to_review",
       acceptedReviewReady ? "Apply 与代码审查完成，等待用户确认进入最终审查" : "Apply 完成且本轮没有代码类改动，等待用户确认进入最终审查",
+      { autoAdvance },
     );
     if (confirmation) return confirmation;
   }
@@ -1408,7 +1678,7 @@ function planApplyDoneNext(context: PhasePlanContext): NextStepPlan {
     state: "apply_done",
     transition: "review-ready",
     risk: mode.risk,
-    reason: "所有任务完成，进入审查",
+    reason: autoAdvance?.eligible ? "代码审查通过且计划范围未变化，进入最终审查" : "所有任务完成，进入审查",
   };
 }
 
@@ -1508,6 +1778,8 @@ function planExploreTransition(context: TransitionPlanContext): TransitionDecisi
   if (!discoveryCheck.ok) return { kind: "skip", message: discoveryCheck.message };
 
   const discoveryContent = readFileSync(join(changeRoot, ".superspec", "artifacts", "discovery.md"), "utf8");
+  const referenceErrors = discoveryReferenceErrors(discoveryContent, events);
+  if (referenceErrors.length > 0) return { kind: "skip", message: referenceErrors.join("；") };
   const currentQuestion = parseDiscoveryOpenQuestions(discoveryContent)[0];
   if (currentQuestion) {
     return { kind: "skip", message: "discovery.md 仍有需要确认的事项，请先完成确认并回写 discovery.md" };
@@ -1560,6 +1832,7 @@ function planProposeReadyTransition(context: TransitionPlanContext): TransitionD
     risk,
     executionPolicyForRisk(risk),
     planningProfile,
+    context.events,
   );
   if (preflight.error) return { kind: "skip", message: preflight.error };
 
@@ -1638,6 +1911,7 @@ function planStartApplyTransition(
     risk,
     executionPolicy,
     planningProfile,
+    events,
   );
   if (preflight.error) return { kind: "skip", message: preflight.error };
 
@@ -1677,10 +1951,7 @@ function planStartApplyTransition(
       ...(executionRequirementVersion === 2 ? { execution_requirement_version: 2 } : {}),
       execution_policy: executionPolicy,
       workflow_mode: risk,
-      review_policy: {
-        review_risk: risk,
-        requires_verifier: risk !== "minimal",
-      },
+      review_policy: startApplyReviewPolicy(risk),
       apply_planning_baseline: applyPlanningBaseline(changeRoot),
       ...(acceptedConfirmation ? phaseConfirmationCommitPayload(
         acceptedConfirmation.confirmation,

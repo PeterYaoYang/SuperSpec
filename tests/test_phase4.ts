@@ -19,7 +19,7 @@ import { codeReviewPacketContext, computeCodeStateCheck, scanCodeReviewScope, ta
 import { phaseConfirmationForCurrentState, type PhaseDecisionAction } from "../src/phase_confirmation.ts";
 import { applyPlanningBaseline, latestAcceptedProposalBaseline } from "../src/phase_plan.ts";
 import type { Job, JobRole, State } from "../src/types.ts";
-import { confirmCurrentPhase } from "./phase_confirmation_support.ts";
+import { confirmCurrentPhase, useTestWorkflowMode } from "./phase_confirmation_support.ts";
 
 function setupApplyWithDoneTask(): { projectRoot: string; change: string; changeRoot: string; cleanup: () => void } {
   const projectRoot = mkdtempSync(join(tmpdir(), "superspec-p4-"));
@@ -143,6 +143,7 @@ function submitCodeReviewerPass(projectRoot: string, change: string, changeRoot:
   writeFileSync(reportPath, JSON.stringify({
     role: "code-reviewer",
     verdict: "pass",
+    evidence_refs: ["test:evidence"],
     review_scope: {
       job_id: jobId,
       packet_digest: packet.packet?.packet_digest,
@@ -192,6 +193,7 @@ function codeReviewerReport(
   return {
     role: "code-reviewer",
     verdict,
+    evidence_refs: ["test:evidence"],
     review_scope: {
       job_id: jobId,
       packet_digest: packetDigestFor(projectRoot, change, jobId),
@@ -216,6 +218,7 @@ function submitVerifierPass(projectRoot: string, change: string, changeRoot: str
     role: "verifier",
     findings: [],
     verdict: "pass",
+    evidence_refs: ["test:evidence"],
     review_scope: { checked_paths: checkedPathsForJob(projectRoot, change, jobId) },
     reviewer: { kind: "codex-subagent", id: "test-verifier" },
   }));
@@ -236,7 +239,7 @@ function advanceApplyDoneToReview(
   assert.equal(job?.role, "code-reviewer");
   const submitted = submitCodeReviewerPass(projectRoot, change, changeRoot, created.created_jobs[0]);
   assert.equal(submitted.accepted, true);
-  confirmCurrentPhase(projectRoot, change, changeRoot, risk);
+  useTestWorkflowMode(projectRoot, risk);
   const advanced = reviewReady(projectRoot, change, changeRoot, risk);
   assert.equal(advanced.outcome, "advanced");
   assert.equal(advanced.to_state, "review");
@@ -299,13 +302,14 @@ test("review-ready：apply → apply_done（所有任务完成）", () => {
   } finally { fx.cleanup(); }
 });
 
-test("apply_done → review：阶段确认必须精确且 direct transition 受门禁", () => {
+test("apply_done → review：计划材料在实现期间变化时仍需阶段确认，确认必须精确且 direct transition 受门禁", () => {
   const fx = setupApplyWithDoneTask();
   try {
     assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal").to_state, "apply_done");
     const codeReview = reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
     assert.equal(codeReview.outcome, "job_created");
     assert.equal(submitCodeReviewerPass(fx.projectRoot, fx.change, fx.changeRoot, codeReview.created_jobs[0]).accepted, true);
+    writeFileSync(join(fx.changeRoot, "design.md"), "# D\n\n## 结构变更清单\n\n无\n\n## 实现期间补充\n\n补充说明。\n");
 
     const ask = next(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
     assert.equal(ask.path, "ask_user");
@@ -346,6 +350,107 @@ test("apply_done → review：阶段确认必须精确且 direct transition 受�
       JSON.stringify(advance.record_input),
     ).accepted, true);
     assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal").to_state, "review");
+  } finally { fx.cleanup(); }
+});
+
+function latestReviewReadyCommit(projectRoot: string, change: string) {
+  return readEvents(projectRoot, change).findLast(event =>
+    event.event_type === "transition_commit" &&
+    (event.payload as { transition?: string; to_state?: string }).transition === "review-ready" &&
+    (event.payload as { to_state?: string }).to_state === "review"
+  )?.payload as { phase_confirmation?: Record<string, unknown> } | undefined;
+}
+
+test("apply_done → review：代码审查通过且计划范围未变化时不经确认进入最终审查，并留痕推进依据", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "normal").to_state, "apply_done");
+    const codeReview = reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.equal(submitCodeReviewerPass(fx.projectRoot, fx.change, fx.changeRoot, codeReview.created_jobs[0]).accepted, true);
+
+    const planned = next(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.equal(planned.path, "next_command");
+    assert.equal(planned.stop_allowed, false);
+    assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "normal").to_state, "review");
+
+    const confirmation = latestReviewReadyCommit(fx.projectRoot, fx.change)?.phase_confirmation;
+    assert.equal(confirmation?.boundary, "apply_to_review");
+    assert.equal(confirmation?.mode, "auto");
+    assert.equal(confirmation?.decision_event_id, undefined);
+    assert.deepEqual(confirmation?.auto_basis, {
+      code_review_job_id: codeReview.created_jobs[0],
+      planning_baseline: "unchanged",
+      scope_notes: 0,
+    });
+    assert.equal(readEvents(fx.projectRoot, fx.change).some(event =>
+      event.event_type === "user_question_presented" &&
+      String((event.payload as { scope?: unknown }).scope).startsWith("phase_confirmation:apply_to_review:")
+    ), false);
+  } finally { fx.cleanup(); }
+});
+
+test("apply_done → review：任务登记了范围扩大说明时仍需确认，确认问题列出该说明", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    const created = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    const jobId = created.created_jobs[0];
+    const finding = {
+      id: "CR-001",
+      type: "implementation",
+      blocking: true,
+      description: "空输入仍会抛错",
+      evidence: "src/example.ts:10 空输入会抛异常",
+      source_refs: ["src/example.ts:10"],
+      impact: "用户提交空输入时流程中断",
+      suggested_action: "apply",
+    };
+    assert.equal(submitCodeReviewerReport(
+      fx.projectRoot, fx.change, fx.changeRoot, jobId,
+      codeReviewerReport(fx.projectRoot, fx.change, jobId, "fail", [finding]),
+    ).accepted, false);
+    assert.equal(reopen(fx.projectRoot, fx.change, fx.changeRoot, "apply", "fix CR-001", { reviewFix: `${jobId}#CR-001` }).to_state, "apply");
+
+    const fixTaskId = `REVIEW-FIX-${jobId}#CR-001`;
+    assert.equal(taskStart(fx.projectRoot, fx.change, fx.changeRoot, fixTaskId).outcome, "advanced");
+    const attempt = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot).active_task_attempts[0];
+    for (const [semantic_status, exit_code] of [["expected_failure", 1], ["expected_success", 0]] as const) {
+      appendTestRunEvent(fx.projectRoot, fx.change, {
+        test_id: fixTaskId,
+        attempt_id: attempt.attempt_id,
+        task_structure_digest: attempt.task_structure_digest,
+        semantic_status,
+        exit_code,
+      });
+    }
+    const scopeNote = {
+      reason: "兼容入口被两个消费者共享，需要一并修正",
+      changed_area: "src/example.ts:20 兼容入口",
+      plan_alignment: "保持已批准行为，不新增能力",
+      verification: ["两个消费者的回归测试"],
+    };
+    assert.equal(taskComplete(fx.projectRoot, fx.change, fx.changeRoot, fixTaskId, JSON.stringify({ scope_note: scopeNote })).outcome, "advanced");
+    assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot).to_state, "apply_done");
+    const rereview = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    const checkedPaths = ((jobsPacket(fx.projectRoot, fx.change, rereview.created_jobs[0]).packet?.boundFiles ?? []) as Array<{ path: string }>)
+      .map(file => file.path);
+    assert.equal(submitCodeReviewerReport(
+      fx.projectRoot, fx.change, fx.changeRoot, rereview.created_jobs[0],
+      codeReviewerReport(fx.projectRoot, fx.change, rereview.created_jobs[0], "pass", [], checkedPaths),
+    ).accepted, true);
+
+    const ask = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(ask.path, "ask_user");
+    assert.match(ask.ask_user.scope, /^phase_confirmation:apply_to_review:/);
+    assert.ok(ask.ask_user.question.includes(scopeNote.reason));
+    assert.ok(ask.ask_user.question.includes(fixTaskId));
+    assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot).events_written, 0);
+
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot).to_state, "review");
+    const confirmation = latestReviewReadyCommit(fx.projectRoot, fx.change)?.phase_confirmation;
+    assert.equal(confirmation?.mode, undefined);
+    assert.equal(typeof confirmation?.decision_event_id, "string");
   } finally { fx.cleanup(); }
 });
 
@@ -413,7 +518,6 @@ test("apply_done 后补任务：reopen 复开执行并创建 fresh code-reviewer
     assert.notEqual(freshCodeReview.created_jobs[0], staleCodeReviewJobId);
     assert.equal(submitCodeReviewerPass(fx.projectRoot, fx.change, fx.changeRoot, freshCodeReview.created_jobs[0]).accepted, true);
 
-    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot);
     const advanced = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(advanced.to_state, "review");
     createAndPassFinalVerifier(fx.projectRoot, fx.change, fx.changeRoot);
@@ -560,7 +664,7 @@ test("reopen：review 回 propose 修正计划且无 pending task 时跳过重�
       fx.change,
       fx.changeRoot,
       verifier.created_jobs[0],
-      JSON.stringify({ role: "verifier", verdict: "pass", findings: [] }),
+      JSON.stringify({ role: "verifier", verdict: "pass", evidence_refs: ["test:evidence"], findings: [] }),
     );
     assert.equal(lateReport.accepted, false);
     assert.match(lateReport.message, /已因回退到更早阶段失效/);
@@ -610,11 +714,12 @@ test("reopen：propose 可以回 explore，且必须更新 discovery 后才能�
     assert.match(ask.ask_user.scope, /^phase_confirmation:explore_to_propose:/);
     const advance = (ask.ask_user.actions as PhaseDecisionAction[]).find(action => action.decision === "advance");
     assert.ok(advance);
-    assert.equal(recordUserDecisionContent(
+    const recorded = recordUserDecisionContent(
       fx.projectRoot,
       fx.change,
       JSON.stringify(advance.record_input),
-    ).accepted, true);
+    );
+    assert.equal(recorded.accepted, true, recorded.message);
     const advanced = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
     assert.equal(advanced.to_state, "propose");
   } finally { fx.cleanup(); }
@@ -743,7 +848,6 @@ test("review policy：首次 risk 生效，后续 risk 不覆盖", () => {
     const codeReview = reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "strict");
     assert.equal(codeReview.outcome, "job_created");
     assert.equal(submitCodeReviewerPass(fx.projectRoot, fx.change, fx.changeRoot, codeReview.created_jobs[0]).accepted, true);
-    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "strict");
     const toReview = reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "strict");
     assert.equal(toReview.to_state, "review");
 
@@ -891,7 +995,6 @@ test("code_state_check：已审 dirty 文件未变化不算差异，后续修改
     assert.deepEqual((codeReviewPacket.packet?.boundFiles as { path: string }[]).map(file => file.path), ["src/a.ts"]);
 
     assert.equal(submitCodeReviewerPass(fx.projectRoot, fx.change, fx.changeRoot, codeReview.created_jobs[0]).accepted, true);
-    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot).to_state, "review");
 
     const verifier = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
@@ -1259,6 +1362,7 @@ test("code-reviewer：pass 报告不能把绑定文件留在 unchecked", () => {
       JSON.stringify({
         role: "code-reviewer",
         verdict: "pass",
+        evidence_refs: ["test:evidence"],
         review_scope: {
           job_id: created.created_jobs[0],
           packet_digest: packet?.packet_digest,
@@ -1780,6 +1884,7 @@ test("code-reviewer：文件路径 fallback 的报告文件不算代码范围变
     writeFileSync(reportPath, JSON.stringify({
       role: "code-reviewer",
       verdict: "pass",
+      evidence_refs: ["test:evidence"],
       review_scope: {
         job_id: jobId,
         packet_digest: packet.packet?.packet_digest,
@@ -1812,6 +1917,7 @@ test("code-reviewer：项目内文件 fallback 的 scope 错误记录路径并�
     writeFileSync(reportPath, JSON.stringify({
       role: "code-reviewer",
       verdict: "pass",
+      evidence_refs: ["test:evidence"],
       review_scope: {
         job_id: jobId,
         packet_digest: packet.packet?.packet_digest,
@@ -1858,6 +1964,7 @@ test("code-reviewer：代码目录内的 fallback scope 错误同样不会进入
     writeFileSync(reportPath, JSON.stringify({
       role: "code-reviewer",
       verdict: "pass",
+      evidence_refs: ["test:evidence"],
       review_scope: {
         job_id: jobId,
         packet_digest: packet.packet?.packet_digest,
@@ -1884,6 +1991,7 @@ test("code-reviewer：代码目录内的 fallback scope 错误同样不会进入
     writeFileSync(retryReportPath, JSON.stringify({
       role: "code-reviewer",
       verdict: "pass",
+      evidence_refs: ["test:evidence"],
       review_scope: {
         job_id: retry.created_jobs[0],
         packet_digest: retryPacket.packet?.packet_digest,
@@ -1969,7 +2077,6 @@ test("code-reviewer：accepted pass 后绑定文件变化必须重新审查", ()
       retry.created_jobs[0],
       codeReviewerReport(fx.projectRoot, fx.change, retry.created_jobs[0], "pass", [], ["src/example.ts"]),
     ).accepted, true);
-    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot).to_state, "review");
   } finally { fx.cleanup(); }
 });
@@ -2009,7 +2116,6 @@ test("code-reviewer：accepted pass 后新增代码文件必须重新审查", ()
       codeReviewerReport(fx.projectRoot, fx.change, retry.created_jobs[0], "pass", [], ["src/b.ts"]),
     );
     assert.equal(retrySubmitted.accepted, true, retrySubmitted.message);
-    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot).to_state, "review");
   } finally { fx.cleanup(); }
 });
@@ -2110,6 +2216,7 @@ test("code-reviewer：schema 错误不写历史，修正后可重交同一工作
     const rejected = recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, first.created_jobs[0], JSON.stringify({
       role: "code-reviewer",
       verdict: "pass",
+      evidence_refs: ["test:evidence"],
       findings: [],
       reviewer: { kind: "codex-subagent", id: "test-code-reviewer" },
     }));
@@ -3569,7 +3676,7 @@ test("next：accepted 和 legacy archive 有 open job 时不走普通完成路�
   } finally { archiveFx.cleanup(); }
 });
 
-test("apply_done：确认后新增普通 open job 时 next 与 direct review-ready 都阻断", () => {
+test("apply_done：代码审查通过后新增普通 open job 时 next 与 direct review-ready 都阻断", () => {
   const fx = setupApplyWithDoneTask();
   try {
     assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal").to_state, "apply_done");
@@ -3581,7 +3688,6 @@ test("apply_done：确认后新增普通 open job 时 next 与 direct review-rea
       fx.changeRoot,
       codeReview.created_jobs[0],
     ).accepted, true);
-    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
     const job = appendOpenJob(fx.projectRoot, fx.change, "apply_done", {
       job_id: "JOB-apply-done-open",
       role: "executor",
@@ -3743,7 +3849,7 @@ test("review-ready：缺执行证据版本的 legacy verifier 不算最终验证
     assert.equal(snap.open_jobs.some(job => job.job_id === legacyJob.job_id), false);
 
     const reportPath = join(fx.projectRoot, "legacy-verifier-no-evidence.json");
-    writeFileSync(reportPath, JSON.stringify({ role: "verifier", findings: [], verdict: "pass" }));
+    writeFileSync(reportPath, JSON.stringify({ role: "verifier", findings: [], verdict: "pass", evidence_refs: ["test:evidence"] }));
     const submitted = recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, legacyJob.job_id, reportPath);
     assert.equal(submitted.accepted, false);
     assert.match(submitted.message, /缺少执行证据版本/);
@@ -3855,7 +3961,7 @@ test("verifier：项目内 fallback 格式错误记录路径且不污染 fresh c
     assert.equal(created.outcome, "job_created");
     const jobId = created.created_jobs[0];
     const reportPath = join(fx.projectRoot, "verifier-invalid.json");
-    writeFileSync(reportPath, JSON.stringify({ role: "verifier", verdict: "pass", findings: [] }));
+    writeFileSync(reportPath, JSON.stringify({ role: "verifier", verdict: "pass", evidence_refs: ["test:evidence"], findings: [] }));
 
     const rejected = recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, jobId, reportPath);
     assert.equal(rejected.job_state, "rejected");
@@ -3986,6 +4092,7 @@ test("accept：verifier accepted 后补登记匹配 digest 的 legacy test-run �
       role: "verifier",
       findings: [],
       verdict: "pass",
+      evidence_refs: ["test:evidence"],
       review_scope: { checked_paths: checkedPathsForJob(fx.projectRoot, fx.change, jobId) },
     }));
     const submit = recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, jobId, reportPath);
@@ -4124,6 +4231,7 @@ test("sync：绑定文件删除会让 open 和 accepted job stale", () => {
       role: "verifier",
       findings: [],
       verdict: "pass",
+      evidence_refs: ["test:evidence"],
       review_scope: { checked_paths: checkedPathsForJob(openFx.projectRoot, openFx.change, jobId) },
     }));
     const staleSubmit = recordJobSubmit(openFx.projectRoot, openFx.change, openFx.changeRoot, jobId, reportPath);
@@ -4141,6 +4249,7 @@ test("sync：绑定文件删除会让 open 和 accepted job stale", () => {
       role: "verifier",
       findings: [],
       verdict: "pass",
+      evidence_refs: ["test:evidence"],
       review_scope: { checked_paths: checkedPathsForJob(acceptedFx.projectRoot, acceptedFx.change, jobId) },
     }));
     const accepted = recordJobSubmit(acceptedFx.projectRoot, acceptedFx.change, acceptedFx.changeRoot, jobId, reportPath);
@@ -4439,6 +4548,7 @@ test("H3：verifier final gate accepted 后改文档 → stale → review-ready 
       role: "verifier",
       findings: [],
       verdict: "pass",
+      evidence_refs: ["test:evidence"],
       review_scope: { checked_paths: checkedPathsForJob(projectRoot, change, jobId) },
     }));
     recordJobSubmit(projectRoot, change, changeRoot, jobId, reportPath);

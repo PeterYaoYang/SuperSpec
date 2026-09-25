@@ -78,16 +78,57 @@ test("CLI job-submit：结论（含 fail）登记成功退出码为 0，其余�
     assert.equal(malformed.status, 1);
     assert.equal(JSON.parse(malformed.stdout).result_kind, "retryable");
 
-    const missing = submit("JOB-cli-missing", { role: "critic", verdict: "pass", findings: [], reviewer });
+    const missing = submit("JOB-cli-missing", { role: "critic", verdict: "pass", evidence_refs: ["test:evidence"], findings: [], reviewer });
     assert.equal(missing.status, 1);
     assert.equal(JSON.parse(missing.stdout).result_kind, "job_not_found");
 
     appendCriticJob(fx.projectRoot, fx.change, "JOB-cli-onbehalf");
-    const onBehalf = submit("JOB-cli-onbehalf", { role: "critic", verdict: "pass", findings: [], reviewer: { kind: "human", id: "reviewer" } }, ["--on-behalf", "yes"]);
+    const onBehalf = submit("JOB-cli-onbehalf", { role: "critic", verdict: "pass", evidence_refs: ["test:evidence"], findings: [], reviewer: { kind: "human", id: "reviewer" } }, ["--on-behalf", "yes"]);
     assert.equal(onBehalf.status, 0, onBehalf.stderr || onBehalf.stdout);
     const accepted = readEvents(fx.projectRoot, fx.change).findLast(event => event.event_type === "job_accepted");
     assert.equal((accepted?.payload as { job_id?: string; submitted_by?: string }).job_id, "JOB-cli-onbehalf");
     assert.equal((accepted?.payload as { submitted_by?: string }).submitted_by, "main_process");
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("CLI job-submit --report-json：单条命令内联报告与 stdin 登记等价，且与 --report 互斥", () => {
+  const fx = setupProject();
+  try {
+    const reviewer = { kind: "subagent", id: "critic-inline" };
+    appendCriticJob(fx.projectRoot, fx.change, "JOB-cli-inline");
+    const report = JSON.stringify({ role: "critic", verdict: "pass", evidence_refs: ["src/a.ts:1"], findings: [], reviewer });
+
+    const both = runCli(fx.projectRoot, ["record", "job-submit", "--change", fx.change, "--job", "JOB-cli-inline", "--report", "-", "--report-json", report], "");
+    assert.equal(both.status, 1);
+    assert.equal(readEvents(fx.projectRoot, fx.change).some(event => event.event_type === "job_accepted"), false);
+
+    const inline = runCli(fx.projectRoot, ["record", "job-submit", "--change", fx.change, "--job", "JOB-cli-inline", "--report-json", report], "");
+    assert.equal(inline.status, 0, inline.stderr || inline.stdout);
+    assert.equal(JSON.parse(inline.stdout).result_kind, "accepted");
+    const accepted = readEvents(fx.projectRoot, fx.change).findLast(event => event.event_type === "job_accepted");
+    assert.equal((accepted?.payload as { job_id?: string }).job_id, "JOB-cli-inline");
+    assert.equal((accepted?.payload as { submitted_by?: string }).submitted_by, undefined);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("CLI job-submit --report-json：经 shell 单引号参数提交时，JSON 中写成 \\u0027 的单引号原样登记", () => {
+  const fx = setupProject();
+  try {
+    appendCriticJob(fx.projectRoot, fx.change, "JOB-cli-quote");
+    const summary = "it's consistent";
+    const report = JSON.stringify({
+      role: "critic", verdict: "pass", summary, evidence_refs: ["src/a.ts:1"], findings: [],
+      reviewer: { kind: "subagent", id: "critic-quote" },
+    }).replace(/'/g, "\\u0027");
+    const command = `'${process.execPath}' '${cliPath()}' record job-submit --change ${fx.change} --job JOB-cli-quote --report-json '${report}'`;
+    const run = spawnSync("/bin/sh", ["-c", command], { cwd: fx.projectRoot, encoding: "utf8" });
+    assert.equal(run.status, 0, run.stderr || run.stdout);
+    const accepted = readEvents(fx.projectRoot, fx.change).findLast(event => event.event_type === "job_accepted");
+    assert.equal((accepted?.payload as { summary?: string }).summary, summary);
   } finally {
     fx.cleanup();
   }
@@ -204,6 +245,7 @@ test("CLI record job-submit reads report JSON from stdin", () => {
     const input = JSON.stringify({
       role: "critic",
       verdict: "pass",
+      evidence_refs: ["test:evidence"],
       findings: [],
       reviewer: { kind: "codex-subagent", id: "critic-stdin-test" },
     });
@@ -253,6 +295,7 @@ test("CLI record stdin keeps user and job idempotency", () => {
     const reportInput = JSON.stringify({
       role: "critic",
       verdict: "pass",
+      evidence_refs: ["test:evidence"],
       findings: [],
       reviewer: { kind: "codex-subagent", id: "critic-stdin-idem-test" },
     });
@@ -401,6 +444,7 @@ test("CLI record keeps file path fallback for all stdin-enabled records", () => 
     writeFileSync(reportFile, JSON.stringify({
       role: "critic",
       verdict: "pass",
+      evidence_refs: ["test:evidence"],
       findings: [],
       reviewer: { kind: "codex-subagent", id: "critic-file-test" },
     }), "utf8");
@@ -444,6 +488,7 @@ test("record 输入：UTF-8、UTF-8 BOM、UTF-16LE BOM 在 stdin 和文件路径
         const report = {
           role: "critic",
           verdict: "pass",
+          evidence_refs: ["test:evidence"],
           findings: [],
           summary: marker,
           reviewer: { kind: "codex-subagent", id: `critic-${mode}-${encoding}` },
@@ -506,6 +551,7 @@ test("record 输入：非法 UTF-8 不写 raw 或终结事件，同一 job 可�
     const valid = {
       role: "critic",
       verdict: "pass",
+      evidence_refs: ["test:evidence"],
       findings: [],
       reviewer: { kind: "codex-subagent", id: "critic-utf8-retry" },
     };

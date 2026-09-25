@@ -2,10 +2,15 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   collectProposeQuestions,
+  legacyProposeOpenQuestionScope,
+  openQuestionAnswerRecord,
+  openQuestionDecisionClosure,
   parseProposeQuestions,
+  proposeOpenQuestionScope,
   proposeQuestionContextFingerprint,
   proposeQuestionDecisionBasisDigest,
   proposeQuestionKey,
+  type OpenQuestionAnswerRecord,
   type ProposeQuestion,
 } from "./format.ts";
 import type { Event, PlanningValidationProfile } from "./types.ts";
@@ -158,6 +163,7 @@ export function proposeAnswerWasRecorded(
       ? recorded.decision_basis_digest === currentBasisDigest
       : recorded?.context_fingerprint === contextFingerprint;
     return payload.accepted === true &&
+      openQuestionDecisionClosure(payload) === "closed" &&
       recorded?.round_id === roundId &&
       recorded.path === question.path &&
       recorded.question_id === question.id &&
@@ -201,6 +207,7 @@ export function answeredProposeQuestionRegisteredText(
     const recorded = payload.propose_open_question;
     if (
       payload.accepted === true &&
+      openQuestionDecisionClosure(payload) === "closed" &&
       recorded?.round_id === roundId &&
       recorded.path === question.path &&
       recorded.question_id === question.id &&
@@ -225,6 +232,43 @@ export function currentProposeQuestionContent(changeRoot: string, question: Prop
     : null;
 }
 
+/** 本轮同一设计问题已登记的答复（含需要补充的），按登记顺序；问题修订前的答复标记为非当前版本。 */
+export function proposeQuestionAnswerHistory(
+  events: readonly Event[],
+  roundId: string,
+  question: ProposeQuestion,
+): OpenQuestionAnswerRecord[] {
+  const basisDigest = proposeQuestionDecisionBasisDigest(question);
+  const currentScopes = [proposeOpenQuestionScope(question, roundId), legacyProposeOpenQuestionScope(question, roundId)];
+  return events.flatMap(event => {
+    if (event.event_type !== "user_decision_recorded") return [];
+    const payload = event.payload as {
+      accepted?: unknown;
+      scope?: unknown;
+      propose_open_question?: {
+        round_id?: unknown;
+        path?: unknown;
+        question_id?: unknown;
+        question_ordinal?: unknown;
+        decision_basis_digest?: unknown;
+      };
+    };
+    if (payload.accepted !== true) return [];
+    const recorded = payload.propose_open_question;
+    const scopeMatches = typeof payload.scope === "string" && currentScopes.includes(payload.scope);
+    const sameQuestion = recorded?.round_id === roundId &&
+      recorded.path === question.path &&
+      recorded.question_id === question.id &&
+      (!question.id.startsWith("item-") || recorded.question_ordinal === question.ordinal);
+    if (!sameQuestion && !scopeMatches) return [];
+    const currentRevision = typeof recorded?.decision_basis_digest === "string"
+      ? recorded.decision_basis_digest === basisDigest
+      : scopeMatches;
+    const record = openQuestionAnswerRecord(event, currentRevision);
+    return record ? [record] : [];
+  });
+}
+
 /** 已正式展示但尚未登记答复的 Propose 问题不能通过删除问题行绕过。 */
 export function unresolvedPresentedProposeQuestionScopes(events: readonly Event[]): string[] {
   const roundId = currentProposeRoundId(events);
@@ -241,7 +285,7 @@ export function unresolvedPresentedProposeQuestionScopes(events: readonly Event[
         decision_basis_digest?: unknown;
       };
     };
-    return payload.accepted === true ? [payload] : [];
+    return payload.accepted === true && openQuestionDecisionClosure(payload) === "closed" ? [payload] : [];
   });
   const latestByQuestion = new Map<string, {
     scope: string;

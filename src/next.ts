@@ -1,11 +1,11 @@
 // SuperSpec 流程引擎 — next：返回可执行路径
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { rebuildSnapshot } from "./sync.ts";
-import { appendEvent, makeEvent, readEvents, withLock } from "./store.ts";
+import { appendEvent, engineRoot, makeEvent, readEvents, withLock } from "./store.ts";
 import { requiredJobActions } from "./job_action.ts";
-import type { Job, NextOutput, State } from "./types.ts";
+import type { AskUser, Event, Job, NextCommandOutput, NextOutput, State } from "./types.ts";
 import type { ReviewRisk } from "./review.ts";
 import { planNextStep, type NextStepPlan } from "./phase_plan.ts";
 import {
@@ -23,6 +23,17 @@ import {
   legacyProposeOpenQuestionScope,
 } from "./format.ts";
 
+/** 同一 scope 下带着需要补充的答复再次询问时，问题文本不同，作为一次新的展示留痕。 */
+function alreadyPresented(latest: Event | undefined, ask: AskUser): boolean {
+  const payload = latest?.payload as { scope?: unknown; question?: unknown } | undefined;
+  return payload?.scope === ask.scope && payload.question === ask.question;
+}
+
+function followupOf(ask: AskUser): Record<string, string> {
+  const pending = ask.answer_history?.filter(record => record.current_revision && record.closure === "needs_followup") ?? [];
+  return pending.length > 0 ? { followup_of: pending.at(-1)!.event_id } : {};
+}
+
 function recordPresentedQuestion(projectRoot: string, change: string, changeRoot: string, output: NextOutput): void {
   if (output.path !== "ask_user") return;
   const isExplore = output.ask_user.scope.startsWith("explore_open_question:");
@@ -39,7 +50,7 @@ function recordPresentedQuestion(projectRoot: string, change: string, changeRoot
       return payload.phase === "explore" && payload.round_id === roundId && payload.question_id === current.id &&
         (!current.id.startsWith("item-") || payload.question_ordinal === current.ordinal);
     });
-    if ((latest?.payload as { scope?: unknown } | undefined)?.scope === output.ask_user.scope) return;
+    if (alreadyPresented(latest, output.ask_user)) return;
     appendEvent(projectRoot, change, makeEvent(change, "user_question_presented", {
       phase: "explore",
       round_id: roundId,
@@ -49,6 +60,7 @@ function recordPresentedQuestion(projectRoot: string, change: string, changeRoot
       question_id: current.id,
       question_ordinal: current.ordinal,
       decision_basis_digest: discoveryQuestionDecisionBasisDigest(current),
+      ...followupOf(output.ask_user),
     }));
     return;
   }
@@ -61,7 +73,7 @@ function recordPresentedQuestion(projectRoot: string, change: string, changeRoot
     return payload.phase === "propose" && payload.round_id === roundId && payload.path === current.path && payload.question_id === current.id &&
       (!current.id.startsWith("item-") || payload.question_ordinal === current.ordinal);
   });
-  if ((latest?.payload as { scope?: unknown } | undefined)?.scope === output.ask_user.scope) return;
+  if (alreadyPresented(latest, output.ask_user)) return;
   appendEvent(projectRoot, change, makeEvent(change, "user_question_presented", {
     phase: "propose",
     round_id: roundId,
@@ -72,14 +84,18 @@ function recordPresentedQuestion(projectRoot: string, change: string, changeRoot
     question_id: current.id,
     question_ordinal: current.ordinal,
     decision_basis_digest: proposeQuestionDecisionBasisDigest(current),
+    ...followupOf(output.ask_user),
   }));
 }
+
+const REQUIRED_JOB_WAIT_INSTRUCTION = "派出工作项后，在当前回合内等待它返回结果，再重新运行 next；工作项尚未返回不是停止点。";
 
 function requiredJobsOutput(state: State, change: string, jobs: Job[], reason: string): NextOutput {
   return {
     state,
     path: "required_job",
     required_jobs: requiredJobActions(change, jobs),
+    instruction: REQUIRED_JOB_WAIT_INSTRUCTION,
     reason,
   };
 }
@@ -153,13 +169,29 @@ function toNextOutput(change: string, plan: NextStepPlan): NextOutput {
 }
 
 
+/** 项目根 .superspec/ 只存放引擎状态；出现 artifacts/ 说明工作流产物写错了位置。 */
+function workspaceWarnings(projectRoot: string): string[] {
+  return existsSync(join(engineRoot(projectRoot), "artifacts"))
+    ? ["项目根的 .superspec/artifacts/ 不属于任何 change，通常是工作流产物写错了位置；产物应写在 next 返回的项目相对路径下，确认内容已迁移后删除该目录"]
+    : [];
+}
+
+function withStopSignal(projectRoot: string, output: NextOutput): NextCommandOutput {
+  const warnings = workspaceWarnings(projectRoot);
+  return {
+    ...output,
+    stop_allowed: output.path === "ask_user" || output.path === "done",
+    ...(warnings.length > 0 ? { warnings } : {}),
+  };
+}
+
 /** next 命令：读取当前状态，返回唯一可执行路径，并登记正式展示的用户问题。 */
 export function next(
   projectRoot: string,
   change: string,
   changeRoot: string,
   defaultRisk?: ReviewRisk,
-): NextOutput {
+): NextCommandOutput {
   return withLock(projectRoot, change, () => {
     const snapshot = rebuildSnapshot(projectRoot, change, changeRoot);
     const events = readEvents(projectRoot, change);
@@ -177,14 +209,14 @@ export function next(
     if (plannedNextStep) {
       const output = { ...toNextOutput(change, plannedNextStep), ...status };
       recordPresentedQuestion(projectRoot, change, changeRoot, output);
-      return output;
+      return withStopSignal(projectRoot, output);
     }
 
-    return {
+    return withStopSignal(projectRoot, {
       state: snapshot.state,
       path: "done",
       reason: `状态 ${snapshot.state} 没有可执行下一步`,
       ...status,
-    };
+    });
   });
 }

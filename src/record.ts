@@ -50,11 +50,12 @@ import { EXPLORE_DISCOVERY_REVIEW_GATE, PROPOSE_FINAL_REVIEW_GATE, type ReviewGa
 import { materialDelta } from "./material_snapshot.ts";
 import { confirmedDecisions, evidenceCodeFiles, previousReviewEvidence } from "./review_context.ts";
 import { RecordInputDecodingError, readRecordInputFile } from "./record_input.ts";
-import { currentExploreRoundId } from "./explore_round.ts";
+import { currentExploreRoundId, exploreQuestionAnswerHistory } from "./explore_round.ts";
 import {
   currentProposeOpenQuestion,
   currentProposeQuestionContent,
   currentProposeRoundId,
+  proposeQuestionAnswerHistory,
 } from "./propose_round.ts";
 import {
   discoveryOpenQuestionDisplayText,
@@ -69,9 +70,12 @@ import {
   proposeQuestionContextFingerprint,
   proposeQuestionDecisionBasisDigest,
   legacyProposeOpenQuestionScope,
+  openQuestionDecisionClosure,
   PROPOSE_OPEN_QUESTION_SCOPE_PREFIX,
   validateDiscovery,
   type DiscoveryOpenQuestion,
+  type OpenQuestionAnswerRecord,
+  type OpenQuestionClosure,
   type ProposeQuestion,
 } from "./format.ts";
 import type { CodeReviewResultKind, Event, RecordResult, Job, JobPacket, JobRole, JobState, JobSubmitResultKind, State, WorkflowModeSelection } from "./types.ts";
@@ -81,12 +85,14 @@ import {
   outOfScopeUncheckedFromReport,
   REVIEW_REPORT_OPTIONAL_FIELDS,
   REVIEW_REPORT_REQUIRED_FIELDS,
+  hasEvidenceRef,
   isReviewRole,
   requiresReviewer,
   requiresReviewScope,
   reportSchemaForJob,
   reportSkeletonFillItems,
   reportSkeletonForJob,
+  reportedPathAliases,
   requiredCheckedBoundPaths,
   type ReportSchemaContract,
 } from "./report_contract.ts";
@@ -151,7 +157,7 @@ function previousRejectionInstruction(job: Job): string {
     ? "逐项核对修复 task 的代码变化、scope_note 和验证证据；实现者用可核实证据说明被质疑实现确有必要时，独立验证后关闭原问题。证据不能支撑必要性且问题仍存在时复用原 finding ID；legacy finding 没有 ID 时沿用原始语义并补一个稳定 ID；同一批准行为的直接消费者若因本次修正暴露出新的遗漏，可以提出新的稳定 finding，但必须给出修正变化或直接消费者链路的因果证据；"
     : "已解决或已由等价证据闭环的问题不要重复报告，不得通过更换标题或措辞重复同一问题；";
   const findingScope = incremental
-    ? "先覆盖 material_delta 的全部变化及其与未变化材料的一致性，再在这个范围内核对历史 finding；不得把 delta 里与旧 finding 无关的变化排除出审查。新 blocker 必须能说明与本次材料变化或同一批准行为的因果链。"
+    ? "先覆盖 material_delta 的全部变化及其与未变化材料的一致性，再逐项核对历史 finding，所在内容没有变化的 finding 同样要判断是否仍成立；不得把 delta 里与旧 finding 无关的变化排除出审查。新 blocker 必须能说明与本次材料变化或同一批准行为的因果链。"
     : "默认围绕历史 finding 及其直接影响链路复核；新 blocker 必须能说明“本次修正或同一批准行为 → 当前问题”的因果链，不得展开无关的故障模型、消费者或架构议题。";
   return `${reason}本轮是修复复核：逐项判断本工作项附带的上一次同角色 finding 是否仍成立。Finding 中的 recommendation 只是非绑定建议，不是需求或验收标准；先独立核对 underlying problem、直接证据和本次验收，不得因原建议指定了某种架构就要求照做。修正不得通过缩小已确认范围、改写用户决定或删除验收来让 finding 字面消失；这类偏离属于本次修正直接引入的回归。${identityRule}${findingScope}`;
 }
@@ -181,14 +187,18 @@ function reviewScopeInstruction(job: Job, reviewTargets: string[], readOnlyRefs:
   return targets + refs;
 }
 
-const REVIEWER_SELF_SUBMISSION_INSTRUCTION = "完成审查后由你自己运行 submission_command，经 stdin 登记 JSON 报告；登记前绑定材料或代码一旦变化，报告就会作废，登记后本工作项即结束。登记结果以返回的 result_kind 为准；无法运行命令时，把完整报告 JSON 原样交回主流程，由主流程加 --on-behalf 代为登记。";
+const REVIEWER_SELF_SUBMISSION_INSTRUCTION = "完成审查后由你自己运行 submission_command，经 stdin 登记 JSON 报告；宿主只放行单条 superspec 命令（不允许 heredoc、管道、重定向或 cd 前缀）时，改用 inline_submission_command，把报告压成单行 JSON 放进单引号参数，JSON 字符串中的单引号写成 \\u0027。登记前绑定材料或代码一旦变化，报告就会作废，登记后本工作项即结束。登记结果以返回的 result_kind 为准；两种方式都无法运行时，把完整报告 JSON 原样交回主流程，由主流程加 --on-behalf 代为登记。";
 const PREVIOUS_REVIEW_EVIDENCE_INSTRUCTION = "previous_review_evidence 是上一轮同角色审查记录的证据与结论：code_files 中 unchanged 为 true 的代码文件自那次核实后内容未变，除非本轮材料变化直接涉及，可以沿用其核实结论而不必重新逐行核对；unchanged 为 false 或未列出的文件需要重新核实。";
 const CONFIRMED_DECISIONS_INSTRUCTION = "confirmed_decisions 是已登记的用户答复原文，核对材料中的已确认结论时以它为准，不必再到事件日志中查找。";
 
 function genericReviewCoverageInstruction(job: Job): string {
   if (!requiresReviewScope(job)) return "";
   if (job.review_baseline) {
-    return `本工作项是同角色审查通过后的复审：${job.review_baseline.job_id} 已审查通过 material_delta 之外的材料内容。审查 material_delta 中的全部变化，以及这些变化与未变化材料之间的一致性和对已批准结论的影响，不因发现第一个 blocker 停止；未变化的绑定文件只在核对这种一致性时读取，可以不列入 checked_paths；diff_unavailable 或新增的文件需要完整阅读。read_only_refs 只在核对本次问题与上下游一致性时读取。review_scope.checked_paths 只填写本次实际浏览并完成语义审查的绑定文件，覆盖回执不能代替语义审查，也不扩大可报告问题的范围。`;
+    const failedBaseline = job.review_baseline.result_kind === "review_failed";
+    const baselineFact = failedBaseline
+      ? `本工作项是同角色审查以 fail 被拒后的复审：${job.review_baseline.job_id} 已完整审查 material_delta 之外的材料内容，它提出的 finding 见 previous_rejection。`
+      : `本工作项是同角色审查通过后的复审：${job.review_baseline.job_id} 已审查通过 material_delta 之外的材料内容。`;
+    return `${baselineFact}审查 material_delta 中的全部变化，以及这些变化与未变化材料之间的一致性和对已批准结论的影响，不因发现第一个 blocker 停止；未变化的绑定文件只在核对这种一致性${failedBaseline ? "或历史 finding" : ""}时读取，可以不列入 checked_paths；diff_unavailable 或新增的文件需要完整阅读。read_only_refs 只在核对本次问题与上下游一致性时读取。review_scope.checked_paths 只填写本次实际浏览并完成语义审查的绑定文件，覆盖回执不能代替语义审查，也不扩大可报告问题的范围。`;
   }
   return "完整审查全部 boundFiles，不因发现第一个 blocker 停止；read_only_refs 只在核对本次问题与上下游一致性时读取。review_scope.checked_paths 只填写本次实际浏览并完成语义审查的绑定文件，不能根据 packet 预填；未检查项如实写入 unchecked。覆盖回执不能代替语义审查，也不扩大可报告问题的范围。";
 }
@@ -448,6 +458,7 @@ function validateCodeReviewScope(
   obj: Record<string, unknown>,
   job: Job,
   checks: string[],
+  changePrefix: string,
 ): void {
   const scope = asObject(obj.review_scope);
   if (!scope) {
@@ -464,8 +475,8 @@ function validateCodeReviewScope(
   if (!stringArray(scope.checked_docs)) checks.push(COVERAGE_MESSAGES.checkedDocsNotStringArray);
   if (!Array.isArray(scope.unchecked)) checks.push(COVERAGE_MESSAGES.uncheckedNotArray);
   if (stringArray(scope.checked_paths) && Array.isArray(scope.unchecked)) {
-    const checkedPaths = new Set(scope.checked_paths);
-    const uncheckedPaths = uncheckedCodeReviewPaths(scope.unchecked, checks);
+    const checkedPaths = reportedPathAliases(scope.checked_paths, changePrefix);
+    const uncheckedPaths = reportedPathAliases(uncheckedCodeReviewPaths(scope.unchecked, checks), changePrefix);
     for (const bound of job.boundFiles) {
       if (!checkedPaths.has(bound.path) && !uncheckedPaths.has(bound.path)) {
         checks.push(`代码审查报告未说明是否检查了 ${bound.path}`);
@@ -483,6 +494,7 @@ function validateReviewScope(
   obj: Record<string, unknown>,
   job: Job,
   checks: string[],
+  changePrefix: string,
 ): void {
   const scope = asObject(obj.review_scope);
   if (!scope) {
@@ -493,7 +505,7 @@ function validateReviewScope(
     checks.push(COVERAGE_MESSAGES.reviewCheckedPathsNotStringArray);
     return;
   }
-  const checkedPaths = new Set(scope.checked_paths);
+  const checkedPaths = reportedPathAliases(scope.checked_paths, changePrefix);
   for (const path of requiredCheckedBoundPaths(job)) {
     if (!checkedPaths.has(path)) {
       checks.push(`审查报告未说明已检查 ${path}`);
@@ -822,6 +834,7 @@ function recordJobSubmitLoaded(
   const checks: string[] = [];
   let parsedReport: Record<string, unknown> | null = null;
   const submitter = submitterPayload(options);
+  const changePrefix = relative(projectRoot, changeRoot).replace(/\\/g, "/");
 
   try {
     const report = JSON.parse(reportContent);
@@ -847,10 +860,13 @@ function recordJobSubmitLoaded(
       if (requiresReviewer(job.role)) {
         validateReviewer(obj, checks);
       }
+      if (isReviewRole(job.role) && obj.verdict === "pass" && !hasEvidenceRef(parsedReport.evidence_refs)) {
+        checks.push(COVERAGE_MESSAGES.passWithoutEvidence);
+      }
       if (job.role === "code-reviewer") {
-        validateCodeReviewScope(parsedReport, job, checks);
+        validateCodeReviewScope(parsedReport, job, checks, changePrefix);
       } else if (requiresReviewScope(job)) {
-        validateReviewScope(parsedReport, job, checks);
+        validateReviewScope(parsedReport, job, checks, changePrefix);
       }
     }
   } catch {
@@ -961,7 +977,9 @@ function recordJobSubmitLoaded(
   const rawRef = appendRawRecord(projectRoot, change, "review-reports", parsedReport);
   // pass 结论下的范围外未检查项不进门禁，但必须留在决策面：只翻 raw 才能看到
   // 会让「pass 但未跑构建 / 未覆盖范围外文件」这一事实在流程里消失。
-  const outOfScopeUnchecked = job.role === "code-reviewer" ? outOfScopeUncheckedFromReport(parsedReport, job.boundFiles) : [];
+  const outOfScopeUnchecked = job.role === "code-reviewer"
+    ? outOfScopeUncheckedFromReport(parsedReport, job.boundFiles, changePrefix)
+    : [];
   const acceptEvent = makeEvent(change, "job_accepted", {
     job_id: jobId,
     role: job.role,
@@ -1105,6 +1123,8 @@ function recordUserDecisionLoaded(
     reason?: unknown;
     decision_source?: unknown;
     review_risk?: unknown;
+    closure?: unknown;
+    followup?: unknown;
   };
   try {
     decision = JSON.parse(content);
@@ -1133,6 +1153,32 @@ function recordUserDecisionLoaded(
     }));
     return { event_type: "user_decision_recorded" as const, accepted: false, message: "决策文件缺少决策范围（scope）或答复内容（answer）" };
   }
+  const closureRejection = decision.closure != null && decision.closure !== "closed" && decision.closure !== "needs_followup"
+    ? { reason: "invalid_closure", message: "closure 只能是 closed 或 needs_followup" }
+    : decision.closure === "needs_followup" && !isExploreOpenQuestionScope(decision.scope) && !isProposeOpenQuestionScope(decision.scope)
+      ? { reason: "closure_not_supported", message: "只有 Explore / Propose 待确认问题的答复可以标记为 needs_followup" }
+      : decision.closure === "needs_followup" && !nonEmptyString(decision.followup)
+        ? { reason: "missing_followup", message: "标记为 needs_followup 时必须在 followup 中写明还需要用户补充什么" }
+        : null;
+  if (closureRejection) {
+    appendEvent(projectRoot, change, makeEvent(change, "user_decision_recorded", {
+      accepted: false,
+      scope: decision.scope,
+      answer: decision.answer,
+      reason: closureRejection.reason,
+      input_digest: inputDigest,
+    }));
+    return { event_type: "user_decision_recorded" as const, accepted: false, message: closureRejection.message };
+  }
+  const closure: OpenQuestionClosure = decision.closure === "needs_followup" ? "needs_followup" : "closed";
+  const followup = closure === "needs_followup" ? (decision.followup as string).trim() : null;
+  const sameOpenQuestionAnswer = (latest: Event): boolean => {
+    const payload = latest.payload as { answer?: unknown; followup?: unknown };
+    return payload.answer === decision.answer &&
+      openQuestionDecisionClosure(payload) === closure &&
+      (closure === "closed" || payload.followup === followup);
+  };
+  let earlierAnswers: Array<{ answer: string; followup?: string; event_id: string }> = [];
   // Explore 的用户答复只能绑定当前文档顺序中的第一项。这里不判断答案是否
   // “正确”，只机械校验当前项、Discovery 决策上下文和 Explore 轮次仍与 next
   // 返回时一致。决定身份绑定问题项中明确写出的 basis；其它文档内容不参与当前
@@ -1168,21 +1214,22 @@ function recordUserDecisionLoaded(
       );
     }
     const currentBasisDigest = current ? discoveryQuestionDecisionBasisDigest(current) : "";
-    const acceptedForCurrentScope = latestAcceptedExploreOpenQuestionDecision(events, expectedScopes, {
+    const latestForQuestion = latestAcceptedExploreOpenQuestionDecision(events, expectedScopes, {
       roundId: exploreRoundId,
       questionId: current!.id,
       questionOrdinal: current!.ordinal,
       decisionBasisDigest: currentBasisDigest,
     });
-    if (acceptedForCurrentScope) {
-      const previousAnswer = (acceptedForCurrentScope.payload as { answer?: unknown }).answer;
-      if (previousAnswer === decision.answer) {
-        return {
-          event_type: "user_decision_recorded" as const,
-          accepted: true,
-          message: "幂等返回：该事项的答复已登记，本次输入没有改变登记内容；答复绑定 discovery.md 中该事项行的原文，回写时只把 [ ] 改为 [x]，结论写在该行之外",
-        };
-      }
+    if (latestForQuestion && sameOpenQuestionAnswer(latestForQuestion)) {
+      return {
+        event_type: "user_decision_recorded" as const,
+        accepted: true,
+        message: closure === "needs_followup"
+          ? "幂等返回：该事项已登记为需要补充，本次输入没有改变登记内容"
+          : "幂等返回：该事项的答复已登记，本次输入没有改变登记内容；答复绑定 discovery.md 中该事项行的原文，回写时只把 [ ] 改为 [x]，结论写在该行之外",
+      };
+    }
+    if (latestForQuestion && openQuestionDecisionClosure(latestForQuestion.payload) === "closed") {
       return invalidExploreOpenQuestionResult(
         projectRoot,
         change,
@@ -1191,6 +1238,9 @@ function recordUserDecisionLoaded(
         { scope: decision.scope, answer: decision.answer },
         "explore_open_question_already_recorded",
       );
+    }
+    if (closure === "closed") {
+      earlierAnswers = pendingFollowupAnswers(exploreQuestionAnswerHistory(events, exploreRoundId, current!));
     }
     exploreOpenQuestion = current;
     exploreOpenQuestionRoundId = exploreRoundId;
@@ -1233,22 +1283,23 @@ function recordUserDecisionLoaded(
       );
     }
     const currentBasisDigest = current ? proposeQuestionDecisionBasisDigest(current) : "";
-    const acceptedForCurrentScope = latestAcceptedProposeOpenQuestionDecision(events, expectedScopes, {
+    const latestForQuestion = latestAcceptedProposeOpenQuestionDecision(events, expectedScopes, {
       roundId: proposeRoundId,
       path: current!.path,
       questionId: current!.id,
       questionOrdinal: current!.ordinal,
       decisionBasisDigest: currentBasisDigest,
     });
-    if (acceptedForCurrentScope) {
-      const previousAnswer = (acceptedForCurrentScope.payload as { answer?: unknown }).answer;
-      if (previousAnswer === decision.answer) {
-        return {
-          event_type: "user_decision_recorded",
-          accepted: true,
-          message: "幂等返回：该设计决定的答复已登记，本次输入没有改变登记内容；答复绑定 design 中该问题行的原文，回写时只把 [ ] 改为 [x]，结论写在该行之外",
-        };
-      }
+    if (latestForQuestion && sameOpenQuestionAnswer(latestForQuestion)) {
+      return {
+        event_type: "user_decision_recorded",
+        accepted: true,
+        message: closure === "needs_followup"
+          ? "幂等返回：该设计决定已登记为需要补充，本次输入没有改变登记内容"
+          : "幂等返回：该设计决定的答复已登记，本次输入没有改变登记内容；答复绑定 design 中该问题行的原文，回写时只把 [ ] 改为 [x]，结论写在该行之外",
+      };
+    }
+    if (latestForQuestion && openQuestionDecisionClosure(latestForQuestion.payload) === "closed") {
       return invalidProposeOpenQuestionResult(
         projectRoot,
         change,
@@ -1257,6 +1308,9 @@ function recordUserDecisionLoaded(
         { scope: decision.scope, answer: decision.answer },
         "propose_open_question_already_recorded",
       );
+    }
+    if (closure === "closed") {
+      earlierAnswers = pendingFollowupAnswers(proposeQuestionAnswerHistory(events, proposeRoundId, current!));
     }
     const content = current ? currentProposeQuestionContent(changeRoot, current) : null;
     proposeOpenQuestion = current;
@@ -1589,6 +1643,11 @@ function recordUserDecisionLoaded(
         review_risk: phaseReviewRisk ?? "strict",
       },
     } : {}),
+    ...(exploreOpenQuestion || proposeOpenQuestion ? {
+      closure,
+      ...(followup ? { followup } : {}),
+      ...(earlierAnswers.length > 0 ? { earlier_answers: earlierAnswers } : {}),
+    } : {}),
   };
   const rawRef = appendRawRecord(projectRoot, change, "user-decisions", normalizedDecision);
   const event = makeEvent(change, "user_decision_recorded", {
@@ -1602,10 +1661,19 @@ function recordUserDecisionLoaded(
   return {
     event_type: "user_decision_recorded" as const,
     accepted: true,
-    message: exploreOpenQuestion
-      ? "这件事的答复已登记"
-      : `用户决策已登记：决策范围（scope）=${decision.scope}`,
+    message: closure === "needs_followup"
+      ? "已登记为需要补充：这件事尚未闭环，不要回写结论；重新执行 next，会在同一事项下带着已收到的答复和需要补充的内容继续询问"
+      : exploreOpenQuestion
+        ? "这件事的答复已登记"
+        : `用户决策已登记：决策范围（scope）=${decision.scope}`,
   };
+}
+
+/** 当前问题版本上尚未闭环的答复，闭环登记时一并留痕。 */
+function pendingFollowupAnswers(history: OpenQuestionAnswerRecord[]): Array<{ answer: string; followup?: string; event_id: string }> {
+  return history
+    .filter(record => record.current_revision && record.closure === "needs_followup")
+    .map(record => ({ answer: record.answer, ...(record.followup ? { followup: record.followup } : {}), event_id: record.event_id }));
 }
 
 /** record user-decision：登记用户决策 */
@@ -1739,7 +1807,7 @@ function packetFieldDescriptions(): Record<string, string> {
   return {
     job_id: "工作项 ID，用于提交本次审查或验证报告。",
     packet_digest: "工作项说明摘要，用于证明报告对应的是当前这份工作项说明。",
-    boundFiles: "本工作项绑定的文件清单；审查报告必须说明这些文件是否都看过。",
+    boundFiles: "本工作项绑定的文件清单；审查报告必须说明这些文件是否都看过。计划材料的 path 相对 change 目录，project_path 是同一文件相对项目根的路径；回执时两种写法都接受。",
     review_scope: "报告中的审查覆盖范围；普通 reviewer/verifier 无 review_baseline 时用 checked_paths 回执全部绑定文件，有 review_baseline 时只需回执相对基线发生变化的绑定文件；code-reviewer 还需按专用协议说明未检查项。",
     code_review_scope: "代码审查范围：从已审基点到当前 HEAD 的提交改动、工作区改动和未跟踪代码文件。",
     task_execution_index: "按任务汇总的执行证据：每个任务（task）的执行依据、有效证据要求、声明测试、测试证据和改动文件。",
@@ -1756,16 +1824,17 @@ function packetFieldDescriptions(): Record<string, string> {
     unknown_attribution_tasks: "因为缺少边界快照或提交段 diff 失败而无法完整计算改动归属的任务（task）。",
     coverage_exemption_refs: "测试覆盖豁免引用：说明某个 TEST 为什么没有绑定到任务（task）。",
     report_file_path: "报告需要落盘时的文件位置（项目相对路径），位于工作流记录目录；报告内容登记后由引擎存入 raw 记录，不属于计划材料。",
+    inline_submission_command: "单条命令形式的登记入口：报告以单行 JSON 作为 --report-json 参数传入，适用于宿主只放行单条 superspec 命令的环境；登记语义与 submission_command 相同。",
     submission_command: "登记本工作项报告的命令，由执行本工作项的角色在完成后自己运行；返回的 result_kind 说明登记结果：accepted、review_failed、non_actionable_report 表示结论已登记为本工作项结果，retryable 表示可修正后以同一工作项重交，invalid_report、job_closed、job_invalidated、job_not_found 表示本次没有形成结论。",
     report_skeleton: "按本工作项预填的报告骨架（job_id / packet_digest / 空数组）；逐字段填写即可，不要自行设计结构。",
     report_schema: "报告契约（字段形状、取值、条件、提示消息）；由 `superspec jobs contract --change <C> --job <J>` 输出，提交校验引用同一份定义。",
     code_review_gate: "最终验证读取的代码审查门禁事实：passed 指向已接受的代码审查工作项，skipped 表示本轮没有代码类改动。",
     code_state_check: "代码状态检查：最终验证时用于判断代码审查后代码是否又发生变化。",
     deliverable_docs: "本审查周期改动的普通文档（计划与工作流材料之外）及其内容指纹；纯文档改动的交付物在这里，登记前它们再变化会使本工作项作废。",
-    review_baseline: "同角色最近一次审查通过的工作项；存在时本工作项是相对它的材料复审。",
+    review_baseline: "同角色最近一次形成结论的审查工作项；存在时本工作项是相对它的材料复审。result_kind 为 review_failed 表示那次审查完整审过后以 fail 结论被拒，其 finding 见 previous_rejection。",
     material_delta: "相对 review_baseline 的逐文件材料变化：status 为 added/removed/modified，diff 为 unified diff；diff_unavailable 说明为何没有差异、需要完整阅读该文件。",
     previous_review_evidence: "上一轮同角色审查（通过或 fail）记录的 summary、evidence_refs，以及报告引用的代码文件自那次提交后是否未变化（code_files[].unchanged）。",
-    confirmed_decisions: "工作项创建前已登记的 Explore/Propose 问题答复：phase、question_id、问题原文、答复与登记事件 ID。",
+    confirmed_decisions: "工作项创建前已登记且已闭环的 Explore/Propose 问题答复：phase、question_id、问题原文、答复与登记事件 ID；earlier_answers 是闭环前同一问题下需要补充的答复，与 answer 一起构成用户的完整答复。",
     event_id: "事件 ID，用于追溯证据来源。",
     event_digest: "事件摘要，用于确认引用的证据事件没有被替换。",
     attempt_id: "任务尝试 ID；执行依据模式下测试运行必须绑定当前活跃任务尝试。",
@@ -1796,14 +1865,17 @@ export function jobsPacket(
   const isPlanReview = [EXPLORE_DISCOVERY_REVIEW_GATE, PROPOSE_FINAL_REVIEW_GATE].some(gate => gate.isJobForGate(job));
   const previousEvidence = isPlanReview ? previousReviewEvidence(projectRoot, events, job) : null;
   const decisions = isPlanReview ? confirmedDecisions(events, job) : [];
+  const changePrefix = relative(projectRoot, openspecChangeRoot(projectRoot, change)).replace(/\\/g, "/");
   return {
     found: true,
-      packet: {
-        job_id: job.job_id,
-        role: job.role,
-        ...(job.gate_id ? { gate_id: job.gate_id } : {}),
-        recommended_agent: recommendedAgentForRole(job.role),
-        boundFiles: job.boundFiles,
+    packet: {
+      job_id: job.job_id,
+      role: job.role,
+      ...(job.gate_id ? { gate_id: job.gate_id } : {}),
+      recommended_agent: recommendedAgentForRole(job.role),
+      boundFiles: isCodeReviewer
+        ? job.boundFiles
+        : job.boundFiles.map(file => ({ ...file, project_path: `${changePrefix}/${file.path}` })),
         ...(isReviewer && reviewTargets.length > 0 ? { review_targets: reviewTargets } : {}),
         ...(isReviewer && readOnlyRefs.length > 0 ? { read_only_refs: readOnlyRefs } : {}),
         ...(job.review_evidence_digest ? { review_evidence_digest: job.review_evidence_digest } : {}),
@@ -1820,7 +1892,13 @@ export function jobsPacket(
         ...(packetContext?.code_state_check ? { code_state_check: packetContext.code_state_check } : {}),
         ...(packetContext?.deliverable_docs ? { deliverable_docs: packetContext.deliverable_docs } : {}),
         ...(job.review_baseline
-          ? { review_baseline: { job_id: job.review_baseline.job_id }, material_delta: materialDelta(projectRoot, change, job) }
+          ? {
+              review_baseline: {
+                job_id: job.review_baseline.job_id,
+                ...(job.review_baseline.result_kind ? { result_kind: job.review_baseline.result_kind } : {}),
+              },
+              material_delta: materialDelta(projectRoot, change, job),
+            }
           : {}),
         ...(previousEvidence ? { previous_review_evidence: previousEvidence } : {}),
         ...(decisions.length > 0 ? { confirmed_decisions: decisions } : {}),
@@ -1829,6 +1907,7 @@ export function jobsPacket(
         preferred_input_mode: "stdin",
         submission_command: `superspec record job-submit --change "${change}" --job "${job.job_id}" --report -`,
         submission_argv: jobSubmitArgv(change, job.job_id),
+        inline_submission_command: `superspec record job-submit --change "${change}" --job "${job.job_id}" --report-json '<单行报告 JSON>'`,
         file_fallback: true,
         report_file_path: jobReportFilePath(change, job.job_id),
         output_contract_fields: isCodeReviewer

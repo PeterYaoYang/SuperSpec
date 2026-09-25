@@ -123,7 +123,7 @@ function startApplyConfirmed(
       execution_requirement_version: 2,
       execution_policy: risk === "strict" ? "tdd" : "green_only",
       workflow_mode: risk,
-      review_policy: { review_risk: risk, requires_verifier: risk !== "minimal" },
+      review_policy: { review_risk: risk, requires_verifier: true },
     }, { transitionId: `T-v2-start-${risk}`, idempotencyKey: `v2-start-${risk}` }));
     return { to_state: "apply" };
   }

@@ -14,6 +14,7 @@ import type { CodeReviewResultKind, CodeStateCheck, Event, Job, JobRole, Ref, Re
 import { computeCodeStateCheck, computeDeliverableDocs, effectiveCoverageExemptionRefsFromEvents } from "./code_review.ts";
 import { diffFingerprints } from "./git_state.ts";
 import { materialManifest } from "./material_snapshot.ts";
+import { reviewRolesForGate } from "./workflow_profile.ts";
 
 export type ReviewRisk = "minimal" | "normal" | "strict";
 
@@ -49,10 +50,22 @@ export function assertCommitPayloadExtension(payload: Record<string, unknown>): 
   }
 }
 
+/**
+ * 历史回放策略：没有 apply_done 代码审查门禁的旧 review 状态只靠该字段决定是否需要 verifier。
+ * 当前流程的 verifier 由门禁决定，start-apply 写入的策略见 startApplyReviewPolicy。
+ */
 export function reviewPolicyForRisk(risk: ReviewRisk): ReviewPolicy {
   return {
     review_risk: risk,
     requires_verifier: risk !== "minimal",
+  };
+}
+
+/** start-apply 冻结的审查策略；requires_verifier 与当前档位的最终验证角色一致。 */
+export function startApplyReviewPolicy(risk: ReviewRisk): ReviewPolicy {
+  return {
+    review_risk: risk,
+    requires_verifier: reviewRolesForGate("review.final_verifier", risk).includes("verifier"),
   };
 }
 
@@ -352,10 +365,11 @@ export function latestReviewHistoryForGateRole(
 }
 
 /**
- * 同 gate、同角色最近一次审查通过且带逐文件清单的工作项，不限于当前审查周期：
- * 通过即说明该清单对应的材料状态已完整审查（增量复审的通过同样覆盖其基线之外的变化）。
+ * 同 gate、同角色最近一次形成结论且带逐文件清单的工作项，不限于当前审查周期：
+ * 通过或 review_failed 的报告都已通过覆盖回执校验，说明该清单对应的材料状态已完整审查
+ * （增量复审的结论同样覆盖其基线之外的变化）。无效、不可处理或过期报告不形成基线。
  */
-export function latestAcceptedReviewBaseline(events: Event[], gate: ReviewGateRule, role: JobRole): ReviewBaseline | null {
+export function latestReviewBaseline(events: Event[], gate: ReviewGateRule, role: JobRole): ReviewBaseline | null {
   const jobs = new Map<string, Job>();
   let baseline: ReviewBaseline | null = null;
   for (const event of events) {
@@ -365,9 +379,17 @@ export function latestAcceptedReviewBaseline(events: Event[], gate: ReviewGateRu
       }
       continue;
     }
-    if (event.event_type !== "job_accepted") continue;
-    const job = jobs.get(String((event.payload as { job_id?: unknown }).job_id ?? ""));
-    if (job?.material_manifest) baseline = { job_id: job.job_id, material_manifest: job.material_manifest };
+    if (event.event_type !== "job_accepted" && event.event_type !== "job_rejected") continue;
+    const payload = event.payload as { job_id?: unknown; result_kind?: unknown; stale_report?: unknown };
+    const failed = event.event_type === "job_rejected";
+    if (failed && (payload.result_kind !== "review_failed" || payload.stale_report === true)) continue;
+    const job = jobs.get(String(payload.job_id ?? ""));
+    if (!job?.material_manifest) continue;
+    baseline = {
+      job_id: job.job_id,
+      material_manifest: job.material_manifest,
+      ...(failed ? { result_kind: "review_failed" as const } : {}),
+    };
   }
   return baseline;
 }

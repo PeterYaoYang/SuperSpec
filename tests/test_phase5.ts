@@ -220,6 +220,7 @@ test("mode 在 propose-ready 冻结：配置变 strict 不重审也不漂移 App
     assert.equal(recordJobSubmitContent(projectRoot, change, changeRoot, critic.created_jobs[0], JSON.stringify({
       role: "critic",
       verdict: "pass",
+      evidence_refs: ["test:evidence"],
       findings: [],
       review_scope: { checked_paths: criticPacket.boundFiles.map(file => file.path) },
       reviewer: { kind: "codex-subagent", id: "mode-round-critic" },

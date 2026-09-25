@@ -100,7 +100,7 @@ export interface Job {
   previous_rejection?: ReviewPreviousRejection;
   /** 计划材料审查工作项创建时的逐文件指纹（目录绑定展开为其中的 .md 文件），正文按指纹另存。 */
   material_manifest?: MaterialFileRef[];
-  /** 同角色最近一次通过审查的工作项及其逐文件指纹；存在时本工作项只需审查相对它的材料变化。 */
+  /** 同角色最近一次形成结论（通过或 fail）的审查工作项及其逐文件指纹；存在时本工作项只需审查相对它的材料变化。 */
   review_baseline?: ReviewBaseline;
 }
 
@@ -113,6 +113,8 @@ export interface MaterialFileRef {
 export interface ReviewBaseline {
   job_id: string;
   material_manifest: MaterialFileRef[];
+  /** 缺省表示基线审查已通过；review_failed 表示它完整审查后以 fail 结论被拒，其 finding 随 previous_rejection 下发。 */
+  result_kind?: "review_failed";
 }
 
 export interface EvidenceCodeFile {
@@ -134,6 +136,8 @@ export interface ConfirmedDecision {
   question_id: string | null;
   question: string;
   answer: string;
+  /** 闭环前同一问题下需要补充的答复，与 answer 一起构成用户的完整答复。 */
+  earlier_answers?: { answer: string; followup?: string }[];
   event_id: string;
 }
 
@@ -276,7 +280,7 @@ export interface JobPacket {
   role: JobRole;
   gate_id?: ReviewJobGateId;
   recommended_agent?: string;
-  boundFiles: Ref[];
+  boundFiles: (Ref & { project_path?: string })[];
   review_targets?: string[];
   read_only_refs?: string[];
   review_evidence_digest?: string;
@@ -292,7 +296,7 @@ export interface JobPacket {
   structure_ledger?: StructureChangeLedger;
   code_state_check?: CodeStateCheck;
   deliverable_docs?: DirtyFileFingerprint[];
-  review_baseline?: { job_id: string };
+  review_baseline?: Pick<ReviewBaseline, "job_id" | "result_kind">;
   material_delta?: MaterialDeltaEntry[];
   previous_review_evidence?: PreviousReviewEvidence;
   confirmed_decisions?: ConfirmedDecision[];
@@ -301,6 +305,7 @@ export interface JobPacket {
   preferred_input_mode?: "stdin" | "file";
   submission_command?: string;
   submission_argv?: string[];
+  inline_submission_command?: string;
   file_fallback?: boolean;
   /** 需要落盘时的报告文件位置（项目相对路径），位于工作流记录目录而非计划材料目录。 */
   report_file_path?: string;
@@ -404,7 +409,10 @@ export interface TransitionCommitPayload {
     epoch_event_id: string;
     material_digest: string;
     scope: string;
-    decision_event_id: string;
+    /** 用户确认的答复事件；自动推进（mode=auto）没有用户答复，改由 auto_basis 留痕推进依据。 */
+    decision_event_id?: string;
+    mode?: "auto";
+    auto_basis?: Record<string, unknown>;
     review_risk?: "minimal" | "normal" | "strict";
   };
   accepted_baseline_docs?: Record<string, string>;
@@ -515,6 +523,17 @@ export interface AskUserAction {
   resume: AskUserActionResume;
 }
 
+export type OpenQuestionClosure = "closed" | "needs_followup";
+
+export interface OpenQuestionAnswerRecord {
+  event_id: string;
+  answer: string;
+  closure: OpenQuestionClosure;
+  followup?: string;
+  /** 登记在当前问题版本（决策依据未变）上；false 表示登记在此前的版本上，不自动适用。 */
+  current_revision: boolean;
+}
+
 export interface AskUser {
   question: string;
   allowed_answers: string[];
@@ -526,8 +545,15 @@ export interface AskUser {
     scope: string;
     question: string;
     answer: null;
+    /** 待确认问题：答复不足以确定这件事时改为 needs_followup，并在 followup 写明还需补充什么。 */
+    closure?: OpenQuestionClosure;
+    followup?: null;
   };
   required_fields?: Array<"answer">;
+  /** 待确认问题的登记说明：何时用 needs_followup 在同一问题下追问。 */
+  instruction?: string;
+  /** 本轮同一问题此前登记的答复；需要补充的答复在同一问题下继续询问。 */
+  answer_history?: OpenQuestionAnswerRecord[];
 }
 
 export interface AcceptedMaterialFollowupContinuation {
@@ -585,13 +611,19 @@ export type NextOutput = {
   state: State;
 } & Partial<WorkflowModeStatus> & (
   | { path: "next_command"; next_command: string; reason: string; missing_inputs: MissingInput[]; finding_context?: ReviewFindingContext }
-  | { path: "required_job"; required_jobs: RequiredJobAction[]; reason: string }
+  | { path: "required_job"; required_jobs: RequiredJobAction[]; instruction?: string; reason: string }
   | { path: "artifact_required"; artifact: RequiredWorkflowArtifact; resume: ArtifactRequiredResume; reason: string }
   | { path: "material_update_required"; errors: string[]; resume: MaterialUpdateRequiredResume; reason: string }
   | { path: "mode_selection_required"; selection: WorkflowModeSelectionAction; reason: string }
   | { path: "ask_user"; ask_user: AskUser; reason: string }
   | { path: "done"; reason: string; continuation?: AcceptedMaterialFollowupContinuation }
 );
+
+/**
+ * next 命令的完整输出。stop_allowed 只在等待用户答复或流程终态时为 true；
+ * warnings 是不阻断当前路径、但需要主流程处理的工作区异常。
+ */
+export type NextCommandOutput = NextOutput & { stop_allowed: boolean; warnings?: string[] };
 
 // ===== Transition 结果 =====
 export interface TransitionResult {

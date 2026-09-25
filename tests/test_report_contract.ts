@@ -13,7 +13,6 @@ import { applyPlanningBaseline } from "../src/phase_plan.ts";
 import { COVERAGE_MESSAGES, reportSkeletonForJob } from "../src/report_contract.ts";
 import type { Job, JobPacket } from "../src/types.ts";
 import { spawnSync } from "node:child_process";
-import { confirmCurrentPhase } from "./phase_confirmation_support.ts";
 import { fileURLToPath } from "node:url";
 
 function setupChange(): { projectRoot: string; change: string; changeRoot: string; cleanup: () => void } {
@@ -107,6 +106,7 @@ function passingReport(packet: JobPacket, jobId: string, unchecked: unknown[], c
   return {
     role: "code-reviewer",
     verdict: "pass",
+    evidence_refs: ["test:evidence"],
     reviewer: { kind: "subagent", id: "test-code-reviewer" },
     review_scope: {
       job_id: jobId,
@@ -228,6 +228,7 @@ test("沿用上一轮报告结构（顶层 job_id、unchecked 字符串、缺 ch
     const result = submitReport(fx.projectRoot, fx.change, fx.changeRoot, jobId, {
       role: "code-reviewer",
       verdict: "pass",
+      evidence_refs: ["test:evidence"],
       job_id: jobId,
       packet_digest: packet.packet_digest,
       findings: [],
@@ -387,8 +388,7 @@ test("pass 的范围外未检查项经 code_review_gate 透出到最终验证 pa
     ]));
     assert.equal(accepted.accepted, true, accepted.message);
 
-    // 进入最终审查需要阶段确认；确认后 apply_done → review 的门禁事实应带上置信边界
-    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    // apply_done → review 的门禁事实应带上置信边界
     const advanced = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(advanced.outcome, "advanced", advanced.message ?? "");
     const verifier = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);

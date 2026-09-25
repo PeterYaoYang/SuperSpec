@@ -1,9 +1,15 @@
 import {
+  discoveryOpenQuestionScope,
   discoveryQuestionContextFingerprint,
   discoveryQuestionDecisionBasisDigest,
   discoveryQuestionKey,
+  legacyDiscoveryOpenQuestionScope,
+  openQuestionAnswerRecord,
+  openQuestionDecisionClosure,
   parseDiscoveryQuestions,
+  type DiscoveryOpenQuestion,
   type DiscoveryQuestion,
+  type OpenQuestionAnswerRecord,
 } from "./format.ts";
 import type { Event } from "./types.ts";
 
@@ -128,6 +134,7 @@ export function exploreAnswerWasRecorded(
       ? recorded.decision_basis_digest === currentBasisDigest
       : recorded?.context_fingerprint === currentContextFingerprint;
     return payload.accepted === true &&
+      openQuestionDecisionClosure(payload) === "closed" &&
       recorded?.round_id === roundId &&
       recorded.question_id === question.id &&
       (!question.id.startsWith("item-") || recorded.question_ordinal === question.ordinal) &&
@@ -173,6 +180,7 @@ export function answeredExploreQuestionRegisteredText(
     const recorded = payload.explore_open_question;
     if (
       payload.accepted === true &&
+      openQuestionDecisionClosure(payload) === "closed" &&
       recorded?.round_id === roundId &&
       recorded.question_id === question.id &&
       (!question.id.startsWith("item-") || recorded.question_ordinal === question.ordinal)
@@ -181,6 +189,41 @@ export function answeredExploreQuestionRegisteredText(
     }
   }
   return null;
+}
+
+/** 本轮同一事项已登记的答复（含需要补充的），按登记顺序；问题修订前的答复标记为非当前版本。 */
+export function exploreQuestionAnswerHistory(
+  events: readonly Event[],
+  roundId: string,
+  question: Pick<DiscoveryOpenQuestion, "id" | "ordinal" | "text" | "documentFingerprint">,
+): OpenQuestionAnswerRecord[] {
+  const basisDigest = discoveryQuestionDecisionBasisDigest(question);
+  const currentScopes = [discoveryOpenQuestionScope(question, roundId), legacyDiscoveryOpenQuestionScope(question, roundId)];
+  return events.flatMap(event => {
+    if (event.event_type !== "user_decision_recorded") return [];
+    const payload = event.payload as {
+      accepted?: unknown;
+      scope?: unknown;
+      explore_open_question?: {
+        round_id?: unknown;
+        question_id?: unknown;
+        question_ordinal?: unknown;
+        decision_basis_digest?: unknown;
+      };
+    };
+    if (payload.accepted !== true) return [];
+    const recorded = payload.explore_open_question;
+    const scopeMatches = typeof payload.scope === "string" && currentScopes.includes(payload.scope);
+    const sameQuestion = recorded?.round_id === roundId &&
+      recorded.question_id === question.id &&
+      (!question.id.startsWith("item-") || recorded.question_ordinal === question.ordinal);
+    if (!sameQuestion && !scopeMatches) return [];
+    const currentRevision = typeof recorded?.decision_basis_digest === "string"
+      ? recorded.decision_basis_digest === basisDigest
+      : scopeMatches;
+    const record = openQuestionAnswerRecord(event, currentRevision);
+    return record ? [record] : [];
+  });
 }
 
 /** 已正式展示但尚未登记答复的 Explore 问题不能通过删除问题行绕过。 */
@@ -198,7 +241,7 @@ export function unresolvedPresentedExploreQuestionScopes(events: readonly Event[
         decision_basis_digest?: unknown;
       };
     };
-    return payload.accepted === true ? [payload] : [];
+    return payload.accepted === true && openQuestionDecisionClosure(payload) === "closed" ? [payload] : [];
   });
   const latestByQuestion = new Map<string, {
     scope: string;
