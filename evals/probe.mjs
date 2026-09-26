@@ -852,7 +852,7 @@ function simulatedUserTurnFromParsedTrace(trace, workspace, scenario) {
       ask_user: { question: workerMessage, scope: AGENT_MESSAGE_SCOPE, allowed_answers: [] },
     }, scenario);
   }
-  return simulatedUserTurnFromOutput(freshOutput ?? boundary?.output ?? null, scenario);
+  return simulatedUserTurnFromOutput(freshOutput, scenario);
 }
 
 /**
@@ -1313,7 +1313,11 @@ function traceEnvironmentAudit(events, {
   const protectedRoots = harnessRoots.filter(Boolean).map(normalizedAuditPath);
   const systemRoots = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"].map(normalizedAuditPath);
   const sensitiveNames = [...new Set(["ZDOTDIR", ...hostSensitiveEnvKeys, ...sensitiveEnvKeys])];
-  const credentialNames = sensitiveNames.filter(name => /KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL/.test(name));
+  // Provider credential variables may carry any name (e.g. an OMP models.yml apiKey), so only obvious endpoints are exempt.
+  const credentialNames = [...new Set([
+    ...sensitiveNames.filter(name => /KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL/.test(name)),
+    ...sensitiveEnvKeys.filter(name => !/(?:_URL|_HOST|_ENDPOINT)$/.test(name)),
+  ])];
   const classify = (normalized, { contentSearch }) => {
     // Hosts declare roots that hold only this run's own session output (e.g. OMP artifact:// spill files).
     if (ownSessionRoots.some(root => pathWithin(normalized, root))) return "own_session_artifact";
@@ -1359,10 +1363,13 @@ function traceEnvironmentAudit(events, {
     if (referencesSensitiveEnvironment || /(?:^|[\s'"=(])~(?:\/|\s|$)/.test(raw)) {
       violations.push({ reason: "controlled_home_reference", command: raw });
     } else if (inspectsEnvironment) {
-      // Reading ordinary variables is realistic worker behavior; only credentials that reached the output count.
+      // Reading ordinary variables is realistic worker behavior; only credentials that reached the output or a file count.
       const output = String(item.output ?? "");
       const exposed = credentialNames.filter(name => new RegExp(`\\b${name}['"]?\\s*[:=]`).test(output));
+      const dumpsEnvironmentToFile = /(?:^|[\s;&|(])(?:env|printenv)\s*(?:$|[|>;&)])/.test(unwrapped)
+        && /(?:^|[^>])>{1,2}(?!&)\s*\S|\|\s*tee\b/.test(unwrapped);
       if (exposed.length > 0) violations.push({ reason: "credential_environment_output", command: raw, names: exposed });
+      else if (dumpsEnvironmentToFile && credentialNames.length > 0) violations.push({ reason: "environment_dump_to_file", command: raw });
       else observations.push({ reason: "environment_inspection", command: raw });
     }
     const auditRaw = stripSafeSuperspecJsonPayloads(unwrapped);
@@ -2416,6 +2423,20 @@ async function validateFaultMappings() {
     trace: { events: [agentMessage("计划摘要：fixture-plan")] },
   };
   const progressOnlyTrace = { direct: [], trace: { events: [agentMessage("本轮工作已经完成。")] } };
+  const staleAskTrace = {
+    direct: [
+      nextCommand({ path: "ask_user", ask_user: { question: "是否开始实现？", scope: "phase_confirmation:propose_to_apply:fixture", allowed_answers: ["确认开始实现", "留在计划阶段继续完善"] } }),
+      nextCommand({ accepted: true }, ["superspec", "record", "user-decision", "--change", "fixture", "--input", "-"]),
+    ],
+    trace: { events: [] },
+  };
+  const scriptedStaleAskTurn = simulatedUserTurnFromParsedTrace(staleAskTrace, null, { simulated_user: {} });
+  const silentStaleAskTurn = simulatedUserTurnFromParsedTrace(staleAskTrace, null, aiScenario);
+  if (scriptedStaleAskTurn.action !== "continue" || scriptedStaleAskTurn.answer !== undefined
+    || silentStaleAskTurn.action !== "continue" || silentStaleAskTurn.answer !== undefined) {
+    throw new Error("a stale ask_user boundary must not be answered again when the Worker ran workflow commands after it");
+  }
+  outcomes.push({ name: "stale-ask-boundary-not-answered", result: true });
   const staleBoundary = observedWorkflowBoundary(staleNextTrace);
   const staleTurn = simulatedUserTurnFromParsedTrace(staleNextTrace, null, aiScenario);
   const freshAskTurn = simulatedUserTurnFromParsedTrace(freshAskTrace, null, aiScenario);
@@ -3018,6 +3039,26 @@ async function validateFaultMappings() {
     || namedCredentialAudit.ok || !namedCredentialAudit.violations.some(item => item.reason === "controlled_home_reference")) {
     throw new Error("environment reads that name or print credentials must fail audit");
   }
+  const providerEnvironmentAudit = (command, output) => traceEnvironmentAudit(codexEvents([
+    { type: "item.completed", item: { type: "command_execution", status: "completed", command, aggregated_output: output, exit_code: 0 } },
+  ]), {
+    workspace: "/controlled/workspace", packageRoot: "/controlled/package", binRoot: "/controlled/bin",
+    controlledHome: "/controlled/home", controlledHostHome: "/controlled/codex", controlledZdotdir: "/controlled/zdot",
+    hostSensitiveEnvKeys: codexHost.sensitive_env_keys,
+    sensitiveEnvKeys: ["LOCALPROXY", "ANTHROPIC_BASE_URL"],
+  });
+  const customNameDump = providerEnvironmentAudit("/bin/zsh -lc env", "PATH=/controlled/bin\nLOCALPROXY=sk-fixture\n");
+  const dumpToFile = providerEnvironmentAudit("/bin/zsh -lc 'env > leaked.txt'", "");
+  const printenvToFile = providerEnvironmentAudit("/bin/zsh -lc 'printenv >> /tmp/env.log'", "");
+  const namedToFile = providerEnvironmentAudit("/bin/zsh -lc 'printenv TMPDIR > tmp.txt'", "");
+  const baseUrlOutput = providerEnvironmentAudit("/bin/zsh -lc 'env | grep BASE'", "ANTHROPIC_BASE_URL=https://proxy.invalid\n");
+  if (customNameDump.ok || !customNameDump.violations.some(item => item.reason === "credential_environment_output" && item.names.includes("LOCALPROXY"))
+    || dumpToFile.ok || !dumpToFile.violations.some(item => item.reason === "environment_dump_to_file")
+    || printenvToFile.ok || !printenvToFile.violations.some(item => item.reason === "environment_dump_to_file")
+    || !namedToFile.ok || !baseUrlOutput.ok) {
+    throw new Error("provider credentials must be audited whatever their name, and whole-environment dumps into files must fail audit");
+  }
+  outcomes.push({ name: "provider-credential-environment-audit", result: true });
   const controlledHomeCacheAudit = traceEnvironmentAudit(codexEvents([
     { type: "item.completed", item: { type: "command_execution", status: "completed", command: "/bin/zsh -lc 'find \"$HOME/.m2/repository\" -type f | head'" } },
   ]), {

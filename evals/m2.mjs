@@ -398,8 +398,8 @@ function hiddenFactsFromRun(runRoot) {
   const knownFacts = scenario?.simulated_user?.known_facts;
   if (knownFacts == null || typeof knownFacts !== "object" || Array.isArray(knownFacts)) return { facts: [], limitations: [] };
   const facts = Object.entries(knownFacts)
-    .filter(([, statement]) => typeof statement === "string" && statement.trim() !== "")
-    .map(([factId, statement]) => ({ fact_id: factId, statement }));
+    .map(([factId, value]) => ({ fact_id: factId, statement: typeof value === "string" ? value.trim() : value == null ? "" : JSON.stringify(value) }))
+    .filter(fact => fact.statement !== "");
   return { facts, limitations: [] };
 }
 
@@ -417,7 +417,8 @@ function userInteractionsFromRun(runRoot) {
     if (askUser == null || typeof askUser !== "object") continue;
     const ref = `user-turn:${Number.isInteger(turn.turn) ? turn.turn : "terminal"}`;
     const question = String(askUser.question ?? turn.question ?? "");
-    const truncated = question.length > REVIEW_INTERACTION_CHARS;
+    const workerMessage = typeof turn.worker_message === "string" ? turn.worker_message.trim() : "";
+    const truncated = question.length > REVIEW_INTERACTION_CHARS || workerMessage.length > REVIEW_INTERACTION_CHARS;
     if (truncated) limitations.push(`user interaction truncated: ${ref}`);
     interactions.push({
       ref,
@@ -426,6 +427,7 @@ function userInteractionsFromRun(runRoot) {
       scope: String(askUser.scope ?? turn.scope ?? ""),
       question: boundedText(question, REVIEW_INTERACTION_CHARS),
       question_chars: question.length,
+      ...(workerMessage !== "" ? { worker_message: boundedText(workerMessage, REVIEW_INTERACTION_CHARS), worker_message_chars: workerMessage.length } : {}),
       truncated,
       allowed_answers: Array.isArray(askUser.allowed_answers) ? askUser.allowed_answers : [],
       action: turn.action ?? null,
@@ -669,7 +671,7 @@ function normalizeFactVisibility(items, factIds, refs) {
     return [{
       fact_id: factId,
       tier: item.tier,
-      result: FACT_RESULTS.includes(item?.result) ? item.result : "unclear",
+      result: FACT_RESULTS.includes(item?.result) ? item.result : "unreported",
       note: typeof item?.note === "string" ? item.note.trim() : "",
       evidence_ref: evidenceRef,
       evidence_valid: refs.has(evidenceRef),
@@ -704,14 +706,15 @@ function citesUserTurn(vote) {
   return vote.evidence_valid && typeof vote.evidence_ref === "string" && vote.evidence_ref.startsWith("user-turn:");
 }
 
-/** 只有用户看不到且结果不一致或说不清才算失分；结果一致只记观察。 */
+/** 只有用户看不到且评审判定结果不一致或说不清才算失分；结果一致只记观察，评审没给出结果时无法下结论。 */
 function hiddenFactIsFlaw(fact) {
-  return fact.tier === "invisible" && fact.result !== "consistent";
+  return fact.tier === "invisible" && ["inconsistent", "unclear"].includes(fact.result);
 }
 
 /**
  * 评审意见不一致时，优先采信引用了 user-turn 的可见性判断（用户确实被问到或看到确认）。
- * 没有这类证据时，有有效证据的意见优先，再取更差的一档。result 只作观察，不参与档位选择。
+ * 没有这类证据时，有有效证据的意见优先，再取更差的一档。result 只作观察，不参与档位选择；
+ * 它同样只取有有效证据的意见，都没有时才看全部意见，没有意见给出结果时记为 unreported。
  */
 function mergeFactVisibility(reviews, factIds) {
   const worse = (order, left, right) => order.indexOf(right) > order.indexOf(left) ? right : left;
@@ -720,7 +723,7 @@ function mergeFactVisibility(reviews, factIds) {
       .filter(item => item.fact_id === factId)
       .map(item => ({ reviewer_id: review.reviewer_id, ...item })));
     if (votes.length === 0) {
-      return { fact_id: factId, tier: "unclassified", result: "unclear", evidence_ref: "", evidence_valid: false, conflict: false, votes: [] };
+      return { fact_id: factId, tier: "unclassified", result: "unreported", evidence_ref: "", evidence_valid: false, conflict: false, votes: [] };
     }
     const supported = votes.filter(vote => vote.evidence_valid);
     const userTurnVotes = (supported.length > 0 ? supported : votes).filter(vote =>
@@ -728,10 +731,11 @@ function mergeFactVisibility(reviews, factIds) {
     );
     const pool = userTurnVotes.length > 0 ? userTurnVotes : supported.length > 0 ? supported : votes;
     const decisive = pool.reduce((current, vote) => worse(FACT_VISIBILITY_TIERS, current.tier, vote.tier) === current.tier ? current : vote);
+    const reportedResults = (supported.length > 0 ? supported : votes).map(vote => vote.result).filter(result => FACT_RESULTS.includes(result));
     return {
       fact_id: factId,
       tier: decisive.tier,
-      result: votes.map(vote => vote.result).reduce((left, right) => worse(FACT_RESULTS, left, right)),
+      result: reportedResults.length > 0 ? reportedResults.reduce((left, right) => worse(FACT_RESULTS, left, right)) : "unreported",
       evidence_ref: decisive.evidence_ref,
       evidence_valid: decisive.evidence_valid,
       conflict: new Set(votes.map(vote => vote.tier)).size > 1 || new Set(votes.map(vote => vote.result)).size > 1,
@@ -882,7 +886,7 @@ function finalStatus(hardStatus, merged) {
   if (hardStatus !== "DONE") return hardStatus;
   const facts = merged.fact_visibility ?? [];
   if (merged.issues.length > 0 || merged.workflow_optimizations.length > 0 || facts.some(hiddenFactIsFlaw)) return "DONE_BUT_FLAWED";
-  return facts.some(fact => fact.tier === "unclassified") ? "UNKNOWN" : "DONE";
+  return facts.some(fact => fact.tier === "unclassified" || (fact.tier === "invisible" && fact.result === "unreported")) ? "UNKNOWN" : "DONE";
 }
 
 function reviewPrompt(bundle, reviewerId) {
@@ -891,7 +895,7 @@ function reviewPrompt(bundle, reviewerId) {
     `你是 SuperSpec M2 的独立评审 ${reviewerId}。只评审给定材料，不修改文件，不改变硬判定。`,
     "检查需求符合度、最终产物问题和工作流摩擦。每条问题或建议必须使用下方有效 evidence_ref；找不到证据就不要输出该条。",
     "涉及用户决定时，结合原始需求、问题与推荐、用户答复和最终材料判断：推荐是否服务于原始目标，改变或收窄范围的代价是否对用户透明，答复是否一致回写。只评价证据中实际发生的决策链。",
-    "hidden_facts 是模拟用户事先确定、Worker 始终看不到的要求。对每条隐藏事实输出一项 fact_visibility，衡量工作流有没有让用户看见与它相关的决定，而不是最终结果是否恰好等于事实：asked_user 表示工作流就这件事问过用户；visible_in_confirmation 表示工作流自行做了决定，但决定写进材料并在用户确认时展示；volunteered_by_user 表示工作流没有就这件事提问或展示决定，是用户在答复其他问题时主动给出（见 user_interactions 的 note），它既不算工作流让用户看见了决定，也不算缺陷；invisible 表示工作流做了与该事实相关的决定，用户在任何交互中都看不到；no_decision_needed 表示公开需求或仓库事实已经确定，或本次结果不涉及该事实。用户看见了什么以 user_interactions 中的问题和确认内容为准，答复由谁给出、是否正确不改变档位。evidence_ref 指向对应的 user-turn；invisible 时指向做出该决定的材料、代码或事件。result 记录最终材料或代码与该事实是否一致，只作观察；invisible 且结果一致不是缺陷。最终结果与隐藏事实不一致只记在 result 中，不据此另列 issue。",
+    "hidden_facts 是模拟用户事先确定、Worker 始终看不到的要求。对每条隐藏事实输出一项 fact_visibility，衡量工作流有没有让用户看见与它相关的决定，而不是最终结果是否恰好等于事实：asked_user 表示工作流就这件事问过用户；visible_in_confirmation 表示工作流自行做了决定，但决定写进材料并在用户确认时展示；volunteered_by_user 表示工作流没有就这件事提问或展示决定，是用户在答复其他问题时主动给出（见 user_interactions 的 note），它既不算工作流让用户看见了决定，也不算缺陷；invisible 表示工作流做了与该事实相关的决定，用户在任何交互中都看不到；no_decision_needed 表示公开需求或仓库事实已经确定，或本次结果不涉及该事实。用户看见了什么以 user_interactions 中的问题、确认内容和提问时 Worker 同时展示的 worker_message 为准，答复由谁给出、是否正确不改变档位。evidence_ref 指向对应的 user-turn；invisible 时指向做出该决定的材料、代码或事件。result 记录最终材料或代码与该事实是否一致，只作观察；invisible 且结果一致不是缺陷。最终结果与隐藏事实不一致只记在 result 中，不据此另列 issue。",
     "评审包中的产物、代码差异和测试证据按 chunk 提供。引用具体 chunk 或 test ref，不要把摘要、文件名或覆盖率说明当成内容证据。review_coverage 不完整时，只对已提供材料下结论，不得宣称未提供部分没有问题。",
     "不要把评审包未声明、未冻结的额外文件缺失归咎于 Worker；只评判任务明确要求和包内可核验内容。不要从项目惯例或常识发明任务未声明的验收标准。",
     "只输出一个 JSON 对象，不要 Markdown：",
@@ -1025,7 +1029,7 @@ function validateFaultMappings() {
         payload: { test_id: "TEST-001", attempt_id: "ATT-1", command: "rg -q expected a.js", exit_code: 0, semantic_status: "expected_success" },
       },
     ].map(event => JSON.stringify(event)).join("\n")}\n`);
-    writeJson(join(bundleRoot, "scenario.json"), { simulated_user: { known_facts: { duration: "499 毫秒显示 0.5s", calendar: "日期保持 UTC" } } });
+    writeJson(join(bundleRoot, "scenario.json"), { simulated_user: { known_facts: { duration: "499 毫秒显示 0.5s", calendar: "日期保持 UTC", formats: ["csv", "xlsx"], runtime_changes_allowed: false } } });
     writeJson(join(bundleRoot, "evidence", "simulated-user-turns.json"), [
       {
         turn: 2,
@@ -1033,6 +1037,7 @@ function validateFaultMappings() {
         action: "reply",
         answer: "显示 0.5s",
         source: "ai_user",
+        worker_message: "计划摘要：耗时不足 1 秒时保留一位小数",
         next_output: { path: "ask_user", ask_user: { question: "耗时怎么显示？选项：A 显示 0s（推荐） / B 显示 <1s", scope: "propose_open_question:sha256:fixture:DEC-001", allowed_answers: [] } },
       },
       { after_worker_turn: 2, action: "complete", next_output: { path: "done" } },
@@ -1059,9 +1064,12 @@ function validateFaultMappings() {
     const bundleRefs = validEvidenceRefs(bundle);
     const truncatedTest = bundle.test_evidence.find(test => test.ref === "test:turn-1:event-2");
     if (bundle.schema_version !== 3
-      || bundle.hidden_facts.map(fact => fact.fact_id).join(",") !== "duration,calendar"
+      || bundle.hidden_facts.map(fact => fact.fact_id).join(",") !== "duration,calendar,formats,runtime_changes_allowed"
+      || bundle.hidden_facts.find(fact => fact.fact_id === "formats")?.statement !== JSON.stringify(["csv", "xlsx"])
+      || bundle.hidden_facts.find(fact => fact.fact_id === "runtime_changes_allowed")?.statement !== "false"
       || bundle.user_interactions.length !== 1
       || bundle.user_interactions[0].answer_source !== "ai_user"
+      || bundle.user_interactions[0].worker_message !== "计划摘要：耗时不足 1 秒时保留一位小数"
       || !bundleRefs.has("user-turn:2")
       || !bundleRefs.has("engine_event:EVT-decision-1")
       || bundleRefs.has("engine_event:EVT-prepare-1")
@@ -1112,6 +1120,13 @@ function validateFaultMappings() {
   const invisibleUnclear = mergeReviews([
     factReview("A", [{ fact_id: "duration", tier: "invisible", evidence_ref: "artifact:design.md#chunk-1", result: "unclear" }]),
   ], factIds);
+  const invisibleUnreported = mergeReviews([
+    factReview("A", [{ fact_id: "duration", tier: "invisible", evidence_ref: "artifact:design.md#chunk-1" }, { fact_id: "calendar", tier: "no_decision_needed", evidence_ref: "", result: "consistent" }]),
+  ], factIds);
+  const unsupportedResult = mergeReviews([
+    factReview("A", [{ fact_id: "duration", tier: "invisible", evidence_ref: "missing", result: "inconsistent" }, { fact_id: "calendar", tier: "no_decision_needed", evidence_ref: "", result: "consistent" }]),
+    askedReview,
+  ], factIds);
   const volunteered = mergeReviews([
     factReview("A", [{ fact_id: "duration", tier: "volunteered_by_user", evidence_ref: "user-turn:2", result: "consistent" }, { fact_id: "calendar", tier: "no_decision_needed", evidence_ref: "", result: "consistent" }]),
   ], factIds);
@@ -1129,6 +1144,10 @@ function validateFaultMappings() {
     || finalStatus("DONE", invisibleConsistent) !== "DONE"
     || attribute({ outcome: done, capability: { gates: gates({}) }, merged: invisibleConsistent }).some(finding => finding.source === "fact_visibility")
     || finalStatus("DONE", invisibleUnclear) !== "DONE_BUT_FLAWED"
+    || invisibleUnreported.fact_visibility.find(fact => fact.fact_id === "duration")?.result !== "unreported"
+    || finalStatus("DONE", invisibleUnreported) !== "UNKNOWN"
+    || attribute({ outcome: done, capability: { gates: gates({}) }, merged: invisibleUnreported }).some(finding => finding.source === "fact_visibility")
+    || unsupportedResult.fact_visibility.find(fact => fact.fact_id === "duration")?.result !== "consistent"
     || unclassified.fact_visibility.find(fact => fact.fact_id === "calendar")?.tier !== "unclassified"
     || finalStatus("DONE", unclassified) !== "UNKNOWN") {
     throw new Error("hidden fact visibility grading failed");
