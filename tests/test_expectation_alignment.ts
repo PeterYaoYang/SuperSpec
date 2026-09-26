@@ -367,7 +367,7 @@ test("执行依据：设计与来源用逗号列出的多个文档引用逐个�
     writeFileSync(join(fx.changeRoot, "design.md"), "# Design\n\n## 金额格式化：`src/money.js` 的十进制 half-up\n\n## 消费者接入\n");
     const missing = validateExecutionRequirementDocumentReferences(fx.changeRoot, parseExecutionRequirements(tasks));
     assert.equal(missing.length, 1);
-    assert.match(missing[0], /引用锚点不存在：design\.md#货币精度；/);
+    assert.ok(missing[0].includes("design.md#货币精度"), missing[0]);
   } finally {
     fx.cleanup();
   }

@@ -367,7 +367,7 @@ function phaseConfirmationStep(
 
 /**
  * 审查拒绝涉及业务决定时向用户提问的正式通道：问题写进当前阶段由 next 负责提问的
- * 待确认段落。只有 Explore 与 Propose 会从材料中取出问题交给用户，其它状态不提供。
+ * 待确认段落。只有 Explore 与 Propose 会从材料中取出问题交给用户；propose_ready 须先回到 Propose，其它状态不提供。
  */
 function reviewRejectionQuestionChannel(
   projectRoot: string,
@@ -377,11 +377,14 @@ function reviewRejectionQuestionChannel(
 ): Record<string, unknown> | null {
   const channel = snapshot.state === "explore" && gate === EXPLORE_DISCOVERY_REVIEW_GATE
     ? { materials: [".superspec/artifacts/discovery.md"], section: "## 待确认问题" }
-    : snapshot.state === "propose" && gate === PROPOSE_FINAL_REVIEW_GATE
+    : (snapshot.state === "propose" || snapshot.state === "propose_ready") && gate === PROPOSE_FINAL_REVIEW_GATE
       ? { materials: ["proposal.md", "design.md", ".superspec/artifacts/test-contract.md"], section: "## 待用户确认" }
       : null;
   if (!channel) return null;
   return {
+    ...(snapshot.state === "propose_ready"
+      ? { prepare_argv: ["superspec", "transition", "reopen", "--change", snapshot.change_id, "--to", "propose", "--reason", "<说明需要用户决定的事项>"] }
+      : {}),
     materials: channel.materials.map(path => relative(projectRoot, join(changeRoot, path))),
     section: channel.section,
     resume_argv: ["superspec", "transition", "next", "--change", snapshot.change_id],
@@ -412,7 +415,7 @@ function reviewGatePlan(
       return {
         kind: "blocked",
         jobs: [],
-        reason: `状态未推进；${role} 审查工作项 ${terminal.job.job_id} 已拒绝。请修改绑定材料、在整份报告没有有效 blocker 时登记整体裁决，或在涉及业务决定时询问用户${askUserVia ? "：把问题写进 ask_user_via 指定材料的待确认段落，再运行 next 由工作流向用户提问" : ""}`,
+        reason: `状态未推进；${role} 审查工作项 ${terminal.job.job_id} 已拒绝。请修改绑定材料${askUserVia ? "、" : "或"}在整份报告没有有效 blocker 时登记整体裁决${askUserVia ? `，或在涉及业务决定时询问用户：${askUserVia.prepare_argv ? "先按 ask_user_via.prepare_argv 回到计划阶段，" : ""}把问题写进 ask_user_via 指定材料的待确认段落，再运行 next 由工作流向用户提问` : ""}`,
         details: {
           review_rejection: {
             job_id: terminal.job.job_id,
@@ -423,7 +426,7 @@ function reviewGatePlan(
             reason: terminal.reason ?? "报告结论为 fail，工作项未通过",
             ...terminalReportContent(terminal),
             override_scope: overrideScope,
-            allowed_actions: ["modify_materials", "record_override", "ask_user"],
+            allowed_actions: ["modify_materials", "record_override", ...(askUserVia ? ["ask_user"] : [])],
             ...(askUserVia ? { ask_user_via: askUserVia } : {}),
             record_input: {
               scope: overrideScope,

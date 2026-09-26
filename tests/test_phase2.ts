@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { ensureChangeLayout, readEvents, appendEvent, makeEvent, rawFile, sha256File, sha256Text, docRef } from "../src/store.ts";
 import { rebuildSnapshot } from "../src/sync.ts";
 import { next } from "../src/next.ts";
-import { proposeReady, startApply, transitionExplore } from "../src/transition.ts";
+import { proposeReady, reopen, startApply, transitionExplore } from "../src/transition.ts";
 import { recordUserDecision, recordUserDecisionContent, recordJobSubmit, recordJobSubmitContent, jobsPacket } from "../src/record.ts";
 import {
   countDiscoveryOpenQuestions,
@@ -3072,6 +3072,37 @@ test("propose reviewer retry：只继承当前 gate 的同角色 findings", () =
         assert.doesNotMatch(JSON.stringify(packet.previous_rejection), new RegExp(`${otherRole}-001`));
       }
     }
+  } finally { fx.cleanup(); }
+});
+
+test("propose_ready 审查拒绝：本状态不能直接向用户提问时，给出先回到计划阶段再提问的通道", () => {
+  const fx = setupPropose();
+  try {
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.equal(transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal").to_state, "propose");
+    writeFileSync(join(fx.changeRoot, "design.md"), appendStructureLedgerNone("# Design\n"));
+    writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");
+    for (const jobId of proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "strict").created_jobs) {
+      assert.equal(recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, jobId, reviewerReportForJob(fx.projectRoot, fx.change, jobId)).accepted, true);
+    }
+    assert.equal(proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "strict").to_state, "propose_ready");
+
+    writeFileSync(join(fx.changeRoot, "design.md"), appendStructureLedgerNone("# Design\n\n补充一处实现说明。\n"));
+    const rereview = startApply(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(rereview.to_state, "propose_ready");
+    const [rejectedJob, ...others] = rereview.created_jobs;
+    assert.equal(recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, rejectedJob, failedReviewerReportForJob(fx.projectRoot, fx.change, rejectedJob, "READY-001")).accepted, false);
+    for (const jobId of others) {
+      assert.equal(recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, jobId, reviewerReportForJob(fx.projectRoot, fx.change, jobId)).accepted, true);
+    }
+    const rejected = next(fx.projectRoot, fx.change, fx.changeRoot, "strict");
+    assert.equal(rejected.path, "review_rejected");
+    const rejection = rejected.review_rejection as { allowed_actions: string[]; ask_user_via?: { prepare_argv?: string[]; materials: string[] } };
+    assert.ok(rejection.allowed_actions.includes("ask_user"));
+    assert.ok(rejection.ask_user_via?.materials.includes(relative(fx.projectRoot, join(fx.changeRoot, "design.md"))));
+    const prepare = rejection.ask_user_via?.prepare_argv ?? [];
+    assert.deepEqual(prepare.slice(0, 7), ["superspec", "transition", "reopen", "--change", fx.change, "--to", "propose"]);
+    assert.equal(reopen(fx.projectRoot, fx.change, fx.changeRoot, "propose", "需要用户决定审查指出的取舍").to_state, "propose");
   } finally { fx.cleanup(); }
 });
 

@@ -81,6 +81,28 @@ test("CLI：在项目内部子目录执行时拒绝并指出项目根，不在�
   }
 });
 
+test("CLI：在项目内部子目录执行 install / init / update 时拒绝并指出项目根，不在子目录另装一套工作流", () => {
+  const fx = setupProject("superspec-nested-install-");
+  try {
+    const nestedDir = join(fx.projectRoot, "src");
+    mkdirSync(nestedDir);
+    for (const args of [
+      ["update", "--skip-self-update"],
+      ["init", "--scope", "project", "--skip-self-update", "--hosts", "codex"],
+      ["install", "--skip-self-update", "--hosts", "codex"],
+    ]) {
+      const run = runCli(nestedDir, args, "");
+      assert.notEqual(run.status, 0, `${args[0]}: ${run.stdout}`);
+      const payload = JSON.parse(run.stdout) as { ok: boolean; project_root: string };
+      assert.equal(payload.ok, false);
+      assert.equal(payload.project_root, realpathSync(fx.projectRoot));
+      assert.deepEqual(readdirSync(nestedDir), [], args[0]);
+    }
+  } finally {
+    fx.cleanup();
+  }
+});
+
 test("CLI job-submit：结论（含 fail）登记成功退出码为 0，其余结果非 0；出现 --on-behalf 即留痕", () => {
   const fx = setupProject();
   try {

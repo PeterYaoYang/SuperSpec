@@ -6,10 +6,11 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { appendEvent, ensureChangeLayout, makeEvent, readEvents } from "../src/store.ts";
+import { rebuildSnapshot } from "../src/sync.ts";
 import { next } from "../src/next.ts";
 import { jobsPacket, recordJobSubmitContent } from "../src/record.ts";
 import { recordTestRunContent } from "../src/task.ts";
-import { accept, reviewReady, taskComplete, taskStart } from "../src/transition.ts";
+import { accept, reopen, reviewReady, taskComplete, taskStart } from "../src/transition.ts";
 import { applyPlanningBaseline } from "../src/phase_plan.ts";
 import type { NextCommandOutput } from "../src/types.ts";
 import { confirmCurrentPhase, useTestWorkflowMode } from "./phase_confirmation_support.ts";
@@ -238,10 +239,30 @@ test("测试证据新鲜度：任务完成后改代码，next 要求按模板重
   }
 });
 
+test("测试证据新鲜度：后一个任务改动代码后，先完成任务的 TEST 也要对当前代码重跑", () => {
+  const fx = setupApply();
+  try {
+    const attempts = completeAllTasks(fx);
+    const stale = nextOutput(fx);
+    assert.equal(stale.path, "test_rerun_required");
+    if (stale.path !== "test_rerun_required") return;
+    assert.deepEqual(stale.test_reruns.map(action => [action.test_id, action.record_input.attempt_id]), [["TEST-001", attempts.first]]);
+    assert.deepEqual(stale.changed_paths, ["src/calc.ts"]);
+    assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot).events_written, 0);
+
+    assert.equal(testRun(fx, "TEST-001", attempts.first, "expected_success").accepted, true);
+    assert.notEqual(nextOutput(fx).path, "test_rerun_required");
+    assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot).outcome, "job_created");
+  } finally {
+    fx.cleanup();
+  }
+});
+
 test("测试证据新鲜度：代码内容未变时不要求重跑；提交改动和登记审查结论都不算代码变化", () => {
   const fx = setupApply();
   try {
     const attempts = completeAllTasks(fx);
+    assert.equal(testRun(fx, "TEST-001", attempts.first, "expected_success").accepted, true);
     assert.notEqual(nextOutput(fx).path, "test_rerun_required");
     assert.equal(testRun(fx, "TEST-001", attempts.first, "expected_success").accepted, false);
 
@@ -262,6 +283,7 @@ test("测试证据新鲜度：最终验证通过后再改代码，accept 被阻�
   const fx = setupApply();
   try {
     const attempts = completeAllTasks(fx);
+    assert.equal(testRun(fx, "TEST-001", attempts.first, "expected_success").accepted, true);
     advanceApplyDoneToReview(fx);
     passFinalVerifier(fx);
 
@@ -284,6 +306,110 @@ test("测试证据新鲜度：最终验证通过后再改代码，accept 被阻�
     if (afterRerun.path === "next_command") assert.match(afterRerun.next_command, /transition review-ready/);
     passFinalVerifier(fx);
     assert.equal(accept(fx.projectRoot, fx.change, fx.changeRoot).to_state, "accepted");
+  } finally {
+    fx.cleanup();
+  }
+});
+
+function setupLegacyApplyDone(): Fixture {
+  const projectRoot = mkdtempSync(join(tmpdir(), "superspec-freshness-legacy-"));
+  const change = "legacy-change";
+  const changeRoot = join(projectRoot, "openspec", "changes", change);
+  mkdirSync(join(changeRoot, ".superspec", "artifacts"), { recursive: true });
+  mkdirSync(join(projectRoot, "src"), { recursive: true });
+  writeFileSync(join(projectRoot, "src", "calc.ts"), "export const version = 0;\n");
+  writeFileSync(join(changeRoot, "tasks.md"), "# Tasks\n\n- [x] TASK-001 实现加法\n");
+  writeFileSync(join(changeRoot, "proposal.md"), "# Proposal\n");
+  writeFileSync(join(changeRoot, "design.md"), "# Design\n\n## Calc\n\n加法\n\n## 结构变更清单\n\n无\n");
+  writeFileSync(join(changeRoot, ".superspec", "artifacts", "discovery.md"), "# Discovery\n");
+  writeFileSync(join(changeRoot, ".superspec", "artifacts", "test-contract.md"), "# Test Contract\n");
+  git(projectRoot, ["init"]);
+  git(projectRoot, ["config", "user.email", "test@example.com"]);
+  git(projectRoot, ["config", "user.name", "Test User"]);
+  git(projectRoot, ["add", "-A"]);
+  git(projectRoot, ["commit", "-m", "init"]);
+  ensureChangeLayout(projectRoot, change);
+  for (const [transition, from, to] of [
+    ["init", "init", "init"],
+    ["explore", "init", "explore"],
+    ["propose", "explore", "propose"],
+    ["propose-ready", "propose", "propose_ready"],
+    ["start-apply", "propose_ready", "apply"],
+  ] as const) {
+    appendEvent(projectRoot, change, makeEvent(change, "transition_commit", {
+      transition,
+      from_state: from,
+      to_state: to,
+      outcome: "advanced",
+      created_job_ids: [],
+      reason: transition,
+      ...(transition === "start-apply" ? { apply_planning_baseline: applyPlanningBaseline(changeRoot) } : {}),
+    }, { transitionId: `T-${transition}`, idempotencyKey: `${transition}-key` }));
+  }
+  writeFileSync(join(projectRoot, "src", "calc.ts"), ADD);
+  const toApplyDone = reviewReady(projectRoot, change, changeRoot);
+  assert.equal(toApplyDone.to_state, "apply_done", toApplyDone.message);
+  return { projectRoot, change, changeRoot, cleanup: () => rmSync(projectRoot, { recursive: true, force: true }) };
+}
+
+test("测试证据新鲜度：历史模式轮里的审查 Fix 完成后改代码，不要求按 attempt_id 补登记重跑", () => {
+  const fx = setupLegacyApplyDone();
+  try {
+    const codeReview = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    const jobId = codeReview.created_jobs[0];
+    const packet = jobsPacket(fx.projectRoot, fx.change, jobId).packet;
+    assert.ok(packet);
+    const rejected = recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, jobId, JSON.stringify({
+      role: "code-reviewer",
+      verdict: "fail",
+      evidence_refs: ["src/calc.ts:1"],
+      review_scope: {
+        job_id: jobId,
+        packet_digest: packet.packet_digest,
+        checked_paths: packet.boundFiles.map(file => file.path),
+        checked_docs: ["proposal.md", "design.md", "tasks.md", ".superspec/artifacts/test-contract.md"],
+        unchecked: [],
+      },
+      findings: [{
+        id: "CR-001",
+        type: "implementation",
+        blocking: true,
+        description: "负数相加结果错误",
+        evidence: "src/calc.ts:1 负数输入结果错误",
+        source_refs: ["src/calc.ts:1"],
+        impact: "负数计算错误",
+        suggested_action: "apply",
+        claim_kind: "breaks_existing",
+        approved_refs: ["design.md#Calc"],
+      }],
+      reviewer: { kind: "codex-subagent", id: "freshness-code-reviewer" },
+    }));
+    assert.equal(rejected.result_kind, "review_failed", rejected.message);
+    assert.equal(reopen(fx.projectRoot, fx.change, fx.changeRoot, "apply", "fix CR-001", { reviewFix: `${jobId}#CR-001` }).to_state, "apply");
+
+    const fixTaskId = `REVIEW-FIX-${jobId}#CR-001`;
+    const started = taskStart(fx.projectRoot, fx.change, fx.changeRoot, fixTaskId);
+    assert.equal(started.outcome, "advanced", started.message);
+    const attempt = rebuildSnapshot(fx.projectRoot, fx.change, fx.changeRoot).active_task_attempts[0];
+    for (const [semanticStatus, exitCode] of [["expected_failure", 1], ["expected_success", 0]] as const) {
+      const recorded = recordTestRunContent(fx.projectRoot, fx.change, JSON.stringify({
+        test_id: fixTaskId,
+        attempt_id: attempt.attempt_id,
+        task_structure_digest: attempt.task_structure_digest,
+        command: "node --test",
+        cwd: fx.projectRoot,
+        exit_code: exitCode,
+        semantic_status: semanticStatus,
+      }));
+      assert.equal(recorded.accepted, true, recorded.message);
+    }
+    writeFileSync(join(fx.projectRoot, "src", "calc.ts"), `${ADD}// 负数\n`);
+    assert.equal(taskComplete(fx.projectRoot, fx.change, fx.changeRoot, fixTaskId).outcome, "advanced");
+
+    writeFileSync(join(fx.projectRoot, "src", "calc.ts"), `${ADD}// 负数与零\n`);
+    assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot).to_state, "apply_done");
+    assert.notEqual(nextOutput(fx).path, "test_rerun_required");
+    assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot).outcome, "job_created");
   } finally {
     fx.cleanup();
   }

@@ -20,17 +20,20 @@ export interface TestRerunRequirement {
 
 export type TestEvidenceFreshness =
   | { fresh: true }
-  | { fresh: false; reruns: TestRerunRequirement[]; changed_paths: string[]; baseline_task_id: string };
+  | { fresh: false; reruns: TestRerunRequirement[]; changed_paths: string[]; baseline_task_ids: string[] };
 
-/** 按 task-start 冻结的证据计划回放完成时要求的 GREEN；不要求 GREEN 的尝试返回 null。 */
+/**
+ * 按 task-start 冻结的证据计划回放完成时要求的 GREEN；不要求 GREEN 的尝试返回 null。
+ * 只有契约尝试能按 attempt_id 补登记重跑，历史模式的尝试（含其中的 Fix）不参与新鲜度要求。
+ */
 export function completedAttemptGreenPlan(attempt: TaskAttempt): CompletedAttemptGreenPlan | null {
+  if (attempt.contract_mode !== true) return null;
   const required = attempt.required_evidence;
   if (required) {
     return required.green_required
       ? { test_ids: required.test_ids, accepted_green_statuses: required.accepted_green_statuses }
       : null;
   }
-  if (attempt.contract_mode !== true) return null;
   const tests = attempt.contract?.tests ?? [];
   if (tests.length === 0 && attempt.tdd_required === false) return null;
   const characterization = attempt.tdd_required === false && attempt.no_tdd_reason === "characterization";
@@ -64,21 +67,19 @@ function changedPaths(before: Ref[], after: Ref[]): string[] {
 }
 
 /**
- * 当前 Apply round 最近一次任务完成之后代码又有变化时，本 round 已完成尝试声明的每个 TEST 都需要一次
- * 对当前代码登记的 GREEN。历史 task_completed 没有代码状态或不属于同一审查周期时无法比较，视为新鲜。
+ * 当前 Apply round 中，某个已完成尝试完成之后代码又有变化（包括后续任务的改动）时，它声明的每个 TEST
+ * 都需要一次对当前代码登记的 GREEN。task_completed 没有代码状态或不属于同一审查周期时无法比较，视为新鲜。
  */
 export function testEvidenceFreshness(projectRoot: string, events: Event[]): TestEvidenceFreshness {
   const roundEvents = events.slice(Math.max(0, events.findLastIndex(isStartApplyCommit)));
-  const baseline = roundEvents.findLast(ev => ev.event_type === "task_completed");
-  const baselineState = taskCodeState(baseline?.payload);
-  if (!baseline || !baselineState) return { fresh: true };
+  if (!roundEvents.some(ev => ev.event_type === "task_completed" && taskCodeState(ev.payload))) return { fresh: true };
   const current = currentCodeStateFingerprint(projectRoot, events);
-  if (baselineState.cycle_start !== current.cycle_start || baselineState.digest === current.digest) return { fresh: true };
 
   const started = new Map<string, TaskAttempt>();
   const plans = new Map<string, CompletedAttemptGreenPlan>();
   const byTest = new Map<string, TestRerunRequirement>();
   const attemptLevel: TestRerunRequirement[] = [];
+  const staleBaselines: { task_id: string; files: Ref[] }[] = [];
   for (const ev of roundEvents) {
     if (ev.event_type === "task_started") {
       const attempt = ev.payload as unknown as TaskAttempt;
@@ -91,6 +92,12 @@ export function testEvidenceFreshness(projectRoot: string, events: Event[]): Tes
     const plan = attempt ? completedAttemptGreenPlan(attempt) : null;
     if (!attempt || !plan) continue;
     plans.set(attempt.attempt_id, plan);
+    const completedState = taskCodeState(ev.payload);
+    if (!completedState || completedState.cycle_start !== current.cycle_start || completedState.digest === current.digest) {
+      for (const testId of plan.test_ids) byTest.delete(testId);
+      continue;
+    }
+    staleBaselines.push({ task_id: attempt.task_id, files: completedState.files });
     const requirement = (testId: string): TestRerunRequirement => ({
       test_id: testId,
       attempt_id: attempt.attempt_id,
@@ -116,18 +123,20 @@ export function testEvidenceFreshness(projectRoot: string, events: Event[]): Tes
     ...attemptLevel.filter(req => !currentRuns.some(run => run.attempt_id === req.attempt_id)),
   ];
   if (reruns.length === 0) return { fresh: true };
+  const staleTaskIds = new Set(reruns.map(req => req.task_id));
+  const baselines = staleBaselines.filter(baseline => staleTaskIds.has(baseline.task_id));
   return {
     fresh: false,
     reruns,
-    changed_paths: changedPaths(baselineState.files, current.files),
-    baseline_task_id: (baseline.payload as { task_id?: unknown }).task_id as string,
+    changed_paths: [...new Set(baselines.flatMap(baseline => changedPaths(baseline.files, current.files)))].sort(),
+    baseline_task_ids: [...new Set(baselines.map(baseline => baseline.task_id))],
   };
 }
 
 export function staleTestEvidenceMessage(freshness: Extract<TestEvidenceFreshness, { fresh: false }>): string {
   const paths = freshness.changed_paths.length > 0 ? `（${freshness.changed_paths.join(", ")}）` : "";
   const tests = freshness.reruns.map(req => req.test_id).join(", ");
-  return `任务 ${freshness.baseline_task_id} 完成后代码又有变化${paths}，已登记的测试证据不再对应当前代码；` +
+  return `任务 ${freshness.baseline_task_ids.join(", ")} 完成后代码又有变化${paths}，已登记的测试证据不再对应当前代码；` +
     `请对当前代码重新运行并登记 ${tests} 的 GREEN（next 返回登记模板）后再继续`;
 }
 
