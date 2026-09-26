@@ -533,6 +533,51 @@ test("propose_to_apply 确认问题展示非目标，以及每个留待计划事
   } finally { fx.cleanup(); }
 });
 
+test("留待计划事项的去向：标题带编号时以其下正文为去向，只在标题出现时仍算已说明", () => {
+  const confirmationFor = (extra: string[]) => {
+    const fx = setupV2Propose({ designContent: designBody({ ledger: "无", extra: extra.join("\n") }) });
+    try {
+      writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "discovery.md"), DEFERRED_DISCOVERY);
+      assert.notEqual(next(fx.projectRoot, fx.change, fx.changeRoot, "minimal").path, "material_update_required");
+      assert.equal(proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal").to_state, "propose_ready");
+      return prepareCurrentPhaseConfirmation(fx.projectRoot, fx.change, fx.changeRoot, "minimal").ask_user.question;
+    } finally { fx.cleanup(); }
+  };
+  const dispositionLines = (question: string) => {
+    const lines = question.split("\n");
+    const firstItem = lines.findIndex(line => line.startsWith("- D-001 "));
+    return lines.slice(firstItem).filter(line => /^\s+- /.test(line));
+  };
+
+  const grouped = confirmationFor([
+    "## 实现方案",
+    "",
+    "### 留待计划阶段事项的去向（D-001、D-002）",
+    "",
+    "- D-001：合计改为先舍入行金额再求和。",
+    "- D-002：旧导出接口保留原字段，新增字段追加在末尾。",
+  ]);
+  const groupedLines = dispositionLines(grouped);
+  assert.equal(groupedLines.length, 2, grouped);
+  assert.ok(groupedLines[0].includes("合计改为先舍入行金额再求和"), grouped);
+  assert.ok(groupedLines[1].includes("旧导出接口保留原字段"), grouped);
+
+  const headingOnly = confirmationFor([
+    "## 非目标",
+    "",
+    "- 不改变合计先汇总再舍入（D-001）",
+    "",
+    "## 实现方案",
+    "",
+    "### D-002 导出兼容",
+    "",
+    "旧导出接口保留原字段。",
+  ]);
+  const headingOnlyLines = dispositionLines(headingOnly);
+  assert.equal(headingOnlyLines.length, 2, headingOnly);
+  assert.ok(headingOnlyLines[1].includes("D-002 导出兼容") && !headingOnlyLines[1].includes("#"), headingOnly);
+});
+
 test("v1 round：不拦截清单且 packet 无 structure_ledger", () => {
   const fx = setupV1Apply();
   try {

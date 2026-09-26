@@ -410,20 +410,28 @@ export function deferredItemReferences(designContent: string, id: string): Defer
   const token = new RegExp(`(?<![A-Za-z0-9_-])${escapeRegex(id)}(?![A-Za-z0-9_-])`);
   const decisionHeadings = new Set<string>(PROPOSE_CONFIRMATION_HEADINGS);
   const nonGoalHeadings = new Set<string>(DESIGN_NON_GOAL_HEADINGS);
-  const references: DeferredItemReference[] = [];
+  const kindUnder = (heading: string | null): DeferredItemDispositionKind => heading != null && decisionHeadings.has(heading)
+    ? "user_decision"
+    : heading != null && nonGoalHeadings.has(heading)
+      ? "non_goal"
+      : "plan";
+  // 标题带编号时，其下正文才是去向；正文没再写编号时才用标题本身作为去向
+  const found: { reference: DeferredItemReference; titleOf?: string }[] = [];
   let heading: string | null = null;
   for (const raw of designContent.split(/\r?\n/)) {
     const headingMatch = /^#{1,6}\s+(.+?)(?:\s+#+)?\s*$/.exec(raw);
-    if (headingMatch) heading = headingMatch[1].trim();
+    if (headingMatch) {
+      const title = headingMatch[1].trim();
+      if (token.test(title)) found.push({ reference: { kind: kindUnder(heading), heading, line: title }, titleOf: title });
+      heading = title;
+      continue;
+    }
     if (!token.test(raw)) continue;
-    const kind: DeferredItemDispositionKind = heading != null && decisionHeadings.has(heading)
-      ? "user_decision"
-      : heading != null && nonGoalHeadings.has(heading)
-        ? "non_goal"
-        : "plan";
-    references.push({ kind, heading, line: raw.trim() });
+    found.push({ reference: { kind: kindUnder(heading), heading, line: raw.trim() } });
   }
-  return references;
+  return found
+    .filter(({ titleOf }) => titleOf == null || !found.some(({ reference, titleOf: other }) => other == null && reference.heading === titleOf))
+    .map(({ reference }) => reference);
 }
 
 /** design.md“非目标”段落的条目；供阶段确认展示，不校验内容。 */
