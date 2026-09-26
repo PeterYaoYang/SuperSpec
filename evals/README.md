@@ -59,7 +59,7 @@ node evals/arena.mjs --validate-faults
 npm run eval:m2:validate
 ```
 
-它们验证硬结果映射、证据密封、篡改检测、动态用户边界和 Review Bundle v2。负向部分是确定性门禁映射自校验，不宣称已经执行真实 Worker 作弊场景。
+它们验证硬结果映射、证据密封、篡改检测、动态用户边界、Review Bundle v3 和隐藏事实分档。负向部分是确定性门禁映射自校验，不宣称已经执行真实 Worker 作弊场景。
 
 ### 2. 运行一个 Probe
 
@@ -206,8 +206,8 @@ node evals/regression.mjs \
 
 - 自动确认已授权的阶段确认；
 - 使用场景明确配置的事实回答问题；
-- 工作流存在唯一明确推荐项时，可以采用该推荐；
-- 默认优先采用工作流推荐；没有可解析推荐时，独立模拟用户基于公开需求、用户人设和已知事实作出合理答复，持续推进到终态；
+- `simulated_user.mode` 为 `ai` 时，其余问题交给独立模拟用户：已知事实覆盖问题时按事实回答，候选都不符合时直接说明期望结果；事实没有覆盖时才参考工作流推荐、公开需求和用户人设，持续推进到终态。场景显式设置 `follow_workflow_recommendation: true` 时，唯一明确推荐项由策略层直接采用；
+- 非 `ai` 模式下，工作流存在唯一明确推荐项时由策略层采用该推荐，`follow_workflow_recommendation: false` 可以关闭；
 - 只有专门验证真实人工停止的场景显式设置 `advance_until_terminal: false`，才允许返回 `needs_human`；
 - 非用户动作只要求 Worker 继续使用当前 Skill 和公开 CLI，不替 Worker 推进状态。
 
@@ -219,7 +219,7 @@ node evals/regression.mjs \
 - Worker 失败或会话无法恢复；
 - 达到 `budget.max_worker_turns`。
 
-当 `simulated_user.mode` 为 `ai` 时，每次用户决策使用一个新的隔离 Codex 会话。该会话无法访问 Worker 工作区，只能看到公开需求、用户人设、已知事实和本轮真实选项；返回答案必须属于工作流的 `allowed_answers`。
+当 `simulated_user.mode` 为 `ai` 时，每次用户决策使用一个新的隔离 Codex 会话。该会话无法访问 Worker 工作区，只能看到公开需求、用户人设、已知事实和本轮问题及可选答复；工作流写给主流程的 scope 和登记说明不会展示给它。返回答案必须属于工作流的 `allowed_answers`。
 
 ## 真实项目评测
 
@@ -312,13 +312,18 @@ Probe 的核心门禁包括：
 | `state` | 事件链与快照是否能重放到目标状态 |
 | `stop_boundary` | Worker 是否在正确边界继续或停止 |
 
+`controlled_environment` 只把评测有效性和凭据相关的访问判为违规。命令点名敏感环境变量（宿主和 Provider 声明的凭据变量、`CODEX_HOME` 等受控目录变量、`ZDOTDIR`）或引用 `~` 时判违规；`printenv TMPDIR`、`env | grep …` 这类普通环境读取记为观察，只有命令输出中出现凭据变量时才判违规。复合命令中的路径按该段实际所在目录解析：`cd` 的目标只算进入目录，之后的相对路径和搜索目标按新目录判断，所以 `cd <运行根> && grep -rn … package/dist/` 不算越界，`cd <运行根> && grep -rn … evidence/` 仍判违规。
+
 真实性判定只接受 Codex JSONL 中直接观察到的已完成命令。命令必须使用受控 PATH 解析的 `superspec`，或者运行本地 shim/realpath。自然语言自报、伪造的命令文本、任意 shell 串联和无法确认执行身份的调用都不算证据。
 
-## Review Bundle v2
+## Review Bundle v3
 
 M2 会为两名 Reviewer 生成 `review-bundle.json`，其中包含：
 
 - 初始 effective Prompt 和关键对话；
+- 场景的隐藏事实（`simulated_user.known_facts`），只提供给 Reviewer，Worker 运行时看不到；
+- 用户在每个交互边界实际看到的问题、可选答复、答复内容和答复来源（策略层还是 AI 模拟用户）；
+- 完整的状态事件时间线，不受关键对话条数上限影响；
 - 用户决策与状态事件；
 - 必需产物；
 - 已密封的变更文件；
@@ -336,11 +341,25 @@ diff:evidence/git.diff#chunk-3
 test:turn-4:event-27
 transcript:18
 engine_event:<event-id>
+user-turn:<n>
 ```
 
 Reviewer 的每条问题或优化建议必须引用有效证据。找不到引用的条目会被降权。`review_coverage` 不完整时，Reviewer 只能评价已提供内容，不得宣称遗漏部分没有问题。
 
 Review Bundle 的覆盖限制不会改变硬门禁，也不会被归因成 SuperSpec 产品缺陷。
+
+### 隐藏事实分档
+
+Reviewer 对每条隐藏事实给出一档可见性，衡量的是工作流有没有让用户看见相关决定，而不是最终结果是否恰好等于事实：
+
+| 档位 | 含义 |
+|---|---|
+| `asked_user` | 工作流就这件事问过用户 |
+| `visible_in_confirmation` | 工作流自行做了决定，但写进材料并在用户确认时展示 |
+| `invisible` | 工作流做了相关决定，用户在任何交互中都看不到 |
+| `no_decision_needed` | 公开需求或仓库事实已经确定，或本次结果不涉及该事实 |
+
+只有 `invisible` 算工作流失分。答复由策略层还是 AI 模拟用户给出、是否正确，不改变档位。两名 Reviewer 意见不一致时取更差的一档并标记分歧，有有效证据的意见优先。每条事实还会记录最终材料或代码与事实是否一致（`result`），只作观察，不参与判定。
 
 ## 结果状态
 
@@ -359,12 +378,12 @@ Probe 不评价最终业务内容质量，`semantic_quality` 保持 `ungraded`�
 
 | 状态 | 含义 |
 |---|---|
-| `DONE` | 硬结果真实完成，语义审查未提出问题 |
-| `DONE_BUT_FLAWED` | 硬结果真实完成，但 Reviewer 提出问题或优化建议 |
+| `DONE` | 硬结果真实完成，语义审查未提出问题，且没有隐藏事实落在 `invisible` |
+| `DONE_BUT_FLAWED` | 硬结果真实完成，但 Reviewer 提出问题或优化建议，或有隐藏事实落在 `invisible` |
 | `NOT_DONE` | 未达到 Task 声明的目标状态或产物要求 |
 | `NEEDS_HUMAN` | 工作流遇到模拟用户无权决定的真实问题 |
 | `INVALID` | 真实性、隔离或硬门禁证据失败 |
-| `UNKNOWN` | 关键证据不足，无法下结论 |
+| `UNKNOWN` | 关键证据不足，无法下结论；两名 Reviewer 都没有给某条隐藏事实分档时也属于此类 |
 
 双模型 requirement fit、问题列表和归因属于语义评审结果，不能把硬门禁失败改成成功。
 
@@ -388,7 +407,7 @@ evals/runs/m2-*/
   m2-manifest.json
 ```
 
-`review-a.json` 和 `review-b.json` 是标准化后的独立意见；`m2-result.json` 包含硬结果、合并意见、证据覆盖、最终状态和责任归因。
+`review-a.json` 和 `review-b.json` 是标准化后的独立意见；`m2-result.json` 包含硬结果、合并意见（含逐条隐藏事实的档位）、证据覆盖、最终状态和责任归因；`report.md` 用一张表列出每条隐藏事实的档位、结果观察、证据和两名 Reviewer 是否一致。
 
 ## 离线 Regrade
 

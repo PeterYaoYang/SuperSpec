@@ -33,6 +33,10 @@ const REVIEW_DIFF_CHUNKS = 8;
 const REVIEW_CHANGED_FILE_LIMIT = 80;
 const REVIEW_CHANGED_FILE_CHUNKS = 1;
 const REVIEW_TEST_OUTPUT_CHARS = 3_000;
+const REVIEW_INTERACTION_CHARS = 8_000;
+const REVIEW_TIMELINE_TEXT_CHARS = 300;
+const FACT_VISIBILITY_TIERS = ["no_decision_needed", "asked_user", "visible_in_confirmation", "invisible"];
+const FACT_RESULTS = ["consistent", "unclear", "inconsistent"];
 const USAGE_EXIT_CODE = 64;
 
 class UsageError extends Error {}
@@ -296,12 +300,16 @@ function isTestCommand(command) {
   return /(?:^|[\s"'\/])((?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:test(?::[\w.-]+)?|typecheck|lint|build)|node\s+--test|pytest|jest|vitest|mocha|go\s+test|cargo\s+test|mvn(?:w)?\s+test|gradle(?:w)?[^\n]*\btest\b|git\s+diff\s+--check)(?:[\s"']|$)/iu.test(command);
 }
 
+function boundedText(value, limit) {
+  if (value.length <= limit) return value;
+  const headChars = Math.ceil(limit / 2);
+  const tailChars = Math.floor(limit / 2);
+  const omitted = value.length - headChars - tailChars;
+  return `${value.slice(0, headChars)}\n...[${omitted} chars omitted]...\n${value.slice(-tailChars)}`;
+}
+
 function boundedTestOutput(output) {
-  if (output.length <= REVIEW_TEST_OUTPUT_CHARS) return output;
-  const headChars = Math.ceil(REVIEW_TEST_OUTPUT_CHARS / 2);
-  const tailChars = Math.floor(REVIEW_TEST_OUTPUT_CHARS / 2);
-  const omitted = output.length - headChars - tailChars;
-  return `${output.slice(0, headChars)}\n...[${omitted} chars omitted]...\n${output.slice(-tailChars)}`;
+  return boundedText(output, REVIEW_TEST_OUTPUT_CHARS);
 }
 
 function isGeneratedReviewPath(path) {
@@ -381,10 +389,105 @@ function recordedTestEvidenceFromRun(runRoot) {
   return tests;
 }
 
+/** 隐藏事实只给评审，用来判断工作流是否让用户看见了相关决定；Worker 从未看到这些内容。 */
+function hiddenFactsFromRun(runRoot) {
+  const scenarioPath = join(runRoot, "scenario.json");
+  if (!safeRegularWithin(scenarioPath, runRoot)) return { facts: [], limitations: [] };
+  let scenario;
+  try { scenario = json(scenarioPath); } catch { return { facts: [], limitations: ["scenario evidence malformed; hidden facts unavailable"] }; }
+  const knownFacts = scenario?.simulated_user?.known_facts;
+  if (knownFacts == null || typeof knownFacts !== "object" || Array.isArray(knownFacts)) return { facts: [], limitations: [] };
+  const facts = Object.entries(knownFacts)
+    .filter(([, statement]) => typeof statement === "string" && statement.trim() !== "")
+    .map(([factId, statement]) => ({ fact_id: factId, statement }));
+  return { facts, limitations: [] };
+}
+
+/** 用户在每个交互边界实际看到的问题、可选答复，以及答复由谁给出。 */
+function userInteractionsFromRun(runRoot) {
+  const turnsPath = join(runRoot, "evidence", "simulated-user-turns.json");
+  if (!safeRegularWithin(turnsPath, runRoot)) return { interactions: [], limitations: [] };
+  let turns;
+  try { turns = json(turnsPath); } catch { return { interactions: [], limitations: ["simulated user turns malformed"] }; }
+  if (!Array.isArray(turns)) return { interactions: [], limitations: ["simulated user turns malformed"] };
+  const interactions = [];
+  const limitations = [];
+  for (const turn of turns) {
+    const askUser = turn?.next_output?.ask_user;
+    if (askUser == null || typeof askUser !== "object") continue;
+    const ref = `user-turn:${Number.isInteger(turn.turn) ? turn.turn : "terminal"}`;
+    const question = String(askUser.question ?? turn.question ?? "");
+    const truncated = question.length > REVIEW_INTERACTION_CHARS;
+    if (truncated) limitations.push(`user interaction truncated: ${ref}`);
+    interactions.push({
+      ref,
+      turn: turn.turn ?? null,
+      after_worker_turn: turn.after_worker_turn ?? null,
+      scope: String(askUser.scope ?? turn.scope ?? ""),
+      question: boundedText(question, REVIEW_INTERACTION_CHARS),
+      question_chars: question.length,
+      truncated,
+      allowed_answers: Array.isArray(askUser.allowed_answers) ? askUser.allowed_answers : [],
+      action: turn.action ?? null,
+      answer: turn.answer ?? null,
+      answer_source: turn.source ?? null,
+      evidence_path: "evidence/simulated-user-turns.json",
+    });
+  }
+  return { interactions, limitations };
+}
+
+/** 完整的状态时间线；transcript 受条数上限约束，早期事件可能被省略。 */
+function workflowTimelineFromRun(runRoot) {
+  const eventsPath = join(runRoot, "evidence", "events.jsonl");
+  if (!safeRegularWithin(eventsPath, runRoot)) return [];
+  const brief = value => {
+    if (value == null) return undefined;
+    return boundedText(typeof value === "string" ? value : JSON.stringify(value), REVIEW_TIMELINE_TEXT_CHARS);
+  };
+  const timeline = [];
+  for (const line of readFileSync(eventsPath, "utf8").split("\n").filter(Boolean)) {
+    let event;
+    try { event = JSON.parse(line); } catch { continue; }
+    if (typeof event?.event_id !== "string" || event.event_type === "transition_prepare") continue;
+    const payload = event.payload ?? {};
+    const entry = {
+      ref: `engine_event:${event.event_id}`,
+      event_type: event.event_type ?? null,
+      created_at: event.created_at ?? null,
+      transition: payload.transition,
+      from_state: payload.from_state,
+      to_state: payload.to_state,
+      outcome: payload.outcome,
+      reason: brief(payload.reason),
+      role: payload.role,
+      result_kind: payload.result_kind,
+      findings: brief(payload.findings),
+      scope: payload.scope,
+      question_id: payload.question_id,
+      question: brief(payload.question),
+      answer: brief(payload.answer),
+      accepted: payload.accepted,
+      closure: payload.closure,
+      phase_decision: payload.phase_confirmation?.decision,
+      task_id: payload.task_id,
+      test_id: payload.test_id,
+      exit_code: payload.exit_code,
+      semantic_status: payload.semantic_status,
+    };
+    timeline.push(Object.fromEntries(Object.entries(entry).filter(([, value]) => value !== undefined)));
+  }
+  return timeline;
+}
+
 function buildReviewBundle({ task, capability, capabilityFile, outcome, transcript, runRoot }) {
   const selectedTranscript = selectReviewTranscript(transcript);
   const artifacts = {};
   const limitations = [];
+  const hiddenFacts = hiddenFactsFromRun(runRoot);
+  const userInteractions = userInteractionsFromRun(runRoot);
+  const workflowTimeline = workflowTimelineFromRun(runRoot);
+  limitations.push(...hiddenFacts.limitations, ...userInteractions.limitations);
   for (const declared of task.target.required_artifacts ?? []) {
     const absolute = join(runRoot, declared);
     if (!safeRegularWithin(absolute, runRoot)) continue;
@@ -496,7 +599,7 @@ function buildReviewBundle({ task, capability, capabilityFile, outcome, transcri
     ...Object.values(changeEvidence),
   ];
   return {
-    schema_version: 2,
+    schema_version: 3,
     task: {
       id: task.id,
       description: task.description,
@@ -506,6 +609,9 @@ function buildReviewBundle({ task, capability, capabilityFile, outcome, transcri
     hard_result: outcome,
     capability_source: relative(runRoot, capabilityFile),
     gates: capability.gates,
+    hidden_facts: hiddenFacts.facts,
+    user_interactions: userInteractions.interactions,
+    workflow_timeline: workflowTimeline,
     transcript: selectedTranscript.records,
     transcript_coverage: selectedTranscript.coverage,
     artifacts,
@@ -515,6 +621,9 @@ function buildReviewBundle({ task, capability, capabilityFile, outcome, transcri
     review_coverage: {
       complete: limitations.length === 0,
       limitations,
+      hidden_fact_count: hiddenFacts.facts.length,
+      user_interaction_count: userInteractions.interactions.length,
+      timeline_event_count: workflowTimeline.length,
       artifact_count: Object.keys(artifacts).length,
       changed_file_count: Object.keys(changedFiles).length,
       declared_artifact_count: (task.target.required_artifacts ?? []).length,
@@ -543,10 +652,31 @@ function validEvidenceRefs(bundle) {
     for (const chunk of source.chunks ?? []) refs.add(chunk.ref);
   }
   for (const test of bundle.test_evidence ?? []) refs.add(test.ref);
+  for (const interaction of bundle.user_interactions ?? []) refs.add(interaction.ref);
+  for (const event of bundle.workflow_timeline ?? []) refs.add(event.ref);
   return refs;
 }
 
-function normalizeReview(raw, reviewerId, refs) {
+function normalizeFactVisibility(items, factIds, refs) {
+  const known = new Set(factIds);
+  const seen = new Set();
+  return (Array.isArray(items) ? items : []).flatMap(item => {
+    const factId = String(item?.fact_id ?? "");
+    if (!known.has(factId) || seen.has(factId) || !FACT_VISIBILITY_TIERS.includes(item?.tier)) return [];
+    seen.add(factId);
+    const evidenceRef = String(item?.evidence_ref ?? "");
+    return [{
+      fact_id: factId,
+      tier: item.tier,
+      result: FACT_RESULTS.includes(item?.result) ? item.result : "unclear",
+      note: typeof item?.note === "string" ? item.note.trim() : "",
+      evidence_ref: evidenceRef,
+      evidence_valid: refs.has(evidenceRef),
+    }];
+  });
+}
+
+function normalizeReview(raw, reviewerId, refs, factIds = []) {
   const requirementFit = Number(raw?.requirement_fit);
   const confidence = Number(raw?.confidence);
   const normalizeItems = (items, kind) => (Array.isArray(items) ? items : []).flatMap(item => {
@@ -564,8 +694,37 @@ function normalizeReview(raw, reviewerId, refs) {
     requirement_fit: Number.isFinite(requirementFit) ? Math.max(0, Math.min(1, requirementFit)) : 0,
     issues: normalizeItems(raw?.issues, "issue"),
     workflow_optimizations: normalizeItems(raw?.workflow_optimizations, "optimization"),
+    fact_visibility: normalizeFactVisibility(raw?.fact_visibility, factIds, refs),
     confidence: Number.isFinite(confidence) ? Math.max(0, Math.min(1, confidence)) : 0,
   };
+}
+
+/**
+ * 评审意见不一致时取更差的一档；有有效证据的意见优先于无证据的意见。
+ * result 只作观察，不参与判定。
+ */
+function mergeFactVisibility(reviews, factIds) {
+  const worse = (order, left, right) => order.indexOf(right) > order.indexOf(left) ? right : left;
+  return factIds.map(factId => {
+    const votes = reviews.flatMap(review => (review.fact_visibility ?? [])
+      .filter(item => item.fact_id === factId)
+      .map(item => ({ reviewer_id: review.reviewer_id, ...item })));
+    if (votes.length === 0) {
+      return { fact_id: factId, tier: "unclassified", result: "unclear", evidence_ref: "", evidence_valid: false, conflict: false, votes: [] };
+    }
+    const supported = votes.filter(vote => vote.evidence_valid);
+    const decisive = (supported.length > 0 ? supported : votes)
+      .reduce((current, vote) => worse(FACT_VISIBILITY_TIERS, current.tier, vote.tier) === current.tier ? current : vote);
+    return {
+      fact_id: factId,
+      tier: decisive.tier,
+      result: votes.map(vote => vote.result).reduce((left, right) => worse(FACT_RESULTS, left, right)),
+      evidence_ref: decisive.evidence_ref,
+      evidence_valid: decisive.evidence_valid,
+      conflict: new Set(votes.map(vote => vote.tier)).size > 1 || new Set(votes.map(vote => vote.result)).size > 1,
+      votes: votes.map(({ fact_id, ...vote }) => vote),
+    };
+  });
 }
 
 function textSimilarity(left, right) {
@@ -582,9 +741,9 @@ function textSimilarity(left, right) {
   return union > 0 ? intersection / union : 0;
 }
 
-function mergeReviews(reviews) {
+function mergeReviews(reviews, factIds = []) {
   if (reviews.length === 0) {
-    return { requirement_fit: 0, confidence: 0, requirement_fit_conflict: false, issues: [], workflow_optimizations: [] };
+    return { requirement_fit: 0, confidence: 0, requirement_fit_conflict: false, issues: [], workflow_optimizations: [], fact_visibility: mergeFactVisibility([], factIds) };
   }
   const issues = [];
   const optimizations = [];
@@ -622,6 +781,7 @@ function mergeReviews(reviews) {
     requirement_fit_conflict: reviews.length > 1 && Math.abs(reviews[0].requirement_fit - reviews[1].requirement_fit) > 0.25,
     issues: issues.map(({ key, ...item }) => item),
     workflow_optimizations: optimizations.map(({ key, ...item }) => item),
+    fact_visibility: mergeFactVisibility(reviews, factIds),
   };
 }
 
@@ -683,6 +843,17 @@ function attribute({ outcome, capability, merged }) {
       source: "review_optimization",
     });
   }
+  for (const fact of merged.fact_visibility ?? []) {
+    if (fact.tier !== "invisible") continue;
+    const note = fact.votes.find(vote => vote.tier === "invisible" && vote.note)?.note;
+    findings.push({
+      responsibility: "workflow",
+      summary: `decision on hidden fact ${fact.fact_id} was not visible to the user${note ? `: ${note}` : ""}`,
+      evidence_ref: fact.evidence_ref,
+      confidence: fact.evidence_valid ? 0.8 : 0.2,
+      source: "fact_visibility",
+    });
+  }
   const deduped = [];
   for (const finding of findings) {
     const key = `${finding.responsibility}:${finding.summary.toLowerCase().replace(/\s+/g, " ")}`;
@@ -693,9 +864,12 @@ function attribute({ outcome, capability, merged }) {
   return deduped.map(({ key, ...finding }) => finding);
 }
 
+/** 隐藏事实只有“用户看不到”一档算工作流失分；评审漏掉某条事实时无法下结论。 */
 function finalStatus(hardStatus, merged) {
   if (hardStatus !== "DONE") return hardStatus;
-  return merged.issues.length > 0 || merged.workflow_optimizations.length > 0 ? "DONE_BUT_FLAWED" : "DONE";
+  const facts = merged.fact_visibility ?? [];
+  if (merged.issues.length > 0 || merged.workflow_optimizations.length > 0 || facts.some(fact => fact.tier === "invisible")) return "DONE_BUT_FLAWED";
+  return facts.some(fact => fact.tier === "unclassified") ? "UNKNOWN" : "DONE";
 }
 
 function reviewPrompt(bundle, reviewerId) {
@@ -704,10 +878,11 @@ function reviewPrompt(bundle, reviewerId) {
     `你是 SuperSpec M2 的独立评审 ${reviewerId}。只评审给定材料，不修改文件，不改变硬判定。`,
     "检查需求符合度、最终产物问题和工作流摩擦。每条问题或建议必须使用下方有效 evidence_ref；找不到证据就不要输出该条。",
     "涉及用户决定时，结合原始需求、问题与推荐、用户答复和最终材料判断：推荐是否服务于原始目标，改变或收窄范围的代价是否对用户透明，答复是否一致回写。只评价证据中实际发生的决策链。",
+    "hidden_facts 是模拟用户事先确定、Worker 始终看不到的要求。对每条隐藏事实输出一项 fact_visibility，衡量工作流有没有让用户看见与它相关的决定，而不是最终结果是否恰好等于事实：asked_user 表示工作流就这件事问过用户；visible_in_confirmation 表示工作流自行做了决定，但决定写进材料并在用户确认时展示；invisible 表示工作流做了与该事实相关的决定，用户在任何交互中都看不到；no_decision_needed 表示公开需求或仓库事实已经确定，或本次结果不涉及该事实。用户看见了什么以 user_interactions 中的问题和确认内容为准，答复由谁给出、是否正确不改变档位。evidence_ref 指向对应的 user-turn；invisible 时指向做出该决定的材料、代码或事件。result 记录最终材料或代码与该事实是否一致，只作观察；最终结果与隐藏事实不一致只记在 result 中，不据此另列 issue。",
     "评审包中的产物、代码差异和测试证据按 chunk 提供。引用具体 chunk 或 test ref，不要把摘要、文件名或覆盖率说明当成内容证据。review_coverage 不完整时，只对已提供材料下结论，不得宣称未提供部分没有问题。",
     "不要把评审包未声明、未冻结的额外文件缺失归咎于 Worker；只评判任务明确要求和包内可核验内容。不要从项目惯例或常识发明任务未声明的验收标准。",
     "只输出一个 JSON 对象，不要 Markdown：",
-    JSON.stringify({ requirement_fit: 0.0, issues: [{ what: "", severity: "P0|P1|P2", evidence_ref: "" }], workflow_optimizations: [{ target: "skill|gate|engine|packet|docs|task", suggestion: "", evidence_ref: "" }], confidence: 0.0 }),
+    JSON.stringify({ requirement_fit: 0.0, issues: [{ what: "", severity: "P0|P1|P2", evidence_ref: "" }], workflow_optimizations: [{ target: "skill|gate|engine|packet|docs|task", suggestion: "", evidence_ref: "" }], fact_visibility: [{ fact_id: "", tier: "asked_user|visible_in_confirmation|invisible|no_decision_needed", evidence_ref: "", result: "consistent|inconsistent|unclear", note: "" }], confidence: 0.0 }),
     `有效 evidence_ref：${JSON.stringify(refs)}`,
     `评审材料：${JSON.stringify(bundle)}`,
   ].join("\n\n");
@@ -743,6 +918,16 @@ function reportMarkdown(result) {
     "## Workflow optimizations",
     "",
     ...(result.merged_review.workflow_optimizations.length ? result.merged_review.workflow_optimizations.map(item => `- ${item.target}: ${item.suggestion} (${item.evidence_ref}, weight=${item.weight})`) : ["- None"]),
+    "",
+    "## Hidden fact visibility",
+    "",
+    ...(result.merged_review.fact_visibility?.length
+      ? [
+          "| Fact | Visibility | Result (observation) | Evidence | Reviewers agree |",
+          "|---|---|---|---|---|",
+          ...result.merged_review.fact_visibility.map(item => `| ${item.fact_id} | ${item.tier} | ${item.result} | ${item.evidence_ref || "-"}${item.evidence_ref && !item.evidence_valid ? " (invalid)" : ""} | ${item.conflict ? "no" : "yes"} |`),
+        ]
+      : ["- No hidden facts"]),
     "",
     "## Attribution",
     "",
@@ -817,12 +1002,28 @@ function validateFaultMappings() {
     writeFileSync(join(bundleRoot, "evidence", "git.diff"), "diff --git a/a.js b/a.js\n+changed\n");
     writeJson(join(bundleRoot, "evidence", "workspace-changes.json"), [{ path: "a.js", before: null, after: { path: "a.js", type: "file" } }]);
     writeJson(join(bundleRoot, "evidence", "git-after.json"), { diff_base: "fixture", status: ["M  a.js"] });
-    writeFileSync(join(bundleRoot, "evidence", "events.jsonl"), `${JSON.stringify({
-      event_id: "EVT-test-1",
-      event_type: "test_run_recorded",
-      event_digest: "sha256:test",
-      payload: { test_id: "TEST-001", attempt_id: "ATT-1", command: "rg -q expected a.js", exit_code: 0, semantic_status: "expected_success" },
-    })}\n`);
+    writeFileSync(join(bundleRoot, "evidence", "events.jsonl"), `${[
+      { event_id: "EVT-prepare-1", event_type: "transition_prepare", payload: { transition: "propose", from_state: "explore", to_state: "propose" } },
+      { event_id: "EVT-decision-1", event_type: "user_decision_recorded", payload: { scope: "propose_open_question:sha256:fixture:DEC-001", question: "耗时怎么显示？", answer: "显示 0.5s", accepted: true, closure: "closed" } },
+      {
+        event_id: "EVT-test-1",
+        event_type: "test_run_recorded",
+        event_digest: "sha256:test",
+        payload: { test_id: "TEST-001", attempt_id: "ATT-1", command: "rg -q expected a.js", exit_code: 0, semantic_status: "expected_success" },
+      },
+    ].map(event => JSON.stringify(event)).join("\n")}\n`);
+    writeJson(join(bundleRoot, "scenario.json"), { simulated_user: { known_facts: { duration: "499 毫秒显示 0.5s", calendar: "日期保持 UTC" } } });
+    writeJson(join(bundleRoot, "evidence", "simulated-user-turns.json"), [
+      {
+        turn: 2,
+        after_worker_turn: 1,
+        action: "reply",
+        answer: "显示 0.5s",
+        source: "ai_user",
+        next_output: { path: "ask_user", ask_user: { question: "耗时怎么显示？选项：A 显示 0s（推荐） / B 显示 <1s", scope: "propose_open_question:sha256:fixture:DEC-001", allowed_answers: [] } },
+      },
+      { after_worker_turn: 2, action: "complete", next_output: { path: "done" } },
+    ]);
     writeFileSync(join(bundleRoot, "evidence", "turn-1.jsonl"), [
       JSON.stringify({ type: "item.completed", item: { type: "command_execution", command: "npm test", aggregated_output: "pass\n", exit_code: 0, status: "completed" } }),
       JSON.stringify({ type: "item.completed", item: { type: "command_execution", command: "npm run test:unit", aggregated_output: `${"x".repeat(REVIEW_TEST_OUTPUT_CHARS + 10)}TAIL`, exit_code: 1, status: "failed" } }),
@@ -844,7 +1045,14 @@ function validateFaultMappings() {
     });
     const bundleRefs = validEvidenceRefs(bundle);
     const truncatedTest = bundle.test_evidence.find(test => test.ref === "test:turn-1:event-2");
-    if (bundle.schema_version !== 2
+    if (bundle.schema_version !== 3
+      || bundle.hidden_facts.map(fact => fact.fact_id).join(",") !== "duration,calendar"
+      || bundle.user_interactions.length !== 1
+      || bundle.user_interactions[0].answer_source !== "ai_user"
+      || !bundleRefs.has("user-turn:2")
+      || !bundleRefs.has("engine_event:EVT-decision-1")
+      || bundleRefs.has("engine_event:EVT-prepare-1")
+      || bundle.workflow_timeline.find(event => event.ref === "engine_event:EVT-decision-1")?.closure !== "closed"
       || bundle.transcript.length !== REVIEW_TRANSCRIPT_LIMIT
       || bundle.transcript[0]?.sequence !== 1
       || bundle.transcript_coverage.truncated !== true
@@ -859,10 +1067,43 @@ function validateFaultMappings() {
       || truncatedTest?.truncated !== true
       || !truncatedTest?.output.endsWith("TAIL")
       || bundle.review_coverage.complete !== false) {
-      throw new Error("review bundle v2 evidence coverage failed");
+      throw new Error("review bundle v3 evidence coverage failed");
     }
   } finally {
     rmSync(bundleRoot, { recursive: true, force: true });
+  }
+  const factRefs = new Set(["user-turn:2", "artifact:design.md#chunk-1"]);
+  const factIds = ["duration", "calendar"];
+  const factReview = (reviewerId, factVisibility) => normalizeReview({ requirement_fit: 1, confidence: 1, issues: [], workflow_optimizations: [], fact_visibility: factVisibility }, reviewerId, factRefs, factIds);
+  const invisibleReview = factReview("A", [
+    { fact_id: "duration", tier: "invisible", evidence_ref: "artifact:design.md#chunk-1", result: "inconsistent", note: "设计自行选定向上取整" },
+    { fact_id: "calendar", tier: "no_decision_needed", evidence_ref: "", result: "consistent" },
+    { fact_id: "undeclared", tier: "asked_user", evidence_ref: "user-turn:2" },
+  ]);
+  const askedReview = factReview("B", [{ fact_id: "duration", tier: "asked_user", evidence_ref: "user-turn:2", result: "consistent" }]);
+  const conflicting = mergeReviews([invisibleReview, askedReview], factIds);
+  const conflictingDuration = conflicting.fact_visibility.find(fact => fact.fact_id === "duration");
+  const unsupportedInvisible = mergeReviews([
+    factReview("A", [{ fact_id: "duration", tier: "invisible", evidence_ref: "missing" }, { fact_id: "calendar", tier: "no_decision_needed", evidence_ref: "" }]),
+    askedReview,
+  ], factIds);
+  const allVisible = mergeReviews([
+    factReview("A", [{ fact_id: "duration", tier: "visible_in_confirmation", evidence_ref: "user-turn:2" }, { fact_id: "calendar", tier: "no_decision_needed", evidence_ref: "" }]),
+    askedReview,
+  ], factIds);
+  const unclassified = mergeReviews([askedReview], factIds);
+  if (invisibleReview.fact_visibility.length !== 2
+    || conflictingDuration?.tier !== "invisible"
+    || conflictingDuration.conflict !== true
+    || conflictingDuration.result !== "inconsistent"
+    || finalStatus("DONE", conflicting) !== "DONE_BUT_FLAWED"
+    || !attribute({ outcome: done, capability: { gates: gates({}) }, merged: conflicting }).some(finding => finding.source === "fact_visibility" && finding.responsibility === "workflow")
+    || unsupportedInvisible.fact_visibility.find(fact => fact.fact_id === "duration")?.tier !== "asked_user"
+    || finalStatus("DONE", unsupportedInvisible) !== "DONE"
+    || finalStatus("DONE", allVisible) !== "DONE"
+    || unclassified.fact_visibility.find(fact => fact.fact_id === "calendar")?.tier !== "unclassified"
+    || finalStatus("DONE", unclassified) !== "UNKNOWN") {
+    throw new Error("hidden fact visibility grading failed");
   }
   const cheatRoot = join(EVAL_ROOT, "tasks", "negative");
   const cheatCases = [
@@ -878,7 +1119,7 @@ function validateFaultMappings() {
     if (result.status !== cheat.expected_status) throw new Error(`cheat task ${cheat.id} escaped detection: ${result.status}`);
     cheatResults[cheat.id] = result.status;
   }
-  process.stdout.write(`${JSON.stringify({ ok: true, cases: { done: done.status, invalid: invalid.status, not_done: notDone.status, unknown: unknown.status, needs_human: human.status, configured_target_boundary: targetBoundary.status, injected: injected.status, invalid_evidence_downgraded: true, review_bundle_v2: true, cheats: cheatResults } }, null, 2)}\n`);
+  process.stdout.write(`${JSON.stringify({ ok: true, cases: { done: done.status, invalid: invalid.status, not_done: notDone.status, unknown: unknown.status, needs_human: human.status, configured_target_boundary: targetBoundary.status, injected: injected.status, invalid_evidence_downgraded: true, review_bundle_v3: true, fact_visibility: true, cheats: cheatResults } }, null, 2)}\n`);
 }
 
 async function main() {
@@ -931,7 +1172,7 @@ async function main() {
   writeJson(join(outputRoot, "review-bundle.json"), bundle);
 
   if (!shouldInvokeSemanticReview(hard.status)) {
-    const merged = { requirement_fit: 0, confidence: 1, requirement_fit_conflict: false, issues: [], workflow_optimizations: [] };
+    const merged = { requirement_fit: 0, confidence: 1, requirement_fit_conflict: false, issues: [], workflow_optimizations: [], fact_visibility: [] };
     const attribution = attribute({ outcome: hard, capability: capabilitySource.value, merged });
     const result = {
       schema_version: 1,
@@ -976,6 +1217,7 @@ async function main() {
   }).then(result => result.json)));
   if (interrupt.interrupted) return interruptedExit(outputRoot, interrupt);
   const refs = validEvidenceRefs(bundle);
+  const factIds = bundle.hidden_facts.map(fact => fact.fact_id);
   const reviews = [];
   const reviewerDetails = {};
   for (let index = 0; index < settledReviews.length; index++) {
@@ -985,7 +1227,7 @@ async function main() {
     const threadIds = judgeHost.sessionIds(tracePath);
     const settled = settledReviews[index];
     if (settled.status === "fulfilled") {
-      const review = normalizeReview(settled.value, key, refs);
+      const review = normalizeReview(settled.value, key, refs, factIds);
       reviews.push(review);
       writeJson(join(outputRoot, `review-${key.toLowerCase()}.json`), review);
       reviewerDetails[key] = { status: "completed", model: config.model, reasoning: config.reasoning, thread_ids: threadIds };
@@ -995,7 +1237,7 @@ async function main() {
       reviewerDetails[key] = { status: "failed", model: config.model, reasoning: config.reasoning, thread_ids: threadIds, failure };
     }
   }
-  const merged = mergeReviews(reviews);
+  const merged = mergeReviews(reviews, factIds);
   const attribution = attribute({ outcome: hard, capability: capabilitySource.value, merged });
   const completedReviewerIds = reviewerConfigs.filter(config => reviewerDetails[config.id].status === "completed").map(config => config.id);
   const independentReviewerSessions = completedReviewerIds.length === 2
