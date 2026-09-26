@@ -218,7 +218,7 @@ node evals/regression.mjs \
 - Worker 失败或会话无法恢复；
 - 达到 `budget.max_worker_turns`。
 
-当 `simulated_user.mode` 为 `ai` 时，每次用户决策使用一个新的隔离会话。该会话无法访问 Worker 工作区，只能看到公开需求、用户人设、已知事实、本轮问题及可选答复，以及 Worker 对用户说的话；工作流写给主流程的 scope 和登记说明不会展示给它。`allowed_answers` 非空时返回答案必须属于其中一项，需要补充说明时写在 `note`。
+当 `simulated_user.mode` 为 `ai` 时，每次用户决策使用一个新的隔离会话。该会话无法访问 Worker 工作区，只能看到公开需求、用户人设、已知事实、本轮问题及可选答复，以及 Worker 对用户说的话；工作流写给主流程的 scope 和登记说明不会展示给它。`allowed_answers` 非空时返回答案必须属于其中一项；`note` 只承载与当前问题直接相关的补充。不接收说明的答复（如确认推进）会以 `answers_without_note` 告知模拟用户；给这类答复附带 `note` 时先带着问题重试，被告知后仍附带的 `note` 不转给 Worker，只以 `dropped_note` 留在证据里。答复不合规时带着问题重试一次；仍不合规则以 `simulated_user_invalid` 停止并封存证据，stop boundary 记为不可用，不算工作流失败。M2 把用户在答复其他问题时主动给出的事实记为 `volunteered_by_user`，不算工作流让用户看见了决定。
 
 ## 真实项目评测
 
@@ -246,7 +246,9 @@ Runner 在隔离工作区中物化指定 commit，再安装当前 SuperSpec。�
 }
 ```
 
-某轮超时后，如果同一 Codex thread 能继续恢复并最终到达目标边界，该 timeout 作为性能限制保留，不单独使整个运行无效。进程非零退出、会话丢失或后续证据无法恢复时，才影响硬有效性。
+场景预算与宿主无关；Worker 模型较慢时，可以用 `--worker-turn-timeout-ms` 为本次运行放宽单轮上限（仍不超过 3600000），实际取值和来源写入 `manifest.launch`。
+
+某轮超时后，如果同一 Codex thread 能继续恢复并最终到达目标边界，该 timeout 作为性能限制保留，不单独使整个运行无效。进程非零退出、会话丢失或后续证据无法恢复时，才影响硬有效性。动态模式下未恢复的单轮超时以 `worker_turn_timeout` 停止，与 Worker 自身异常退出的 `worker_failed` 分开记录，stop boundary 记为不可用。
 
 ## Provider 与隔离环境
 
@@ -263,7 +265,7 @@ Runner 不继承其他用户配置。Provider URL 必须是不包含凭据、查
 每次 Probe 都会：
 
 - 创建新的工作区、`HOME`、宿主配置目录和 `ZDOTDIR`；
-- 使用受控 PATH；Codex 为 `workspace-write` + `approval_policy=never`，Claude 为沙箱写入 + `bypassPermissions`，OMP 关闭逐行输出截断（`tools.outputMaxColumns: 0`）；
+- 使用受控 PATH（含宿主上可用的 npm/npx）；Codex 为 `workspace-write` + `approval_policy=never`；Claude 为沙箱写入，并设置 `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`，不让 Bash 和子 Agent 继承凭据。设置后 Claude 会强制使用 default 权限模式，改由隔离配置的 allow 列表放行工具。此外使用私有 `CLAUDE_CODE_TMPDIR`，并像真实项目一样预先信任工作区；`CLAUDE_CONFIG_DIR/projects`（工具输出溢出文件、子 Agent 记录）和私有临时目录里的读写按本会话产物记为观察；`CLAUDE_CONFIG_DIR` 其余位置是 Claude 会加载的用户配置（如 `settings.json`、`CLAUDE.md`、`skills/`），Worker 读写仍判违规。OMP 关闭逐行输出截断（`tools.outputMaxColumns: 0`）；
 - 仅安装当前构建出的 SuperSpec 包副本；
 - 忽略用户 skills、agents、prompts、hooks、rules、history 和无关配置；
 - 在运行结束后删除临时认证目录。

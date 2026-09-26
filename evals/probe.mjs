@@ -63,6 +63,8 @@ function usage() {
     "  --reasoning <level>   none|low|medium|high|xhigh|max (default medium)",
     "  --judge-provider <name>, --judge-model <name>, --judge-reasoning <level>",
     "                        AI simulated user provider/model/reasoning (default: the Worker values)",
+    "  --worker-turn-timeout-ms <ms>",
+    "                        Per-turn Worker time limit for this run (overrides scenario budget; 60000-3600000)",
     "  --inject <fault>      Development fault injection; never a product baseline",
     "  --regrade <run-dir>   Re-grade a sealed run offline without re-running the Worker",
     "  --validate-faults     Deterministic evaluator self-checks (no model calls)",
@@ -86,6 +88,7 @@ function parseArgs(argv) {
     judgeProvider: null,
     judgeModel: null,
     judgeReasoning: null,
+    workerTurnTimeoutMs: null,
     scenario: SCENARIO_PATH,
   };
   for (let i = 0; i < argv.length; i++) {
@@ -101,10 +104,14 @@ function parseArgs(argv) {
     else if (argv[i] === "--judge-provider") result.judgeProvider = argv[++i] ?? "";
     else if (argv[i] === "--judge-model") result.judgeModel = argv[++i] ?? "";
     else if (argv[i] === "--judge-reasoning") result.judgeReasoning = argv[++i] ?? "";
+    else if (argv[i] === "--worker-turn-timeout-ms") result.workerTurnTimeoutMs = Number(argv[++i] ?? NaN);
     else if (argv[i] === "--scenario") result.scenario = resolve(argv[++i] ?? "");
     else throw new UsageError(`unknown argument: ${argv[i]}`);
   }
   if (result.help) return result;
+  if (result.workerTurnTimeoutMs !== null && !validWorkerTurnTimeout(result.workerTurnTimeoutMs)) {
+    throw new UsageError("--worker-turn-timeout-ms must be an integer between 60000 and 3600000");
+  }
   let workerHost;
   try { workerHost = getWorkerHost(result.host); } catch (error) { throw new UsageError(error.message); }
   result.provider ??= workerHost.eval_defaults.provider;
@@ -224,7 +231,7 @@ function resolveHostTools(host, injection) {
   const hostPath = process.env.PATH ?? "";
   const tools = host.resolveTools(name => commandOnPath(name, hostPath), { injection });
   for (const name of BASE_REQUIRED_TOOLS) tools[name] = commandOnPath(name, hostPath);
-  for (const extra of ["zsh", "ls", "cat", "sed", "find", "mkdir", "cp", "mv", "rm", "pwd", "head", "tail", "sort", "wc", "xargs"]) {
+  for (const extra of ["zsh", "ls", "cat", "sed", "find", "mkdir", "cp", "mv", "rm", "pwd", "head", "tail", "sort", "wc", "xargs", "npm", "npx"]) {
     const found = commandOnPath(extra, hostPath);
     if (found) tools[extra] = found;
   }
@@ -255,6 +262,13 @@ function materializeToolShims(localBin, tools, run) {
 
 function gate(status, evidence, detail, evidenceLevel = status === "unavailable" ? "unavailable" : "correlated") {
   return { status, evidence, evidence_level: evidenceLevel, ...(detail ? { detail } : {}) };
+}
+
+// 评测侧中断时工作流本就到不了目标状态；eventIntegrity 只在目标状态不符时返回 fail，完整性问题仍是 unavailable。
+function evaluatorCutoffStateGate(stateGate) {
+  return stateGate?.status === "fail"
+    ? gate("unavailable", stateGate.evidence, `${stateGate.detail}; target state not reachable after evaluator-side stop`)
+    : stateGate;
 }
 
 function workerProcessStatus(codes, timeouts, timeoutRecoveries, label = "Worker") {
@@ -577,10 +591,22 @@ function multiAgentEnabledForScenario(scenario) {
   return scenario?.fixture?.enable_multi_agent !== false;
 }
 
-function workerTurnTimeoutMs(scenario) {
-  const value = scenario.budget?.worker_turn_timeout_ms ?? 600_000;
-  if (!Number.isInteger(value) || value < 60_000 || value > 3_600_000) throw new Error("worker_turn_timeout_ms must be an integer between 60000 and 3600000");
+function validWorkerTurnTimeout(value) {
+  return Number.isInteger(value) && value >= 60_000 && value <= 3_600_000;
+}
+
+/** Scenario budgets are host-agnostic; a run may raise the per-turn limit for a slow Worker model. */
+function workerTurnTimeoutMs(scenario, override = null) {
+  const value = override ?? scenario.budget?.worker_turn_timeout_ms ?? 600_000;
+  if (!validWorkerTurnTimeout(value)) throw new Error("worker_turn_timeout_ms must be an integer between 60000 and 3600000");
   return value;
+}
+
+/** 单轮超时是评测侧时限截断了 Worker，与 Worker 自己异常退出分开记录。 */
+function workerExitStop(turn, worker, timeoutMs) {
+  return worker.timedOut
+    ? { action: "worker_turn_timeout", after_worker_turn: turn, reason: `Worker turn ${turn} exceeded worker_turn_timeout_ms (${timeoutMs} ms)` }
+    : { action: "worker_failed", after_worker_turn: turn, reason: `Worker turn ${turn} exited ${worker.code}` };
 }
 
 function dynamicTracePaths(evidenceDir, turnCount) {
@@ -845,11 +871,13 @@ function policyTurnSettles(policyTurn, scenario) {
 function aiSimulatedUserPrompt(scenario, askUser, workerMessage = "") {
   const advanceUntilTerminal = scenario.simulated_user?.advance_until_terminal !== false;
   const fromMessage = askUser?.scope === AGENT_MESSAGE_SCOPE;
+  const answersWithoutNote = answersTakingNoNote(askUser);
   const visible = fromMessage
     ? { worker_message: String(askUser?.question ?? "") }
     : {
         question: String(askUser?.question ?? ""),
         allowed_answers: Array.isArray(askUser?.allowed_answers) ? askUser.allowed_answers : [],
+        ...(answersWithoutNote.length > 0 ? { answers_without_note: answersWithoutNote } : {}),
         ...(workerMessage ? { worker_message: workerMessage } : {}),
       };
   return [
@@ -862,8 +890,9 @@ function aiSimulatedUserPrompt(scenario, askUser, workerMessage = "") {
       ? "你的职责是配合工作流持续推进到终态，不得仅因存在取舍而停止。"
       : "只能依据公开需求、用户人设、已知事实和工作流本轮给出的真实选项作答。信息不足且会改变产品语义时可以要求真人决定。",
     advanceUntilTerminal
-      ? "只输出一个 JSON 对象：{\"action\":\"reply\",\"answer\":\"\",\"note\":\"\",\"reason\":\"\"}。allowed_answers 非空时，answer 必须逐字等于其中一项，所选项需要补充说明时写在 note；为空时直接在 answer 中给出简短明确答复。"
-      : "只输出一个 JSON 对象：{\"action\":\"reply|needs_human\",\"answer\":\"\",\"note\":\"\",\"reason\":\"\"}。选择 reply 且 allowed_answers 非空时，answer 必须逐字等于其中一项，所选项需要补充说明时写在 note。",
+      ? "只输出一个 JSON 对象：{\"action\":\"reply\",\"answer\":\"\",\"note\":\"\",\"reason\":\"\"}。allowed_answers 非空时，answer 必须逐字等于其中一项；为空时直接在 answer 中给出简短明确答复。"
+      : "只输出一个 JSON 对象：{\"action\":\"reply|needs_human\",\"answer\":\"\",\"note\":\"\",\"reason\":\"\"}。选择 reply 且 allowed_answers 非空时，answer 必须逐字等于其中一项。",
+    "note 只写 Worker 执行这个答复时必须知道、且与当前问题直接相关的补充；当前问题没有问到的事项不要提前作答，也不要复述已知事实。没有这类补充时留空。answers_without_note 中的答复表示按当前方案继续且不附带说明，需要调整时应选择其他答复。",
     `公开需求：${scenario.initial_prompt}`,
     `用户人设：${JSON.stringify(scenario.simulated_user?.persona ?? {})}`,
     `已知事实：${JSON.stringify(scenario.simulated_user?.known_facts ?? {})}`,
@@ -888,44 +917,113 @@ async function resolveSimulatedUserTurn({
   if (policyTurnSettles(policyTurn, scenario)) return policyTurn;
   const nextOutput = policyTurn.next_output;
   if (nextOutput?.path !== "ask_user") return policyTurn;
-  const userTracePath = join(runRoot, "evidence", `user-turn-${turn}.jsonl`);
-  const userStderrPath = join(runRoot, "evidence", `user-turn-${turn}.stderr.log`);
+  return aiSimulatedUserReply({ turn, scenario, nextOutput, workerMessage: policyTurn.worker_message ?? "", judge, model, reasoning, runRoot });
+}
+
+async function aiSimulatedUserReply({ turn, scenario, nextOutput, workerMessage, judge, model, reasoning, runRoot }) {
   const advanceUntilTerminal = scenario.simulated_user?.advance_until_terminal !== false;
-  const prompt = aiSimulatedUserPrompt(scenario, nextOutput.ask_user, policyTurn.worker_message ?? "");
-  const { json: raw } = await judge.run({
-    turn,
-    model: scenario.simulated_user?.model ?? model,
-    reasoning: scenario.simulated_user?.reasoning ?? reasoning,
-    prompt,
-    tracePath: userTracePath,
-    stderrPath: userStderrPath,
-  });
+  const basePrompt = aiSimulatedUserPrompt(scenario, nextOutput.ask_user, workerMessage);
   const allowedAnswers = nextOutput.ask_user.allowed_answers ?? [];
-  if (raw?.action === "needs_human") {
-    if (advanceUntilTerminal) throw new Error(`simulated user turn ${turn} stopped although advance_until_terminal is enabled`);
-    return { action: "needs_human", reason: String(raw.reason ?? "simulated user requires human input"), next_output: nextOutput, source: "ai_user", model_evidence: `evidence/user-turn-${turn}.jsonl` };
+  const rejected = [];
+  let raw = null;
+  let problem = null;
+  let modelEvidence = null;
+  // 答复不合规时带着问题重试一次；仍不合规就作为评测侧停止封存证据，不能让一次格式错误中断整场运行。
+  for (const attempt of [1, 2]) {
+    const suffix = attempt === 1 ? "" : "-retry";
+    modelEvidence = `evidence/user-turn-${turn}${suffix}.jsonl`;
+    const prompt = attempt === 1
+      ? basePrompt
+      : `${basePrompt}\n\n你上一次的输出不符合要求：${problem}。请按要求重新输出。`;
+    try {
+      const { json } = await judge.run({
+        turn,
+        model: scenario.simulated_user?.model ?? model,
+        reasoning: scenario.simulated_user?.reasoning ?? reasoning,
+        prompt,
+        tracePath: join(runRoot, "evidence", `user-turn-${turn}${suffix}.jsonl`),
+        stderrPath: join(runRoot, "evidence", `user-turn-${turn}${suffix}.stderr.log`),
+      });
+      raw = normalizeSimulatedUserReply(json, allowedAnswers);
+      problem = simulatedUserReplyProblem(raw, allowedAnswers, advanceUntilTerminal)
+        ?? (attempt === 1 && noteOnAnswerTakingNone(raw, nextOutput.ask_user)
+          ? `所选答复「${raw.answer}」不附带说明，note 不会转给 Worker；需要调整时选择其他答复，否则 note 留空`
+          : null);
+    } catch (error) {
+      raw = null;
+      problem = `输出无法作为 JSON 答复解析（${error instanceof Error ? error.message.split("\n")[0] : String(error)}）`;
+    }
+    if (problem == null) break;
+    rejected.push({ model_evidence: modelEvidence, problem });
   }
-  if (raw?.action !== "reply"
-    || typeof raw.answer !== "string"
-    || raw.answer.trim() === ""
-    || allowedAnswers.length > 0 && !allowedAnswers.includes(raw.answer)) {
-    throw new Error(`simulated user turn ${turn} returned an unauthorized answer`);
+  if (problem != null) {
+    return {
+      action: "simulated_user_invalid",
+      reason: `simulated user turn ${turn} reply stayed invalid after one retry: ${problem}`,
+      question: String(nextOutput.ask_user.question ?? ""),
+      scope: String(nextOutput.ask_user.scope ?? ""),
+      source: "ai_user",
+      next_output: nextOutput,
+      rejected_replies: rejected,
+    };
   }
-  const note = typeof raw.note === "string" ? raw.note.trim() : "";
+  const rejectedEvidence = rejected.length > 0 ? { rejected_replies: rejected } : {};
+  if (raw.action === "needs_human") {
+    return { action: "needs_human", reason: String(raw.reason ?? "simulated user requires human input"), next_output: nextOutput, source: "ai_user", model_evidence: modelEvidence, ...rejectedEvidence };
+  }
+  const rawNote = typeof raw.note === "string" ? raw.note.trim() : "";
+  // 被告知后仍给不接收说明的答复附带 note，按用户已知情处理：不转给 Worker，只留在证据里。
+  const note = noteOnAnswerTakingNone(raw, nextOutput.ask_user) ? "" : rawNote;
   const workerPromptOriginal = note === "" ? raw.answer : `${raw.answer}\n${note}`;
   return {
     action: "reply",
     answer: raw.answer,
     ...(note === "" ? {} : { note }),
+    ...(rawNote !== "" && note === "" ? { dropped_note: rawNote } : {}),
     reason: String(raw.reason ?? ""),
     question: String(nextOutput.ask_user.question ?? ""),
     scope: String(nextOutput.ask_user.scope ?? ""),
     source: "ai_user",
     next_output: nextOutput,
-    model_evidence: `evidence/user-turn-${turn}.jsonl`,
+    model_evidence: modelEvidence,
+    ...rejectedEvidence,
     worker_prompt_original: workerPromptOriginal,
     worker_prompt: evalWorkerPrompt(workerPromptOriginal),
   };
+}
+
+function answersTakingNoNote(askUser) {
+  return Array.isArray(askUser?.actions)
+    ? askUser.actions.filter(action => action?.reason === "none" && typeof action.label === "string").map(action => action.label)
+    : [];
+}
+
+function noteOnAnswerTakingNone(raw, askUser) {
+  return raw?.action === "reply"
+    && typeof raw.note === "string" && raw.note.trim() !== ""
+    && answersTakingNoNote(askUser).includes(raw.answer);
+}
+
+/** 没有候选时答复就是自由文本；模型把答复写进 note 而 answer 留空时，按答复处理。 */
+function normalizeSimulatedUserReply(raw, allowedAnswers) {
+  const emptyAnswer = typeof raw?.answer !== "string" || raw.answer.trim() === "";
+  const note = typeof raw?.note === "string" ? raw.note.trim() : "";
+  if (raw?.action === "reply" && allowedAnswers.length === 0 && emptyAnswer && note !== "") {
+    return { ...raw, answer: note, note: "" };
+  }
+  return raw;
+}
+
+function simulatedUserReplyProblem(raw, allowedAnswers, advanceUntilTerminal) {
+  if (raw?.action === "needs_human") {
+    return advanceUntilTerminal ? "本场要求配合工作流推进到终态，action 只能是 reply" : null;
+  }
+  if (raw?.action !== "reply") return "action 必须是 reply";
+  if (typeof raw.answer !== "string" || raw.answer.trim() === "") return "answer 不能为空";
+  if (allowedAnswers.length > 0 && !allowedAnswers.includes(raw.answer)) {
+    return `answer 必须逐字等于 allowed_answers 中的一项：${JSON.stringify(allowedAnswers)}`;
+  }
+  return null;
 }
 
 function commandEvents(events) {
@@ -2343,6 +2441,82 @@ async function validateFaultMappings() {
   }
   outcomes.push({ name: "simulated-user-final-turn-state", result: true });
 
+  const scriptedJudge = replies => {
+    const prompts = [];
+    return {
+      prompts,
+      run: async ({ prompt }) => {
+        prompts.push(prompt);
+        const reply = replies.shift();
+        if (reply instanceof Error) throw reply;
+        return { json: reply };
+      },
+    };
+  };
+  const replyRoot = join(fixtureRoot, "simulated-user-reply");
+  mkdirSync(join(replyRoot, "evidence"), { recursive: true });
+  const phaseAsk = {
+    question: "是否开始实现？",
+    scope: "phase_confirmation:propose_to_apply:fixture",
+    allowed_answers: ["确认开始实现", "留在计划阶段继续完善"],
+    actions: [
+      { decision: "advance", label: "确认开始实现", reason: "none" },
+      { decision: "stay", label: "留在计划阶段继续完善", reason: "required" },
+    ],
+  };
+  const replyOf = async (askUser, replies, simulatedUser = {}) => {
+    const judge = scriptedJudge(replies);
+    const result = await aiSimulatedUserReply({
+      turn: 1,
+      scenario: { initial_prompt: "fixture", simulated_user: { mode: "ai", ...simulatedUser } },
+      nextOutput: { path: "ask_user", ask_user: askUser },
+      workerMessage: "",
+      judge,
+      model: "fixture-model",
+      reasoning: "low",
+      runRoot: replyRoot,
+    });
+    return { result, prompts: judge.prompts };
+  };
+  const advanceCorrected = await replyOf(phaseAsk, [
+    { action: "reply", answer: "确认开始实现", note: "先把合计改成逐行舍入", reason: "" },
+    { action: "reply", answer: "留在计划阶段继续完善", note: "先把合计改成逐行舍入", reason: "" },
+  ]);
+  const advanceWithNote = await replyOf(phaseAsk, [
+    { action: "reply", answer: "确认开始实现", note: "顺便把缓存也做了", reason: "" },
+    { action: "reply", answer: "确认开始实现", note: "顺便把缓存也做了", reason: "" },
+  ]);
+  const stayWithNote = await replyOf(phaseAsk, [{ action: "reply", answer: "留在计划阶段继续完善", note: "补充失败重试策略", reason: "" }]);
+  const noteOnlyFreeText = await replyOf(recommendedAsk, [{ action: "reply", answer: "", note: "显示 0.5s", reason: "" }]);
+  const retried = await replyOf(phaseAsk, [{ action: "reply", answer: "开始吧", reason: "" }, { action: "reply", answer: "确认开始实现", reason: "" }]);
+  const parseRetried = await replyOf(phaseAsk, [new Error("judge output is not JSON"), { action: "reply", answer: "确认开始实现", reason: "" }]);
+  const stillInvalid = await replyOf(phaseAsk, [{ action: "reply", answer: "", reason: "" }, { action: "needs_human", reason: "不想推进" }]);
+  const humanAllowed = await replyOf(phaseAsk, [{ action: "needs_human", reason: "需要真人决定" }], { advance_until_terminal: false });
+  if (!advanceCorrected.prompts[0].includes(JSON.stringify({ answers_without_note: ["确认开始实现"] }).slice(1, -1))
+    || advanceCorrected.prompts.length !== 2 || advanceCorrected.result.answer !== "留在计划阶段继续完善"
+    || advanceCorrected.result.note !== "先把合计改成逐行舍入" || advanceCorrected.result.dropped_note !== undefined
+    || advanceWithNote.result.action !== "reply" || advanceWithNote.result.note !== undefined || advanceWithNote.prompts.length !== 2
+    || advanceWithNote.result.dropped_note !== "顺便把缓存也做了" || advanceWithNote.result.worker_prompt_original !== "确认开始实现"
+    || stayWithNote.result.note !== "补充失败重试策略" || stayWithNote.result.dropped_note !== undefined
+    || noteOnlyFreeText.result.action !== "reply" || noteOnlyFreeText.result.answer !== "显示 0.5s" || noteOnlyFreeText.prompts.length !== 1
+    || retried.result.action !== "reply" || retried.result.answer !== "确认开始实现" || retried.prompts.length !== 2
+    || !retried.prompts[1].startsWith(retried.prompts[0]) || retried.result.rejected_replies?.length !== 1
+    || retried.result.model_evidence !== "evidence/user-turn-1-retry.jsonl"
+    || parseRetried.result.action !== "reply" || parseRetried.result.rejected_replies?.length !== 1
+    || stillInvalid.result.action !== "simulated_user_invalid" || stillInvalid.result.rejected_replies?.length !== 2
+    || humanAllowed.result.action !== "needs_human") {
+    throw new Error("AI simulated user replies must retry a note on an answer that takes none before dropping it, retry one invalid reply, and stop as evaluator-side failure when still invalid");
+  }
+  outcomes.push({ name: "ai-simulated-user-reply-normalization", result: true });
+
+  const timedOutStop = workerExitStop(3, { code: 143, timedOut: true }, 1_800_000);
+  const crashedStop = workerExitStop(2, { code: 1, timedOut: false }, 1_800_000);
+  if (timedOutStop.action !== "worker_turn_timeout" || timedOutStop.after_worker_turn !== 3
+    || crashedStop.action !== "worker_failed" || crashedStop.after_worker_turn !== 2) {
+    throw new Error("an evaluator turn-limit cut-off must be recorded apart from a Worker failure");
+  }
+  outcomes.push({ name: "worker-turn-timeout-classified", result: true });
+
   const dynamicAcceptedTrace = {
     malformed: 0,
     commandSchemaRecognized: true,
@@ -2634,6 +2808,22 @@ async function validateFaultMappings() {
   const stalePrefix = eventIntegrity({ present: true, malformed: 0, records: [transitionEvent, laterEvent] }, goodSnapshot, "explore");
   if (stalePrefix.status !== "pass" || !stalePrefix.staleSnapshot) throw new Error("valid stale snapshot prefix must pass with limitation");
   outcomes.push({ name: "event-integrity-mismatches-unavailable", result: true });
+
+  const cutoffEvents = { present: true, malformed: 0, records: [transitionEvent] };
+  const cutoffState = evaluatorCutoffStateGate(gate(eventIntegrity(cutoffEvents, goodSnapshot, "accepted").status, [], "state"));
+  const cutoffCapability = finalizeCapability({
+    limitations: [],
+    gates: {
+      ...Object.fromEntries(CORE_GATES.map(name => [name, gate("pass", [])])),
+      state: cutoffState,
+      stop_boundary: gate("unavailable", [], "cut off"),
+    },
+  });
+  if (cutoffState.status !== "unavailable" || cutoffCapability.scenario_result !== "INVALID"
+    || evaluatorCutoffStateGate(gate("pass", [])).status !== "pass") {
+    throw new Error("an evaluator-side stop must turn an unreached target state into INVALID, not a workflow failure");
+  }
+  outcomes.push({ name: "evaluator-cutoff-state-invalid", result: true });
 
   const hidden = classifyAuthenticity({
     direct: [{ kind: "direct", argv: required[0], executable_allowed: true }],
@@ -3164,7 +3354,7 @@ async function validateFaultMappings() {
 
   validateTraceSemantics();
   outcomes.push({ name: "trace-semantics-deltas-sessions-completion", result: true });
-  validateHostAdapters();
+  validateHostAdapters({ traceEnvironmentAudit });
   outcomes.push({ name: "host-adapters-claude-omp", result: true });
 
   process.stdout.write(`${JSON.stringify({ ok: true, cases: outcomes }, null, 2)}\n`);
@@ -3824,7 +4014,7 @@ async function regradeExistingRun(inputRunDir) {
     const simulatedTurnsPath = join(evidenceDir, "simulated-user-turns.json");
     const simulatedTurns = safeRegularWithin(simulatedTurnsPath, evidenceDir).ok ? json(simulatedTurnsPath) : [];
     const recordedStop = originalManifest.simulated_user?.stop
-      ?? [...simulatedTurns].reverse().find(turn => ["complete", "needs_human", "budget_exhausted", "invalid_execution", "worker_failed"].includes(turn?.action))
+      ?? [...simulatedTurns].reverse().find(turn => ["complete", "needs_human", "budget_exhausted", "invalid_execution", "worker_failed", "worker_turn_timeout", "simulated_user_invalid"].includes(turn?.action))
       ?? null;
     const effectiveStop = terminalBoundary && integrity?.derivedState === "accepted"
       ? {
@@ -3847,6 +4037,12 @@ async function regradeExistingRun(inputRunDir) {
     const stopEvidence = [...tracePaths.map((_, index) => `evidence/turn-${index + 1}.jsonl`), "evidence/simulated-user-turns.json", "evidence/events.jsonl", "evidence/snapshot.json"];
     if (!commandPolicyAudit.ok) {
       capability.gates.stop_boundary = gate("fail", stopEvidence, `recorded Worker executed forbidden SuperSpec commands: ${commandPolicyAudit.violations.map(item => item.family).join(", ")}`, "direct");
+    } else if (effectiveStop?.action === "simulated_user_invalid") {
+      capability.gates.stop_boundary = gate("unavailable", stopEvidence, `recorded run stopped on an evaluator-side simulated user failure: ${effectiveStop.reason}`);
+      capability.gates.state = evaluatorCutoffStateGate(capability.gates.state);
+    } else if (effectiveStop?.action === "worker_turn_timeout") {
+      capability.gates.stop_boundary = gate("unavailable", stopEvidence, `recorded run was cut off by the evaluator turn limit before a stop boundary: ${effectiveStop.reason}`);
+      capability.gates.state = evaluatorCutoffStateGate(capability.gates.state);
     } else if (["budget_exhausted", "invalid_execution"].includes(effectiveStop?.action)) {
       capability.gates.stop_boundary = gate("fail", stopEvidence, effectiveStop.reason, "direct");
     } else if (integrity?.status === "unavailable" || events.malformed > 0 || !authenticity.sequence.ok || !sameThread || !(finalOutput || runnerObservedTerminal(effectiveStop)) || !effectiveStop) {
@@ -4165,7 +4361,7 @@ async function main() {
   const workflowArtifactMode = scriptedMode || dynamicUserMode;
   const persistentMode = resumeMode || scriptedMode || dynamicUserMode;
   const dynamicMaxTurns = dynamicUserMode ? dynamicTurnLimit(scenario) : 0;
-  const workerTimeoutMs = workerTurnTimeoutMs(scenario);
+  const workerTimeoutMs = workerTurnTimeoutMs(scenario, args.workerTurnTimeoutMs);
   const negativeActivationMode = scenario.session_mode === "single_turn_negative_activation";
   const runId = `${scenario.id}-${isoForPath()}-${process.pid}`;
   const archiveRunRoot = join(RUNS_ROOT, runId);
@@ -4351,7 +4547,7 @@ async function main() {
 
     const install = await run(shim, ["install", "--skip-self-update", ...host.installArgs({ isolation: authDirs })], { phase: "setup.fixture.install", cwd: workspace, env });
     if (install.code !== 0) throw new Error(`fixture install failed: ${install.stderr || install.stdout}`);
-    const projectConfigNormalization = host.prepareWorkspace({ workspace, features, run });
+    const projectConfigNormalization = host.prepareWorkspace({ workspace, features, run, isolation: authDirs });
     const workflowConfigPath = join(workspace, ".superspec", "config.json");
     const installedWorkflowConfig = json(workflowConfigPath);
     const scenarioPinsWorkflowMode = scenario.fixture.workflow_mode !== undefined;
@@ -4457,6 +4653,8 @@ async function main() {
       launch: {
         provider: args.provider, model: args.model, reasoning: args.reasoning, sandbox: host.launch_policy.sandbox,
         approval: host.launch_policy.approval, session: persistentMode ? "persistent_isolated_resume" : "ephemeral", argv: [workerExecutable, ...launchArgv],
+        worker_turn_timeout_ms: workerTimeoutMs,
+        worker_turn_timeout_source: args.workerTurnTimeoutMs !== null ? "run_option" : scenario.budget?.worker_turn_timeout_ms !== undefined ? "scenario" : "default",
         environment_keys: Object.keys(env).sort(), path_entries: pathValue.split(":"),
         shell: systemShell,
         zdotdir,
@@ -4552,7 +4750,7 @@ async function main() {
             reasoning: args.judgeReasoning,
             runRoot,
           });
-          if (["complete", "needs_human"].includes(observed.action)) {
+          if (["complete", "needs_human", "simulated_user_invalid"].includes(observed.action)) {
             dynamicStop = { after_worker_turn: currentTurn, ...observed };
             simulatedUserTurns.push(dynamicStop);
             writeJson(simulatedUserPath, simulatedUserTurns);
@@ -4619,11 +4817,7 @@ async function main() {
           currentTracePath = nextTracePath;
         }
         if (!dynamicStop && currentWorker.code !== 0) {
-          dynamicStop = {
-            action: "worker_failed",
-            after_worker_turn: currentTurn,
-            reason: `Worker turn ${currentTurn} exited ${currentWorker.code}`,
-          };
+          dynamicStop = workerExitStop(currentTurn, currentWorker, workerTimeoutMs);
           simulatedUserTurns.push(dynamicStop);
           writeJson(simulatedUserPath, simulatedUserTurns);
         }
@@ -4807,7 +5001,7 @@ async function main() {
     }
     if (dynamicUserMode) {
       if (!dynamicStop && worker.code !== 0) {
-        dynamicStop = { action: "worker_failed", after_worker_turn: 1, reason: `initial Worker exited ${worker.code}` };
+        dynamicStop = workerExitStop(1, worker, workerTimeoutMs);
         simulatedUserTurns.push(dynamicStop);
       }
       if (!existsSync(simulatedUserPath)) writeJson(simulatedUserPath, simulatedUserTurns);
@@ -5230,6 +5424,12 @@ async function main() {
       const stopEvidence = [...tracePaths.map((_, index) => `evidence/turn-${index + 1}.jsonl`), "evidence/simulated-user-turns.json", "evidence/events.jsonl", "evidence/snapshot.json"];
       if (!commandPolicyAudit.ok) {
         capability.gates.stop_boundary = gate("fail", stopEvidence, `recorded Worker executed forbidden SuperSpec commands: ${commandPolicyAudit.violations.map(item => item.family).join(", ")}`, "direct");
+      } else if (dynamicStop?.action === "simulated_user_invalid") {
+        capability.gates.stop_boundary = gate("unavailable", stopEvidence, `run stopped on an evaluator-side simulated user failure: ${dynamicStop.reason}`);
+        capability.gates.state = evaluatorCutoffStateGate(capability.gates.state);
+      } else if (dynamicStop?.action === "worker_turn_timeout") {
+        capability.gates.stop_boundary = gate("unavailable", stopEvidence, `run was cut off by the evaluator turn limit before a stop boundary: ${dynamicStop.reason}`);
+        capability.gates.state = evaluatorCutoffStateGate(capability.gates.state);
       } else if (["budget_exhausted", "invalid_execution"].includes(dynamicStop?.action)) {
         capability.gates.stop_boundary = gate("fail", stopEvidence, dynamicStop.reason, "direct");
       } else if (integrity?.status === "unavailable" || events.malformed > 0 || !authenticity.sequence.ok || !sameThread || !finalTracePath || !(finalOutput || runnerObservedTerminal(dynamicStop)) || !dynamicStop) {

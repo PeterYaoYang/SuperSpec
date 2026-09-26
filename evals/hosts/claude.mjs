@@ -8,13 +8,17 @@
  *
  * Launch: `claude -p --output-format stream-json --verbose` (never `--bare`,
  * so project skills and CLAUDE.md stay visible). Isolation uses
- * CLAUDE_CONFIG_DIR + an isolated HOME; credentials stay in the process
- * environment, not the user's ~/.claude OAuth store. Headless eval uses
- * `--permission-mode bypassPermissions` so Bash, Write and `node -e` are not
- * paused for approval; Bash still runs inside the Claude sandbox (writes
+ * CLAUDE_CONFIG_DIR + an isolated HOME + a private CLAUDE_CODE_TMPDIR;
+ * credentials stay in the Claude process environment, not the user's
+ * ~/.claude OAuth store, and CLAUDE_CODE_SUBPROCESS_ENV_SCRUB keeps them out
+ * of Bash and subagent subprocesses. Scrubbing forces the default permission
+ * mode, so the isolated allow list is what keeps Bash, Write and `node -e`
+ * from pausing for approval; Bash still runs inside the Claude sandbox (writes
  * confined to the workspace and temp), mirroring Codex `workspace-write`.
- * File tools may only read the workspace. Trace init/message events keep the
- * requested model alias and the backend model the CLI actually served.
+ * File tools may only read the workspace. The workspace is pre-trusted like a
+ * real user's project, so its own permissions.allow entries apply. Trace
+ * init/message events keep the requested model alias and the backend model
+ * the CLI actually served.
  */
 
 import { createHash } from "node:crypto";
@@ -27,6 +31,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -128,7 +133,7 @@ function hostSecretDirs(env = process.env) {
 export function isolatedSettings() {
   return {
     permissions: {
-      defaultMode: "bypassPermissions",
+      defaultMode: "default",
       allow: ["Bash(*)", "Read", "Write", "Edit", "MultiEdit", "Glob", "Grep", "NotebookEdit"],
       blockReadsOutsideWorkingDirectories: true,
     },
@@ -144,6 +149,19 @@ export function isolatedSettings() {
   };
 }
 
+/**
+ * Claude keeps task and subagent output plus its sockets under CLAUDE_CODE_TMPDIR,
+ * which otherwise defaults to /tmp/claude-<uid> shared by concurrent runs. Socket
+ * paths cap its length, so the name stays short. Sandboxed Bash keeps its own
+ * TMPDIR under /tmp/claude-<uid> because the sandbox only allows writes there.
+ */
+export function privateClaudeTmpDir(registry = null) {
+  const dir = mkdtempSync(join(tmpdir(), `sscc-${process.pid}-`));
+  registry?.track(dir);
+  chmodSync(dir, 0o700);
+  return dir;
+}
+
 export function isolatedClaudeHome(runId, { registry = null } = {}) {
   const home = mkdtempSync(join(tmpdir(), `superspec-probe-home-${runId}-`));
   registry?.track(home);
@@ -151,19 +169,34 @@ export function isolatedClaudeHome(runId, { registry = null } = {}) {
   registry?.track(hostHome);
   chmodSync(home, 0o700);
   chmodSync(hostHome, 0o700);
+  const claudeTmpDir = privateClaudeTmpDir(registry);
   const settingsPath = join(hostHome, "settings.json");
   writeFileSync(settingsPath, `${JSON.stringify(isolatedSettings(), null, 2)}\n`, { mode: 0o600 });
   return {
     home,
     hostHome,
     claudeHome: hostHome,
+    claudeTmpDir,
     settingsPath,
     auth: { source_type: "env_api_key", exists: true, required: false, mode_ok: true, top_level_keys: [] },
-    tempDirs: [home, hostHome],
+    tempDirs: [home, hostHome, claudeTmpDir],
   };
 }
 
-export function controlledEnv(home, hostHome, zdotdir, pathValue, systemShell, providerEnvKeys = [], { model = null } = {}) {
+/** A real user has accepted the trust dialog for their project; untrusted, Claude ignores the project's permissions.allow entries. */
+function trustWorkspace(isolation, workspace, run) {
+  const hostHome = isolation?.hostHome ?? isolation?.claudeHome;
+  if (!hostHome || !workspace) return;
+  const configPath = join(hostHome, ".claude.json");
+  let config = {};
+  try { config = JSON.parse(readFileSync(configPath, "utf8")); } catch {}
+  const project = realpathSync(workspace);
+  config.projects = { ...config.projects, [project]: { ...config.projects?.[project], hasTrustDialogAccepted: true } };
+  writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+  run?.recordMutation?.("setup.claude.trust-workspace", configPath, { project });
+}
+
+export function controlledEnv(home, hostHome, zdotdir, pathValue, systemShell, providerEnvKeys = [], { model = null, claudeTmpDir = null, scrubSubprocessEnv = false } = {}) {
   const source = process.env;
   const env = {};
   for (const key of ENV_ALLOWLIST) {
@@ -180,6 +213,8 @@ export function controlledEnv(home, hostHome, zdotdir, pathValue, systemShell, p
   env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1";
   // Built-in subagents default to Anthropic model aliases a protocol proxy may not serve.
   if (model) env.CLAUDE_CODE_SUBAGENT_MODEL = model;
+  if (claudeTmpDir) env.CLAUDE_CODE_TMPDIR = claudeTmpDir;
+  if (scrubSubprocessEnv) env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB = "1";
   env.ZDOTDIR = zdotdir;
   env.TMPDIR = source.TMPDIR ?? tmpdir();
   env.LANG = source.LANG ?? "en_US.UTF-8";
@@ -542,7 +577,7 @@ function printArgs({ model, reasoning, launchFeatures, persistent }) {
     "-p",
     "--output-format", "stream-json",
     "--verbose",
-    "--permission-mode", "bypassPermissions",
+    "--permission-mode", "default",
     "--permission-prompts", "none",
     "--model", model,
     "--effort", mapEffort(reasoning),
@@ -561,12 +596,13 @@ export const claudeWorkerHost = Object.freeze({
   sensitive_env_keys: ["CLAUDE_CONFIG_DIR", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"],
   command_evidence_source: "completed Claude tool_result",
   commands_inherit_launch_cwd: true,
-  launch_policy: { sandbox: "claude-sandbox-workspace-write", approval: "bypass-permissions+sandboxed-bash" },
+  launch_policy: { sandbox: "claude-sandbox-workspace-write", approval: "default-mode-allowlist+sandboxed-bash+scrubbed-subprocess-env" },
   eval_defaults: { provider: "anthropic", model: "deepseek-v4.1-flash-expires-on-0910" },
   workspace_noise_dirs: [".claude/.cc-writes"],
   stale_temp_dir_rules: [
     { prefix: "superspec-probe-home-", pid: /^superspec-probe-home-.+-\d{14,17}-(\d+)(?:-user-\d+)?-[A-Za-z0-9]{6}$/ },
     { prefix: "superspec-probe-claude-", pid: /^superspec-probe-claude-.+-\d{14,17}-(\d+)(?:-user-\d+)?-[A-Za-z0-9]{6}$/ },
+    { prefix: "sscc-", pid: /^sscc-(\d+)-[A-Za-z0-9]{6}$/, requirePid: true },
   ],
 
   resolveTools(lookup, { injection = null } = {}) {
@@ -583,7 +619,11 @@ export const claudeWorkerHost = Object.freeze({
     if (!isolation.auth.mode_ok) throw new Error("isolated Claude authentication is unavailable");
   },
   controlledEnv({ isolation, zdotdir, pathValue, systemShell, providerProfile, model = null }) {
-    return controlledEnv(isolation.home, isolation.hostHome, zdotdir, pathValue, systemShell, providerProfile.env_keys, { model });
+    return controlledEnv(isolation.home, isolation.hostHome, zdotdir, pathValue, systemShell, providerProfile.env_keys, {
+      model,
+      claudeTmpDir: isolation.claudeTmpDir,
+      scrubSubprocessEnv: true,
+    });
   },
   controlManifest({ isolation, providerProfile, features }) {
     return {
@@ -592,6 +632,8 @@ export const claudeWorkerHost = Object.freeze({
       auth_isolation: isolation.auth.mode_ok,
       auth: isolation.auth,
       ignored_user_config: true,
+      claude_tmpdir_isolated: typeof isolation.claudeTmpDir === "string",
+      subprocess_env_scrubbed: true,
       sandbox: isolatedSettings().sandbox,
       provider: {
         id: providerProfile.id,
@@ -613,7 +655,8 @@ export const claudeWorkerHost = Object.freeze({
   installArgs() {
     return ["--hosts", CLAUDE_HOST_ID];
   },
-  prepareWorkspace() {
+  prepareWorkspace({ workspace, isolation, run } = {}) {
+    trustWorkspace(isolation, workspace, run);
     return { original_digest: null, normalized_digest: null, removed: [] };
   },
   launchFeatures({ multiAgentEnabled }) {
@@ -644,6 +687,16 @@ export const claudeWorkerHost = Object.freeze({
   },
   sessionStorageEvidence(isolation, sessionId) {
     return sessionStorageEvidence(isolation.hostHome ?? isolation.claudeHome, sessionId);
+  },
+  /**
+   * Only CLAUDE_CONFIG_DIR/projects holds this run's session output (spilled tool results,
+   * subagent transcripts); the rest of the config dir is what Claude loads as user config
+   * (settings.json, CLAUDE.md, skills/, agents/), so Worker access there stays a violation.
+   * The private temp dir holds this run's task and subagent output.
+   */
+  sessionArtifactRoots(isolation) {
+    const hostHome = isolation?.hostHome ?? isolation?.claudeHome;
+    return [hostHome ? join(hostHome, "projects") : null, isolation?.claudeTmpDir].filter(Boolean);
   },
   sessionNotStoredMessage: "persistent session file was not found in isolated CLAUDE_CONFIG_DIR before resume",
   parseTrace: parseClaudeTrace,

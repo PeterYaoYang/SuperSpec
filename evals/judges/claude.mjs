@@ -10,6 +10,7 @@ import { join } from "node:path";
 import {
   controlledEnv,
   parseClaudeTrace,
+  privateClaudeTmpDir,
   usageObservations,
 } from "../hosts/claude.mjs";
 import {
@@ -44,7 +45,7 @@ function isolatedJudgeHome(id, registry) {
   writeFileSync(join(hostHome, "settings.json"), `${JSON.stringify({
     permissions: { allow: ["Read"] },
   }, null, 2)}\n`, { mode: 0o600 });
-  return { home, hostHome };
+  return { home, hostHome, claudeTmpDir: privateClaudeTmpDir(registry) };
 }
 
 function requireClaude(label) {
@@ -82,7 +83,7 @@ function createReviewerRunner({ provider, registry = null }) {
   async function run({ id, model, reasoning, prompt, cwd, tracePath, stderrPath }) {
     const isolated = isolatedJudgeHome(id, registry);
     try {
-      const env = controlledEnv(isolated.home, isolated.hostHome, isolated.home, process.env.PATH ?? "", process.env.SHELL ?? "/bin/zsh", envKeys);
+      const env = controlledEnv(isolated.home, isolated.hostHome, isolated.home, process.env.PATH ?? "", process.env.SHELL ?? "/bin/zsh", envKeys, { claudeTmpDir: isolated.claudeTmpDir });
       const args = judgeArgs({ model, reasoning });
       for (let attempt = 1; attempt <= 2; attempt++) {
         const result = await spawnJudge(executable, args, { cwd, env, prompt, active });
@@ -102,7 +103,7 @@ function createReviewerRunner({ provider, registry = null }) {
       }
       throw new Error(`reviewer ${id} exhausted its retry budget`);
     } finally {
-      removeDirs([isolated.home, isolated.hostHome], registry);
+      removeDirs([isolated.home, isolated.hostHome, isolated.claudeTmpDir], registry);
     }
   }
 
@@ -125,9 +126,9 @@ function createSimulatedUserRunner({ executable, spawnDirector, pathValue, syste
     registry?.track(userWorkspace);
     mkdirSync(userWorkspace, { recursive: true, mode: 0o700 });
     const isolated = isolatedJudgeHome(`${runLabel}-user-${turn}`, registry);
-    const dirs = [userWorkspace, isolated.home, isolated.hostHome];
+    const dirs = [userWorkspace, isolated.home, isolated.hostHome, isolated.claudeTmpDir];
     try {
-      const userEnv = controlledEnv(isolated.home, isolated.hostHome, zdotdir, pathValue, systemShell, envKeys);
+      const userEnv = controlledEnv(isolated.home, isolated.hostHome, zdotdir, pathValue, systemShell, envKeys, { claudeTmpDir: isolated.claudeTmpDir });
       const result = await spawnDirector(claude, judgeArgs({ model, reasoning }), {
         phase: `simulated-user.turn-${turn}`,
         actor: "simulated_user",
@@ -161,6 +162,7 @@ export const claudeJudgeHost = Object.freeze({
   stale_temp_dir_rules: [
     { prefix: "superspec-m2-home-", pid: /^superspec-m2-home-.+-\d{14,17}-(\d+)(?:-user-\d+)?-[A-Za-z0-9]+-[A-Za-z0-9]{6}$/ },
     { prefix: "superspec-m2-claude-", pid: /^superspec-m2-claude-.+-\d{14,17}-(\d+)(?:-user-\d+)?-[A-Za-z0-9]+-[A-Za-z0-9]{6}$/ },
+    { prefix: "sscc-", pid: /^sscc-(\d+)-[A-Za-z0-9]{6}$/, requirePid: true },
   ],
   createRunner(config) {
     if (config.role === "reviewer") return createReviewerRunner(config);

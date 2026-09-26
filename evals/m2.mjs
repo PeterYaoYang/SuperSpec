@@ -35,7 +35,7 @@ const REVIEW_CHANGED_FILE_CHUNKS = 1;
 const REVIEW_TEST_OUTPUT_CHARS = 3_000;
 const REVIEW_INTERACTION_CHARS = 8_000;
 const REVIEW_TIMELINE_TEXT_CHARS = 300;
-const FACT_VISIBILITY_TIERS = ["no_decision_needed", "asked_user", "visible_in_confirmation", "invisible"];
+const FACT_VISIBILITY_TIERS = ["no_decision_needed", "asked_user", "visible_in_confirmation", "volunteered_by_user", "invisible"];
 const FACT_RESULTS = ["consistent", "unclear", "inconsistent"];
 const USAGE_EXIT_CODE = 64;
 
@@ -430,6 +430,7 @@ function userInteractionsFromRun(runRoot) {
       allowed_answers: Array.isArray(askUser.allowed_answers) ? askUser.allowed_answers : [],
       action: turn.action ?? null,
       answer: turn.answer ?? null,
+      ...(typeof turn.note === "string" && turn.note !== "" ? { note: turn.note } : {}),
       answer_source: turn.source ?? null,
       evidence_path: "evidence/simulated-user-turns.json",
     });
@@ -890,11 +891,11 @@ function reviewPrompt(bundle, reviewerId) {
     `你是 SuperSpec M2 的独立评审 ${reviewerId}。只评审给定材料，不修改文件，不改变硬判定。`,
     "检查需求符合度、最终产物问题和工作流摩擦。每条问题或建议必须使用下方有效 evidence_ref；找不到证据就不要输出该条。",
     "涉及用户决定时，结合原始需求、问题与推荐、用户答复和最终材料判断：推荐是否服务于原始目标，改变或收窄范围的代价是否对用户透明，答复是否一致回写。只评价证据中实际发生的决策链。",
-    "hidden_facts 是模拟用户事先确定、Worker 始终看不到的要求。对每条隐藏事实输出一项 fact_visibility，衡量工作流有没有让用户看见与它相关的决定，而不是最终结果是否恰好等于事实：asked_user 表示工作流就这件事问过用户；visible_in_confirmation 表示工作流自行做了决定，但决定写进材料并在用户确认时展示；invisible 表示工作流做了与该事实相关的决定，用户在任何交互中都看不到；no_decision_needed 表示公开需求或仓库事实已经确定，或本次结果不涉及该事实。用户看见了什么以 user_interactions 中的问题和确认内容为准，答复由谁给出、是否正确不改变档位。evidence_ref 指向对应的 user-turn；invisible 时指向做出该决定的材料、代码或事件。result 记录最终材料或代码与该事实是否一致，只作观察；invisible 且结果一致不是缺陷。最终结果与隐藏事实不一致只记在 result 中，不据此另列 issue。",
+    "hidden_facts 是模拟用户事先确定、Worker 始终看不到的要求。对每条隐藏事实输出一项 fact_visibility，衡量工作流有没有让用户看见与它相关的决定，而不是最终结果是否恰好等于事实：asked_user 表示工作流就这件事问过用户；visible_in_confirmation 表示工作流自行做了决定，但决定写进材料并在用户确认时展示；volunteered_by_user 表示工作流没有就这件事提问或展示决定，是用户在答复其他问题时主动给出（见 user_interactions 的 note），它既不算工作流让用户看见了决定，也不算缺陷；invisible 表示工作流做了与该事实相关的决定，用户在任何交互中都看不到；no_decision_needed 表示公开需求或仓库事实已经确定，或本次结果不涉及该事实。用户看见了什么以 user_interactions 中的问题和确认内容为准，答复由谁给出、是否正确不改变档位。evidence_ref 指向对应的 user-turn；invisible 时指向做出该决定的材料、代码或事件。result 记录最终材料或代码与该事实是否一致，只作观察；invisible 且结果一致不是缺陷。最终结果与隐藏事实不一致只记在 result 中，不据此另列 issue。",
     "评审包中的产物、代码差异和测试证据按 chunk 提供。引用具体 chunk 或 test ref，不要把摘要、文件名或覆盖率说明当成内容证据。review_coverage 不完整时，只对已提供材料下结论，不得宣称未提供部分没有问题。",
     "不要把评审包未声明、未冻结的额外文件缺失归咎于 Worker；只评判任务明确要求和包内可核验内容。不要从项目惯例或常识发明任务未声明的验收标准。",
     "只输出一个 JSON 对象，不要 Markdown：",
-    JSON.stringify({ requirement_fit: 0.0, issues: [{ what: "", severity: "P0|P1|P2", evidence_ref: "" }], workflow_optimizations: [{ target: "skill|gate|engine|packet|docs|task", suggestion: "", evidence_ref: "" }], fact_visibility: [{ fact_id: "", tier: "asked_user|visible_in_confirmation|invisible|no_decision_needed", evidence_ref: "", result: "consistent|inconsistent|unclear", note: "" }], confidence: 0.0 }),
+    JSON.stringify({ requirement_fit: 0.0, issues: [{ what: "", severity: "P0|P1|P2", evidence_ref: "" }], workflow_optimizations: [{ target: "skill|gate|engine|packet|docs|task", suggestion: "", evidence_ref: "" }], fact_visibility: [{ fact_id: "", tier: "asked_user|visible_in_confirmation|volunteered_by_user|invisible|no_decision_needed", evidence_ref: "", result: "consistent|inconsistent|unclear", note: "" }], confidence: 0.0 }),
     `有效 evidence_ref：${JSON.stringify(refs)}`,
     `评审材料：${JSON.stringify(bundle)}`,
   ].join("\n\n");
@@ -1111,7 +1112,12 @@ function validateFaultMappings() {
   const invisibleUnclear = mergeReviews([
     factReview("A", [{ fact_id: "duration", tier: "invisible", evidence_ref: "artifact:design.md#chunk-1", result: "unclear" }]),
   ], factIds);
+  const volunteered = mergeReviews([
+    factReview("A", [{ fact_id: "duration", tier: "volunteered_by_user", evidence_ref: "user-turn:2", result: "consistent" }, { fact_id: "calendar", tier: "no_decision_needed", evidence_ref: "", result: "consistent" }]),
+  ], factIds);
   if (invisibleReview.fact_visibility.length !== 2
+    || volunteered.fact_visibility.find(fact => fact.fact_id === "duration")?.tier !== "volunteered_by_user"
+    || finalStatus("DONE", volunteered) !== "DONE"
     || conflictingDuration?.tier !== "asked_user"
     || conflictingDuration.conflict !== true
     || conflictingDuration.result !== "inconsistent"

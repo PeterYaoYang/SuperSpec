@@ -8,11 +8,13 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { getWorkerHost, registeredWorkerHostIds } from "../hosts/index.mjs";
 import { resolveOmpModelRef } from "../hosts/omp.mjs";
 import { getJudgeHost, registeredJudgeHostIds } from "../judges/index.mjs";
@@ -27,7 +29,7 @@ function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 
-export function validateHostAdapters() {
+export function validateHostAdapters({ traceEnvironmentAudit }) {
   const ids = registeredWorkerHostIds();
   assert(ids.includes("claude") && ids.includes("omp") && ids.includes("codex"), `worker hosts missing claude/omp: ${ids.join(",")}`);
   const judgeIds = registeredJudgeHostIds();
@@ -42,14 +44,14 @@ export function validateHostAdapters() {
 
   const root = mkdtempSync(join(tmpdir(), "superspec-host-adapters-"));
   try {
-    validateClaude(claude, claudeJudge, root);
+    validateClaude(claude, claudeJudge, root, traceEnvironmentAudit);
     validateOmp(omp, ompJudge, root);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 }
 
-function validateClaude(host, judge, root) {
+function validateClaude(host, judge, root, traceEnvironmentAudit) {
   const sessionId = "claude-session-1";
   const fixture = join(root, "claude-turn.jsonl");
   writeJsonl(fixture, [
@@ -161,7 +163,7 @@ function validateClaude(host, judge, root) {
     assert(!existsSync(join(isolation.hostHome, "auth.json")), "claude must not copy user OAuth");
     const settings = JSON.parse(readFileSync(join(isolation.hostHome, "settings.json"), "utf8"));
     assert(settings.sandbox?.enabled === true && settings.sandbox.allowUnsandboxedCommands === false, "claude Bash runs sandboxed");
-    assert(settings.permissions?.defaultMode === "bypassPermissions", "claude isolation uses a headless permission mode");
+    assert(["Bash(*)", "Write", "Edit"].every(rule => settings.permissions?.allow?.includes(rule)), "claude allow list keeps headless turns from pausing");
     assert(settings.permissions?.blockReadsOutsideWorkingDirectories === true, "claude file tools are confined to the workspace");
     const env = host.controlledEnv({
       isolation,
@@ -173,6 +175,36 @@ function validateClaude(host, judge, root) {
     });
     assert(env.CLAUDE_CONFIG_DIR === isolation.hostHome && env.HOME === isolation.home, "claude controlled env");
     assert(env.CLAUDE_CODE_SUBAGENT_MODEL === "deepseek-v4-flash", "claude subagents use the Worker model");
+    assert(env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB === "1", "claude Bash and subagent subprocesses do not inherit provider credentials");
+    assert(env.CLAUDE_CODE_TMPDIR === isolation.claudeTmpDir && isolation.tempDirs.includes(isolation.claudeTmpDir)
+      && (statSync(isolation.claudeTmpDir).mode & 0o777) === 0o700 && isolation.claudeTmpDir.length <= 80,
+    "claude internal temp dir is private to the run, owner-only and short enough for sockets");
+    const roots = host.sessionArtifactRoots(isolation);
+    const spilled = join(isolation.hostHome, "projects", "p", "s", "tool-results", "out.txt");
+    const userMemory = join(isolation.hostHome, "CLAUDE.md");
+    const taskOutput = join(isolation.claudeTmpDir, "task.out");
+    mkdirSync(dirname(spilled), { recursive: true });
+    for (const path of [spilled, userMemory, taskOutput]) writeFileSync(path, "x\n");
+    const configAudit = traceEnvironmentAudit([
+      { kind: "file_access", tool: "read", status: "completed", paths: [spilled] },
+      { kind: "file_access", tool: "write", status: "completed", paths: [userMemory] },
+      { kind: "file_access", tool: "read", status: "completed", paths: [taskOutput] },
+    ], {
+      workspace: join(isolation.home, "workspace"), packageRoot: "/controlled/package", binRoot: "/controlled/bin",
+      controlledHome: isolation.home, controlledHostHome: isolation.hostHome, controlledZdotdir: "/controlled/zdot",
+      sessionArtifactRoots: roots,
+    });
+    assert(configAudit.violations.length === 1 && configAudit.violations[0].reason === "controlled_home_path"
+      && configAudit.violations[0].path === userMemory
+      && configAudit.observations.filter(item => item.reason === "own_session_artifact").length === 2,
+    "claude session output under the config dir and private temp dir are own-session artifacts; files Claude loads as user config are not");
+    const trustedWorkspace = join(isolation.home, "workspace");
+    mkdirSync(trustedWorkspace);
+    const mutations = [];
+    host.prepareWorkspace({ workspace: trustedWorkspace, isolation, run: { recordMutation: (...entry) => mutations.push(entry) } });
+    const claudeConfig = JSON.parse(readFileSync(join(isolation.hostHome, ".claude.json"), "utf8"));
+    assert(claudeConfig.projects?.[realpathSync(trustedWorkspace)]?.hasTrustDialogAccepted === true && mutations.length === 1,
+      "claude workspace is pre-trusted like a real project so its permissions.allow entries apply");
     writeFileSync(join(isolation.hostHome, "auth.json"), "{}\n");
     mkdirSync(join(isolation.hostHome, "telemetry"), { recursive: true });
     writeFileSync(join(isolation.hostHome, "telemetry", "events.json"), "{}\n");
@@ -210,7 +242,7 @@ function validateClaude(host, judge, root) {
   const persistent = host.freshLaunchArgs({ persistent: true, model: "claude-sonnet-4-6", reasoning: "high", launchFeatures: features });
   const resume = host.resumeLaunchArgs({ model: "claude-sonnet-4-6", reasoning: "high", launchFeatures: features, sessionId });
   assert(fresh.includes("-p") && fresh.includes("stream-json") && !fresh.includes("--bare"), "claude launch is print+stream-json, not bare");
-  assert(fresh.includes("bypassPermissions") && !fresh.includes("acceptEdits"), "claude launch does not wait for permission prompts");
+  assert(fresh[fresh.indexOf("--permission-prompts") + 1] === "none" && !fresh.includes("acceptEdits"), "claude launch does not wait for permission prompts");
   assert(fresh.includes("--no-session-persistence") && !persistent.includes("--no-session-persistence"), "claude persistence flag");
   assert(resume.includes("-r") && resume.includes(sessionId) && !resume.includes("--no-session-persistence"), "claude resume");
   assert(features.args.includes("--forward-subagent-text"), "claude multi-agent forwards subagent text");
