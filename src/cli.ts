@@ -5,7 +5,7 @@ import { execFileSync, type ExecFileSyncOptionsWithStringEncoding } from "node:c
 import { createInterface } from "node:readline/promises";
 import { readFileSync } from "node:fs";
 import { installProject } from "./install.ts";
-import { writeSnapshot, readEvents } from "./store.ts";
+import { enclosingProjectRoot, writeSnapshot, readEvents } from "./store.ts";
 import { rebuildSnapshot } from "./sync.ts";
 import { next as nextCmd } from "./next.ts";
 import { proposeReady, commitTransition, transitionInit, transitionExplore, startApply, taskStart, taskComplete, reopen, reviewReady, accept } from "./transition.ts";
@@ -834,6 +834,16 @@ async function main(argv: string[]): Promise<number> {
         : { ok: false, message: commandErrorMessage(err) }));
       return 1;
     }
+  }
+
+  const enclosingRoot = enclosingProjectRoot(projectRoot);
+  if (enclosingRoot) {
+    console.log(JSON.stringify({
+      ok: false,
+      message: `当前目录不是 SuperSpec 项目根；工作流状态和返回的产物路径都以项目根为基准，请在 ${enclosingRoot} 下重新执行`,
+      project_root: enclosingRoot,
+    }));
+    return 1;
   }
 
   const change = opts.change;

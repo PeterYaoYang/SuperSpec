@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -60,6 +60,26 @@ function appendCriticJob(projectRoot: string, change: string, jobId: string): vo
     reason: "record input encoding test",
   }, { transitionId: `T-${jobId}`, idempotencyKey: `${jobId}-key` }));
 }
+
+test("CLI：在项目内部子目录执行时拒绝并指出项目根，不在子目录另起工作流状态", () => {
+  const fx = setupProject("superspec-nested-cwd-");
+  try {
+    const changeRoot = join(fx.projectRoot, "openspec", "changes", fx.change);
+    mkdirSync(join(changeRoot, ".superspec", "artifacts"), { recursive: true });
+
+    const nested = runCli(changeRoot, ["transition", "next", "--change", fx.change], "");
+    assert.notEqual(nested.status, 0);
+    const payload = JSON.parse(nested.stdout) as { ok: boolean; project_root: string };
+    assert.equal(payload.ok, false);
+    assert.equal(payload.project_root, realpathSync(fx.projectRoot));
+    assert.equal(existsSync(join(changeRoot, ".superspec", "changes")), false);
+
+    const atRoot = runCli(fx.projectRoot, ["status", "--change", fx.change], "");
+    assert.equal(atRoot.status, 0, atRoot.stderr);
+  } finally {
+    fx.cleanup();
+  }
+});
 
 test("CLI job-submit：结论（含 fail）登记成功退出码为 0，其余结果非 0；出现 --on-behalf 即留痕", () => {
   const fx = setupProject();

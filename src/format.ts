@@ -925,11 +925,19 @@ function isTopLevelTaskLine(line: string): boolean {
   return TASK_LINE_RE.test(line);
 }
 
-function splitSourceRefs(value: string): string[] {
+/**
+ * 一个字段里的多个 `文件.md#标题` 引用：分号总是分隔；逗号、顿号只在紧跟下一个
+ * `文件.md#` 时分隔，标题自身的逗号与同文档多个 ID 锚点保持原样。
+ */
+function splitDocumentRefs(value: string): string[] {
   return value
-    .split(/[；;]/)
+    .split(/[；;]|[,，、]\s*(?=[^\s#,，、；;]+\.md#)/)
     .map(item => item.trim())
     .filter(Boolean);
+}
+
+function designRefs(contract: ExecutionContract): string[] {
+  return contract.design ? splitDocumentRefs(contract.design) : [];
 }
 
 function parseTestIds(value: string): { ids: string[]; ok: boolean } {
@@ -983,7 +991,7 @@ function parseExecutionRequirementBlock(lines: string[], task: ParsedTask, heade
         if (!parsed.ok) errors.push(`${task.taskId} 的测试字段没有可解析的 TEST ID`);
         contract.tests = parsed.ids;
       } else if (key === "source") {
-        contract.source = splitSourceRefs(value);
+        contract.source = splitDocumentRefs(value);
       } else {
         contract[key] = value || null;
       }
@@ -1153,8 +1161,10 @@ function isQualifiedDocumentRef(value: string): boolean {
 
 function executionRequirementReferenceErrors(contract: ParsedExecutionRequirement): string[] {
   const errors: string[] = [];
-  if (contract.contract.design && !isQualifiedDocumentRef(contract.contract.design)) {
-    errors.push(`${contract.taskId} 的设计必须使用 文件.md#标题 的可定位引用`);
+  for (const design of designRefs(contract.contract)) {
+    if (!isQualifiedDocumentRef(design)) {
+      errors.push(`${contract.taskId} 的设计必须使用 文件.md#标题 的可定位引用：${design}`);
+    }
   }
   for (const source of contract.contract.source) {
     if (!isQualifiedDocumentRef(source)) {
@@ -1236,7 +1246,7 @@ export function validateExecutionRequirementDocumentReferences(
   const realRoot = realpathSync(root);
   const errors: string[] = [];
   for (const contract of contracts) {
-    const refs = [contract.contract.design, ...contract.contract.source].filter((value): value is string => Boolean(value));
+    const refs = [...designRefs(contract.contract), ...contract.contract.source];
     for (const ref of refs) {
       const parsed = parseQualifiedDocumentRef(ref);
       if (!parsed) continue; // 语法错误由 executionRequirementReferenceErrors 报告。

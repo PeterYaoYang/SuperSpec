@@ -4,7 +4,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync, readdirSync, symlinkSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { tmpdir } from "node:os";
 
 import { ensureChangeLayout, readEvents, appendEvent, makeEvent, rawFile, sha256File, sha256Text, docRef } from "../src/store.ts";
@@ -2078,6 +2078,48 @@ test("packet argv 字段保留包含空格和括号的 change/job token", () => 
   }
 });
 
+test("explore 审查拒绝：next 交出拒绝与提问通道，问题写进待确认问题后由 next 正式提问", () => {
+  const fx = setupPropose();
+  try {
+    writeFileSync(join(fx.projectRoot, ".superspec", "config.json"), JSON.stringify({ workflow: { mode: "strict" } }));
+    const jobId = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "strict").created_jobs[0];
+    assert.equal(recordJobSubmitContent(
+      fx.projectRoot,
+      fx.change,
+      fx.changeRoot,
+      jobId,
+      failedReviewerReportForJob(fx.projectRoot, fx.change, jobId, "DISC-ASK-001"),
+    ).accepted, false);
+
+    const rejected = next(fx.projectRoot, fx.change, fx.changeRoot, "strict");
+    assert.equal(rejected.path, "review_rejected");
+    assert.equal(rejected.stop_allowed, false);
+    const rejection = rejected.review_rejection as {
+      job_id: string;
+      allowed_actions: string[];
+      ask_user_via: { materials: string[]; resume_argv: string[] };
+    };
+    assert.equal(rejection.job_id, jobId);
+    assert.deepEqual(rejection.allowed_actions, ["modify_materials", "record_override", "ask_user"]);
+    const discoveryPath = join(fx.changeRoot, ".superspec", "artifacts", "discovery.md");
+    assert.deepEqual(rejection.ask_user_via.materials, [relative(fx.projectRoot, discoveryPath)]);
+    assert.deepEqual(rejection.ask_user_via.resume_argv, ["superspec", "transition", "next", "--change", fx.change]);
+
+    const blocked = transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "strict");
+    assert.deepEqual(
+      (blocked.details?.review_rejection as { ask_user_via?: unknown })?.ask_user_via,
+      rejection.ask_user_via,
+    );
+
+    writeFileSync(discoveryPath, `${readFileSync(discoveryPath, "utf8")}\n## 待确认问题\n- [ ] Q-001 49ms 显示为 0.0s 还是 0.1s？\n`);
+    const asked = next(fx.projectRoot, fx.change, fx.changeRoot, "strict");
+    assert.equal(asked.path, "ask_user");
+    assert.match(asked.ask_user.scope, /^explore_open_question:/);
+  } finally {
+    fx.cleanup();
+  }
+});
+
 test("explore review override：fresh rejected 稳定 blocked，整体裁决后 gate 满足", () => {
   const fx = setupPropose();
   try {
@@ -3071,6 +3113,11 @@ test("propose review override：只裁决 rejected 角色，其他角色仍须 a
     assert.equal(blocked.outcome, "blocked");
     assert.equal(Object.hasOwn(blocked, "required_jobs"), false);
     assert.equal((blocked.details?.review_rejection as { job_id?: string })?.job_id, architectJobId);
+    const proposeNext = next(fx.projectRoot, fx.change, fx.changeRoot, "strict");
+    assert.equal(proposeNext.path, "review_rejected");
+    const proposeRejection = proposeNext.review_rejection as { job_id: string; ask_user_via: { materials: string[] } };
+    assert.equal(proposeRejection.job_id, architectJobId);
+    assert.ok(proposeRejection.ask_user_via.materials.includes(relative(fx.projectRoot, join(fx.changeRoot, "design.md"))));
 
     assert.equal(recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({
       scope: `review_rejection_override:${architectJobId}`,

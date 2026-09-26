@@ -25,6 +25,29 @@ export function changeDir(projectRoot: string, change: string): string {
   return join(engineRoot(projectRoot), "changes", change);
 }
 
+function looksLikeProjectRoot(dir: string): boolean {
+  return existsSync(join(dir, "openspec"))
+    || existsSync(join(dir, ".superspec", "config.json"))
+    || existsSync(join(dir, ".superspec", "changes"));
+}
+
+/**
+ * cwd 位于某个 SuperSpec 项目内部（如 change 目录）而不是项目根时返回该项目根。
+ * 引擎状态与 next 返回的路径都以项目根为基准，在子目录执行会另起一套状态。
+ * 向上查找止于 git 仓库根，不越出当前仓库。
+ */
+export function enclosingProjectRoot(cwd: string): string | null {
+  if (looksLikeProjectRoot(cwd)) return null;
+  let dir = cwd;
+  while (!existsSync(join(dir, ".git"))) {
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+    if (looksLikeProjectRoot(dir)) return dir;
+  }
+  return null;
+}
+
 export function eventsFile(projectRoot: string, change: string): string {
   return join(changeDir(projectRoot, change), "events.jsonl");
 }

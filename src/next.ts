@@ -147,6 +147,13 @@ function toNextOutput(change: string, plan: NextStepPlan): NextOutput {
         selection: plan.selection,
         reason: plan.reason,
       };
+    case "review_rejected":
+      return {
+        state: plan.state,
+        path: "review_rejected",
+        review_rejection: plan.review_rejection,
+        reason: plan.reason,
+      };
     case "run_transition": {
       const findingContext = plan.reopen?.reason === "review_fix" ? plan.reopen.findingContext : undefined;
       return {

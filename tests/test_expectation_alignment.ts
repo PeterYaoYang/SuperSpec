@@ -340,6 +340,39 @@ test("执行依据：同一文档的多个 CHAIN/IDC 锚点分别解析，discov
   }
 });
 
+test("执行依据：设计与来源用逗号列出的多个文档引用逐个校验", () => {
+  const tasks = [
+    "# Tasks",
+    "",
+    "- [ ] TASK-001 Resolve listed references",
+    "  执行依据:",
+    "  - 测试:",
+    "  - 设计: design.md#金额格式化：`src/money.js` 的十进制 half-up, design.md#货币精度, design.md#消费者接入",
+    "  - 来源: proposal.md#Impact，specs/money/spec.md#Requirement: 金额舍入, 小数位",
+    "  - 验收: 可检查的结果",
+    "  - 边界: 不改持久化",
+  ].join("\n");
+  const fx = setupChange(tasks);
+  try {
+    writeFileSync(join(fx.changeRoot, "design.md"), "# Design\n\n## 金额格式化：`src/money.js` 的十进制 half-up\n\n## 货币精度\n\n## 消费者接入\n");
+    writeFileSync(join(fx.changeRoot, "proposal.md"), "# Proposal\n\n## Impact\n");
+    mkdirSync(join(fx.changeRoot, "specs", "money"), { recursive: true });
+    writeFileSync(join(fx.changeRoot, "specs", "money", "spec.md"), "# Spec\n\n### Requirement: 金额舍入, 小数位\n");
+    assert.deepEqual(validateExecutionRequirements(tasks, null, "green_only", 2).errors, []);
+    assert.deepEqual(
+      validateExecutionRequirementDocumentReferences(fx.changeRoot, parseExecutionRequirements(tasks)),
+      [],
+    );
+
+    writeFileSync(join(fx.changeRoot, "design.md"), "# Design\n\n## 金额格式化：`src/money.js` 的十进制 half-up\n\n## 消费者接入\n");
+    const missing = validateExecutionRequirementDocumentReferences(fx.changeRoot, parseExecutionRequirements(tasks));
+    assert.equal(missing.length, 1);
+    assert.match(missing[0], /引用锚点不存在：design\.md#货币精度；/);
+  } finally {
+    fx.cleanup();
+  }
+});
+
 test("历史 v1 计划：即使项目已初始化 OpenSpec，start-apply 不追加 v2 的 Impact/strict gate", () => {
   const fx = setupChange("# Tasks\n\n- [ ] TASK-001 Historical documentation tdd_required:false no_tdd_reason:documentation-only\n");
   try {

@@ -158,6 +158,7 @@ export type NextStepPlan =
   | { kind: "material_update_required"; state: State; errors: string[]; reason: string }
   | { kind: "mode_selection_required"; state: State; selection: WorkflowModeSelectionAction; reason: string }
   | { kind: "run_transition"; state: State; transition: TransitionName; reason: string; risk?: ReviewRisk; taskId?: string; reopen?: ReopenNextStep }
+  | { kind: "review_rejected"; state: State; review_rejection: Record<string, unknown>; reason: string }
   | {
       kind: "done";
       state: State;
@@ -189,6 +190,14 @@ export interface ApplyPendingTaskStatus {
 }
 
 type ReviewGatePlanResult = Extract<TransitionDecisionPlan, { kind: "blocked" | "create_gate_jobs" }>;
+
+/** 审查已拒绝时，next 直接交出拒绝内容与可选处理，而不是返回一条必然被阻断的 transition。 */
+function reviewRejectionStep(state: State, plan: TransitionDecisionPlan | null): NextStepPlan | null {
+  if (plan?.kind !== "blocked") return null;
+  const rejection = plan.details?.review_rejection;
+  if (!rejection || typeof rejection !== "object") return null;
+  return { kind: "review_rejected", state, review_rejection: rejection as Record<string, unknown>, reason: plan.reason };
+}
 
 function requiredJobs(state: State, jobs: Job[], reason: string): NextStepPlan {
   return { kind: "required_jobs", state, jobs, reason };
@@ -354,7 +363,31 @@ function phaseConfirmationStep(
   };
 }
 
+/**
+ * 审查拒绝涉及业务决定时向用户提问的正式通道：问题写进当前阶段由 next 负责提问的
+ * 待确认段落。只有 Explore 与 Propose 会从材料中取出问题交给用户，其它状态不提供。
+ */
+function reviewRejectionQuestionChannel(
+  projectRoot: string,
+  changeRoot: string,
+  snapshot: Snapshot,
+  gate: ReviewGateRule,
+): Record<string, unknown> | null {
+  const channel = snapshot.state === "explore" && gate === EXPLORE_DISCOVERY_REVIEW_GATE
+    ? { materials: [".superspec/artifacts/discovery.md"], section: "## 待确认问题" }
+    : snapshot.state === "propose" && gate === PROPOSE_FINAL_REVIEW_GATE
+      ? { materials: ["proposal.md", "design.md", ".superspec/artifacts/test-contract.md"], section: "## 待用户确认" }
+      : null;
+  if (!channel) return null;
+  return {
+    materials: channel.materials.map(path => relative(projectRoot, join(changeRoot, path))),
+    section: channel.section,
+    resume_argv: ["superspec", "transition", "next", "--change", snapshot.change_id],
+  };
+}
+
 function reviewGatePlan(
+  projectRoot: string,
   snapshot: Snapshot,
   events: Event[],
   changeRoot: string,
@@ -373,10 +406,11 @@ function reviewGatePlan(
     if (resolution.kind === "rejected_pending") {
       const terminal = resolution.terminal;
       const overrideScope = reviewRejectionOverrideScope(terminal.job.job_id);
+      const askUserVia = reviewRejectionQuestionChannel(projectRoot, changeRoot, snapshot, gate);
       return {
         kind: "blocked",
         jobs: [],
-        reason: `状态未推进；${role} 审查工作项 ${terminal.job.job_id} 已拒绝。请修改绑定材料、在整份报告没有有效 blocker 时登记整体裁决，或在涉及业务决定时询问用户`,
+        reason: `状态未推进；${role} 审查工作项 ${terminal.job.job_id} 已拒绝。请修改绑定材料、在整份报告没有有效 blocker 时登记整体裁决，或在涉及业务决定时询问用户${askUserVia ? "：把问题写进 ask_user_via 指定材料的待确认段落，再运行 next 由工作流向用户提问" : ""}`,
         details: {
           review_rejection: {
             job_id: terminal.job.job_id,
@@ -388,6 +422,7 @@ function reviewGatePlan(
             ...terminalReportContent(terminal),
             override_scope: overrideScope,
             allowed_actions: ["modify_materials", "record_override", "ask_user"],
+            ...(askUserVia ? { ask_user_via: askUserVia } : {}),
             record_input: {
               scope: overrideScope,
               answer: "do_not_block",
@@ -1257,7 +1292,10 @@ export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
       }
 
       const requiredRoles = EXPLORE_DISCOVERY_REVIEW_GATE.requiredRolesForRisk(mode.risk);
-      if (!reviewGatePlan(snapshot, events, changeRoot, EXPLORE_DISCOVERY_REVIEW_GATE, requiredRoles)) {
+      const exploreGate = reviewGatePlan(projectRoot, snapshot, events, changeRoot, EXPLORE_DISCOVERY_REVIEW_GATE, requiredRoles);
+      const exploreRejection = reviewRejectionStep("explore", exploreGate);
+      if (exploreRejection) return exploreRejection;
+      if (!exploreGate) {
         const confirmation = phaseConfirmationStep(context, "explore_to_propose", "探索完成，等待用户确认进入计划阶段");
         if (confirmation) return confirmation;
       }
@@ -1369,6 +1407,15 @@ export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
       if (proposalReviewJobs.length > 0) {
         return requiredJobs("propose", proposalReviewJobs, `有 ${proposalReviewJobs.length} 个待完成 proposal 审查工作项`);
       }
+      const proposeRejection = reviewRejectionStep("propose", reviewGatePlan(
+        projectRoot,
+        snapshot,
+        events,
+        changeRoot,
+        PROPOSE_FINAL_REVIEW_GATE,
+        PROPOSE_FINAL_REVIEW_GATE.requiredRolesForRisk(mode.risk),
+      ));
+      if (proposeRejection) return proposeRejection;
 
       return {
         kind: "run_transition",
@@ -1386,6 +1433,8 @@ export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
         return requiredJobs("propose_ready", proposalReviewJobs, `有 ${proposalReviewJobs.length} 个待完成 proposal 审查工作项`);
       }
       const startApplyPlan = planStartApplyTransition(context, false);
+      const startApplyRejection = reviewRejectionStep("propose_ready", startApplyPlan);
+      if (startApplyRejection) return startApplyRejection;
       const planOnlyRepair = isPostApplyPlanOnlyRepair(changeRoot, events);
       if (startApplyPlan.kind === "advance" && !planOnlyRepair) {
         const confirmation = phaseConfirmationStep(context, "propose_to_apply", "计划阶段完成，等待用户确认开始实现");
@@ -1796,7 +1845,7 @@ function planExploreTransition(context: TransitionPlanContext): TransitionDecisi
   }
 
   const requiredRoles = EXPLORE_DISCOVERY_REVIEW_GATE.requiredRolesForRisk(mode.risk);
-  const gatePlan = reviewGatePlan(snapshot, events, changeRoot, EXPLORE_DISCOVERY_REVIEW_GATE, requiredRoles);
+  const gatePlan = reviewGatePlan(projectRoot, snapshot, events, changeRoot, EXPLORE_DISCOVERY_REVIEW_GATE, requiredRoles);
   if (gatePlan) return gatePlan;
 
   const confirmation = phaseConfirmationForBoundary(projectRoot, events, snapshot, "explore_to_propose", mode.risk);
@@ -1855,7 +1904,7 @@ function planProposeReadyTransition(context: TransitionPlanContext): TransitionD
   if (budgetSkip) return { kind: "skip", message: budgetSkip };
 
   const requiredRoles = PROPOSE_FINAL_REVIEW_GATE.requiredRolesForRisk(risk);
-  const gatePlan = reviewGatePlan(snapshot, context.events, changeRoot, PROPOSE_FINAL_REVIEW_GATE, requiredRoles);
+  const gatePlan = reviewGatePlan(context.projectRoot, snapshot, context.events, changeRoot, PROPOSE_FINAL_REVIEW_GATE, requiredRoles);
   if (gatePlan) return gatePlan;
 
   return {
@@ -1918,7 +1967,7 @@ function planStartApplyTransition(
   const requiredRoles = executionRequirementVersion === 2
     ? PROPOSE_FINAL_REVIEW_GATE.requiredRolesForRisk(risk)
     : historicalProposeReadyRoles(events);
-  const gatePlan = reviewGatePlan(snapshot, events, changeRoot, PROPOSE_FINAL_REVIEW_GATE, requiredRoles);
+  const gatePlan = reviewGatePlan(projectRoot, snapshot, events, changeRoot, PROPOSE_FINAL_REVIEW_GATE, requiredRoles);
   if (gatePlan) {
     return {
       ...gatePlan,

@@ -103,6 +103,12 @@ export function simulateLoop(
         steps.push(step);
         return { completed: false, steps, finalState: output.state, message: `需要用户确认：${output.ask_user.question}` };
 
+      case "review_rejected":
+        step.action = "handle_review_rejection";
+        step.detail = output.reason;
+        steps.push(step);
+        return { completed: false, steps, finalState: output.state, message: output.reason };
+
       case "mode_selection_required":
         step.action = "select_mode";
         step.detail = output.selection.instruction;

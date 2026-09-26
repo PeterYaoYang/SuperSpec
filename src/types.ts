@@ -616,6 +616,7 @@ export type NextOutput = {
   | { path: "material_update_required"; errors: string[]; resume: MaterialUpdateRequiredResume; reason: string }
   | { path: "mode_selection_required"; selection: WorkflowModeSelectionAction; reason: string }
   | { path: "ask_user"; ask_user: AskUser; reason: string }
+  | { path: "review_rejected"; review_rejection: Record<string, unknown>; reason: string }
   | { path: "done"; reason: string; continuation?: AcceptedMaterialFollowupContinuation }
 );
 
