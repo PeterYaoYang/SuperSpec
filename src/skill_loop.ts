@@ -97,6 +97,12 @@ export function simulateLoop(
           message: `需要修正工作流材料：${output.errors.join("；")}`,
         };
 
+      case "test_rerun_required":
+        step.action = "test_rerun";
+        step.detail = output.test_reruns.map(action => action.test_id).join(", ");
+        steps.push(step);
+        return { completed: false, steps, finalState: output.state, message: output.reason };
+
       case "ask_user":
         step.action = "ask";
         step.detail = output.ask_user.question;

@@ -64,17 +64,21 @@ function parseFlags(args: string[]): Record<string, string> {
 }
 
 class StdinRecordInputError extends Error {
-  constructor(flag: "--input" | "--report") {
-    super(`${flag} - 需要通过 pipe 或重定向提供 JSON；不方便时请使用文件路径。`);
+  constructor(message: string) {
+    super(message);
     this.name = "StdinRecordInputError";
   }
 }
 
 function readStdinRecordContent(flag: "--input" | "--report"): string {
   if (process.stdin.isTTY === true) {
-    throw new StdinRecordInputError(flag);
+    throw new StdinRecordInputError(`${flag} - 需要通过 pipe 或重定向提供 JSON；不方便时请使用文件路径。`);
   }
-  return decodeRecordInput(readFileSync(0));
+  const content = decodeRecordInput(readFileSync(0));
+  if (content.trim() === "") {
+    throw new StdinRecordInputError(`${flag} - 从 stdin 读到的内容为空，未登记任何记录；请确认 JSON 确实通过 pipe 或 heredoc 传给了这条命令，或改用文件路径。`);
+  }
+  return content;
 }
 
 function transitionExitCode(result: TransitionResult): number {

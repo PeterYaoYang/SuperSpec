@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { sha256Text, ensureChangeLayout, appendEvent, makeEvent, withLock, appendRawRecord, readEvents } from "./store.ts";
 import { tasksStructureDigest as formatDigest } from "./format.ts";
 import { RecordInputDecodingError, readRecordInputFile } from "./record_input.ts";
+import { currentCodeStateFingerprint } from "./code_review.ts";
+import { completedAttemptGreenPlan, testEvidenceFreshness, type CompletedAttemptGreenPlan } from "./test_freshness.ts";
 import { GREEN_ONLY_NO_TDD_REASON, type Event, type TaskAttempt, type TestRun } from "./types.ts";
 
 /** tasks.md 结构指纹（委托给 format.ts 统一实现） */
@@ -30,17 +32,27 @@ function recordTestRunLoaded(
   const events = readEvents(projectRoot, change);
   const attemptRecord = typeof tr.attempt_id === "string" ? attemptById(events, tr.attempt_id) : null;
   const activeAttempt = attemptRecord?.state === "active" ? attemptRecord.attempt : null;
-  if (attemptRecord?.attempt.contract_mode === true && attemptRecord.state !== "active") {
-    return { accepted: false, message: "契约测试证据只能登记到当前活跃任务尝试（attempt_id）" };
-  }
-  if (!activeAttempt && activeContractAttemptExists(events)) {
-    return { accepted: false, message: "契约测试证据必须带当前活跃任务尝试 ID（attempt_id）" };
-  }
-  if (activeAttempt?.contract_mode === true) {
-    const contractCheck = validateContractTestRunInput(tr, activeAttempt);
-    if (!contractCheck.ok) return { accepted: false, message: contractCheck.message };
-  } else if (!tr.test_id || !tr.task_structure_digest) {
-    return { accepted: false, message: "缺少测试 ID（test_id）或历史任务结构指纹（task_structure_digest）" };
+  // 任务完成后代码又被修改时，需要对当前代码重跑已完成尝试的 GREEN；有活跃尝试时证据仍归当前尝试。
+  const rerunPlan = attemptRecord?.state === "completed" && attemptRecord.attempt.contract_mode === true && !activeAttemptExists(events)
+    ? completedAttemptGreenPlan(attemptRecord.attempt)
+    : null;
+  const rerunAttempt = rerunPlan ? attemptRecord!.attempt : null;
+  if (rerunAttempt && rerunPlan) {
+    const rerunCheck = validatePostCompletionRerunInput(projectRoot, events, tr, rerunAttempt, rerunPlan);
+    if (!rerunCheck.ok) return { accepted: false, message: rerunCheck.message };
+  } else {
+    if (attemptRecord?.attempt.contract_mode === true && attemptRecord.state !== "active") {
+      return { accepted: false, message: "契约测试证据只能登记到当前活跃任务尝试（attempt_id）" };
+    }
+    if (!activeAttempt && activeContractAttemptExists(events)) {
+      return { accepted: false, message: "契约测试证据必须带当前活跃任务尝试 ID（attempt_id）" };
+    }
+    if (activeAttempt?.contract_mode === true) {
+      const contractCheck = validateContractTestRunInput(tr, activeAttempt);
+      if (!contractCheck.ok) return { accepted: false, message: contractCheck.message };
+    } else if (!tr.test_id || !tr.task_structure_digest) {
+      return { accepted: false, message: "缺少测试 ID（test_id）或历史任务结构指纹（task_structure_digest）" };
+    }
   }
 
   let coversTaskIds: string[] | undefined;
@@ -62,7 +74,7 @@ function recordTestRunLoaded(
 
   const normalizedTestRun = {
     test_id: tr.test_id,
-    task_structure_digest: tr.task_structure_digest ?? activeAttempt?.task_structure_digest ?? "",
+    task_structure_digest: tr.task_structure_digest ?? (activeAttempt ?? rerunAttempt)?.task_structure_digest ?? "",
     attempt_id: tr.attempt_id ?? null,
     ...(coversTaskIds ? { covers_task_ids: coversTaskIds } : {}),
     command: tr.command ?? "",
@@ -75,6 +87,8 @@ function recordTestRunLoaded(
   const rawRef = appendRawRecord(projectRoot, change, "test-runs", normalizedTestRun);
   const event = makeEvent(change, "test_run_recorded", {
     ...normalizedTestRun,
+    code_state_digest: currentCodeStateFingerprint(projectRoot, events).digest,
+    ...(rerunAttempt ? { rerun_after_completion: true } : {}),
     ...rawRef,
   });
   appendEvent(projectRoot, change, event);
@@ -98,6 +112,49 @@ function attemptById(events: Event[], attemptId: string): { attempt: TaskAttempt
     }
   }
   return attempts.get(attemptId) ?? null;
+}
+
+function activeAttemptExists(events: Event[]): boolean {
+  const active = new Set<string>();
+  for (const ev of events) {
+    const attemptId = (ev.payload as { attempt_id?: unknown }).attempt_id;
+    if (typeof attemptId !== "string") continue;
+    if (ev.event_type === "task_started") active.add(attemptId);
+    else if (ev.event_type === "task_completed" || ev.event_type === "task_abandoned") active.delete(attemptId);
+  }
+  return active.size > 0;
+}
+
+function validatePostCompletionRerunInput(
+  projectRoot: string,
+  events: Event[],
+  tr: Partial<TestRun>,
+  attempt: TaskAttempt,
+  plan: CompletedAttemptGreenPlan,
+): { ok: true } | { ok: false; message: string } {
+  if (!tr.test_id || !tr.command || !tr.cwd || typeof tr.exit_code !== "number" || !tr.semantic_status) {
+    return { ok: false, message: "测试证据缺少测试 ID（test_id）、命令（command）、工作目录（cwd）、退出码（exit_code）或语义状态（semantic_status）" };
+  }
+  if (plan.test_ids.length > 0 && !plan.test_ids.includes(tr.test_id)) {
+    return { ok: false, message: `测试 ID（test_id=${tr.test_id}）不属于任务 ${attempt.task_id} 契约声明的测试列表` };
+  }
+  const freshness = testEvidenceFreshness(projectRoot, events);
+  const required = !freshness.fresh && freshness.reruns.some(req =>
+    plan.test_ids.length > 0 ? req.test_id === tr.test_id : req.attempt_id === attempt.attempt_id
+  );
+  if (!required) {
+    return { ok: false, message: `任务 ${attempt.task_id} 已完成，已登记的证据仍对应当前代码，无需补登记；契约测试证据只能登记到当前活跃任务尝试（attempt_id）` };
+  }
+  if (tr.semantic_status === "expected_failure") {
+    return { ok: false, message: `任务 ${attempt.task_id} 已完成；完成后只登记对当前代码重跑的 GREEN，不再登记 RED（expected_failure）` };
+  }
+  if (!plan.accepted_green_statuses.includes(tr.semantic_status as CompletedAttemptGreenPlan["accepted_green_statuses"][number])) {
+    return { ok: false, message: `任务 ${attempt.task_id} 的 GREEN 语义状态（semantic_status）只能是 ${plan.accepted_green_statuses.join(" 或 ")}` };
+  }
+  if (tr.exit_code !== 0) {
+    return { ok: false, message: `语义状态（semantic_status=${tr.semantic_status}）要求退出码（exit_code）为 0；测试未通过时先修复代码再重跑` };
+  }
+  return { ok: true };
 }
 
 function activeContractAttemptExists(events: Event[]): boolean {

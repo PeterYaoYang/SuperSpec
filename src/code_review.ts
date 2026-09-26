@@ -314,6 +314,10 @@ export function selectCodeReviewBase(events: Event[]): CodeReviewBase {
     const preexisting = preexistingDirtyFiles(events);
     return preexisting ? { ...reviewed, preexisting_dirty_files: preexisting } : reviewed;
   }
+  return reviewCycleCodeBase(events);
+}
+
+function reviewCycleCodeBase(events: Event[]): CodeReviewBase {
   const baseline = reviewCycleBaseline(events);
   if (baseline) {
     return {
@@ -434,6 +438,34 @@ function scanCodeReviewScopeFromBase(
 
 export function scanCodeReviewScope(projectRoot: string, events: Event[]): CodeReviewScope {
   return scanCodeReviewScopeFromBase(projectRoot, selectCodeReviewBase(events), knownCodeReviewReportPaths(projectRoot, events));
+}
+
+export interface CodeStateFingerprint {
+  digest: string;
+  /** 指纹基线所属审查周期的起点事件；不同周期的指纹基线不同，不能互相比较。 */
+  cycle_start: string | null;
+  files: Ref[];
+}
+
+/**
+ * 与审查进度无关的代码状态指纹：审查周期基线以来改动的代码文件及其内容。
+ * 登记审查结论不会移动基线；提交、暂存等不改变文件内容的操作也不改变指纹。
+ */
+export function currentCodeStateFingerprint(projectRoot: string, events: Event[]): CodeStateFingerprint {
+  const ignored = new Set<string>();
+  for (const ev of events) {
+    if (ev.event_type !== "job_accepted" && ev.event_type !== "job_rejected") continue;
+    const reportPath = (ev.payload as { report_path?: unknown }).report_path;
+    if (typeof reportPath === "string" && reportPath.trim() !== "") ignored.add(normalizeKnownPath(reportPath));
+  }
+  const scope = scanCodeReviewScopeFromBase(projectRoot, reviewCycleCodeBase(events), ignored);
+  const files = codeReviewBoundFiles(projectRoot, scope.review_paths);
+  const startIndex = reviewCycleStartIndex(events);
+  return {
+    digest: sha256Text(JSON.stringify(files)),
+    cycle_start: startIndex >= 0 ? events[startIndex].event_id : null,
+    files,
+  };
 }
 
 export function scanCodeChangesForReview(projectRoot: string, events: Event[]): CodeChangeScan {

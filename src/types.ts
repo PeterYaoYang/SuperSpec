@@ -614,6 +614,7 @@ export type NextOutput = {
   | { path: "required_job"; required_jobs: RequiredJobAction[]; instruction?: string; reason: string }
   | { path: "artifact_required"; artifact: RequiredWorkflowArtifact; resume: ArtifactRequiredResume; reason: string }
   | { path: "material_update_required"; errors: string[]; resume: MaterialUpdateRequiredResume; reason: string }
+  | { path: "test_rerun_required"; test_reruns: TestEvidenceAction[]; changed_paths: string[]; resume: { argv: string[] }; reason: string }
   | { path: "mode_selection_required"; selection: WorkflowModeSelectionAction; reason: string }
   | { path: "ask_user"; ask_user: AskUser; reason: string }
   | { path: "review_rejected"; review_rejection: Record<string, unknown>; reason: string }

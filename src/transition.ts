@@ -42,6 +42,7 @@ import {
   computeCodeStateCheck,
   computeDeliverableDocs,
   currentCodeReviewWorkingPaths,
+  currentCodeStateFingerprint,
   dismissedCodeReviewSummary,
   effectiveCoverageExemptionRefsFromEvents,
   latestCodeReviewGateEvidence,
@@ -55,6 +56,7 @@ import {
   isReviewFixCapReached,
 } from "./code_review.ts";
 import { taskEvidenceReadiness } from "./task_evidence.ts";
+import { staleTestEvidenceMessage, testEvidenceFreshness } from "./test_freshness.ts";
 import { invalidReasonForSnapshot } from "./job_validity.ts";
 import { materialManifest as materialManifestForBound, storeMaterialBlobs } from "./material_snapshot.ts";
 import {
@@ -1783,6 +1785,10 @@ export function reviewReady(projectRoot: string, change: string, changeRoot: str
           commitPayload: policyPayload,
         };
       }
+      if (snapshot.state === "apply_done" || snapshot.state === "review") {
+        const freshness = testEvidenceFreshness(projectRoot, events);
+        if (!freshness.fresh) return { skip: true, message: staleTestEvidenceMessage(freshness) };
+      }
       if (snapshot.state === "apply_done") {
         const blockingJobs = blockingJobsForApplyDone(projectRoot, events, snapshot);
         if (blockingJobs.length > 0) {
@@ -1898,6 +1904,7 @@ export function taskComplete(projectRoot: string, change: string, changeRoot: st
         attempt_id: attempt.attempt_id,
         execution_policy: attempt.execution_policy ?? "tdd",
         ...boundarySnapshotPayload(projectRoot),
+        code_state: currentCodeStateFingerprint(projectRoot, events),
         checkbox_update: { status: "pending" },
         ...(scopeInput.value ? { scope_note: scopeInput.value } : {}),
       };

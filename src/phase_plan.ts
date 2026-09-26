@@ -86,6 +86,7 @@ import {
   type PhaseBoundary,
 } from "./phase_confirmation.ts";
 import { taskEvidenceReadiness } from "./task_evidence.ts";
+import { staleTestEvidenceMessage, testEvidenceFreshness, type TestRerunRequirement } from "./test_freshness.ts";
 import type {
   AcceptedMaterialFollowupContinuation,
   AskUser,
@@ -156,6 +157,7 @@ export type NextStepPlan =
     }
   | { kind: "ask_user"; state: State; ask: AskUser; reason: string }
   | { kind: "material_update_required"; state: State; errors: string[]; reason: string }
+  | { kind: "test_rerun_required"; state: State; reruns: TestRerunRequirement[]; changedPaths: string[]; reason: string }
   | { kind: "mode_selection_required"; state: State; selection: WorkflowModeSelectionAction; reason: string }
   | { kind: "run_transition"; state: State; transition: TransitionName; reason: string; risk?: ReviewRisk; taskId?: string; reopen?: ReopenNextStep }
   | { kind: "review_rejected"; state: State; review_rejection: Record<string, unknown>; reason: string }
@@ -1569,6 +1571,18 @@ export function blockingJobsForApplyDone(
   );
 }
 
+function staleTestEvidenceStep(state: State, projectRoot: string, events: Event[]): NextStepPlan | null {
+  const freshness = testEvidenceFreshness(projectRoot, events);
+  if (freshness.fresh) return null;
+  return {
+    kind: "test_rerun_required",
+    state,
+    reruns: freshness.reruns,
+    changedPaths: freshness.changed_paths,
+    reason: staleTestEvidenceMessage(freshness),
+  };
+}
+
 function planApplyDoneNext(context: PhasePlanContext): NextStepPlan {
   const { change, changeRoot, events, mode, snapshot } = context;
   const pendingTasks = pendingTaskStatusForApply(changeRoot, events).pending;
@@ -1581,6 +1595,8 @@ function planApplyDoneNext(context: PhasePlanContext): NextStepPlan {
       reason: `发现未完成任务 ${pendingTasks[0]}，回到执行阶段`,
     };
   }
+  const staleEvidence = staleTestEvidenceStep("apply_done", context.projectRoot, events);
+  if (staleEvidence) return staleEvidence;
 
   const facts = collectCodeReviewGateFacts(events);
   const currentWorkingPaths = currentCodeReviewWorkingPaths(context.projectRoot, events);
@@ -1743,6 +1759,8 @@ function planReviewNext(context: PhasePlanContext): NextStepPlan {
       reason: `发现未完成任务 ${pending[0]}，回到执行阶段`,
     };
   }
+  const staleEvidence = staleTestEvidenceStep("review", projectRoot, events);
+  if (staleEvidence) return staleEvidence;
 
   const reviewVerifierJobs = snapshot.open_jobs.filter(isReviewReadyVerifier);
   if (reviewVerifierJobs.length > 0) {
@@ -2022,6 +2040,8 @@ function planAcceptTransition(context: TransitionPlanContext): TransitionDecisio
 
   const policy = readReviewPolicyFromEvents(events);
   if (!policy) return { kind: "skip", message: "缺少审查策略，请先运行 review-ready" };
+  const freshness = testEvidenceFreshness(projectRoot, events);
+  if (!freshness.fresh) return { kind: "skip", message: staleTestEvidenceMessage(freshness) };
 
   if (requiresFinalVerifierForCurrentReview(events) || policy.requires_verifier) {
     const currentEvidenceDigest = reviewEvidenceDigest(events);
