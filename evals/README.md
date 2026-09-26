@@ -202,14 +202,13 @@ node evals/regression.mjs \
 
 ## 动态模拟用户
 
-`session_mode: "dynamic_user"` 的场景不会预写固定恢复轮数。每个 Worker 回合结束后，Director 只读检查 Worker 最后一次直接执行的工作流输出，并由模拟用户答复后继续：
+`session_mode: "dynamic_user"` 的场景不会预写固定恢复轮数。每个 Worker 回合结束后，Director 只读检查本轮**最后一条**工作流命令给出的 `next`/`accept` 输出；之后又执行了工作流命令的输出视为过期。没有新鲜边界时，Runner 只读工作流快照，看到 `accepted`/`archive`/`abandoned` 且没有未完成工作项就停止。其余情况：
 
-- 自动确认已授权的阶段确认；
-- 使用场景明确配置的事实回答问题；
-- `simulated_user.mode` 为 `ai` 时，其余问题交给独立模拟用户：已知事实覆盖问题时按事实回答，候选都不符合时直接说明期望结果；事实没有覆盖时才参考工作流推荐、公开需求和用户人设，持续推进到终态。场景显式设置 `follow_workflow_recommendation: true` 时，唯一明确推荐项由策略层直接采用；
-- 非 `ai` 模式下，工作流存在唯一明确推荐项时由策略层采用该推荐，`follow_workflow_recommendation: false` 可以关闭；
+- `simulated_user.mode` 为 `ai` 时，正式提问、阶段确认和 Worker 最后一条对用户说的话都交给独立模拟用户：已知事实覆盖问题时按事实回答，候选都不符合时直接说明期望结果，不因为是确认环节或工作流给了推荐就直接放行；事实没有覆盖时才参考工作流推荐、公开需求和用户人设，持续推进到终态。场景显式设置 `follow_workflow_recommendation: true` 时，唯一明确推荐项由策略层直接采用；
+- 非 `ai` 模式下，工作流存在唯一明确推荐项时由策略层采用该推荐，`follow_workflow_recommendation: false` 可以关闭；阶段确认仍可由策略层按 `auto_confirm_scope_prefixes` 放行；
 - 只有专门验证真实人工停止的场景显式设置 `advance_until_terminal: false`，才允许返回 `needs_human`；
 - 非用户动作只要求 Worker 继续使用当前 Skill 和公开 CLI，不替 Worker 推进状态。
+- 工作区路径写成 `cd <工作区> && superspec …` 的单条规范命令视为直接边界；CLI 拒绝的未知子命令和 `--help` 不算禁用命令违规。
 
 动态运行只会在以下情况停止：
 
@@ -219,7 +218,7 @@ node evals/regression.mjs \
 - Worker 失败或会话无法恢复；
 - 达到 `budget.max_worker_turns`。
 
-当 `simulated_user.mode` 为 `ai` 时，每次用户决策使用一个新的隔离 Codex 会话。该会话无法访问 Worker 工作区，只能看到公开需求、用户人设、已知事实和本轮问题及可选答复；工作流写给主流程的 scope 和登记说明不会展示给它。返回答案必须属于工作流的 `allowed_answers`。
+当 `simulated_user.mode` 为 `ai` 时，每次用户决策使用一个新的隔离会话。该会话无法访问 Worker 工作区，只能看到公开需求、用户人设、已知事实、本轮问题及可选答复，以及 Worker 对用户说的话；工作流写给主流程的 scope 和登记说明不会展示给它。`allowed_answers` 非空时返回答案必须属于其中一项，需要补充说明时写在 `note`。
 
 ## 真实项目评测
 
@@ -263,11 +262,13 @@ Runner 不继承其他用户配置。Provider URL 必须是不包含凭据、查
 
 每次 Probe 都会：
 
-- 创建新的工作区、`HOME`、`CODEX_HOME` 和 `ZDOTDIR`；
-- 使用 `workspace-write`、`approval_policy=never` 和受控 PATH；
+- 创建新的工作区、`HOME`、宿主配置目录和 `ZDOTDIR`；
+- 使用受控 PATH；Codex 为 `workspace-write` + `approval_policy=never`，Claude 为沙箱写入 + `bypassPermissions`，OMP 关闭逐行输出截断（`tools.outputMaxColumns: 0`）；
 - 仅安装当前构建出的 SuperSpec 包副本；
 - 忽略用户 skills、agents、prompts、hooks、rules、history 和无关配置；
 - 在运行结束后删除临时认证目录。
+
+`manifest.launch.model` 记录请求的模型别名；宿主 trace 里出现的实际模型写入 `observed_models`，只有一个时同时写入 `actual_model`。
 
 `multi_agent` 默认启用，使隔离 Worker 与真实 Codex 默认能力一致，并在 manifest 中记录。只有专门验证能力降级行为的场景才可显式设置 `fixture.enable_multi_agent: false`；普通工作流 Eval 不得关闭。
 
@@ -312,7 +313,7 @@ Probe 的核心门禁包括：
 | `state` | 事件链与快照是否能重放到目标状态 |
 | `stop_boundary` | Worker 是否在正确边界继续或停止 |
 
-`controlled_environment` 只把评测有效性和凭据相关的访问判为违规。命令点名敏感环境变量（宿主和 Provider 声明的凭据变量、`CODEX_HOME` 等受控目录变量、`ZDOTDIR`）或引用 `~` 时判违规；`printenv TMPDIR`、`env | grep …` 这类普通环境读取记为观察，只有命令输出中出现凭据变量时才判违规。复合命令中的路径按该段实际所在目录解析：`cd` 的目标只算进入目录，之后的相对路径和搜索目标按新目录判断，所以 `cd <运行根> && grep -rn … package/dist/` 不算越界，`cd <运行根> && grep -rn … evidence/` 仍判违规。
+`controlled_environment` 只把评测有效性和凭据相关的访问判为违规。命令点名敏感环境变量（宿主和 Provider 声明的凭据变量、`CODEX_HOME` 等受控目录变量、`ZDOTDIR`）或引用 `~` 时判违规；`printenv TMPDIR`、`env | grep …` 这类普通环境读取记为观察，只有命令输出中出现凭据变量时才判违规。列出受控宿主目录、以及读取宿主声明的本次会话产物（例如 OMP 的 `artifact://` 溢出文件）记为观察，读取受控 home 里的凭据或配置仍判违规。复合命令中的路径按该段实际所在目录解析：`cd` 的目标只算进入目录，之后的相对路径和搜索目标按新目录判断，所以 `cd <运行根> && grep -rn … package/dist/` 不算越界，`cd <运行根> && grep -rn … evidence/` 仍判违规。
 
 真实性判定只接受 Codex JSONL 中直接观察到的已完成命令。命令必须使用受控 PATH 解析的 `superspec`，或者运行本地 shim/realpath。自然语言自报、伪造的命令文本、任意 shell 串联和无法确认执行身份的调用都不算证据。
 
@@ -359,7 +360,7 @@ Reviewer 对每条隐藏事实给出一档可见性，衡量的是工作流有�
 | `invisible` | 工作流做了相关决定，用户在任何交互中都看不到 |
 | `no_decision_needed` | 公开需求或仓库事实已经确定，或本次结果不涉及该事实 |
 
-只有 `invisible` 算工作流失分。答复由策略层还是 AI 模拟用户给出、是否正确，不改变档位。两名 Reviewer 意见不一致时取更差的一档并标记分歧，有有效证据的意见优先。每条事实还会记录最终材料或代码与事实是否一致（`result`），只作观察，不参与判定。
+只有 `invisible` 且 `result` 为 `inconsistent` 或 `unclear` 算工作流失分；`invisible` 且结果一致只记观察。答复由策略层还是 AI 模拟用户给出、是否正确，不改变档位。两名 Reviewer 意见不一致时，优先采信引用了 `user-turn` 的可见性判断，并标记分歧；没有这类证据时，有有效证据的意见优先，再取更差的一档。每条事实还会记录最终材料或代码与事实是否一致（`result`）。
 
 ## 结果状态
 
@@ -378,8 +379,8 @@ Probe 不评价最终业务内容质量，`semantic_quality` 保持 `ungraded`�
 
 | 状态 | 含义 |
 |---|---|
-| `DONE` | 硬结果真实完成，语义审查未提出问题，且没有隐藏事实落在 `invisible` |
-| `DONE_BUT_FLAWED` | 硬结果真实完成，但 Reviewer 提出问题或优化建议，或有隐藏事实落在 `invisible` |
+| `DONE` | 硬结果真实完成，语义审查未提出问题，且没有隐藏事实落在“用户看不到且结果不一致或说不清” |
+| `DONE_BUT_FLAWED` | 硬结果真实完成，但 Reviewer 提出问题或优化建议，或有隐藏事实落在“用户看不到且结果不一致或说不清” |
 | `NOT_DONE` | 未达到 Task 声明的目标状态或产物要求 |
 | `NEEDS_HUMAN` | 工作流遇到模拟用户无权决定的真实问题 |
 | `INVALID` | 真实性、隔离或硬门禁证据失败 |

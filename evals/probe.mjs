@@ -377,9 +377,29 @@ function executableAllowed(value, identities, bareResolutionProven = false) {
   return resolved != null && identities.some(identity => resolved === identity);
 }
 
+function sameHostDirectory(left, right) {
+  const comparable = path => {
+    const resolved = resolve(path);
+    return (safeRealpath(resolved) ?? resolved).replace(/^\/private(?=\/(?:var|tmp|etc)\/)/, "");
+  };
+  return comparable(left) === comparable(right);
+}
+
+/**
+ * Claude/OMP 常把 CLI 调用写成 `cd <工作区> && superspec …`。只有 cd 目标就是受控
+ * 工作区时才剥掉前缀，剩余部分仍须是单条规范 superspec 命令。
+ */
+function workspaceCdStripped(commandText, workspace) {
+  if (typeof workspace !== "string") return null;
+  const match = commandText.match(/^\s*cd\s+(?:'([^']+)'|"([^"]+)"|([^\s;&|'"]+))\s*(?:&&|;)\s*([^\n\r]+)$/);
+  if (!match) return null;
+  return sameHostDirectory(match[1] ?? match[2] ?? match[3], workspace) ? match[4].trim() : null;
+}
+
 function canonicalSuperspecArgv(commandText) {
-  if (!commandText || /(?:&&|\|\||[;|<>\n\r])/.test(commandText)) return null;
-  const trimmed = commandText.trim();
+  const withoutStderrMerge = commandText?.replace(/\s+2>&1\s*$/, "");
+  if (!withoutStderrMerge || /(?:&&|\|\||[;|<>\n\r])/.test(withoutStderrMerge)) return null;
+  const trimmed = withoutStderrMerge.trim();
   const transition = trimmed.match(/^superspec\s+transition\s+(next|explore|propose-ready|start-apply|review-ready|accept)\s+--change\s+(?:'([^']+)'|"([^"]+)"|([A-Za-z0-9._-]+))$/);
   const taskTransition = trimmed.match(/^superspec\s+transition\s+(task-start|task-complete)\s+--change\s+(?:'([^']+)'|"([^"]+)"|([A-Za-z0-9._-]+))\s+--task\s+(?:'([^']+)'|"([^"]+)"|([A-Za-z0-9._-]+))$/);
   const status = trimmed.match(/^superspec\s+status\s+--change\s+(?:'([^']+)'|"([^"]+)"|([A-Za-z0-9._-]+))$/);
@@ -399,13 +419,16 @@ function canonicalSuperspecArgv(commandText) {
   return ["superspec", "status", "--change", change];
 }
 
-function boundedShellCommand(raw) {
+function boundedShellCommand(raw, workspace) {
+  let inner = null;
   let match = raw.match(/^\/bin\/zsh\s+-lc\s+'([^']*)'$/s);
-  if (match) return canonicalSuperspecArgv(match[1]);
-  match = raw.match(/^\/bin\/zsh\s+-lc\s+"((?:[^"\\]|\\.)*)"$/s);
-  if (!match) return null;
-  const inner = match[1].replace(/\\(["\\])/g, "$1");
-  return canonicalSuperspecArgv(inner);
+  if (match) inner = match[1];
+  else {
+    match = raw.match(/^\/bin\/zsh\s+-lc\s+"((?:[^"\\]|\\.)*)"$/s);
+    if (!match) return null;
+    inner = match[1].replace(/\\(["\\])/g, "$1");
+  }
+  return canonicalSuperspecArgv(workspaceCdStripped(inner, workspace) ?? inner);
 }
 
 /** Classifies one normalized command event as grading evidence. */
@@ -421,14 +444,19 @@ function exactCommand(command, workspace, executableIdentities = [], bareResolut
       ? command.command
       : null;
   let parsedArgv = null;
+  let cdIntoWorkspace = false;
   if (argv && argv.every(value => typeof value === "string")) {
     parsedArgv = argv;
   } else if (typeof command.command === "string") {
     const raw = command.command.trim();
-    const bounded = boundedShellCommand(raw);
-    const canonical = canonicalSuperspecArgv(raw);
+    const bounded = boundedShellCommand(raw, workspace);
+    const stripped = workspaceCdStripped(raw, workspace);
+    const canonical = canonicalSuperspecArgv(stripped ?? raw);
     if (bounded) parsedArgv = bounded;
-    else if (canonical) parsedArgv = canonical;
+    else if (canonical) {
+      parsedArgv = canonical;
+      cdIntoWorkspace = stripped != null;
+    }
     else if (/^(?:(?:\/usr)?\/bin\/(?:zsh|sh|bash)|zsh|sh|bash)\s+-[a-z]*c\b/.test(raw)) {
       return { kind: "shell_wrapper", raw, status, exitCode, output };
     }
@@ -445,18 +473,20 @@ function exactCommand(command, workspace, executableIdentities = [], bareResolut
   // Hosts whose shell tool never records cwd (Claude/OMP Bash) declare that
   // commands run in the controlled Worker launch cwd; others must record it
   // unless the bounded login-zsh wrapper proves the launch cwd.
-  const effectiveCwd = typeof cwd === "string"
-    ? cwd
-    : boundedShellCommand(command.command ?? "") || (inheritLaunchCwd && parsedArgv)
-      ? workspace
-      : null;
+  const effectiveCwd = cdIntoWorkspace
+    ? workspace
+    : typeof cwd === "string"
+      ? cwd
+      : boundedShellCommand(command.command ?? "", workspace) || (inheritLaunchCwd && parsedArgv)
+        ? workspace
+        : null;
   if (effectiveCwd == null) return { kind: "missing_cwd", argv: parsedArgv, output };
   if (resolve(effectiveCwd) !== resolve(workspace)) return { kind: "wrong_cwd", argv: parsedArgv, cwd: effectiveCwd, output };
   return {
     kind: "direct",
     argv: parsedArgv,
     executable_allowed: executableAllowed(parsedArgv[0], executableIdentities, bareResolutionProven),
-    cwd_source: typeof cwd === "string" ? "event" : "controlled_worker_launch",
+    cwd_source: cdIntoWorkspace ? "workspace_cd" : typeof cwd === "string" ? "event" : "controlled_worker_launch",
     raw: typeof command.command === "string" ? command.command : undefined,
     output,
   };
@@ -585,11 +615,51 @@ function observedWorkflowBoundary(trace) {
     if (typeof item.raw !== "string") return false;
     return /(?:^|[;&|\n]\s*)superspec\s+transition\s+(?:next|accept)\b/.test(unwrapCommandForPolicy(item.raw));
   };
+  const isWorkflowCommand = item => Array.isArray(item.argv)
+    ? item.argv[0] === "superspec" || item.executable_allowed === true
+    : typeof item.raw === "string" && /(?:^|[;&|\n]\s*)superspec\s+\S/.test(unwrapCommandForPolicy(item.raw));
   const candidates = Array.isArray(trace.commands) && trace.commands.length > 0 ? trace.commands : trace.direct;
-  const command = [...candidates].reverse().find(item => isDirectBoundary(item) || isShellBoundary(item));
-  if (!command) return null;
+  const index = candidates.findLastIndex(item => isDirectBoundary(item) || isShellBoundary(item));
+  if (index < 0) return null;
+  const command = candidates[index];
   const output = parseLastJson(command.output);
-  return { command, output, observation: isDirectBoundary(command) ? "direct" : "completed_shell_command" };
+  // 之后又执行了工作流命令时，这次 next/accept 的输出已不代表本轮结束时的边界。
+  const fresh = !candidates.slice(index + 1).some(isWorkflowCommand);
+  return { command, output, fresh, observation: isDirectBoundary(command) ? "direct" : "completed_shell_command" };
+}
+
+function runnerObservedTerminal(stop) {
+  return stop?.action === "complete" && stop.source === "runner_state_observation";
+}
+
+/** Host traces may record the backend model separately from the requested --model alias. */
+function collectObservedModels(host, paths) {
+  const models = [];
+  for (const path of paths) {
+    if (typeof path !== "string" || !existsSync(path)) continue;
+    let events = [];
+    try { events = host.parseTrace(path).events ?? []; } catch { continue; }
+    for (const event of events) {
+      if (typeof event.model === "string" && event.model.trim() !== "" && !models.includes(event.model)) {
+        models.push(event.model);
+      }
+    }
+  }
+  return models;
+}
+
+/** Runner 对工作流状态的只读观察：只读 CLI 写出的快照文件，不调用 CLI 或状态机。 */
+function observedTerminalWorkflowState(workspace, change) {
+  if (typeof workspace !== "string" || typeof change !== "string") return null;
+  const snapshotPath = join(workspace, ".superspec", "changes", change, "snapshot.json");
+  if (!existsSync(snapshotPath) || !safeRegularWithin(snapshotPath, workspace).ok) return null;
+  let snapshot;
+  try { snapshot = JSON.parse(readFileSync(snapshotPath, "utf8")); } catch { return null; }
+  const terminal = ["accepted", "archive", "abandoned"].includes(snapshot?.state)
+    && Array.isArray(snapshot.open_jobs) && snapshot.open_jobs.length === 0;
+  return terminal
+    ? { state: snapshot.state, computed_at: snapshot.computed_at ?? null, evidence: `.superspec/changes/${change}/snapshot.json` }
+    : null;
 }
 
 function classifyDynamicTurn(trace, workerCode) {
@@ -721,63 +791,83 @@ function simulatedUserTurnFromOutput(nextOutput, scenario) {
   };
 }
 
-function agentMessageRequestsUserReply(trace) {
-  const message = traceAgentMessages(trace).at(-1)?.trim() ?? "";
-  if (message === "") return null;
-  const requestsReply = /(?:请|需要|等待|等你|由你).{0,32}(?:回复|答复|选择|确认|决定)|(?:回复|答复|选择|确认)[：:]|请选择|(?:please|need you to|waiting for you to).{0,48}(?:reply|respond|choose|confirm|decide)/iu.test(message);
-  return requestsReply ? message : null;
-}
+const AGENT_MESSAGE_SCOPE = "agent_message:final_message";
 
+/**
+ * 回合结束时用户面对的局面。只有本轮最后一条工作流命令给出的 next/accept 输出才算边界；
+ * 边界缺失或已过期时，Runner 只读快照兜底终态。AI 模拟用户模式下，没有正式提问又未到终态时，
+ * Worker 的最后一条消息交给模拟用户阅读，由它判断其中是否有需要回答的内容。
+ */
 function simulatedUserTurnFromTrace(host, tracePath, workspace, executableIdentities, bareResolutionProven, scenario) {
   const trace = parseTrace(host, tracePath, workspace, null, executableIdentities, bareResolutionProven, null);
+  return simulatedUserTurnFromParsedTrace(trace, workspace, scenario);
+}
+
+function simulatedUserTurnFromParsedTrace(trace, workspace, scenario) {
   const boundary = observedWorkflowBoundary(trace);
-  if (!boundary && scenario.simulated_user?.mode === "ai") {
-    const question = agentMessageRequestsUserReply(trace.trace);
-    if (question != null) {
-      return simulatedUserTurnFromOutput({
-        path: "ask_user",
-        ask_user: {
-          question,
-          scope: "agent_message:explicit_user_reply",
-          allowed_answers: [],
-        },
-      }, scenario);
-    }
+  const freshOutput = boundary?.fresh ? boundary.output : null;
+  const workerMessage = traceAgentMessages(trace.trace).at(-1)?.trim() ?? "";
+  const withMessage = turn => workerMessage === "" ? turn : { ...turn, worker_message: workerMessage };
+  if (freshOutput?.path === "done" || freshOutput?.to_state === "accepted") return simulatedUserTurnFromOutput(freshOutput, scenario);
+  const terminalState = observedTerminalWorkflowState(workspace, scenario.fixture?.change);
+  if (terminalState) {
+    return {
+      action: "complete",
+      reason: `runner observed the workflow snapshot at terminal state ${terminalState.state}`,
+      source: "runner_state_observation",
+      observed_state: terminalState,
+      next_output: boundary?.output ?? null,
+    };
   }
-  return simulatedUserTurnFromOutput(boundary?.output ?? null, scenario);
+  if (freshOutput?.path === "ask_user") return withMessage(simulatedUserTurnFromOutput(freshOutput, scenario));
+  if (scenario.simulated_user?.mode === "ai" && workerMessage !== "") {
+    return simulatedUserTurnFromOutput({
+      path: "ask_user",
+      ask_user: { question: workerMessage, scope: AGENT_MESSAGE_SCOPE, allowed_answers: [] },
+    }, scenario);
+  }
+  return simulatedUserTurnFromOutput(freshOutput ?? boundary?.output ?? null, scenario);
 }
 
 /**
- * 策略层结果直接作为本回合用户输入的情形。AI 模拟用户默认不按工作流推荐代答，
+ * 策略层结果直接作为本回合用户输入的情形。AI 模拟用户默认不按工作流推荐或阶段确认策略代答，
  * 由它先对照已知事实判断；场景显式要求跟随推荐时才沿用策略层的推荐答案。
  */
 function policyTurnSettles(policyTurn, scenario) {
   const simulatedUser = scenario.simulated_user ?? {};
   if (simulatedUser.mode !== "ai" || policyTurn.action === "complete") return true;
-  if (["configured_stop_scope", "configured_question_answer", "configured_scope_answer", "phase_confirmation_policy"].includes(policyTurn.source)) return true;
+  if (policyTurn.scope === AGENT_MESSAGE_SCOPE) return false;
+  if (["configured_stop_scope", "configured_question_answer", "configured_scope_answer"].includes(policyTurn.source)) return true;
   return policyTurn.source === "workflow_recommendation" && simulatedUser.follow_workflow_recommendation === true;
 }
 
-/** 模拟用户只看到真人能看到的问题和选项；scope、登记说明等是给主流程的。 */
-function aiSimulatedUserPrompt(scenario, askUser) {
+/** 模拟用户只看到真人能看到的内容：问题、选项与 Worker 对用户说的话；scope、登记说明等是给主流程的。 */
+function aiSimulatedUserPrompt(scenario, askUser, workerMessage = "") {
   const advanceUntilTerminal = scenario.simulated_user?.advance_until_terminal !== false;
-  const visibleQuestion = {
-    question: String(askUser?.question ?? ""),
-    allowed_answers: Array.isArray(askUser?.allowed_answers) ? askUser.allowed_answers : [],
-  };
+  const fromMessage = askUser?.scope === AGENT_MESSAGE_SCOPE;
+  const visible = fromMessage
+    ? { worker_message: String(askUser?.question ?? "") }
+    : {
+        question: String(askUser?.question ?? ""),
+        allowed_answers: Array.isArray(askUser?.allowed_answers) ? askUser.allowed_answers : [],
+        ...(workerMessage ? { worker_message: workerMessage } : {}),
+      };
   return [
     "你是评测考场中的独立模拟用户。你不是开发者，不得读取工作区、日志、源码或隐藏文件，也不得调用工具。",
     "已知事实是你作为用户早已确定的要求，回答时以它为准：已知事实覆盖当前问题时按事实回答，候选都不符合就直接说明期望的结果，不因为工作流给了推荐就改变；已知事实没有覆盖时，再参考工作流的推荐、公开需求和用户人设。",
+    fromMessage
+      ? "工作流本轮没有正式向你提问，worker_message 是 Worker 本轮最后对你说的话。其中有需要你回答、选择或确认的内容时按上述原则回答；只是进度汇报时，简短回复让它继续推进。"
+      : "当前问题由工作流正式提出；worker_message 是 Worker 本轮对你说的话，其中展示的方案、结论与已知事实不符时，按已知事实选择并说明要调整什么，不因为是确认环节就直接放行。",
     advanceUntilTerminal
       ? "你的职责是配合工作流持续推进到终态，不得仅因存在取舍而停止。"
       : "只能依据公开需求、用户人设、已知事实和工作流本轮给出的真实选项作答。信息不足且会改变产品语义时可以要求真人决定。",
     advanceUntilTerminal
-      ? "只输出一个 JSON 对象：{\"action\":\"reply\",\"answer\":\"\",\"reason\":\"\"}。allowed_answers 非空时，answer 必须逐字等于其中一项；为空时直接给出简短明确答复。"
-      : "只输出一个 JSON 对象：{\"action\":\"reply|needs_human\",\"answer\":\"\",\"reason\":\"\"}。选择 reply 且 allowed_answers 非空时，answer 必须逐字等于其中一项。",
+      ? "只输出一个 JSON 对象：{\"action\":\"reply\",\"answer\":\"\",\"note\":\"\",\"reason\":\"\"}。allowed_answers 非空时，answer 必须逐字等于其中一项，所选项需要补充说明时写在 note；为空时直接在 answer 中给出简短明确答复。"
+      : "只输出一个 JSON 对象：{\"action\":\"reply|needs_human\",\"answer\":\"\",\"note\":\"\",\"reason\":\"\"}。选择 reply 且 allowed_answers 非空时，answer 必须逐字等于其中一项，所选项需要补充说明时写在 note。",
     `公开需求：${scenario.initial_prompt}`,
     `用户人设：${JSON.stringify(scenario.simulated_user?.persona ?? {})}`,
     `已知事实：${JSON.stringify(scenario.simulated_user?.known_facts ?? {})}`,
-    `当前问题：${JSON.stringify(visibleQuestion)}`,
+    `${fromMessage ? "Worker 消息" : "当前问题"}：${JSON.stringify(visible)}`,
   ].join("\n\n");
 }
 
@@ -801,7 +891,7 @@ async function resolveSimulatedUserTurn({
   const userTracePath = join(runRoot, "evidence", `user-turn-${turn}.jsonl`);
   const userStderrPath = join(runRoot, "evidence", `user-turn-${turn}.stderr.log`);
   const advanceUntilTerminal = scenario.simulated_user?.advance_until_terminal !== false;
-  const prompt = aiSimulatedUserPrompt(scenario, nextOutput.ask_user);
+  const prompt = aiSimulatedUserPrompt(scenario, nextOutput.ask_user, policyTurn.worker_message ?? "");
   const { json: raw } = await judge.run({
     turn,
     model: scenario.simulated_user?.model ?? model,
@@ -821,10 +911,12 @@ async function resolveSimulatedUserTurn({
     || allowedAnswers.length > 0 && !allowedAnswers.includes(raw.answer)) {
     throw new Error(`simulated user turn ${turn} returned an unauthorized answer`);
   }
-  const workerPromptOriginal = raw.answer;
+  const note = typeof raw.note === "string" ? raw.note.trim() : "";
+  const workerPromptOriginal = note === "" ? raw.answer : `${raw.answer}\n${note}`;
   return {
     action: "reply",
     answer: raw.answer,
+    ...(note === "" ? {} : { note }),
     reason: String(raw.reason ?? ""),
     question: String(nextOutput.ask_user.question ?? ""),
     scope: String(nextOutput.ask_user.scope ?? ""),
@@ -1110,11 +1202,13 @@ function traceEnvironmentAudit(events, {
   sensitiveEnvKeys = [],
   harnessRoots = [],
   hostSecretRoots = defaultHostSecretRoots(),
+  sessionArtifactRoots = [],
 }) {
   // Only evaluation validity and credentials are policed: harness fixtures/evidence and
   // secrets fail the gate; other host paths (listing dirs, global packages, /tmp) are observations.
   const violations = [];
   const observations = [];
+  const ownSessionRoots = sessionArtifactRoots.filter(Boolean).map(normalizedAuditPath);
   const allowedRoots = [workspace, packageRoot, binRoot].map(normalizedAuditPath);
   const restrictedRoots = [controlledHome, controlledHostHome, controlledZdotdir].map(normalizedAuditPath);
   const secretRoots = hostSecretRoots.filter(Boolean).map(normalizedAuditPath);
@@ -1123,6 +1217,8 @@ function traceEnvironmentAudit(events, {
   const sensitiveNames = [...new Set(["ZDOTDIR", ...hostSensitiveEnvKeys, ...sensitiveEnvKeys])];
   const credentialNames = sensitiveNames.filter(name => /KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL/.test(name));
   const classify = (normalized, { contentSearch }) => {
+    // Hosts declare roots that hold only this run's own session output (e.g. OMP artifact:// spill files).
+    if (ownSessionRoots.some(root => pathWithin(normalized, root))) return "own_session_artifact";
     if (restrictedRoots.some(root => pathWithin(normalized, root))) return "controlled_home_path";
     if (secretRoots.some(root => pathWithin(normalized, root))) return "host_secret_path";
     if (allowedRoots.some(root => pathWithin(normalized, root))
@@ -1136,7 +1232,11 @@ function traceEnvironmentAudit(events, {
     return "observed";
   };
   const record = (reason, entry, { listingOnly = false, blocked = false } = {}) => {
-    if (reason === "observed" || (listingOnly && (reason === "harness_path" || reason === "harness_content_search"))) {
+    if (reason === "own_session_artifact") {
+      observations.push({ reason, ...entry });
+    } else if (listingOnly && reason === "controlled_home_path") {
+      observations.push({ reason: "controlled_home_listing", ...entry });
+    } else if (reason === "observed" || (listingOnly && (reason === "harness_path" || reason === "harness_content_search"))) {
       observations.push({ reason: reason === "observed" ? "host_path_outside_workspace" : "harness_listing", ...entry });
     } else if (reason && blocked) {
       observations.push({ reason: "blocked_attempt", blocked_reason: reason, ...entry });
@@ -1276,11 +1376,13 @@ function unwrapCommandForPolicy(raw) {
 
 function workerCommandPolicyAudit(events, assertions, executableIdentities = [], bareResolutionProven = false) {
   const violations = [];
+  const observations = [];
   const enabled = new Set((assertions.forbidden_worker_commands ?? []).map(rule => rule.family));
   const transitionRule = (assertions.forbidden_worker_commands ?? []).find(rule => rule.family === "superspec_transition_except");
   for (const item of commandEvents(events)) {
     const raw = commandText(item);
     const command = unwrapCommandForPolicy(raw);
+    const failed = item.status === "failed" || Number.isInteger(item.exit_code) && item.exit_code !== 0;
     const matches = command.matchAll(/(?:^|\s)([^\s'";&|<>]+)\s+(record|transition)\s+([^\s'";&|<>]+)/g);
     for (const match of matches) {
       const executable = match[1];
@@ -1291,11 +1393,16 @@ function workerCommandPolicyAudit(events, assertions, executableIdentities = [],
         violations.push({ family: "superspec_record_user_decision", executable, command: raw });
       }
       if (transitionRule && family === "transition" && !transitionRule.allowed_subcommands.includes(subcommand)) {
-        violations.push({ family: "superspec_transition_except", executable, subcommand, command: raw });
+        const entry = { family: "superspec_transition_except", executable, subcommand, command: raw };
+        // The command's failure is attributable to this invocation only when nothing runs after it.
+        const tail = command.slice(match.index + match[0].length).replace(/\s2>&1\b/g, "");
+        if (subcommand.startsWith("-")) observations.push({ reason: "cli_usage_lookup", ...entry });
+        else if (failed && !/[;&|]/.test(tail)) observations.push({ reason: "rejected_by_cli", ...entry });
+        else violations.push(entry);
       }
     }
   }
-  return { ok: violations.length === 0, violations };
+  return { ok: violations.length === 0, violations, observations };
 }
 
 function validateAuditOverlay(originalScenario, currentScenario) {
@@ -1816,6 +1923,17 @@ async function validateFaultMappings() {
   const chainedWrapper = exactCommand(codexCommand({ status: "completed", exit_code: 0, command: "/bin/zsh -lc 'superspec transition next --change x && git status'" }), workspace);
   if (chainedWrapper.kind !== "shell_wrapper") throw new Error("chained shell wrapper must be rejected");
   if (canonicalSuperspecArgv("superspec transition next --change 'x;rm'") !== null) throw new Error("unsafe quoted change must be rejected");
+  const shellHostCommand = command => exactCommand({ kind: "command", command, status: "completed", exit_code: 0, output: "{}" }, workspace, [], true, { inheritLaunchCwd: true });
+  const workspaceCd = shellHostCommand(`cd "${workspace}" && superspec transition next --change "x" 2>&1`);
+  const privateAliasCd = shellHostCommand(`cd /private${workspace} && superspec transition next --change x`);
+  const otherCd = shellHostCommand("cd /tmp/other && superspec transition next --change x");
+  const cdThenChain = shellHostCommand(`cd ${workspace} && superspec transition next --change x && git status`);
+  if (workspaceCd.kind !== "direct" || workspaceCd.cwd_source !== "workspace_cd"
+    || !sameArgv(workspaceCd.argv, ["superspec", "transition", "next", "--change", "x"], [], true)
+    || privateAliasCd.kind !== "direct"
+    || otherCd.kind === "direct" || cdThenChain.kind === "direct") {
+    throw new Error("only a cd into the controlled workspace followed by one canonical superspec command counts as direct evidence");
+  }
   outcomes.push({ name: "bounded-shell-wrapper-only", result: true });
   const allowedDirectory = inventoryChangeAllowed(
     { path: "openspec/changes/x/.superspec", before: null, after: { type: "directory" } },
@@ -2169,19 +2287,61 @@ async function validateFaultMappings() {
     path: "ask_user",
     ask_user: { question: "是否开始实现？", scope: "phase_confirmation:propose_to_apply:fixture", allowed_answers: ["确认开始实现", "留在计划阶段"] },
   }, { simulated_user: { mode: "ai", auto_confirm_scope_prefixes: ["phase_confirmation:"] } });
-  const aiPrompt = aiSimulatedUserPrompt(aiScenario, recommendedAsk);
+  const aiPrompt = aiSimulatedUserPrompt(aiScenario, recommendedAsk, "fixture-plan-summary-shown-to-user");
   if (aiRecommendedTurn.source !== "workflow_recommendation"
     || policyTurnSettles(aiRecommendedTurn, aiScenario)
     || !policyTurnSettles(aiRecommendedTurn, { simulated_user: { ...aiScenario.simulated_user, follow_workflow_recommendation: true } })
     || !policyTurnSettles(aiRecommendedTurn, { simulated_user: {} })
-    || !policyTurnSettles(aiPhaseTurn, { simulated_user: { mode: "ai" } })
+    || aiPhaseTurn.source !== "phase_confirmation_policy"
+    || policyTurnSettles(aiPhaseTurn, { simulated_user: { mode: "ai" } })
+    || !policyTurnSettles(aiPhaseTurn, { simulated_user: {} })
     || !aiPrompt.includes(recommendedAsk.question)
     || !aiPrompt.includes(aiScenario.simulated_user.known_facts.duration)
+    || !aiPrompt.includes("fixture-plan-summary-shown-to-user")
     || aiPrompt.includes(recommendedAsk.scope)
     || aiPrompt.includes(recommendedAsk.instruction)) {
-    throw new Error("AI simulated user must judge recommended questions against known facts and see only user-visible content");
+    throw new Error("AI simulated user must judge recommendations and phase confirmations against known facts and see only user-visible content");
   }
   outcomes.push({ name: "ai-simulated-user-facts-before-recommendation", result: true });
+
+  const agentMessage = text => ({ kind: "message", role: "agent", text });
+  const nextCommand = (output, argv = ["superspec", "transition", "next", "--change", "fixture"]) => ({ argv, executable_allowed: true, output: JSON.stringify(output) });
+  const staleNextTrace = {
+    direct: [
+      nextCommand({ path: "next_command", next_command: "superspec transition run propose-ready --change fixture" }),
+      nextCommand({ ok: false, message: "blocked" }, ["superspec", "transition", "run", "propose-ready", "--change", "fixture"]),
+    ],
+    trace: { events: [agentMessage("审查指出两种口径都说得通，你希望 49ms 显示成 0.0s 还是 <0.1s？")] },
+  };
+  const freshAskTrace = {
+    direct: [nextCommand({ path: "ask_user", ask_user: { question: "是否开始实现？", scope: "phase_confirmation:propose_to_apply:fixture", allowed_answers: ["确认开始实现", "留在计划阶段继续完善"] } })],
+    trace: { events: [agentMessage("计划摘要：fixture-plan")] },
+  };
+  const progressOnlyTrace = { direct: [], trace: { events: [agentMessage("本轮工作已经完成。")] } };
+  const staleBoundary = observedWorkflowBoundary(staleNextTrace);
+  const staleTurn = simulatedUserTurnFromParsedTrace(staleNextTrace, null, aiScenario);
+  const freshAskTurn = simulatedUserTurnFromParsedTrace(freshAskTrace, null, aiScenario);
+  const progressTurn = simulatedUserTurnFromParsedTrace(progressOnlyTrace, null, aiScenario);
+  const scriptedProgressTurn = simulatedUserTurnFromParsedTrace(progressOnlyTrace, null, { simulated_user: {} });
+  const messagePrompt = aiSimulatedUserPrompt(aiScenario, staleTurn.next_output?.ask_user);
+  const terminalWorkspace = join(fixtureRoot, "terminal-state-workspace");
+  mkdirSync(join(terminalWorkspace, ".superspec", "changes", "fixture"), { recursive: true });
+  writeFileSync(join(terminalWorkspace, ".superspec", "changes", "fixture", "snapshot.json"), JSON.stringify({ state: "accepted", open_jobs: [] }));
+  const terminalTurn = simulatedUserTurnFromParsedTrace(staleNextTrace, terminalWorkspace, { ...aiScenario, fixture: { change: "fixture" } });
+  writeFileSync(join(terminalWorkspace, ".superspec", "changes", "fixture", "snapshot.json"), JSON.stringify({ state: "accepted", open_jobs: ["JOB-1"] }));
+  const openJobTurn = simulatedUserTurnFromParsedTrace(staleNextTrace, terminalWorkspace, { ...aiScenario, fixture: { change: "fixture" } });
+  if (staleBoundary?.fresh !== false
+    || staleTurn.next_output?.ask_user?.scope !== AGENT_MESSAGE_SCOPE || policyTurnSettles(staleTurn, aiScenario)
+    || !messagePrompt.includes("49ms")
+    || freshAskTurn.next_output?.ask_user?.scope !== "phase_confirmation:propose_to_apply:fixture"
+    || freshAskTurn.worker_message !== "计划摘要：fixture-plan"
+    || progressTurn.next_output?.ask_user?.scope !== AGENT_MESSAGE_SCOPE
+    || scriptedProgressTurn.action !== "continue"
+    || terminalTurn.action !== "complete" || !runnerObservedTerminal(terminalTurn)
+    || openJobTurn.action === "complete") {
+    throw new Error("simulated user must face the final turn state: stale boundaries yield to the Worker message and runner-observed terminal state");
+  }
+  outcomes.push({ name: "simulated-user-final-turn-state", result: true });
 
   const dynamicAcceptedTrace = {
     malformed: 0,
@@ -2238,10 +2398,6 @@ async function validateFaultMappings() {
     path: "ask_user",
     ask_user: { question: "选择业务语义", scope: "business:meaning", allowed_answers: ["A", "B"] },
   }, { simulated_user: {} });
-  const explicitReplyTrace = join(fixtureRoot, "explicit-user-reply.jsonl");
-  const completedMessageTrace = join(fixtureRoot, "completed-agent-message.jsonl");
-  writeFileSync(explicitReplyTrace, `${JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "请明确回复是否确认进入下一阶段。" } })}\n`);
-  writeFileSync(completedMessageTrace, `${JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "本轮工作已经完成。" } })}\n`);
   let invalidBudgetRejected = false;
   try { dynamicTurnLimit({ budget: { max_worker_turns: 0 } }); } catch { invalidBudgetRejected = true; }
   if (dynamicTurnLimit({ budget: { max_worker_turns: 17 } }) !== 17
@@ -2260,8 +2416,6 @@ async function validateFaultMappings() {
     || dynamicRecommendedReply.worker_prompt !== dynamicRecommendedReply.worker_prompt_original
     || evalWorkerPrompt("真实用户短提示") !== "真实用户短提示"
     || dynamicNeedsHuman.action !== "needs_human"
-    || agentMessageRequestsUserReply(codexHost.parseTrace(explicitReplyTrace)) == null
-    || agentMessageRequestsUserReply(codexHost.parseTrace(completedMessageTrace)) != null
     || !invalidBudgetRejected) {
     throw new Error("dynamic arbitrary-turn boundary validation failed");
   }
@@ -2703,6 +2857,32 @@ async function validateFaultMappings() {
   if (controlledHomePathAudit.ok || !controlledHomePathAudit.violations.some(item => item.reason === "controlled_home_path")) {
     throw new Error("controlled home absolute paths must fail audit");
   }
+  const sessionArtifactAudit = traceEnvironmentAudit([
+    { kind: "file_access", tool: "read", status: "completed", paths: ["/controlled/omp-sessions/2026-session/31.bash.log"] },
+    { kind: "file_access", tool: "read", status: "completed", paths: ["/controlled/home/.omp/agent/models.yml"] },
+  ], {
+    workspace: "/controlled/workspace", packageRoot: "/controlled/package", binRoot: "/controlled/bin",
+    controlledHome: "/controlled/home", controlledHostHome: "/controlled/omp-sessions", controlledZdotdir: "/controlled/zdot",
+    sessionArtifactRoots: ["/controlled/omp-sessions"],
+  });
+  const controlledListingAudit = traceEnvironmentAudit(codexEvents([
+    { type: "item.completed", item: { type: "command_execution", status: "completed", command: "/bin/zsh -lc 'ls -la /controlled/codex'" } },
+  ]), {
+    workspace: "/controlled/workspace", packageRoot: "/controlled/package", binRoot: "/controlled/bin",
+    controlledHome: "/controlled/home", controlledHostHome: "/controlled/codex", controlledZdotdir: "/controlled/zdot",
+    hostSensitiveEnvKeys: codexHost.sensitive_env_keys,
+  });
+  if (!sessionArtifactAudit.observations.some(item => item.reason === "own_session_artifact")
+    || sessionArtifactAudit.violations.length !== 1 || sessionArtifactAudit.violations[0].reason !== "controlled_home_path"
+    || !controlledListingAudit.ok || !controlledListingAudit.observations.some(item => item.reason === "controlled_home_listing")) {
+    throw new Error("own session artifacts and controlled-home listings are observations; controlled-home reads still fail audit");
+  }
+  const observedModelTrace = join(fixtureRoot, "observed-model.jsonl");
+  writeFileSync(observedModelTrace, `${JSON.stringify({ type: "system", subtype: "init", session_id: "m1", model: "requested-alias" })}\n${JSON.stringify({ type: "assistant", session_id: "m1", message: { model: "served-model", content: [{ type: "text", text: "ok" }] } })}\n`);
+  const observedModels = collectObservedModels(getWorkerHost("claude"), [observedModelTrace]);
+  if (!observedModels.includes("requested-alias") || !observedModels.includes("served-model")) {
+    throw new Error("host traces must surface the requested alias and the served model");
+  }
   const tildeHomeAudit = traceEnvironmentAudit(codexEvents([
     { type: "item.completed", item: { type: "command_execution", status: "completed", command: "/bin/zsh -lc 'sed -n 1,2p ~/.codex/auth.json'" } },
   ]), {
@@ -2773,6 +2953,18 @@ async function validateFaultMappings() {
     forbidden_worker_commands: [{ family: "superspec_transition_except", allowed_subcommands: ["next", "explore"] }],
   }, [realpathSync(localExecutable)], false);
   if (absolutePolicy.ok || absolutePolicy.violations.length !== 1) throw new Error("absolute run-local superspec must be policy audited");
+  const inertPolicy = workerCommandPolicyAudit(codexEvents([
+    { type: "item.completed", item: { type: "command_execution", status: "failed", exit_code: 1, command: "/bin/zsh -lc 'cd /w && superspec transition propose --change x'" } },
+    { type: "item.completed", item: { type: "command_execution", status: "completed", exit_code: 0, command: "/bin/zsh -lc 'superspec transition --help 2>&1 | head -40'" } },
+    { type: "item.completed", item: { type: "command_execution", status: "failed", exit_code: 1, command: "/bin/zsh -lc 'superspec transition archive --change x && false'" } },
+  ]), {
+    forbidden_worker_commands: [{ family: "superspec_transition_except", allowed_subcommands: ["next"] }],
+  }, [], true);
+  if (inertPolicy.violations.length !== 1 || inertPolicy.violations[0].subcommand !== "archive"
+    || !inertPolicy.observations.some(item => item.reason === "rejected_by_cli" && item.subcommand === "propose")
+    || !inertPolicy.observations.some(item => item.reason === "cli_usage_lookup")) {
+    throw new Error("CLI-rejected transition subcommands and usage lookups are observations; unattributable failures stay violations");
+  }
   outcomes.push({ name: "forbidden-worker-superspec-policy", result: true });
 
   const overlayBaseline = {
@@ -3657,7 +3849,7 @@ async function regradeExistingRun(inputRunDir) {
       capability.gates.stop_boundary = gate("fail", stopEvidence, `recorded Worker executed forbidden SuperSpec commands: ${commandPolicyAudit.violations.map(item => item.family).join(", ")}`, "direct");
     } else if (["budget_exhausted", "invalid_execution"].includes(effectiveStop?.action)) {
       capability.gates.stop_boundary = gate("fail", stopEvidence, effectiveStop.reason, "direct");
-    } else if (integrity?.status === "unavailable" || events.malformed > 0 || !authenticity.sequence.ok || !sameThread || !finalOutput || !effectiveStop) {
+    } else if (integrity?.status === "unavailable" || events.malformed > 0 || !authenticity.sequence.ok || !sameThread || !(finalOutput || runnerObservedTerminal(effectiveStop)) || !effectiveStop) {
       capability.gates.stop_boundary = gate("unavailable", stopEvidence, "recorded dynamic workflow state, session, command, or stop evidence is unavailable");
     } else if (effectiveStop.action === "needs_human") {
       const scope = String(finalOutput.ask_user?.scope ?? "");
@@ -3674,7 +3866,7 @@ async function regradeExistingRun(inputRunDir) {
     } else if (effectiveStop.action === "complete") {
       const completed = integrity.status !== "fail"
         && integrity.derivedState === "accepted"
-        && (finalOutput.path === "done" || finalOutput.to_state === "accepted")
+        && (runnerObservedTerminal(effectiveStop) || finalOutput.path === "done" || finalOutput.to_state === "accepted")
         && !enteredArchive;
       capability.gates.stop_boundary = gate(
         completed ? "pass" : "fail",
@@ -4644,6 +4836,17 @@ async function main() {
     };
     writeFileSync(join(runRoot, "scenario.json"), scenarioBytes);
     run.recordMutation("post-worker.scenario.materialize", join(runRoot, "scenario.json"), { source: "frozen_in_memory_bytes", digest: sha256(scenarioBytes) });
+    const observedModels = collectObservedModels(
+      host,
+      readdirSync(evidenceDir)
+        .filter(name => /^turn-\d+\.jsonl$/.test(name))
+        .sort((left, right) => Number(left.match(/\d+/)[0]) - Number(right.match(/\d+/)[0]))
+        .map(name => join(evidenceDir, name)),
+    );
+    if (observedModels.length > 0) {
+      manifest.launch.observed_models = observedModels;
+      if (observedModels.length === 1) manifest.launch.actual_model = observedModels[0];
+    }
     writeJson(manifestPath, manifest);
 
     if (args.inject === "forbidden-path") {
@@ -4730,6 +4933,7 @@ async function main() {
       hostSensitiveEnvKeys: host.sensitive_env_keys,
       sensitiveEnvKeys: providerProfile.env_keys,
       harnessRoots: [runRoot, RUNS_ROOT, EVAL_ROOT],
+      sessionArtifactRoots: host.sessionArtifactRoots?.(authDirs) ?? [],
     });
     const commandPolicyAudit = workerCommandPolicyAudit(trace.events, scenario.assertions, executableIdentities, bareResolutionProven);
     const activationAudit = negativeActivationMode
@@ -5028,7 +5232,7 @@ async function main() {
         capability.gates.stop_boundary = gate("fail", stopEvidence, `recorded Worker executed forbidden SuperSpec commands: ${commandPolicyAudit.violations.map(item => item.family).join(", ")}`, "direct");
       } else if (["budget_exhausted", "invalid_execution"].includes(dynamicStop?.action)) {
         capability.gates.stop_boundary = gate("fail", stopEvidence, dynamicStop.reason, "direct");
-      } else if (integrity?.status === "unavailable" || events.malformed > 0 || !authenticity.sequence.ok || !sameThread || !finalTracePath || !finalOutput || !dynamicStop) {
+      } else if (integrity?.status === "unavailable" || events.malformed > 0 || !authenticity.sequence.ok || !sameThread || !finalTracePath || !(finalOutput || runnerObservedTerminal(dynamicStop)) || !dynamicStop) {
         capability.gates.stop_boundary = gate("unavailable", stopEvidence, "dynamic workflow state, session, command, or stop evidence is unavailable");
       } else if (dynamicStop.action === "needs_human") {
         const scope = String(finalOutput.ask_user?.scope ?? "");
@@ -5048,7 +5252,7 @@ async function main() {
       } else if (dynamicStop.action === "complete") {
         const completed = integrity.status !== "fail"
           && integrity.derivedState === "accepted"
-          && (finalOutput.path === "done" || finalOutput.to_state === "accepted")
+          && (runnerObservedTerminal(dynamicStop) || finalOutput.path === "done" || finalOutput.to_state === "accepted")
           && !enteredArchive;
         capability.gates.stop_boundary = gate(
           completed ? "pass" : "fail",

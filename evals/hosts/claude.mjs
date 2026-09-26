@@ -9,9 +9,12 @@
  * Launch: `claude -p --output-format stream-json --verbose` (never `--bare`,
  * so project skills and CLAUDE.md stay visible). Isolation uses
  * CLAUDE_CONFIG_DIR + an isolated HOME; credentials stay in the process
- * environment, not the user's ~/.claude OAuth store. Bash runs inside the
- * Claude sandbox (reads allowed, writes confined to the workspace and temp),
- * mirroring Codex `workspace-write`; file tools may only read the workspace.
+ * environment, not the user's ~/.claude OAuth store. Headless eval uses
+ * `--permission-mode bypassPermissions` so Bash, Write and `node -e` are not
+ * paused for approval; Bash still runs inside the Claude sandbox (writes
+ * confined to the workspace and temp), mirroring Codex `workspace-write`.
+ * File tools may only read the workspace. Trace init/message events keep the
+ * requested model alias and the backend model the CLI actually served.
  */
 
 import { createHash } from "node:crypto";
@@ -41,7 +44,7 @@ import {
 } from "../lib/trace.mjs";
 
 export const CLAUDE_HOST_ID = "claude";
-export const CLAUDE_ADAPTER_VERSION = "2";
+export const CLAUDE_ADAPTER_VERSION = "3";
 
 const ENV_ALLOWLIST = [
   "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "TERM", "USER", "SHELL",
@@ -125,7 +128,8 @@ function hostSecretDirs(env = process.env) {
 export function isolatedSettings() {
   return {
     permissions: {
-      allow: ["Bash(superspec *)"],
+      defaultMode: "bypassPermissions",
+      allow: ["Bash(*)", "Read", "Write", "Edit", "MultiEdit", "Glob", "Grep", "NotebookEdit"],
       blockReadsOutsideWorkingDirectories: true,
     },
     sandbox: {
@@ -208,7 +212,15 @@ function expandClaudeRecord(record, pending) {
   // Only the init handshake announces the session. Stream-json also emits many
   // other `system` records (thinking_tokens, status, …) that share session_id.
   if ((type === "system" && record.subtype === "init") || type === "init") {
-    if (sessionId) events.push({ raw_type: type, kind: "thread", action: "started", thread_id: sessionId });
+    if (sessionId) {
+      events.push({
+        raw_type: type,
+        kind: "thread",
+        action: "started",
+        thread_id: sessionId,
+        ...(typeof record.model === "string" && record.model ? { model: record.model } : {}),
+      });
+    }
   }
   if (type === "system" && record.subtype === "task_notification" && typeof record.task_id === "string") {
     events.push({
@@ -223,7 +235,13 @@ function expandClaudeRecord(record, pending) {
   if (type === "assistant") {
     for (const block of record.message?.content ?? []) {
       if (block?.type === "text" && typeof block.text === "string") {
-        events.push({ raw_type: type, kind: "message", role: "agent", text: block.text });
+        events.push({
+          raw_type: type,
+          kind: "message",
+          role: "agent",
+          text: block.text,
+          ...(typeof record.message?.model === "string" && record.message.model ? { model: record.message.model } : {}),
+        });
       }
       if (block?.type === "tool_use" && block.id) {
         pending.set(block.id, { name: block.name, input: block.input ?? {} });
@@ -524,7 +542,7 @@ function printArgs({ model, reasoning, launchFeatures, persistent }) {
     "-p",
     "--output-format", "stream-json",
     "--verbose",
-    "--permission-mode", "acceptEdits",
+    "--permission-mode", "bypassPermissions",
     "--permission-prompts", "none",
     "--model", model,
     "--effort", mapEffort(reasoning),
@@ -543,7 +561,7 @@ export const claudeWorkerHost = Object.freeze({
   sensitive_env_keys: ["CLAUDE_CONFIG_DIR", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"],
   command_evidence_source: "completed Claude tool_result",
   commands_inherit_launch_cwd: true,
-  launch_policy: { sandbox: "claude-sandbox-workspace-write", approval: "accept-edits+sandboxed-bash" },
+  launch_policy: { sandbox: "claude-sandbox-workspace-write", approval: "bypass-permissions+sandboxed-bash" },
   eval_defaults: { provider: "anthropic", model: "deepseek-v4.1-flash-expires-on-0910" },
   workspace_noise_dirs: [".claude/.cc-writes"],
   stale_temp_dir_rules: [

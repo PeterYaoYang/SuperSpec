@@ -35,7 +35,7 @@ import {
 } from "../lib/trace.mjs";
 
 export const OMP_HOST_ID = "omp";
-export const OMP_ADAPTER_VERSION = "2";
+export const OMP_ADAPTER_VERSION = "3";
 export const DEFAULT_OMP_PROVIDER_ID = "codex-current";
 
 const ENV_ALLOWLIST = [
@@ -242,6 +242,9 @@ export function isolatedOmpHome(runId, providerProfile, { registry = null } = {}
     "  - ollama",
     "  - lm-studio",
     "  - cursor",
+    "# Eval evidence needs whole CLI JSON lines; the default 768-byte cap cuts ask_user questions.",
+    "tools:",
+    "  outputMaxColumns: 0",
     "",
   ].join("\n"), { mode: 0o600 });
   return {
@@ -681,6 +684,10 @@ export const ompWorkerHost = Object.freeze({
   },
   sessionStorageEvidence(isolation, sessionId) {
     return sessionStorageEvidence(isolation.hostHome ?? isolation.sessionDir, sessionId);
+  },
+  /** The per-run session dir holds only this run's transcripts and artifact:// spill files; credentials live under home. */
+  sessionArtifactRoots(isolation) {
+    return [isolation?.sessionDir ?? isolation?.hostHome].filter(Boolean);
   },
   sessionNotStoredMessage: "persistent session file was not found in isolated OMP session-dir before resume",
   parseTrace: parseOmpTrace,

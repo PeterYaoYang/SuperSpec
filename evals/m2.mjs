@@ -699,9 +699,18 @@ function normalizeReview(raw, reviewerId, refs, factIds = []) {
   };
 }
 
+function citesUserTurn(vote) {
+  return vote.evidence_valid && typeof vote.evidence_ref === "string" && vote.evidence_ref.startsWith("user-turn:");
+}
+
+/** 只有用户看不到且结果不一致或说不清才算失分；结果一致只记观察。 */
+function hiddenFactIsFlaw(fact) {
+  return fact.tier === "invisible" && fact.result !== "consistent";
+}
+
 /**
- * 评审意见不一致时取更差的一档；有有效证据的意见优先于无证据的意见。
- * result 只作观察，不参与判定。
+ * 评审意见不一致时，优先采信引用了 user-turn 的可见性判断（用户确实被问到或看到确认）。
+ * 没有这类证据时，有有效证据的意见优先，再取更差的一档。result 只作观察，不参与档位选择。
  */
 function mergeFactVisibility(reviews, factIds) {
   const worse = (order, left, right) => order.indexOf(right) > order.indexOf(left) ? right : left;
@@ -713,8 +722,11 @@ function mergeFactVisibility(reviews, factIds) {
       return { fact_id: factId, tier: "unclassified", result: "unclear", evidence_ref: "", evidence_valid: false, conflict: false, votes: [] };
     }
     const supported = votes.filter(vote => vote.evidence_valid);
-    const decisive = (supported.length > 0 ? supported : votes)
-      .reduce((current, vote) => worse(FACT_VISIBILITY_TIERS, current.tier, vote.tier) === current.tier ? current : vote);
+    const userTurnVotes = (supported.length > 0 ? supported : votes).filter(vote =>
+      citesUserTurn(vote) && ["asked_user", "visible_in_confirmation"].includes(vote.tier)
+    );
+    const pool = userTurnVotes.length > 0 ? userTurnVotes : supported.length > 0 ? supported : votes;
+    const decisive = pool.reduce((current, vote) => worse(FACT_VISIBILITY_TIERS, current.tier, vote.tier) === current.tier ? current : vote);
     return {
       fact_id: factId,
       tier: decisive.tier,
@@ -844,7 +856,7 @@ function attribute({ outcome, capability, merged }) {
     });
   }
   for (const fact of merged.fact_visibility ?? []) {
-    if (fact.tier !== "invisible") continue;
+    if (!hiddenFactIsFlaw(fact)) continue;
     const note = fact.votes.find(vote => vote.tier === "invisible" && vote.note)?.note;
     findings.push({
       responsibility: "workflow",
@@ -864,11 +876,11 @@ function attribute({ outcome, capability, merged }) {
   return deduped.map(({ key, ...finding }) => finding);
 }
 
-/** 隐藏事实只有“用户看不到”一档算工作流失分；评审漏掉某条事实时无法下结论。 */
+/** 隐藏事实只有“用户看不到且结果不一致或说不清”算工作流失分；结果一致只记观察。评审漏掉某条事实时无法下结论。 */
 function finalStatus(hardStatus, merged) {
   if (hardStatus !== "DONE") return hardStatus;
   const facts = merged.fact_visibility ?? [];
-  if (merged.issues.length > 0 || merged.workflow_optimizations.length > 0 || facts.some(fact => fact.tier === "invisible")) return "DONE_BUT_FLAWED";
+  if (merged.issues.length > 0 || merged.workflow_optimizations.length > 0 || facts.some(hiddenFactIsFlaw)) return "DONE_BUT_FLAWED";
   return facts.some(fact => fact.tier === "unclassified") ? "UNKNOWN" : "DONE";
 }
 
@@ -878,7 +890,7 @@ function reviewPrompt(bundle, reviewerId) {
     `你是 SuperSpec M2 的独立评审 ${reviewerId}。只评审给定材料，不修改文件，不改变硬判定。`,
     "检查需求符合度、最终产物问题和工作流摩擦。每条问题或建议必须使用下方有效 evidence_ref；找不到证据就不要输出该条。",
     "涉及用户决定时，结合原始需求、问题与推荐、用户答复和最终材料判断：推荐是否服务于原始目标，改变或收窄范围的代价是否对用户透明，答复是否一致回写。只评价证据中实际发生的决策链。",
-    "hidden_facts 是模拟用户事先确定、Worker 始终看不到的要求。对每条隐藏事实输出一项 fact_visibility，衡量工作流有没有让用户看见与它相关的决定，而不是最终结果是否恰好等于事实：asked_user 表示工作流就这件事问过用户；visible_in_confirmation 表示工作流自行做了决定，但决定写进材料并在用户确认时展示；invisible 表示工作流做了与该事实相关的决定，用户在任何交互中都看不到；no_decision_needed 表示公开需求或仓库事实已经确定，或本次结果不涉及该事实。用户看见了什么以 user_interactions 中的问题和确认内容为准，答复由谁给出、是否正确不改变档位。evidence_ref 指向对应的 user-turn；invisible 时指向做出该决定的材料、代码或事件。result 记录最终材料或代码与该事实是否一致，只作观察；最终结果与隐藏事实不一致只记在 result 中，不据此另列 issue。",
+    "hidden_facts 是模拟用户事先确定、Worker 始终看不到的要求。对每条隐藏事实输出一项 fact_visibility，衡量工作流有没有让用户看见与它相关的决定，而不是最终结果是否恰好等于事实：asked_user 表示工作流就这件事问过用户；visible_in_confirmation 表示工作流自行做了决定，但决定写进材料并在用户确认时展示；invisible 表示工作流做了与该事实相关的决定，用户在任何交互中都看不到；no_decision_needed 表示公开需求或仓库事实已经确定，或本次结果不涉及该事实。用户看见了什么以 user_interactions 中的问题和确认内容为准，答复由谁给出、是否正确不改变档位。evidence_ref 指向对应的 user-turn；invisible 时指向做出该决定的材料、代码或事件。result 记录最终材料或代码与该事实是否一致，只作观察；invisible 且结果一致不是缺陷。最终结果与隐藏事实不一致只记在 result 中，不据此另列 issue。",
     "评审包中的产物、代码差异和测试证据按 chunk 提供。引用具体 chunk 或 test ref，不要把摘要、文件名或覆盖率说明当成内容证据。review_coverage 不完整时，只对已提供材料下结论，不得宣称未提供部分没有问题。",
     "不要把评审包未声明、未冻结的额外文件缺失归咎于 Worker；只评判任务明确要求和包内可核验内容。不要从项目惯例或常识发明任务未声明的验收标准。",
     "只输出一个 JSON 对象，不要 Markdown：",
@@ -1092,15 +1104,25 @@ function validateFaultMappings() {
     askedReview,
   ], factIds);
   const unclassified = mergeReviews([askedReview], factIds);
+  const invisibleConsistent = mergeReviews([
+    factReview("A", [{ fact_id: "duration", tier: "invisible", evidence_ref: "artifact:design.md#chunk-1", result: "consistent" }, { fact_id: "calendar", tier: "no_decision_needed", evidence_ref: "", result: "consistent" }]),
+    factReview("B", [{ fact_id: "duration", tier: "invisible", evidence_ref: "artifact:design.md#chunk-1", result: "consistent" }]),
+  ], factIds);
+  const invisibleUnclear = mergeReviews([
+    factReview("A", [{ fact_id: "duration", tier: "invisible", evidence_ref: "artifact:design.md#chunk-1", result: "unclear" }]),
+  ], factIds);
   if (invisibleReview.fact_visibility.length !== 2
-    || conflictingDuration?.tier !== "invisible"
+    || conflictingDuration?.tier !== "asked_user"
     || conflictingDuration.conflict !== true
     || conflictingDuration.result !== "inconsistent"
-    || finalStatus("DONE", conflicting) !== "DONE_BUT_FLAWED"
-    || !attribute({ outcome: done, capability: { gates: gates({}) }, merged: conflicting }).some(finding => finding.source === "fact_visibility" && finding.responsibility === "workflow")
+    || finalStatus("DONE", conflicting) !== "DONE"
+    || attribute({ outcome: done, capability: { gates: gates({}) }, merged: conflicting }).some(finding => finding.source === "fact_visibility")
     || unsupportedInvisible.fact_visibility.find(fact => fact.fact_id === "duration")?.tier !== "asked_user"
     || finalStatus("DONE", unsupportedInvisible) !== "DONE"
     || finalStatus("DONE", allVisible) !== "DONE"
+    || finalStatus("DONE", invisibleConsistent) !== "DONE"
+    || attribute({ outcome: done, capability: { gates: gates({}) }, merged: invisibleConsistent }).some(finding => finding.source === "fact_visibility")
+    || finalStatus("DONE", invisibleUnclear) !== "DONE_BUT_FLAWED"
     || unclassified.fact_visibility.find(fact => fact.fact_id === "calendar")?.tier !== "unclassified"
     || finalStatus("DONE", unclassified) !== "UNKNOWN") {
     throw new Error("hidden fact visibility grading failed");

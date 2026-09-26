@@ -53,11 +53,12 @@ function validateClaude(host, judge, root) {
   const sessionId = "claude-session-1";
   const fixture = join(root, "claude-turn.jsonl");
   writeJsonl(fixture, [
-    { type: "system", subtype: "init", session_id: sessionId },
+    { type: "system", subtype: "init", session_id: sessionId, model: "deepseek-v4.1-flash-expires-on-0910" },
     {
       type: "assistant",
       session_id: sessionId,
       message: {
+        model: "deepseek-v4-1-flash-260910",
         content: [
           { type: "text", text: "{\"ok\":true}" },
           { type: "tool_use", id: "tool-1", name: "Bash", input: { command: "superspec status --change x" } },
@@ -85,6 +86,8 @@ function validateClaude(host, judge, root) {
   assert(traceThreadIds(trace)[0] === sessionId, "claude thread id");
   assert(eventsOfKind(trace, "thread").length === 1, "claude must not treat every system event as a thread");
   assert(traceAgentMessages(trace).some(text => text.includes("\"ok\":true")), "claude agent message");
+  assert(eventsOfKind(trace, "thread")[0]?.model === "deepseek-v4.1-flash-expires-on-0910", "claude init records requested model");
+  assert(eventsOfKind(trace, "message").some(event => event.model === "deepseek-v4-1-flash-260910"), "claude messages record the served model");
   const commands = eventsOfKind(trace, "command");
   assert(commands.length === 1 && commands[0].command === "superspec status --change x" && commands[0].status === "completed", "claude bash tool_result");
   assert(eventsOfKind(trace, "file_change").some(event => event.changes?.[0]?.path === "openspec/changes/x/proposal.md" && event.changes[0].kind === "update"), "claude edit file_change is an update");
@@ -158,6 +161,7 @@ function validateClaude(host, judge, root) {
     assert(!existsSync(join(isolation.hostHome, "auth.json")), "claude must not copy user OAuth");
     const settings = JSON.parse(readFileSync(join(isolation.hostHome, "settings.json"), "utf8"));
     assert(settings.sandbox?.enabled === true && settings.sandbox.allowUnsandboxedCommands === false, "claude Bash runs sandboxed");
+    assert(settings.permissions?.defaultMode === "bypassPermissions", "claude isolation uses a headless permission mode");
     assert(settings.permissions?.blockReadsOutsideWorkingDirectories === true, "claude file tools are confined to the workspace");
     const env = host.controlledEnv({
       isolation,
@@ -206,6 +210,7 @@ function validateClaude(host, judge, root) {
   const persistent = host.freshLaunchArgs({ persistent: true, model: "claude-sonnet-4-6", reasoning: "high", launchFeatures: features });
   const resume = host.resumeLaunchArgs({ model: "claude-sonnet-4-6", reasoning: "high", launchFeatures: features, sessionId });
   assert(fresh.includes("-p") && fresh.includes("stream-json") && !fresh.includes("--bare"), "claude launch is print+stream-json, not bare");
+  assert(fresh.includes("bypassPermissions") && !fresh.includes("acceptEdits"), "claude launch does not wait for permission prompts");
   assert(fresh.includes("--no-session-persistence") && !persistent.includes("--no-session-persistence"), "claude persistence flag");
   assert(resume.includes("-r") && resume.includes(sessionId) && !resume.includes("--no-session-persistence"), "claude resume");
   assert(features.args.includes("--forward-subagent-text"), "claude multi-agent forwards subagent text");
@@ -298,6 +303,8 @@ function validateOmp(host, judge, root) {
     assert(isolation.home !== process.env.HOME, "omp HOME isolated");
     assert(isolation.sessionDir === isolation.hostHome, "omp session dir isolated");
     assert(existsSync(join(isolation.home, ".omp", "agent", "models.yml")), "omp models.yml materialized");
+    assert(readFileSync(join(isolation.home, ".omp", "agent", "config.yml"), "utf8").includes("outputMaxColumns: 0"), "omp isolation disables per-line output truncation");
+    assert(host.sessionArtifactRoots(isolation).includes(isolation.sessionDir), "omp session dir is an own-session artifact root");
     writeFileSync(join(isolation.hostHome, "auth.json"), "{}\n");
     mkdirSync(join(isolation.hostHome, "sessions"), { recursive: true });
     writeFileSync(join(isolation.hostHome, "sessions", `${sessionId}.jsonl`), `${JSON.stringify({ id: sessionId })}\n`);
