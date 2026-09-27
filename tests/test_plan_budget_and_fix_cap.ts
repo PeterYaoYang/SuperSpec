@@ -246,6 +246,66 @@ test("计划规模预算：确认规模合理后进入 propose-ready", () => {
   } finally { fx.cleanup(); }
 });
 
+test("计划规模预算：答复不是给定选项原文时登记被拒，next 仍在同一问题；原文答复后推进", () => {
+  const fx = setupProposeBudget({ taskCount: 11 });
+  try {
+    const ask = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(ask.path, "ask_user");
+    if (ask.path !== "ask_user") throw new Error("expected budget ask");
+    const annotated = recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({
+      scope: ask.ask_user.scope,
+      answer: `${PLAN_SIZE_BUDGET_CONFIRM_ANSWER}——每个场景对应独立行为`,
+    }));
+    assert.equal(annotated.accepted, false);
+    const stillAsking = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(stillAsking.path, "ask_user");
+    if (stillAsking.path !== "ask_user") throw new Error("expected budget ask");
+    assert.equal(stillAsking.ask_user.scope, ask.ask_user.scope);
+
+    assert.equal(recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({
+      scope: ask.ask_user.scope,
+      answer: PLAN_SIZE_BUDGET_CONFIRM_ANSWER,
+      reason: "每个场景对应独立行为",
+    })).accepted, true);
+    const after = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(after.path, "next_command");
+  } finally { fx.cleanup(); }
+});
+
+test("计划规模预算：规模变化后，旧规模问题的答复登记被拒", () => {
+  const fx = setupProposeBudget({ taskCount: 11 });
+  try {
+    const ask = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(ask.path, "ask_user");
+    if (ask.path !== "ask_user") throw new Error("expected budget ask");
+    writeFileSync(join(fx.changeRoot, "tasks.md"), makeTaskLines(12));
+    assert.equal(recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({
+      scope: ask.ask_user.scope,
+      answer: PLAN_SIZE_BUDGET_CONFIRM_ANSWER,
+    })).accepted, false);
+    const reasked = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(reasked.path, "ask_user");
+    if (reasked.path !== "ask_user") throw new Error("expected budget ask");
+    assert.notEqual(reasked.ask_user.scope, ask.ask_user.scope);
+  } finally { fx.cleanup(); }
+});
+
+test("计划规模预算：答复因规模变化被拒后规模恢复，同一输入可以正常登记", () => {
+  const fx = setupProposeBudget({ taskCount: 11 });
+  try {
+    const ask = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(ask.path, "ask_user");
+    if (ask.path !== "ask_user") throw new Error("expected budget ask");
+    const input = JSON.stringify({ scope: ask.ask_user.scope, question: ask.ask_user.question, answer: PLAN_SIZE_BUDGET_CONFIRM_ANSWER });
+    writeFileSync(join(fx.changeRoot, "tasks.md"), makeTaskLines(12));
+    assert.equal(recordUserDecisionContent(fx.projectRoot, fx.change, input).accepted, false);
+    writeFileSync(join(fx.changeRoot, "tasks.md"), makeTaskLines(11));
+    assert.equal(recordUserDecisionContent(fx.projectRoot, fx.change, input).accepted, true);
+    const after = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(after.path, "next_command");
+  } finally { fx.cleanup(); }
+});
+
 test("计划规模预算：登记回去收缩且规模未变时 material_update_required", () => {
   const fx = setupProposeBudget({ taskCount: 11 });
   try {

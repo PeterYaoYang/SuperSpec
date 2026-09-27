@@ -373,6 +373,63 @@ test("v2 round：需决定条目依据 Requirement 通过", () => {
   } finally { fx.cleanup(); }
 });
 
+function exploreDecisionLedgerFixture(discoveryQuestion: string, decision: string, registeredAnswer: boolean) {
+  const fx = setupV2Propose({
+    designContent: designBody({
+      ledger: structureLedgerTable([{
+        id: "SC-001",
+        category: "改变既有数据语义",
+        change: "daily_status 口径",
+        basis: "specs/demo/spec.md#Requirement: demo requirement",
+        decision,
+      }]),
+    }),
+  });
+  writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "discovery.md"), [
+    "# Discovery",
+    "",
+    "## 待确认问题",
+    discoveryQuestion,
+    "",
+  ].join("\n"));
+  if (registeredAnswer) {
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "user_decision_recorded", {
+      scope: `explore_open_question:sha256:${"0".repeat(64)}:Q-001`,
+      question: "日报口径是否按新规则？",
+      answer: "A 是",
+      accepted: true,
+      closure: "closed",
+      explore_open_question: { round_id: "T-explore", question_id: "Q-001", question_ordinal: 1 },
+    }));
+  }
+  return fx;
+}
+
+const CLOSED_Q = "- [x] Q-001 [验收] 日报口径是否按新规则？选项：A 是 / B 否。建议：A";
+const OPEN_Q = "- [ ] Q-001 [验收] 日报口径是否按新规则？选项：A 是 / B 否。建议：A";
+
+test("v2 round：需决定条目引用 Explore 已登记答复并确认的 Q 通过，不必另设 DEC", () => {
+  const fx = exploreDecisionLedgerFixture(CLOSED_Q, "Q-001", true);
+  try {
+    assert.notEqual(next(fx.projectRoot, fx.change, fx.changeRoot, "minimal").path, "material_update_required");
+    assert.equal(proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal").to_state, "propose_ready");
+  } finally { fx.cleanup(); }
+});
+
+test("v2 round：需决定条目引用未登记答复、尚未确认或不存在的 Q 时拒绝", () => {
+  for (const [question, decision, registered] of [
+    [CLOSED_Q, "Q-001", false],
+    [OPEN_Q, "Q-001", true],
+    [CLOSED_Q, "Q-002", true],
+  ] as const) {
+    const fx = exploreDecisionLedgerFixture(question, decision, registered);
+    try {
+      assert.equal(next(fx.projectRoot, fx.change, fx.changeRoot, "minimal").path, "material_update_required");
+      assert.notEqual(proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal").to_state, "propose_ready");
+    } finally { fx.cleanup(); }
+  }
+});
+
 test("v2 round：仅展示条目依据 proposal.md#What Changes 通过", () => {
   const fx = setupV2Propose({
     designContent: designBody({

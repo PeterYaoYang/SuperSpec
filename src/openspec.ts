@@ -2,8 +2,9 @@
 
 import { execFileSync, type ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { createHash } from "node:crypto";
+import type { ChangeMaterialPaths, WorkflowArtifactKind } from "./types.ts";
 
 export interface OpenSpecProbe {
   available: boolean;
@@ -107,4 +108,29 @@ export function validateOpenSpecChange(projectRoot: string, change: string): Ope
 
 export function changeRoot(projectRoot: string, change: string): string {
   return join(projectRoot, "openspec", "changes", change);
+}
+
+/** 工作流材料在 change 目录内的规范位置。 */
+export const CHANGE_MATERIAL_RELATIVE_PATHS: Readonly<Record<WorkflowArtifactKind, string>> = {
+  discovery: ".superspec/artifacts/discovery.md",
+  proposal: "proposal.md",
+  specs: "specs/",
+  design: "design.md",
+  test_contract: ".superspec/artifacts/test-contract.md",
+  tasks: "tasks.md",
+};
+
+/**
+ * change 内材料相对项目根的路径，布局与 changeRoot() 一致。项目根另有同名的
+ * .superspec/ 状态目录，面向 Agent 的路径一律用这个形式，不给需要自行补基准的相对路径。
+ */
+export function changeMaterialProjectPath(changeRootPath: string, materialPath: string): string {
+  return `openspec/changes/${basename(changeRootPath)}/${materialPath}`;
+}
+
+export function changeMaterialProjectPaths(changeRootPath: string): ChangeMaterialPaths {
+  const paths = Object.fromEntries(
+    Object.entries(CHANGE_MATERIAL_RELATIVE_PATHS).map(([kind, rel]) => [kind, changeMaterialProjectPath(changeRootPath, rel)]),
+  ) as Record<WorkflowArtifactKind, string>;
+  return { change_root: `openspec/changes/${basename(changeRootPath)}`, ...paths };
 }

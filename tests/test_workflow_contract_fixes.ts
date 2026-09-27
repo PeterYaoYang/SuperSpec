@@ -172,7 +172,7 @@ test("propose 计划材料引用未定义的 DEC/SC 编号时 next 返回材料�
     const result = next(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(result.path, "material_update_required");
     if (result.path !== "material_update_required") throw new Error("expected material update");
-    const referenceError = result.errors.find(error => error.startsWith("design.md"));
+    const referenceError = result.errors.find(error => error.startsWith(result.material_paths.design));
     assert.ok(referenceError, result.errors.join("\n"));
     assert.ok(referenceError.includes("DEC-009") && referenceError.includes("SC-003"));
 

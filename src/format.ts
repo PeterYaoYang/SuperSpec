@@ -620,6 +620,7 @@ const STRUCTURE_LEDGER_ID_RE = /^SC-[A-Za-z0-9_-]+$/;
 const STRUCTURE_LEDGER_NONE_RE = /^\s*无\s*$/;
 const STRUCTURE_TEST_ID_RE = /^TEST-[A-Za-z0-9_-]+$/;
 const DEC_ID_RE = /^DEC-[A-Za-z0-9][A-Za-z0-9_-]*$/;
+const DISCOVERY_QUESTION_ID_RE = /^Q-[A-Za-z0-9][A-Za-z0-9_-]*$/;
 const DISPLAY_ONLY_DECISION_MARKERS = new Set(["—", "-", "–"]);
 const STRUCTURE_LEDGER_MISSING_MESSAGE = 'design.md 缺少 ## 结构变更清单；没有结构变更时在该标题下写"无"';
 const STRUCTURE_LEDGER_FORMAT_MESSAGE = `## 结构变更清单 一节只能是"无"或一张含 ${STRUCTURE_LEDGER_COLUMNS.join("、")} 列的表格，其他说明写到别的标题下`;
@@ -774,7 +775,15 @@ function isDisplayOnlyDecisionMarker(decision: string): boolean {
   return decision.trim() === "" || DISPLAY_ONLY_DECISION_MARKERS.has(decision.trim());
 }
 
-export function validateStructureChangeLedger(changeRoot: string, ledger: StructureChangeLedger): StructureChangeLedgerValidation {
+/**
+ * confirmedExploreQuestionIds 由调用方按事件核实：discovery 已勾选且有已闭环的答复登记。
+ * 只凭勾选不能证明用户确认过，因为进入 Propose 后 discovery 仍可被改写。
+ */
+export function validateStructureChangeLedger(
+  changeRoot: string,
+  ledger: StructureChangeLedger,
+  confirmedExploreQuestionIds: ReadonlySet<string> = new Set(),
+): StructureChangeLedgerValidation {
   if (!ledger.present) return { ok: false, errors: [STRUCTURE_LEDGER_MISSING_MESSAGE] };
   if (ledger.none) return { ok: true, errors: [] };
   if (ledger.format_error) return { ok: false, errors: [ledger.format_error] };
@@ -805,13 +814,14 @@ export function validateStructureChangeLedger(changeRoot: string, ledger: Struct
     const basis = resolveStructureBasisRef(changeRoot, entry.basis, entry.category);
     if (!basis.ok) errors.push(`结构变更清单 ${entry.id} 的需求依据无效：${basis.reason}`);
 
-    const decisionValid = DEC_ID_RE.test(entry.decision) && knownDecIds.has(entry.decision);
+    const decisionValid = (DEC_ID_RE.test(entry.decision) && knownDecIds.has(entry.decision))
+      || (DISCOVERY_QUESTION_ID_RE.test(entry.decision) && confirmedExploreQuestionIds.has(entry.decision));
     if (STRUCTURE_DECISION_REQUIRED_CATEGORIES.has(entry.category)) {
       if (!decisionValid) {
-        errors.push(`结构变更清单 ${entry.id} 属于 ${entry.category}，必须在 决定 列引用一个 ## 待用户确认 中的 DEC`);
+        errors.push(`结构变更清单 ${entry.id} 属于 ${entry.category}，决定列必须引用一个决定：用户在 Explore 已就这项结构取舍给出答复时，引用该已确认的 Q；否则在 ## 待用户确认 中新增 DEC`);
       }
     } else if (!isDisplayOnlyDecisionMarker(entry.decision) && !decisionValid) {
-      errors.push(`结构变更清单 ${entry.id} 的决定列引用了无效的 DEC：${entry.decision}`);
+      errors.push(`结构变更清单 ${entry.id} 的决定列引用了无效的 DEC 或未确认的 Q：${entry.decision}`);
     }
   }
 
@@ -825,7 +835,9 @@ export function formatStructureChangeLedgerSummary(ledger: StructureChangeLedger
   const lines = ledger.entries.map(entry => {
     const ref = splitBasisRef(entry.basis);
     const basisLabel = ref && /^specs\//.test(ref.path) ? ref.anchor : entry.basis;
-    const decisionSuffix = DEC_ID_RE.test(entry.decision) ? ` — 决定 ${entry.decision}` : "";
+    const decisionSuffix = DEC_ID_RE.test(entry.decision) || DISCOVERY_QUESTION_ID_RE.test(entry.decision)
+      ? ` — 决定 ${entry.decision}`
+      : "";
     return `- ${entry.id} [${entry.category}] ${entry.change} — 依据 ${basisLabel}${decisionSuffix}`;
   });
   return ["结构变更清单", "", ...lines].join("\n");

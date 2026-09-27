@@ -46,11 +46,12 @@ import {
   validateTasksDocument,
   parseStructureChangeLedger,
   validateStructureChangeLedger,
+  openQuestionDecisionClosure,
   type DiscoveryQuestion,
   type ProposeQuestion,
 } from "./format.ts";
 import { currentGitHead } from "./git_state.ts";
-import { validateOpenSpecChange } from "./openspec.ts";
+import { CHANGE_MATERIAL_RELATIVE_PATHS, changeMaterialProjectPath, validateOpenSpecChange } from "./openspec.ts";
 import { docRef, sha256File, sha256Text, findLatestEvent, listMarkdownFiles } from "./store.ts";
 import {
   isReviewReadyVerifier,
@@ -117,6 +118,7 @@ import {
 export const PLAN_SIZE_BUDGET_SCOPE_PREFIX = "plan_size_budget:";
 export const PLAN_SIZE_BUDGET_CONFIRM_ANSWER = "确认规模合理，继续审查";
 export const PLAN_SIZE_BUDGET_SHRINK_ANSWER = "回去收缩计划";
+export const PLAN_SIZE_BUDGET_ANSWERS: readonly string[] = [PLAN_SIZE_BUDGET_CONFIRM_ANSWER, PLAN_SIZE_BUDGET_SHRINK_ANSWER];
 
 export type TransitionName =
   | "explore"
@@ -159,7 +161,17 @@ export type NextStepPlan =
   | { kind: "material_update_required"; state: State; errors: string[]; reason: string }
   | { kind: "test_rerun_required"; state: State; reruns: TestRerunRequirement[]; changedPaths: string[]; reason: string }
   | { kind: "mode_selection_required"; state: State; selection: WorkflowModeSelectionAction; reason: string }
-  | { kind: "run_transition"; state: State; transition: TransitionName; reason: string; risk?: ReviewRisk; taskId?: string; reopen?: ReopenNextStep }
+  | {
+      kind: "run_transition";
+      state: State;
+      transition: TransitionName;
+      reason: string;
+      risk?: ReviewRisk;
+      taskId?: string;
+      reopen?: ReopenNextStep;
+      /** 执行该转换只会创建这些角色的审查工作项，状态不会推进。 */
+      createsReviewJobs?: JobRole[];
+    }
   | { kind: "review_rejected"; state: State; review_rejection: Record<string, unknown>; reason: string }
   | {
       kind: "done";
@@ -243,12 +255,14 @@ function hasPendingFollowup(history: OpenQuestionAnswerRecord[]): boolean {
   return history.some(record => record.current_revision && record.closure === "needs_followup");
 }
 
-function exploreQuestionLabel(question: Pick<DiscoveryQuestion, "id" | "ordinal">): string {
-  return question.id.startsWith("item-") ? `discovery.md 第 ${question.ordinal} 项待确认事项` : `discovery.md 中的 ${question.id}`;
+function exploreQuestionLabel(changeRoot: string, question: Pick<DiscoveryQuestion, "id" | "ordinal">): string {
+  const path = changeMaterialProjectPath(changeRoot, CHANGE_MATERIAL_RELATIVE_PATHS.discovery);
+  return question.id.startsWith("item-") ? `${path} 第 ${question.ordinal} 项待确认事项` : `${path} 中的 ${question.id}`;
 }
 
-function proposeQuestionLabel(question: ProposeQuestion): string {
-  return question.id.startsWith("item-") ? `${question.path} 第 ${question.ordinal} 项待确认问题` : `${question.path} 中的 ${question.id}`;
+function proposeQuestionLabel(changeRoot: string, question: ProposeQuestion): string {
+  const path = changeMaterialProjectPath(changeRoot, question.path);
+  return question.id.startsWith("item-") ? `${path} 第 ${question.ordinal} 项待确认问题` : `${path} 中的 ${question.id}`;
 }
 
 function answerAwaitingWritebackError(label: string, answer: OpenQuestionAnswerRecord, affected: string): string {
@@ -293,21 +307,21 @@ function missingProposeFirstBeatArtifact(
   return null;
 }
 
-function unregisteredClosedExploreQuestionError(events: Event[], question: DiscoveryQuestion): string {
-  const label = exploreQuestionLabel(question);
+function unregisteredClosedExploreQuestionError(changeRoot: string, events: Event[], question: DiscoveryQuestion): string {
+  const label = exploreQuestionLabel(changeRoot, question);
   const answered = answeredExploreQuestionRegisteredText(events, question);
   if (!answered && hasPendingFollowup(exploreQuestionAnswerHistory(events, currentExploreRoundId(events), question))) {
-    return `${label} 已标记为已确认，但它的答复登记为需要补充、尚未闭环；请恢复为待确认，通过 next 继续询问并登记闭环答复后再回写 discovery.md`;
+    return `${label} 已标记为已确认，但它的答复登记为需要补充、尚未闭环；请恢复为待确认，通过 next 继续询问并登记闭环答复后再回写`;
   }
   if (!answered) {
-    return `${label} 已标记为已确认，但本轮没有它的答复登记；请恢复为待确认，通过 next 向用户展示并登记真实答复后再回写 discovery.md`;
+    return `${label} 已标记为已确认，但本轮没有它的答复登记；请恢复为待确认，通过 next 向用户展示并登记真实答复后再回写`;
   }
   const original = answered.registeredText == null ? "" : `：${answered.registeredText}`;
   return `${label} 已登记用户答复，但勾选后该事项行的文本与登记时不一致，答复无法匹配；请把该行恢复为登记时的原文${original}，只把 [ ] 改为 [x]，结论写在该行之外`;
 }
 
-function unregisteredClosedProposeQuestionError(events: Event[], question: ProposeQuestion): string {
-  const label = proposeQuestionLabel(question);
+function unregisteredClosedProposeQuestionError(changeRoot: string, events: Event[], question: ProposeQuestion): string {
+  const label = proposeQuestionLabel(changeRoot, question);
   const answered = answeredProposeQuestionRegisteredText(events, question);
   if (!answered && hasPendingFollowup(proposeQuestionAnswerHistory(events, currentProposeRoundId(events), question))) {
     return `${label} 已标记为确认，但它的答复登记为需要补充、尚未闭环；请恢复为待确认，通过 next 继续询问并登记闭环答复后再回写计划材料`;
@@ -481,7 +495,23 @@ const REQUIRED_DESIGN_HEADINGS = [
   "## 实现方案",
 ] as const;
 
-function validateDesignPlan(changeRoot: string, profile: PlanningValidationProfile | null): string | null {
+/** discovery 中已勾选、且有已闭环答复登记的 Explore 事项，才能作为结构变更清单的决定。 */
+function userConfirmedExploreQuestionIds(changeRoot: string, events: Event[]): Set<string> {
+  const discoveryContent = readDiscovery(changeRoot);
+  if (discoveryContent == null) return new Set();
+  const answered = new Set<string>();
+  for (const event of events) {
+    if (event.event_type !== "user_decision_recorded" || event.payload.accepted !== true) continue;
+    if (openQuestionDecisionClosure(event.payload) !== "closed") continue;
+    const question = event.payload.explore_open_question as { question_id?: unknown } | undefined;
+    if (typeof question?.question_id === "string") answered.add(question.question_id);
+  }
+  return new Set(parseDiscoveryQuestions(discoveryContent)
+    .filter(question => question.status === "closed" && answered.has(question.id))
+    .map(question => question.id));
+}
+
+function validateDesignPlan(changeRoot: string, profile: PlanningValidationProfile | null, events: Event[]): string | null {
   const errors: string[] = [];
 
   // 稳定标题检查自 design.schema_version 引入起生效；更早的 strict round 没有 design 字段，保持不检查。
@@ -516,7 +546,7 @@ function validateDesignPlan(changeRoot: string, profile: PlanningValidationProfi
       errors.push('design.md 缺少 ## 结构变更清单；没有结构变更时在该标题下写"无"');
     } else {
       const ledger = parseStructureChangeLedger(readFileSync(designPath, "utf8"));
-      const validation = validateStructureChangeLedger(changeRoot, ledger);
+      const validation = validateStructureChangeLedger(changeRoot, ledger, userConfirmedExploreQuestionIds(changeRoot, events));
       if (!validation.ok) errors.push(...validation.errors);
     }
   }
@@ -673,7 +703,7 @@ function proposeReferenceErrors(changeRoot: string, events: Event[]): string[] {
       ...(deferredIds ? undefinedIdReferences(content, "D", deferredIds) : []),
     ];
     if (missing.length > 0) {
-      errors.push(`${path} 引用了未定义的编号 ${missing.join("、")}；DEC 须在“## 待用户确认”中定义，SC 须在 design.md 的“## 结构变更清单”中定义，Q 须在 discovery.md 的“待确认问题”中定义，D 须在 discovery.md 的“留待计划阶段”中定义`);
+      errors.push(`${changeMaterialProjectPath(changeRoot, path)} 引用了未定义的编号 ${missing.join("、")}；DEC 须在“## 待用户确认”中定义，SC 须在 design.md 的“## 结构变更清单”中定义，Q 须在 discovery.md 的“待确认问题”中定义，D 须在 discovery.md 的“留待计划阶段”中定义`);
     }
   }
   errors.push(...unaddressedDeferredItemErrors(changeRoot));
@@ -700,7 +730,7 @@ function validatePlanningPreflight(
   const missingArtifact = missingBaseArtifact(changeRoot, risk);
   if (missingArtifact) errors.push(missingArtifact);
 
-  const designPlanError = validateDesignPlan(changeRoot, profile);
+  const designPlanError = validateDesignPlan(changeRoot, profile, events);
   if (designPlanError) errors.push(designPlanError);
 
   if (existsSync(join(changeRoot, "tasks.md"))) {
@@ -913,6 +943,12 @@ function countPlanTestEntries(changeRoot: string): number {
   return parsed.ok ? parsed.entries.length : 0;
 }
 
+/** 当前计划规模对应的确认 scope；规模变化后旧 scope 的答复不再适用。 */
+export function currentPlanSizeBudgetScope(changeRoot: string, events: Event[]): string | null {
+  if (!existsSync(join(changeRoot, "tasks.md"))) return null;
+  return planSizeBudgetScope(currentProposeRoundId(events), countNonFixPlanTasks(changeRoot), countPlanTestEntries(changeRoot));
+}
+
 function isOverPlanSizeBudget(budget: WorkflowBudget, taskCount: number, testCount: number): boolean {
   const overTasks = budget.tasks !== null && taskCount > budget.tasks;
   const overTests = budget.tests !== null && testCount > budget.tests;
@@ -986,7 +1022,7 @@ function planSizeBudgetNextStep(context: PhasePlanContext): NextStepPlan | null 
   const question = `当前计划规模为 ${overage}。请确认是否按此规模继续进入审查，或先回去收缩 tasks / test-contract。`;
   const ask: AskUser = {
     question,
-    allowed_answers: [PLAN_SIZE_BUDGET_CONFIRM_ANSWER, PLAN_SIZE_BUDGET_SHRINK_ANSWER],
+    allowed_answers: [...PLAN_SIZE_BUDGET_ANSWERS],
     scope,
     record_argv: ["superspec", "record", "user-decision", "--change", change, "--input", "-"],
     record_input: { scope, question, answer: null },
@@ -1217,7 +1253,7 @@ export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
       }
       const discoveryPath = join(changeRoot, ".superspec", "artifacts", "discovery.md");
       if (!existsSync(discoveryPath)) {
-        return requiredArtifact(projectRoot, change, changeRoot, "explore", "discovery", ".superspec/artifacts/discovery.md", mode.risk);
+        return requiredArtifact(projectRoot, change, changeRoot, "explore", "discovery", CHANGE_MATERIAL_RELATIVE_PATHS.discovery, mode.risk);
       }
       const discoveryCheck = validateDiscovery(changeRoot);
       if (!discoveryCheck.ok) {
@@ -1248,7 +1284,7 @@ export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
           return {
             kind: "material_update_required",
             state: "explore",
-            errors: [answerAwaitingWritebackError(exploreQuestionLabel(currentQuestion), answered, "受影响的调查结论")],
+            errors: [answerAwaitingWritebackError(exploreQuestionLabel(changeRoot, currentQuestion), answered, "受影响的调查结论")],
             reason: "答复已登记，等待回写 discovery.md",
           };
         }
@@ -1272,7 +1308,7 @@ export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
         return {
           kind: "material_update_required",
           state: "explore",
-          errors: unregisteredClosedQuestions.map(question => unregisteredClosedExploreQuestionError(events, question)),
+          errors: unregisteredClosedQuestions.map(question => unregisteredClosedExploreQuestionError(changeRoot, events, question)),
           reason: "存在未登记答复的已确认事项",
         };
       }
@@ -1309,8 +1345,11 @@ export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
         kind: "run_transition",
         state: "explore",
         transition: "explore",
-        reason: "探索完成，推进到计划阶段",
+        reason: exploreGate?.kind === "create_gate_jobs"
+          ? `探索材料需要审查，执行后创建审查工作项，尚未到进入计划阶段的确认点：${exploreGate.reason}`
+          : "探索完成，推进到计划阶段",
         risk: mode.risk,
+        ...(exploreGate?.kind === "create_gate_jobs" ? { createsReviewJobs: exploreGate.roles } : {}),
       };
     }
 
@@ -1325,7 +1364,7 @@ export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
           return {
             kind: "material_update_required",
             state: "propose",
-            errors: [answerAwaitingWritebackError(proposeQuestionLabel(currentQuestion), answered, "受这项决定影响的计划材料")],
+            errors: [answerAwaitingWritebackError(proposeQuestionLabel(changeRoot, currentQuestion), answered, "受这项决定影响的计划材料")],
             reason: "设计决定已登记，等待回写计划材料",
           };
         }
@@ -1349,7 +1388,7 @@ export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
         return {
           kind: "material_update_required",
           state: "propose",
-          errors: unregisteredClosed.map(question => unregisteredClosedProposeQuestionError(events, question)),
+          errors: unregisteredClosed.map(question => unregisteredClosedProposeQuestionError(changeRoot, events, question)),
           reason: "存在未登记答复的设计决定",
         };
       }
@@ -1380,11 +1419,11 @@ export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
 
       const testContractPath = join(changeRoot, ".superspec", "artifacts", "test-contract.md");
       if (!existsSync(testContractPath)) {
-        return requiredArtifact(projectRoot, change, changeRoot, "propose", "test_contract", ".superspec/artifacts/test-contract.md", mode.risk);
+        return requiredArtifact(projectRoot, change, changeRoot, "propose", "test_contract", CHANGE_MATERIAL_RELATIVE_PATHS.test_contract, mode.risk);
       }
 
       if (!existsSync(join(changeRoot, "tasks.md"))) {
-        return requiredArtifact(projectRoot, change, changeRoot, "propose", "tasks", "tasks.md", mode.risk);
+        return requiredArtifact(projectRoot, change, changeRoot, "propose", "tasks", CHANGE_MATERIAL_RELATIVE_PATHS.tasks, mode.risk);
       }
 
       const preflight = validatePlanningPreflight(
@@ -1412,22 +1451,26 @@ export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
       if (proposalReviewJobs.length > 0) {
         return requiredJobs("propose", proposalReviewJobs, `有 ${proposalReviewJobs.length} 个待完成 proposal 审查工作项`);
       }
-      const proposeRejection = reviewRejectionStep("propose", reviewGatePlan(
+      const proposeGate = reviewGatePlan(
         projectRoot,
         snapshot,
         events,
         changeRoot,
         PROPOSE_FINAL_REVIEW_GATE,
         PROPOSE_FINAL_REVIEW_GATE.requiredRolesForRisk(mode.risk),
-      ));
+      );
+      const proposeRejection = reviewRejectionStep("propose", proposeGate);
       if (proposeRejection) return proposeRejection;
 
       return {
         kind: "run_transition",
         state: "propose",
         transition: "propose-ready",
-        reason: "计划文档就绪，提交 propose-ready",
+        reason: proposeGate?.kind === "create_gate_jobs"
+          ? `计划材料需要审查，执行后创建审查工作项：${proposeGate.reason}`
+          : "计划文档就绪，提交 propose-ready",
         risk: mode.risk,
+        ...(proposeGate?.kind === "create_gate_jobs" ? { createsReviewJobs: proposeGate.roles } : {}),
       };
     }
 
@@ -1459,7 +1502,10 @@ export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
         kind: "run_transition",
         state: "propose_ready",
         transition: "start-apply",
-        reason: planOnlyRepair ? "计划材料已修正且没有待实施任务，跳过重复的 Apply 确认" : "计划就绪，开始执行",
+        reason: startApplyPlan.kind === "create_gate_jobs"
+          ? startApplyPlan.reason
+          : planOnlyRepair ? "计划材料已修正且没有待实施任务，跳过重复的 Apply 确认" : "计划就绪，开始执行",
+        ...(startApplyPlan.kind === "create_gate_jobs" ? { createsReviewJobs: startApplyPlan.roles } : {}),
       };
     }
 
@@ -1852,7 +1898,8 @@ function planExploreTransition(context: TransitionPlanContext): TransitionDecisi
   if (referenceErrors.length > 0) return { kind: "skip", message: referenceErrors.join("；") };
   const currentQuestion = parseDiscoveryOpenQuestions(discoveryContent)[0];
   if (currentQuestion) {
-    return { kind: "skip", message: "discovery.md 仍有需要确认的事项，请先完成确认并回写 discovery.md" };
+    const discoveryPath = changeMaterialProjectPath(changeRoot, CHANGE_MATERIAL_RELATIVE_PATHS.discovery);
+    return { kind: "skip", message: `${discoveryPath} 仍有需要确认的事项，请先完成确认并回写` };
   }
 
   if (unregisteredClosedExploreQuestions(events, discoveryContent).length > 0) {

@@ -3075,6 +3075,39 @@ test("propose reviewer retry：只继承当前 gate 的同角色 findings", () =
   } finally { fx.cleanup(); }
 });
 
+test("propose / propose_ready：执行转换只会创建审查时，next 标明将创建的审查角色", () => {
+  const fx = setupPropose();
+  try {
+    confirmCurrentPhase(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.equal(transitionExplore(fx.projectRoot, fx.change, fx.changeRoot, "normal").to_state, "propose");
+    writeFileSync(join(fx.changeRoot, "design.md"), appendStructureLedgerNone("# Design\n"));
+    writeFileSync(join(fx.changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");
+
+    const beforeReview = next(fx.projectRoot, fx.change, fx.changeRoot, "strict");
+    assert.equal(beforeReview.path, "next_command");
+    if (beforeReview.path !== "next_command") throw new Error("expected next_command");
+    const created = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "strict");
+    const createdRoles = created.created_jobs.map(jobId => jobsPacket(fx.projectRoot, fx.change, jobId).packet?.role);
+    assert.deepEqual([...(beforeReview.creates_review_jobs ?? [])].sort(), [...createdRoles].sort());
+    for (const jobId of created.created_jobs) {
+      assert.equal(recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, jobId, reviewerReportForJob(fx.projectRoot, fx.change, jobId)).accepted, true);
+    }
+    assert.equal(proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "strict").to_state, "propose_ready");
+    const confirmation = next(fx.projectRoot, fx.change, fx.changeRoot, "strict");
+    assert.equal(confirmation.path, "ask_user");
+
+    writeFileSync(join(fx.changeRoot, "design.md"), appendStructureLedgerNone("# Design\n\n补充一处实现说明。\n"));
+    const stale = next(fx.projectRoot, fx.change, fx.changeRoot, "strict");
+    assert.equal(stale.path, "next_command");
+    if (stale.path !== "next_command") throw new Error("expected next_command");
+    assert.match(stale.next_command, /start-apply/);
+    const rereview = startApply(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(rereview.to_state, "propose_ready");
+    const rereviewRoles = rereview.created_jobs.map(jobId => jobsPacket(fx.projectRoot, fx.change, jobId).packet?.role);
+    assert.deepEqual([...(stale.creates_review_jobs ?? [])].sort(), [...rereviewRoles].sort());
+  } finally { fx.cleanup(); }
+});
+
 test("propose_ready 审查拒绝：本状态不能直接向用户提问时，给出先回到计划阶段再提问的通道", () => {
   const fx = setupPropose();
   try {

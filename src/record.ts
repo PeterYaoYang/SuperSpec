@@ -7,7 +7,8 @@ import {
   sha256File, sha256Text, withLock, appendRawRecord, type RawRecordRef,
 } from "./store.ts";
 import { rebuildSnapshot } from "./sync.ts";
-import { changeRoot as openspecChangeRoot } from "./openspec.ts";
+import { CHANGE_MATERIAL_RELATIVE_PATHS, changeMaterialProjectPath, changeRoot as openspecChangeRoot } from "./openspec.ts";
+import { currentPlanSizeBudgetScope, PLAN_SIZE_BUDGET_ANSWERS, PLAN_SIZE_BUDGET_SCOPE_PREFIX } from "./phase_plan.ts";
 import { latestWorkflowModeSelection, workflowModeSelectionError, workflowModeUpgradePending } from "./workflow_config.ts";
 import {
   isPhaseConfirmationScope,
@@ -176,13 +177,18 @@ function reviewScopeForJob(job: Job): { reviewTargets: string[]; readOnlyRefs: s
     : { reviewTargets: [], readOnlyRefs: [] };
 }
 
-function reviewScopeInstruction(job: Job, reviewTargets: string[], readOnlyRefs: string[]): string {
+function reviewScopeInstruction(
+  job: Job,
+  reviewTargets: string[],
+  readOnlyRefs: string[],
+  projectPath: (path: string) => string,
+): string {
   if (reviewTargets.length === 0 && readOnlyRefs.length === 0) {
-    return `请审查 ${job.boundFiles.map(file => file.path).join(", ")}，`;
+    return `请审查 ${job.boundFiles.map(file => projectPath(file.path)).join(", ")}，`;
   }
-  const targets = reviewTargets.length > 0 ? `本 gate 可提出修改建议的审查目标为 ${reviewTargets.join(", ")}。` : "";
+  const targets = reviewTargets.length > 0 ? `本 gate 可提出修改建议的审查目标为 ${reviewTargets.map(projectPath).join(", ")}。` : "";
   const refs = readOnlyRefs.length > 0
-    ? `只读上游引用为 ${readOnlyRefs.join(", ")}；只允许读取和核对一致性，不得要求在当前阶段修改、追加、删除、重排或格式化这些文件。只读引用中与本次目标或绑定上游事实无直接因果关系的历史质量问题不得作为本 gate 的 fail。如果本次审查目标或 boundFiles 中绑定的上游事实直接造成变更包跨文档不一致，并且会影响明确验收或实施落地，可以 fail；finding 必须锚定为当前变更包未完成一致性闭环，required outcome 只要求消除矛盾，不得指定必须修改哪份文档或采用哪种技术方案。`
+    ? `只读上游引用为 ${readOnlyRefs.map(projectPath).join(", ")}；只允许读取和核对一致性，不得要求在当前阶段修改、追加、删除、重排或格式化这些文件。只读引用中与本次目标或绑定上游事实无直接因果关系的历史质量问题不得作为本 gate 的 fail。如果本次审查目标或 boundFiles 中绑定的上游事实直接造成变更包跨文档不一致，并且会影响明确验收或实施落地，可以 fail；finding 必须锚定为当前变更包未完成一致性闭环，required outcome 只要求消除矛盾，不得指定必须修改哪份文档或采用哪种技术方案。`
     : "";
   return targets + refs;
 }
@@ -190,6 +196,7 @@ function reviewScopeInstruction(job: Job, reviewTargets: string[], readOnlyRefs:
 const REVIEWER_SELF_SUBMISSION_INSTRUCTION = "完成审查后由你自己运行 submission_command，经 stdin 登记 JSON 报告；宿主只放行单条 superspec 命令（不允许 heredoc、管道、重定向或 cd 前缀）时，改用 inline_submission_command，把报告压成单行 JSON 放进单引号参数，JSON 字符串中的单引号写成 \\u0027。登记前绑定材料或代码一旦变化，报告就会作废，登记后本工作项即结束。登记结果以返回的 result_kind 为准；两种方式都无法运行时，把完整报告 JSON 原样交回主流程，由主流程加 --on-behalf 代为登记。";
 const PREVIOUS_REVIEW_EVIDENCE_INSTRUCTION = "previous_review_evidence 是上一轮同角色审查记录的证据与结论：code_files 中 unchanged 为 true 的代码文件自那次核实后内容未变，除非本轮材料变化直接涉及，可以沿用其核实结论而不必重新逐行核对；unchanged 为 false 或未列出的文件需要重新核实。";
 const CONFIRMED_DECISIONS_INSTRUCTION = "confirmed_decisions 是已登记的用户答复原文，核对材料中的已确认结论时以它为准，不必再到事件日志中查找。";
+const PLAN_REVIEW_PASS_FINDINGS_INSTRUCTION = "verdict=pass 表示当前材料可以进入下一步，随 pass 报告列出的 finding 与 risks 是不阻塞推进的遗留意见，不要写成进入下一步前必须完成的修改；认为不修改就不能推进的问题按 blocker 判 fail。";
 
 function genericReviewCoverageInstruction(job: Job): string {
   if (!requiresReviewScope(job)) return "";
@@ -303,7 +310,7 @@ function invalidExploreOpenQuestionResult(
     message: reason === "invalid_explore_open_question_scope"
       ? "确认事项的内部标识无效，请重新执行 next 获取当前事项"
       : reason === "explore_open_question_already_recorded"
-        ? "这件事已有已登记答复，请先回写 discovery.md 后重新执行 next"
+        ? `这件事已有已登记答复，请先回写 ${changeMaterialProjectPath(openspecChangeRoot(projectRoot, change), CHANGE_MATERIAL_RELATIVE_PATHS.discovery)} 后重新执行 next`
       : "需要确认的事项已变化或已完成，请重新执行 next 获取当前事项",
   };
 }
@@ -1170,6 +1177,31 @@ function recordUserDecisionLoaded(
     }));
     return { event_type: "user_decision_recorded" as const, accepted: false, message: closureRejection.message };
   }
+  // 计划规模确认按原文逐字消费：这里拒收不匹配的答复，避免“已登记”却不生效。
+  const budgetRejection = decision.scope.startsWith(PLAN_SIZE_BUDGET_SCOPE_PREFIX)
+    ? decision.scope !== currentPlanSizeBudgetScope(openspecChangeRoot(projectRoot, change), events)
+      ? { reason: "stale_plan_size_budget_scope", message: "计划规模已变化或当前没有待确认的规模问题，请重新执行 next 获取当前问题" }
+      : !PLAN_SIZE_BUDGET_ANSWERS.includes(decision.answer.trim())
+        ? {
+            reason: "invalid_plan_size_budget_answer",
+            message: `计划规模确认的 answer 必须精确为：${PLAN_SIZE_BUDGET_ANSWERS.join("、")}；用户给出的理由写在 reason 字段`,
+          }
+        : null
+    : null;
+  if (budgetRejection) {
+    const existingPayload = existing?.payload as { accepted?: unknown; reason?: unknown } | undefined;
+    if (existingPayload?.accepted === false && existingPayload.reason === budgetRejection.reason) {
+      return { event_type: "user_decision_recorded" as const, accepted: false, message: budgetRejection.message };
+    }
+    appendEvent(projectRoot, change, makeEvent(change, "user_decision_recorded", {
+      accepted: false,
+      scope: decision.scope,
+      answer: decision.answer,
+      reason: budgetRejection.reason,
+      input_digest: inputDigest,
+    }));
+    return { event_type: "user_decision_recorded" as const, accepted: false, message: budgetRejection.message };
+  }
   const closure: OpenQuestionClosure = decision.closure === "needs_followup" ? "needs_followup" : "closed";
   const followup = closure === "needs_followup" ? (decision.followup as string).trim() : null;
   const sameOpenQuestionAnswer = (latest: Event): boolean => {
@@ -1226,7 +1258,7 @@ function recordUserDecisionLoaded(
         accepted: true,
         message: closure === "needs_followup"
           ? "幂等返回：该事项已登记为需要补充，本次输入没有改变登记内容"
-          : "幂等返回：该事项的答复已登记，本次输入没有改变登记内容；答复绑定 discovery.md 中该事项行的原文，回写时只把 [ ] 改为 [x]，结论写在该行之外",
+          : `幂等返回：该事项的答复已登记，本次输入没有改变登记内容；答复绑定 ${changeMaterialProjectPath(openspecChangeRoot(projectRoot, change), CHANGE_MATERIAL_RELATIVE_PATHS.discovery)} 中该事项行的原文，回写时只把 [ ] 改为 [x]，结论写在该行之外`,
       };
     }
     if (latestForQuestion && openQuestionDecisionClosure(latestForQuestion.payload) === "closed") {
@@ -1398,7 +1430,10 @@ function recordUserDecisionLoaded(
   // Explore scope 已在上面按当前问题和同 scope 的已接受答复完成校验。此前同一
   // input 曾因 stale 被拒绝、但材料后来回到完全相同的当前项时，不能让旧拒绝
   // 记录永久吞掉一次现在有效的登记。
-  if (existing && !phaseAction && !exploreOpenQuestion) {
+  // 计划规模答复已按当前 scope 重新校验；同一输入此前因规模变化被拒、规模恢复后应能登记。
+  const revalidatedBudgetInput = decision.scope.startsWith(PLAN_SIZE_BUDGET_SCOPE_PREFIX)
+    && (existing?.payload as { accepted?: unknown } | undefined)?.accepted === false;
+  if (existing && !phaseAction && !exploreOpenQuestion && !revalidatedBudgetInput) {
     const accepted = (existing.payload as { accepted?: unknown }).accepted !== false;
     return {
       event_type: "user_decision_recorded" as const,
@@ -1832,7 +1867,9 @@ function packetFieldDescriptions(): Record<string, string> {
     code_state_check: "代码状态检查：最终验证时用于判断代码审查后代码是否又发生变化。",
     deliverable_docs: "本审查周期改动的普通文档（计划与工作流材料之外）及其内容指纹；纯文档改动的交付物在这里，登记前它们再变化会使本工作项作废。",
     review_baseline: "同角色最近一次形成结论的审查工作项；存在时本工作项是相对它的材料复审。result_kind 为 review_failed 表示那次审查完整审过后以 fail 结论被拒，其 finding 见 previous_rejection。",
-    material_delta: "相对 review_baseline 的逐文件材料变化：status 为 added/removed/modified，diff 为 unified diff；diff_unavailable 说明为何没有差异、需要完整阅读该文件。",
+    material_delta: "相对 review_baseline 的逐文件材料变化：path 与 boundFiles 的 path 同一基准（计划材料相对 change 目录），status 为 added/removed/modified，diff 为 unified diff；diff_unavailable 说明为何没有差异、需要完整阅读该文件。",
+    review_targets: "本 gate 可提出修改建议的材料，path 相对 change 目录；对应的项目相对路径见 boundFiles 中同一文件的 project_path。",
+    read_only_refs: "只读上游材料，path 相对 change 目录；对应的项目相对路径见 boundFiles 中同一文件的 project_path。",
     previous_review_evidence: "上一轮同角色审查（通过或 fail）记录的 summary、evidence_refs，以及报告引用的代码文件自那次提交后是否未变化（code_files[].unchanged）。",
     confirmed_decisions: "工作项创建前已登记且已闭环的 Explore/Propose 问题答复：phase、question_id、问题原文、答复与登记事件 ID；earlier_answers 是闭环前同一问题下需要补充的答复，与 answer 一起构成用户的完整答复。",
     event_id: "事件 ID，用于追溯证据来源。",
@@ -1923,12 +1960,15 @@ export function jobsPacket(
         字段说明: packetFieldDescriptions(),
         output_instructions:
           `${roleDescription(job.role)}。本工作项的报告结构以 packet 顶层 report_skeleton 为准（完整契约：superspec jobs contract --change "${change}" --job "${job.job_id}"）：按骨架逐字段填写，job_id / packet_digest 已按本工作项预填，不要改写，也不要用上一轮报告里的值。` +
-          (isReviewer ? reviewScopeInstruction(job, reviewTargets, readOnlyRefs) : "") +
+          (isReviewer
+            ? reviewScopeInstruction(job, reviewTargets, readOnlyRefs, path => isCodeReviewer ? path : `${changePrefix}/${path}`)
+            : "") +
           (isReviewer ? migrationEvidenceInstruction(job) : "") +
           (job.review_evidence_digest ? `本工作项对应的执行证据版本为 ${job.review_evidence_digest}，` : "") +
           (isReviewer ? genericReviewCoverageInstruction(job) + proposalIncrementalReviewInstruction(job) + previousRejectionInstruction(job) : "") +
           (previousEvidence ? PREVIOUS_REVIEW_EVIDENCE_INSTRUCTION : "") +
           (decisions.length > 0 ? CONFIRMED_DECISIONS_INSTRUCTION : "") +
+          (isPlanReview ? PLAN_REVIEW_PASS_FINDINGS_INSTRUCTION : "") +
           (requiresReviewer(job.role) ? `必须由独立 ${recommendedAgentForRole(job.role)} 审查角色执行，并在审查者来源字段（reviewer.kind/id）中记录来源，` : "") +
           (isReviewer ? REVIEWER_SELF_SUBMISSION_INSTRUCTION : "产出 JSON 报告内容并优先通过 --report - 从 stdin 登记；") +
           `需要落盘时写到 report_file_path，不要写进 openspec/changes 或 .superspec/artifacts 等计划材料目录。${recordInputInstruction(job)}协议字段含义见 packet 顶层“字段说明”，普通对话不要原样复述 JSON。` +

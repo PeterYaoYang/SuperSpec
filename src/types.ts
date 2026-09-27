@@ -571,6 +571,9 @@ export interface AcceptedMaterialFollowupContinuation {
 
 export type WorkflowArtifactKind = "discovery" | "proposal" | "specs" | "design" | "test_contract" | "tasks";
 
+/** 当前 change 的目录与各工作流材料相对项目根的路径。 */
+export type ChangeMaterialPaths = { change_root: string } & Record<WorkflowArtifactKind, string>;
+
 export interface RequiredWorkflowArtifact {
   kind: WorkflowArtifactKind;
   /** Repository-relative canonical path owned by the workflow engine. */
@@ -610,7 +613,15 @@ export interface ReviewFindingContext {
 export type NextOutput = {
   state: State;
 } & Partial<WorkflowModeStatus> & (
-  | { path: "next_command"; next_command: string; reason: string; missing_inputs: MissingInput[]; finding_context?: ReviewFindingContext }
+  | {
+      path: "next_command";
+      next_command: string;
+      reason: string;
+      missing_inputs: MissingInput[];
+      finding_context?: ReviewFindingContext;
+      /** 执行 next_command 只会创建这些角色的审查工作项，状态不会推进。 */
+      creates_review_jobs?: JobRole[];
+    }
   | { path: "required_job"; required_jobs: RequiredJobAction[]; instruction?: string; reason: string }
   | { path: "artifact_required"; artifact: RequiredWorkflowArtifact; resume: ArtifactRequiredResume; reason: string }
   | { path: "material_update_required"; errors: string[]; resume: MaterialUpdateRequiredResume; reason: string }
@@ -623,9 +634,14 @@ export type NextOutput = {
 
 /**
  * next 命令的完整输出。stop_allowed 只在等待用户答复或流程终态时为 true；
- * warnings 是不阻断当前路径、但需要主流程处理的工作区异常。
+ * warnings 是不阻断当前路径、但需要主流程处理的工作区异常；material_paths
+ * 是提示中提到的材料的读写位置。
  */
-export type NextCommandOutput = NextOutput & { stop_allowed: boolean; warnings?: string[] };
+export type NextCommandOutput = NextOutput & {
+  stop_allowed: boolean;
+  material_paths: ChangeMaterialPaths;
+  warnings?: string[];
+};
 
 // ===== Transition 结果 =====
 export interface TransitionResult {

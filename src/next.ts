@@ -15,6 +15,7 @@ import {
 } from "./workflow_config.ts";
 import { currentExploreRoundId } from "./explore_round.ts";
 import { currentProposeRoundId } from "./propose_round.ts";
+import { changeMaterialProjectPaths } from "./openspec.ts";
 import {
   discoveryQuestionDecisionBasisDigest,
   legacyDiscoveryOpenQuestionScope,
@@ -173,6 +174,7 @@ function toNextOutput(change: string, plan: NextStepPlan): NextOutput {
         reason: plan.reason,
         missing_inputs: [],
         ...(findingContext ? { finding_context: findingContext } : {}),
+        ...(plan.createsReviewJobs ? { creates_review_jobs: plan.createsReviewJobs } : {}),
       };
     }
     case "done":
@@ -193,11 +195,12 @@ function workspaceWarnings(projectRoot: string): string[] {
     : [];
 }
 
-function withStopSignal(projectRoot: string, output: NextOutput): NextCommandOutput {
+function withStopSignal(projectRoot: string, changeRoot: string, output: NextOutput): NextCommandOutput {
   const warnings = workspaceWarnings(projectRoot);
   return {
     ...output,
     stop_allowed: output.path === "ask_user" || output.path === "done",
+    material_paths: changeMaterialProjectPaths(changeRoot),
     ...(warnings.length > 0 ? { warnings } : {}),
   };
 }
@@ -226,10 +229,10 @@ export function next(
     if (plannedNextStep) {
       const output = { ...toNextOutput(change, plannedNextStep), ...status };
       recordPresentedQuestion(projectRoot, change, changeRoot, output);
-      return withStopSignal(projectRoot, output);
+      return withStopSignal(projectRoot, changeRoot, output);
     }
 
-    return withStopSignal(projectRoot, {
+    return withStopSignal(projectRoot, changeRoot, {
       state: snapshot.state,
       path: "done",
       reason: `状态 ${snapshot.state} 没有可执行下一步`,

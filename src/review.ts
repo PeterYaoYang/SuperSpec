@@ -14,6 +14,7 @@ import type { CodeReviewResultKind, CodeStateCheck, Event, Job, JobRole, Ref, Re
 import { computeCodeStateCheck, computeDeliverableDocs, effectiveCoverageExemptionRefsFromEvents } from "./code_review.ts";
 import { diffFingerprints } from "./git_state.ts";
 import { materialManifest } from "./material_snapshot.ts";
+import { changeMaterialProjectPath } from "./openspec.ts";
 import { reviewRolesForGate } from "./workflow_profile.ts";
 
 export type ReviewRisk = "minimal" | "normal" | "strict";
@@ -578,8 +579,9 @@ export function boundFilesStaleReason(job: Job, changeRoot: string): string | nu
     // 目录绑定（path 以 / 结尾）比对聚合指纹，覆盖目录内文件的增/删/改
     const current = docRef(changeRoot, bf.path).sha;
     if (current !== bf.sha) {
-      const changedFiles = changedFilesInBoundDirectory(job, changeRoot, bf.path);
-      return `绑定文件 ${bf.path} 已变化（${bf.sha} → ${current}）${changedFiles.length > 0 ? `，变化的文件：${stalePathList(changedFiles)}` : ""}`;
+      const changedFiles = changedFilesInBoundDirectory(job, changeRoot, bf.path)
+        .map(path => changeMaterialProjectPath(changeRoot, path));
+      return `绑定文件 ${changeMaterialProjectPath(changeRoot, bf.path)} 已变化（${bf.sha} → ${current}）${changedFiles.length > 0 ? `，变化的文件：${stalePathList(changedFiles)}` : ""}`;
     }
   }
   return null;
