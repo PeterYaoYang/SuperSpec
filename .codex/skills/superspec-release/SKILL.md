@@ -1,6 +1,6 @@
 ---
 name: superspec-release
-description: "发布 SuperSpec 新版本：解析版本/分支/npm dist-tag，升级版本、隔离脏工作区、验证、提交并推送 GitHub、发布 npm、创建 GitHub Release 并上传 tarball。"
+description: "发布 SuperSpec 新版本：解析版本/分支/npm dist-tag，升级版本、验证、提交并推送 GitHub、发布 npm、创建 GitHub Release 并上传 tarball。"
 triggers:
   - release
   - publish
@@ -43,27 +43,14 @@ metadata:
 
 不要硬编码 `main` 或 npm 默认 tag；所有 push、tag、registry 验证和最终报告都要引用解析出的 `releaseBranch` / `distTag`。
 
-## 工作区隔离
+## 工作区检查
 
-发布前先判断当前工作区是否干净，尤其是会进入 npm packlist 的 `README.md`、`dist/`、`templates/`、`package.json`。如果当前工作区有未提交改动、未跟踪文件，或当前分支不是目标分支，优先从远端目标分支创建临时干净 worktree 发布：
+发布前先判断当前工作区是否干净。如果存在未提交改动或未跟踪文件：
 
-```text
-git fetch origin <releaseBranch> --tags
-mktemp -d /tmp/superspec-release-<version>.XXXXXX
-git worktree add --detach <tmpdir> origin/<releaseBranch>
-```
+- 本次发布相关的改动：先提交，再继续发布。
+- 与发布无关的改动或未跟踪文件（如 `openspec/`、本地配置）：不提交、不打包，在最终报告中列出。
 
-之后所有版本修改、验证、提交、打包、发布都在临时 worktree 内执行。原工作区只在发布完成后尝试安全快进：
-
-```text
-git merge --ff-only origin/<releaseBranch>
-```
-
-如果快进失败，不要合并或重置；报告本地分支落后以及保留的未提交项。发布结束后清理临时 worktree：
-
-```text
-git worktree remove --force <tmpdir>
-```
+发布从当前检出内容进行。`npm pack` 打包的是磁盘上的文件而非 git HEAD，所以进入 packlist 的文件（`README.md`、`dist/`、`templates/`、`package.json`）必须在提交前生成、提交后打包，确保 push 到 GitHub 的代码与发布到 npm 的内容一致。验证阶段发现 packlist 内容与已提交内容不一致时，停下来修正而不是继续发布。
 
 ## 发布前检查
 
@@ -110,7 +97,7 @@ npm publish <tarball> --access public --auth-type=web --tag <distTag>
 npm version <version> --no-git-tag-version
 ```
 
-如果临时 worktree 没有 `node_modules`，先安装验证依赖，但不要生成 lockfile：
+如果当前工作区没有 `node_modules`，先安装验证依赖，但不要生成 lockfile：
 
 ```text
 npm install --no-package-lock --ignore-scripts
@@ -175,13 +162,7 @@ git commit -m "<为什么发布此变更>" \
 
 ## 推送代码
 
-提交后推送到目标分支。临时 detached worktree 内使用：
-
-```text
-git push origin HEAD:<releaseBranch>
-```
-
-如果直接在目标分支上发布，可使用：
+提交后推送到目标分支：
 
 ```text
 git push origin <releaseBranch>
@@ -238,7 +219,7 @@ npm view @peterxiaoyang/superspec@<version> version dist-tags.<distTag> dist.tar
 
 - 可以从用户发布说明、`CHANGELOG`、OpenSpec 变更、或上一版本 tag 以来的 commit 中提炼。
 - 只保留功能、行为、兼容性、文档或缺陷修复相关条目。
-- 不写发布流水线信息，例如 npm 发布、registry 验证、GitHub Release 创建、tarball 上传、worktree 清理、测试通过、版本号提交等。
+- 不写发布流水线信息，例如 npm 发布、registry 验证、GitHub Release 创建、tarball 上传、测试通过、版本号提交等。
 - 不写空泛过程描述，例如“完成发布”“执行发布”“上传包”。
 - 如果某个分类没有内容，就省略该分类。
 
@@ -271,7 +252,7 @@ EOF
 提交前检查 notes 中没有转义换行或发布流水线噪音：
 
 ```text
-grep -nE '\\n|/n|npm|registry|tarball|worktree|GitHub Release|发布成功|测试通过|验证通过' /tmp/superspec-release-notes-v<version>.md || true
+grep -nE '\\n|/n|npm|registry|tarball|GitHub Release|发布成功|测试通过|验证通过' /tmp/superspec-release-notes-v<version>.md || true
 sed -n '1,120p' /tmp/superspec-release-notes-v<version>.md
 ```
 
@@ -321,7 +302,6 @@ gh release view v<version> --repo PeterYaoYang/SuperSpec --json tagName,url,isDr
 - tarball 附件名。
 - 验证命令与结果。
 - 未纳入发布的无关工作区项，例如 `openspec/`。
-- 是否使用临时 worktree，以及是否已清理。
 
 如果任一步失败，报告：
 
