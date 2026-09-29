@@ -109,7 +109,13 @@ export function reportSchemaForJob(job: Job): ReportSchemaContract {
     open_questions: { type: "array" },
   };
   const conditions: string[] = ["verdict 只能是 pass 或 fail。"];
-  if (isReviewRole(job.role)) conditions.push("verdict=pass 时 evidence_refs 至少包含一条可定位的证据引用。");
+  if (isReviewRole(job.role)) {
+    fields["findings[].description"] = { type: "string", required: true };
+    conditions.push(
+      "verdict=pass 时 evidence_refs 至少包含一条可定位的证据引用。",
+      "每条 finding（含非阻塞）都必须有非空 description 写清问题本身；只有 id 的 finding 会被退回重交。",
+    );
+  }
 
   if (requiresReviewer(job.role)) {
     fields.reviewer = { type: "object", required: true };
@@ -129,7 +135,7 @@ export function reportSchemaForJob(job: Job): ReportSchemaContract {
     fields["findings[blocking=true].claim_kind"] = { type: "string", required: true, values: CLAIM_KINDS };
     fields["findings[blocking=true].suggested_action"] = { type: "string", required: true, values: SUGGESTED_ACTIONS };
     fields["findings[blocking=true].source_refs"] = { type: "array", required: true, item: "path:line" };
-    fields["findings[blocking=true].approved_refs"] = { type: "array", item: "已批准锚点" };
+    fields["findings[blocking=true].approved_refs"] = { type: "array", item: "已批准锚点：TEST-ID、SC-ID、DEC-ID 或 文件#标题" };
     for (const field of ["description", "evidence", "impact"] as const) {
       fields[`findings[blocking=true].${field}`] = { type: "string", required: true };
     }
@@ -137,7 +143,7 @@ export function reportSchemaForJob(job: Job): ReportSchemaContract {
       "verdict=pass 时不得存在 blocking:true 的问题。",
       "verdict=pass 时 unchecked 中不得包含绑定文件；范围外观察写 unchecked 或 risks 都不会导致拒收。",
       "checked_paths 与 unchecked[].path 合起来必须覆盖全部绑定文件。",
-      "verdict=fail 时必须给出至少一个字段完整的 blocking 问题，字段缺失会被判为不可处理报告。",
+      "verdict=fail 时必须给出至少一个 blocking 问题；blocking 问题字段缺失或锚点无法解析时返回 retryable，按提示修正后以同一工作项重交；fail 却没有任何 blocking 问题会被判为不可处理报告。",
       "claim_kind=missing_approved 且 suggested_action=apply 时，approved_refs 必须含可解析的 TEST 或 spec Requirement；缺口属于计划或验收本身时，改用 type=mixed 且 suggested_action=propose。",
       "提交时引擎会比对冻结范围与当前代码状态：绑定文件已变化会被判为过期报告，需等 next 重建工作项，不要补写指纹。",
     );
@@ -172,13 +178,14 @@ export function reportSchemaForJob(job: Job): ReportSchemaContract {
  * 可直接填写的报告骨架。
  *
  * 只预填工作项常量（job_id / packet_digest）与空数组：code-reviewer 的 checked_paths
- * 必须由审查者按实际浏览填写，预填会架空覆盖回执的意义。
+ * 必须由审查者按实际浏览填写，预填会架空覆盖回执的意义。verdict 留空由审查者填写，
+ * 骨架不带默认结论。
  * 普通 reviewer / verifier 的 checked_paths 仍按既有协议预填需要覆盖的绑定文件。
  */
 export function reportSkeletonForJob(job: Job): Record<string, unknown> {
   const skeleton: Record<string, unknown> = {
     role: job.role,
-    verdict: "pass",
+    verdict: null,
     findings: [],
     ...(isReviewRole(job.role) ? { evidence_refs: [] } : {}),
   };

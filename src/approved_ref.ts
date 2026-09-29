@@ -2,7 +2,7 @@
 
 import { readFileSync, statSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import { headingExists, parseTasksMd, parseTestContractEntries, parseStructureChangeLedger } from "./format.ts";
+import { headingExists, parseProposeQuestions, parseTasksMd, parseTestContractEntries, parseStructureChangeLedger } from "./format.ts";
 import type { CodeReviewClaimKind } from "./types.ts";
 
 export const CODE_REVIEW_CLAIM_KINDS = [
@@ -13,9 +13,10 @@ export const CODE_REVIEW_CLAIM_KINDS = [
 
 const TEST_ID_RE = /^TEST-[A-Za-z0-9_-]+$/;
 const STRUCTURE_LEDGER_ID_RE = /^SC-[A-Za-z0-9_-]+$/;
+const DECISION_ID_RE = /^DEC-[A-Za-z0-9][A-Za-z0-9_-]*$/;
 const TEST_CONTRACT_REL = join(".superspec", "artifacts", "test-contract.md");
 
-export type ApprovedRefKind = "test" | "requirement" | "task" | "design" | "proposal" | "structure";
+export type ApprovedRefKind = "test" | "requirement" | "task" | "design" | "proposal" | "structure" | "decision";
 
 export interface ResolvedApprovedRef {
   raw: string;
@@ -48,6 +49,27 @@ function readChangeFile(changeRoot: string, relPath: string): string | null {
   } catch {
     return null;
   }
+}
+
+/** design.md 自有编号：结构变更清单的 SC-xxx 与待用户确认中的 DEC-xxx，裸写或写成 design.md#ID 都按同一规则解析。 */
+function resolveDesignIdRef(
+  changeRoot: string,
+  raw: string,
+  id: string,
+): { ok: true; value: ResolvedApprovedRef } | { ok: false; reason: string } {
+  const content = readChangeFile(changeRoot, "design.md");
+  if (content == null) return { ok: false, reason: `design.md 在当前 change 中不存在，无法解析 ${raw}` };
+  if (STRUCTURE_LEDGER_ID_RE.test(id)) {
+    const ledger = parseStructureChangeLedger(content);
+    if (ledger.present && ledger.entries.some(entry => entry.id === id)) {
+      return { ok: true, value: { raw, kind: "structure", short: id } };
+    }
+    return { ok: false, reason: `design.md 结构变更清单中不存在 ${id}` };
+  }
+  if (parseProposeQuestions(content, "design.md").some(question => question.id === id)) {
+    return { ok: true, value: { raw, kind: "decision", short: id } };
+  }
+  return { ok: false, reason: `design.md 待用户确认中不存在 ${id}` };
 }
 
 export function isCodeReviewClaimKind(value: unknown): value is CodeReviewClaimKind {
@@ -93,9 +115,11 @@ export function resolveApprovedRef(changeRoot: string, raw: unknown): { ok: true
     return { ok: true, value: { raw: ref, kind: "test", short: testId } };
   }
 
+  if (STRUCTURE_LEDGER_ID_RE.test(ref) || DECISION_ID_RE.test(ref)) return resolveDesignIdRef(changeRoot, ref, ref);
+
   const separator = ref.indexOf("#");
   if (separator <= 0 || separator === ref.length - 1) {
-    return { ok: false, reason: `锚点格式无法解析，应为 文件#标题 或 TEST-ID：${ref}` };
+    return { ok: false, reason: `锚点格式无法解析，应为 TEST-ID、SC-ID、DEC-ID 或 文件#标题：${ref}` };
   }
   const path = ref.slice(0, separator).replace(/\\/g, "/");
   const anchor = ref.slice(separator + 1).trim();
@@ -109,13 +133,7 @@ export function resolveApprovedRef(changeRoot: string, raw: unknown): { ok: true
   }
 
   if (path === "design.md") {
-    if (STRUCTURE_LEDGER_ID_RE.test(anchor)) {
-      const ledger = parseStructureChangeLedger(content);
-      if (ledger.present && ledger.entries.some(entry => entry.id === anchor)) {
-        return { ok: true, value: { raw: ref, kind: "structure", short: anchor } };
-      }
-      return { ok: false, reason: `design.md 结构变更清单中不存在 ${anchor}` };
-    }
+    if (STRUCTURE_LEDGER_ID_RE.test(anchor) || DECISION_ID_RE.test(anchor)) return resolveDesignIdRef(changeRoot, ref, anchor);
     if (!headingExists(content, anchor)) return { ok: false, reason: `design.md 中不存在标题「${anchor}」` };
     return { ok: true, value: { raw: ref, kind: "design", short: anchor } };
   }

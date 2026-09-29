@@ -324,6 +324,9 @@ export interface RequiredJobAction {
   role: JobRole;
   packet_command: string;
   packet_argv: string[];
+  /** 引擎生成的派发说明（角色 prompt + 工作项契约），主流程原样交给执行该工作项的独立角色。 */
+  dispatch_command: string;
+  dispatch_argv: string[];
 }
 
 // ===== 事件 =====
@@ -610,6 +613,20 @@ export interface ReviewFindingContext {
   note: string;
 }
 
+/** 最近一次通过的代码审查 / 最终验证报告里不阻塞推进的意见；不进门禁，交付时交给使用者判断。 */
+export interface ReviewLeftoverItem {
+  role: JobRole;
+  job_id: string;
+  kind: "finding" | "risk";
+  id?: string;
+  text: string;
+}
+
+export interface ReviewLeftovers {
+  items: ReviewLeftoverItem[];
+  instruction: string;
+}
+
 export type NextOutput = {
   state: State;
 } & Partial<WorkflowModeStatus> & (
@@ -621,6 +638,7 @@ export type NextOutput = {
       finding_context?: ReviewFindingContext;
       /** 执行 next_command 只会创建这些角色的审查工作项，状态不会推进。 */
       creates_review_jobs?: JobRole[];
+      review_leftovers?: ReviewLeftovers;
     }
   | { path: "required_job"; required_jobs: RequiredJobAction[]; instruction?: string; reason: string }
   | { path: "artifact_required"; artifact: RequiredWorkflowArtifact; resume: ArtifactRequiredResume; reason: string }
@@ -629,7 +647,7 @@ export type NextOutput = {
   | { path: "mode_selection_required"; selection: WorkflowModeSelectionAction; reason: string }
   | { path: "ask_user"; ask_user: AskUser; reason: string }
   | { path: "review_rejected"; review_rejection: Record<string, unknown>; reason: string }
-  | { path: "done"; reason: string; continuation?: AcceptedMaterialFollowupContinuation }
+  | { path: "done"; reason: string; continuation?: AcceptedMaterialFollowupContinuation; review_leftovers?: ReviewLeftovers }
 );
 
 /**

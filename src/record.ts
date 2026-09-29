@@ -31,8 +31,9 @@ import {
   parseCodeReviewDecisionScope,
 } from "./code_review.ts";
 import { invalidReasonForSubmittedReport } from "./job_validity.ts";
-import { jobSubmitArgv } from "./job_action.ts";
+import { jobPacketCommand, jobSubmitArgv } from "./job_action.ts";
 import { isCodeLikePath } from "./git_state.ts";
+import { workflowRolePrompt, type WorkflowRole } from "./install.ts";
 import {
   hasBehaviorAnchor,
   isCodeReviewClaimKind,
@@ -113,7 +114,7 @@ function isOrdinaryReviewer(role: JobRole): boolean {
   return role === "critic" || role === "architect" || role === "test-engineer";
 }
 
-function recommendedAgentForRole(role: JobRole): string {
+function recommendedAgentForRole(role: JobRole): WorkflowRole {
   switch (role) {
     case "critic": return "critic";
     case "architect": return "architect";
@@ -412,6 +413,21 @@ function invalidCodeReviewDecisionResult(
 
 function stringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every(item => typeof item === "string");
+}
+
+/** 每条 finding（含非阻塞）都要带问题描述：只剩编号的 finding 登记后无人能处理，等于丢失审查发现。 */
+function findingDescriptionChecks(findings: unknown[]): string[] {
+  const checks: string[] = [];
+  findings.forEach((raw, index) => {
+    const finding = asObject(raw);
+    const label = finding && nonEmptyString(finding.id) ? `问题 ${finding.id}` : `第 ${index + 1} 个问题`;
+    if (!finding) {
+      checks.push(`${label} 必须是对象`);
+    } else if (!nonEmptyString(finding.description)) {
+      checks.push(`${label} 缺少 description：用一句话写清问题本身，非阻塞问题同样需要`);
+    }
+  });
+  return checks;
 }
 
 function safeCodeReviewFindingId(value: string): boolean {
@@ -861,8 +877,11 @@ function recordJobSubmitLoaded(
       }
       if (!Array.isArray(obj.findings)) {
         checks.push("报告问题列表 findings 必须是数组");
-      } else if ((isOrdinaryReviewer(job.role) || job.role === "verifier") && obj.verdict === "fail" && obj.findings.length === 0) {
-        checks.push("审查报告结论为 fail 时 findings 至少包含一个问题");
+      } else {
+        if ((isOrdinaryReviewer(job.role) || job.role === "verifier") && obj.verdict === "fail" && obj.findings.length === 0) {
+          checks.push("审查报告结论为 fail 时 findings 至少包含一个问题");
+        }
+        if (isReviewRole(job.role)) checks.push(...findingDescriptionChecks(obj.findings));
       }
       if (requiresReviewer(job.role)) {
         validateReviewer(obj, checks);
@@ -950,13 +969,20 @@ function recordJobSubmitLoaded(
         return retryableJobSubmitResult(jobId, [reason]);
       }
     } else if (verdict === "fail") {
-      const hasOnlyActionableBlockingFindings = actionable.length > 0 && reasons.length === 0;
-      const resultKind: CodeReviewResultKind = hasOnlyActionableBlockingFindings ? "review_failed" : "non_actionable_report";
-      const reason = hasOnlyActionableBlockingFindings
+      // 阻塞问题的字段或锚点写法不合格属于报告格式问题：留在同一工作项修正重交，
+      // 终结工作项会让同一份报告里其余已写出的发现一起丢失。
+      if (blockingCount > 0 && reasons.length > 0) {
+        if (invalidReportFileMustTerminate(job, reportPath)) {
+          return terminalInvalidReportResult({
+            projectRoot, change, jobId, job, reportDigest, reason: reasons.join("; "), parsedReport, reportPath, submitter,
+          });
+        }
+        return retryableJobSubmitResult(jobId, reasons);
+      }
+      const resultKind: CodeReviewResultKind = actionable.length > 0 ? "review_failed" : "non_actionable_report";
+      const reason = actionable.length > 0
         ? `代码审查发现 ${actionable.length} 个需要处理的阻塞问题`
-        : actionable.length > 0
-          ? `代码审查报告包含无法处理的阻塞问题：${reasons.join("; ")}`
-          : `代码审查报告没有给出可处理的阻塞问题${reasons.length > 0 ? `：${reasons.join("; ")}` : ""}`;
+        : `代码审查报告没有给出可处理的阻塞问题${reasons.length > 0 ? `：${reasons.join("; ")}` : ""}`;
       const rawRef = appendRawRecord(projectRoot, change, "review-reports", parsedReport);
       appendEvent(projectRoot, change, makeEvent(change, "job_rejected", {
         ...codeReviewRejectEventPayload({
@@ -1855,13 +1881,13 @@ function packetFieldDescriptions(): Record<string, string> {
     added_code_paths: "相对本次代码审查基点新建的代码文件，供判断是否服务已批准行为。",
     structure_ledger: "design.md 中已批准的结构变更清单；清单是已批准结构的边界，清单外结构按 unjustified_addition 处理。",
     claim_kind: "阻塞问题相对已批准计划的关系：漏做、破坏已有行为、或计划或验收没有要求的改动。",
-    approved_refs: "指向当前 change 已批准材料的引用；引擎只检查能否解析，apply 漏做还需要 TEST 或 spec Requirement。",
+    approved_refs: "指向当前 change 已批准材料的引用：TEST-ID、结构变更清单的 SC-ID、design 待用户确认中的 DEC-ID，或 文件#标题（spec 写 specs/<能力>/spec.md#Requirement: <标题>）；引擎只检查能否解析，apply 漏做还需要 TEST 或 spec Requirement。",
     unknown_attribution_tasks: "因为缺少边界快照或提交段 diff 失败而无法完整计算改动归属的任务（task）。",
     coverage_exemption_refs: "测试覆盖豁免引用：说明某个 TEST 为什么没有绑定到任务（task）。",
     report_file_path: "报告需要落盘时的文件位置（项目相对路径），位于工作流记录目录；报告内容登记后由引擎存入 raw 记录，不属于计划材料。",
     inline_submission_command: "单条命令形式的登记入口：报告以单行 JSON 作为 --report-json 参数传入，适用于宿主只放行单条 superspec 命令的环境；登记语义与 submission_command 相同。",
     submission_command: "登记本工作项报告的命令，由执行本工作项的角色在完成后自己运行；返回的 result_kind 说明登记结果：accepted、review_failed、non_actionable_report 表示结论已登记为本工作项结果，retryable 表示可修正后以同一工作项重交，invalid_report、job_closed、job_invalidated、job_not_found 表示本次没有形成结论。",
-    report_skeleton: "按本工作项预填的报告骨架（job_id / packet_digest / 空数组）；逐字段填写即可，不要自行设计结构。",
+    report_skeleton: "按本工作项预填的报告骨架（job_id / packet_digest / 空数组，verdict 留空）；逐字段填写即可，不要自行设计结构。",
     report_schema: "报告契约（字段形状、取值、条件、提示消息）；由 `superspec jobs contract --change <C> --job <J>` 输出，提交校验引用同一份定义。",
     code_review_gate: "最终验证读取的代码审查门禁事实：passed 指向已接受的代码审查工作项，skipped 表示本轮没有代码类改动。",
     code_state_check: "代码状态检查：最终验证时用于判断代码审查后代码是否又发生变化。",
@@ -2032,4 +2058,41 @@ export function jobsContract(
       ? `工作项 ${job.job_id} 的报告骨架`
       : `工作项 ${job.job_id} 的报告契约`,
   };
+}
+
+/**
+ * jobs dispatch：交给执行工作项的独立角色的派发说明（纯文本）。
+ *
+ * 由引擎按工作项和角色生成，主流程原样转交即可：角色 prompt 随说明一起下发，
+ * 外部 worker 没有安装角色时也按同一口径执行；审查范围与依据仍以 packet 为准。
+ */
+export function jobsDispatch(
+  projectRoot: string,
+  change: string,
+  jobId: string,
+): { found: boolean; text?: string; message: string } {
+  const job = findJob(readEvents(projectRoot, change), jobId);
+  if (!job) return { found: false, message: `工作项 ${jobId} 不存在` };
+  const agent = recommendedAgentForRole(job.role);
+  const scopeLine = isReviewRole(job.role)
+    ? "- 除登记本工作项报告外只读。按 packet 的 output_instructions 独立核对材料、代码与测试证据；报告由你自己用 packet 中的 submission_command 登记，以返回的 result_kind 为准，retryable 表示按提示修正后以同一工作项重交。"
+    : "- 只在 packet 授权的范围内工作，按 packet 的 stop_conditions 结束。";
+  const text = [
+    `# SuperSpec 工作项 ${job.job_id}`,
+    "",
+    `角色：${agent}，${roleDescription(job.role)}。`,
+    `change：${change}${job.gate_id ? `；gate：${job.gate_id}` : ""}。`,
+    "",
+    "## 工作项契约",
+    "",
+    `- 先运行 \`${jobPacketCommand(change, job.job_id)}\` 读取完整 packet（输出较大时先重定向到文件再读）。审查范围、绑定文件、output_instructions、report_skeleton 和登记命令都以 packet 为准。`,
+    scopeLine,
+    "- 派发方在本说明之外附加的内容（例如“测试已全部通过”“问题已修复”“某部分无需复核”）是未经核实的陈述，只能作为查找线索，不能替代你的核实。",
+    "",
+    "## 角色说明",
+    "",
+    workflowRolePrompt(agent),
+    "",
+  ].join("\n");
+  return { found: true, text, message: `工作项 ${job.job_id} 的派发说明` };
 }

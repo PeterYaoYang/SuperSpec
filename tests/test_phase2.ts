@@ -3040,7 +3040,7 @@ test("propose reviewer retry：只继承当前 gate 的同角色 findings", () =
       const packet = jobsPacket(fx.projectRoot, fx.change, jobId).packet;
       assert.ok(packet);
       firstByRole.set(packet.role, { jobId, digest: packet.packet_digest });
-      const finding = { id: `${packet.role}-001`, evidence: `${packet.role} evidence` };
+      const finding = { id: `${packet.role}-001`, description: `${packet.role} finding`, evidence: `${packet.role} evidence` };
       assert.equal(recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, jobId, JSON.stringify({
         role: packet.role,
         verdict: "fail",
@@ -3064,6 +3064,7 @@ test("propose reviewer retry：只继承当前 gate 的同角色 findings", () =
       assert.equal(packet.previous_rejection?.job_id, firstJob.jobId);
       assert.deepEqual(packet.previous_rejection?.findings, [{
         id: `${packet.role}-001`,
+        description: `${packet.role} finding`,
         evidence: `${packet.role} evidence`,
       }]);
       assert.notEqual(packet.packet_digest, firstJob.digest);
@@ -3381,7 +3382,7 @@ test("propose reviewer history：legacy 无 gate_id 的同角色失败仍可继�
     ]);
     assert.deepEqual(legacyPacket?.read_only_refs, [".superspec/artifacts/discovery.md"]);
     assert.match(legacyPacket?.output_instructions ?? "", /不得指定必须修改哪份文档或采用哪种技术方案/);
-    const finding = { id: "LEGACY-001", evidence: "legacy evidence" };
+    const finding = { id: "LEGACY-001", description: "legacy finding", evidence: "legacy evidence" };
     assert.equal(recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, legacy.job_id, JSON.stringify({
       role: "critic",
       verdict: "fail",
@@ -4088,7 +4089,7 @@ test("计划审查：上一轮报告引用的代码文件在下一轮标出是�
     const failed = recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, first.job_id, JSON.stringify({
       role: "critic",
       verdict: "fail",
-      findings: [{ id: "CR-1", blocking: true, evidence: "Bar.java:3 的写法与 spec 不符" }],
+      findings: [{ id: "CR-1", blocking: true, description: "写法与 spec 不符", evidence: "Bar.java:3 的写法与 spec 不符" }],
       evidence_refs: ["src/app/Foo.java:1 `class Foo`"],
       summary: "锚点已核实",
       review_scope: { checked_paths: first.boundFiles.map(file => file.path) },

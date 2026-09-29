@@ -244,6 +244,26 @@ function countValidJsonlRecords(filePath: string): number {
   return count;
 }
 
+/** 按事件里记录的 raw 引用取回原始记录；位置或摘要对不上时返回 null，不猜测。 */
+export function readRawRecord(projectRoot: string, change: string, ref: RawRecordRef): unknown | null {
+  if (!(RAW_RECORD_KINDS as readonly string[]).includes(ref.raw_kind)) return null;
+  const rf = rawFile(projectRoot, change, ref.raw_kind);
+  if (!existsSync(rf)) return null;
+  let index = 0;
+  for (const line of readFileSync(rf, "utf8").split("\n")) {
+    if (!line.trim()) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (index === ref.raw_index) return sha256Text(line) === ref.raw_digest ? parsed : null;
+    index++;
+  }
+  return null;
+}
+
 /**
  * Append an accepted record input to the raw archive.
  *

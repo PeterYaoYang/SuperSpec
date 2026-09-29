@@ -408,6 +408,8 @@ test("simulateLoop：required_job → next_command → done", () => {
         role: "critic",
         packet_command: "superspec jobs packet --change test-change --job JOB-1",
         packet_argv: ["superspec", "jobs", "packet", "--change", "test-change", "--job", "JOB-1"],
+        dispatch_command: "superspec jobs dispatch --change test-change --job JOB-1",
+        dispatch_argv: ["superspec", "jobs", "dispatch", "--change", "test-change", "--job", "JOB-1"],
       }],
       reason: "需要审查",
     },

@@ -148,22 +148,28 @@ test("approved_refs：TEST、Requirement、task、design 标题可解析，非�
   } finally { fx.cleanup(); }
 });
 
-test("code-reviewer：缺 claim_kind 或 approved_refs 的 fail 是 non_actionable，next 不 review-fix", () => {
+test("code-reviewer：缺 claim_kind 或 approved_refs 的 fail 留在同一工作项修正重交，不 review-fix", () => {
   const fx = setupChange();
   try {
     const jobId = openCodeReviewer(fx.projectRoot, fx.change, fx.changeRoot);
     const rejected = submitFinding(fx.projectRoot, fx.change, fx.changeRoot, jobId, baseFinding);
     assert.equal(rejected.accepted, false);
-    const event = readEvents(fx.projectRoot, fx.change).findLast(item => item.event_type === "job_rejected");
-    assert.equal(payloadResultKind(event?.payload), "non_actionable_report");
+    assert.equal(rejected.result_kind, "retryable");
+    assert.equal(readEvents(fx.projectRoot, fx.change).some(item => item.event_type === "job_rejected"), false);
     const nextResult = next(fx.projectRoot, fx.change, fx.changeRoot);
-    assert.equal(nextResult.path, "next_command");
-    assert.match(nextCommand(nextResult), /review-ready/);
-    assert.doesNotMatch(nextCommand(nextResult), /review-fix/);
+    assert.equal(nextResult.path, "required_job");
+    assert.equal(nextResult.required_jobs[0].job_id, jobId);
+
+    const corrected = submitFinding(fx.projectRoot, fx.change, fx.changeRoot, jobId, {
+      ...baseFinding,
+      claim_kind: "missing_approved",
+      approved_refs: ["TEST-001"],
+    });
+    assert.equal(corrected.result_kind, "review_failed");
   } finally { fx.cleanup(); }
 });
 
-test("code-reviewer：missing_approved 只引用 design 或 tasks 不可执行", () => {
+test("code-reviewer：missing_approved 只引用 design 或 tasks 不可执行，需修正后重交", () => {
   const fx = setupChange();
   try {
     const jobId = openCodeReviewer(fx.projectRoot, fx.change, fx.changeRoot);
@@ -173,8 +179,8 @@ test("code-reviewer：missing_approved 只引用 design 或 tasks 不可执行",
       approved_refs: ["design.md#设计目标", "tasks.md#TASK-001"],
     });
     assert.equal(rejected.accepted, false);
-    const event = readEvents(fx.projectRoot, fx.change).findLast(item => item.event_type === "job_rejected");
-    assert.equal(payloadResultKind(event?.payload), "non_actionable_report");
+    assert.equal(rejected.result_kind, "retryable");
+    assert.match(rejected.message, /TEST 或 spec Requirement/);
   } finally { fx.cleanup(); }
 });
 

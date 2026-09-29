@@ -10,7 +10,7 @@ import { rebuildSnapshot } from "./sync.ts";
 import { next as nextCmd } from "./next.ts";
 import { proposeReady, commitTransition, transitionInit, transitionExplore, startApply, taskStart, taskComplete, reopen, reviewReady, accept } from "./transition.ts";
 import type { State, TransitionResult } from "./types.ts";
-import { jobSubmitConclusionRecorded, recordJobSubmit, recordJobSubmitContent, recordUserDecision, recordUserDecisionContent, recordWorkflowModeContent, jobsList, jobsPacket, jobsContract } from "./record.ts";
+import { jobSubmitConclusionRecorded, recordJobSubmit, recordJobSubmitContent, recordUserDecision, recordUserDecisionContent, recordWorkflowModeContent, jobsList, jobsPacket, jobsContract, jobsDispatch } from "./record.ts";
 import { recordTestRun, recordTestRunContent } from "./task.ts";
 import { RecordInputDecodingError, decodeRecordInput, readRecordInputFile } from "./record_input.ts";
 import { probeOpenSpec, openspecStatus, changeRoot } from "./openspec.ts";
@@ -681,11 +681,21 @@ record 子命令：
   workflow-mode --input <F|->
 
 jobs 子命令：
-  list / packet --job <J> / contract --job <J> [--skeleton]
+  list / packet --job <J> / contract --job <J> [--skeleton] / dispatch --job <J>
 `;
 }
 
 function commandHelp(command: string | undefined, subcommand: string | undefined): string {
+  if (command === "jobs" && subcommand === "dispatch") {
+    return `用法：superspec jobs dispatch --change <C> --job <J>
+
+输出交给独立角色执行该工作项的派发说明（纯文本）：角色 prompt 与工作项契约由引擎生成，主流程原样转交；需要补充的背景附在说明之后并写明未经核实。
+外部 worker（例如另开的终端会话）没有安装 SuperSpec 角色时，也可以直接用这份说明启动。
+
+示例：
+  superspec jobs dispatch --change <C> --job <J>
+`;
+  }
   if (command === "jobs" && subcommand === "contract") {
     return `用法：superspec jobs contract --change <C> --job <J> [--skeleton]
 
@@ -1135,6 +1145,18 @@ async function main(argv: string[]): Promise<number> {
             return result.found ? 0 : 1;
           }
 
+          case "dispatch": {
+            const jobId = opts.job;
+            if (!jobId) { console.error("jobs dispatch 需要 --job"); return 1; }
+            const result = jobsDispatch(projectRoot, change, jobId);
+            if (!result.found) {
+              console.log(JSON.stringify(result, null, 2));
+              return 1;
+            }
+            console.log(result.text);
+            return 0;
+          }
+
           default:
             console.error(`未知的 jobs 子命令：${subcommand}`);
             return 1;
@@ -1151,5 +1173,6 @@ async function main(argv: string[]): Promise<number> {
   }
 }
 
-// 入口
-main(process.argv.slice(2)).then(exitCode => process.exit(exitCode));
+// 入口：只设置退出码、让进程自然退出。stdout 接管道时写入是异步的，
+// 直接 process.exit 会截断未写完的输出（大 packet / jobs list 超过 64KB 时出现）。
+main(process.argv.slice(2)).then(exitCode => { process.exitCode = exitCode; });

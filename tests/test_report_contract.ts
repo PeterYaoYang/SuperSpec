@@ -8,7 +8,9 @@ import { tmpdir } from "node:os";
 
 import { ensureChangeLayout, appendEvent, makeEvent, readEvents } from "../src/store.ts";
 import { reviewReady, reopen } from "../src/transition.ts";
-import { jobsContract, jobsList, jobsPacket, recordJobSubmit } from "../src/record.ts";
+import { jobsContract, jobsDispatch, jobsList, jobsPacket, recordJobSubmit, recordJobSubmitContent } from "../src/record.ts";
+import { next } from "../src/next.ts";
+import { workflowRolePrompt } from "../src/install.ts";
 import { applyPlanningBaseline } from "../src/phase_plan.ts";
 import { COVERAGE_MESSAGES, reportSkeletonForJob } from "../src/report_contract.ts";
 import type { Job, JobPacket } from "../src/types.ts";
@@ -327,7 +329,7 @@ test("fail 报告：完整 blocking 问题按 review_failed 处理，范围外 u
   } finally { fx.cleanup(); }
 });
 
-test("fail 报告：blocking 问题缺 claim_kind 时判 non_actionable", () => {
+test("fail 报告：blocking 问题缺 claim_kind 时退回同一工作项修正重交", () => {
   const fx = setupChange();
   try {
     const jobId = openCodeReviewer(fx.projectRoot, fx.change, fx.changeRoot);
@@ -346,10 +348,11 @@ test("fail 报告：blocking 问题缺 claim_kind 时判 non_actionable", () => 
         source_refs: ["src/example.ts:1"],
       },
     ];
-    const result = submitReport(fx.projectRoot, fx.change, fx.changeRoot, jobId, report);
+    const result = recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, jobId, JSON.stringify(report));
     assert.equal(result.accepted, false);
-    const rejected = readEvents(fx.projectRoot, fx.change).findLast(event => event.event_type === "job_rejected");
-    assert.equal((rejected?.payload as { result_kind?: string }).result_kind, "non_actionable_report");
+    assert.equal(result.result_kind, "retryable");
+    assert.match(result.message, /claim_kind/);
+    assert.equal(readEvents(fx.projectRoot, fx.change).some(event => event.event_type === "job_rejected"), false);
   } finally { fx.cleanup(); }
 });
 
@@ -398,5 +401,111 @@ test("pass 的范围外未检查项经 code_review_gate 透出到最终验证 pa
     assert.deepEqual(verifierPacket.code_review_gate?.out_of_scope_unchecked, [
       { path: "docs/notes.md", reason: "范围外文档，未纳入判断" },
     ]);
+  } finally { fx.cleanup(); }
+});
+
+test("CLI：经管道读取超过 64KB 的输出保持完整", () => {
+  const fx = setupChange();
+  try {
+    const jobs: Job[] = Array.from({ length: 300 }, (_, index) => ({
+      job_id: `JOB-bulk-${index}`,
+      role: "critic",
+      state: "requested",
+      boundFiles: Array.from({ length: 3 }, (_, file) => ({
+        path: `src/modules/very/long/package/path/for/bulk/output/${index}/generated-file-${file}-${"x".repeat(40)}.ts`,
+        sha: `sha256:${"0".repeat(64)}`,
+      })),
+      packet_digest: `sha256:bulk-${index}`,
+      created_from_transition: "propose-ready",
+      created_at: new Date().toISOString(),
+    }));
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "transition_commit", {
+      transition: "propose-ready", from_state: "apply", to_state: "apply",
+      outcome: "job_created", created_job_ids: jobs.map(job => job.job_id), new_jobs: jobs, reason: "bulk jobs",
+    }, { transitionId: "T-bulk", idempotencyKey: "bulk-key" }));
+
+    const expected = `${JSON.stringify(jobsList(fx.projectRoot, fx.change), null, 2)}\n`;
+    assert.ok(Buffer.byteLength(expected) > 65536, "夹具输出需要超过 64KB 才能覆盖管道截断");
+
+    const cliPath = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
+    const run = spawnSync(process.execPath, [cliPath, "jobs", "list", "--change", fx.change], {
+      cwd: fx.projectRoot,
+      encoding: "utf8",
+      maxBuffer: 16 * 1024 * 1024,
+    });
+    assert.equal(run.status, 0, run.stderr);
+    assert.equal(Buffer.byteLength(run.stdout), Buffer.byteLength(expected));
+    const parsed = JSON.parse(run.stdout) as { open: Job[] };
+    assert.equal(parsed.open.length, jobs.length);
+  } finally { fx.cleanup(); }
+});
+
+test("jobs dispatch：派发说明由引擎生成，带角色 prompt 与取 packet 的命令，next 给出 dispatch_argv", () => {
+  const fx = setupChange();
+  try {
+    const jobId = openCodeReviewer(fx.projectRoot, fx.change, fx.changeRoot);
+    const dispatch = jobsDispatch(fx.projectRoot, fx.change, jobId);
+    assert.equal(dispatch.found, true);
+    const text = dispatch.text ?? "";
+    assert.ok(text.includes(jobId));
+    assert.ok(text.includes(`superspec jobs packet --change "${fx.change}" --job "${jobId}"`));
+    assert.ok(text.includes(workflowRolePrompt("code-reviewer")));
+
+    const nextResult = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(nextResult.path, "required_job");
+    assert.deepEqual(nextResult.required_jobs[0].dispatch_argv, [
+      "superspec", "jobs", "dispatch", "--change", fx.change, "--job", jobId,
+    ]);
+
+    const cliPath = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
+    const run = spawnSync(process.execPath, [cliPath, "jobs", "dispatch", "--change", fx.change, "--job", jobId], {
+      cwd: fx.projectRoot,
+      encoding: "utf8",
+    });
+    assert.equal(run.status, 0, run.stderr);
+    assert.equal(run.stdout, `${text}\n`);
+
+    const unknown = spawnSync(process.execPath, [cliPath, "jobs", "dispatch", "--change", fx.change, "--job", "JOB-missing-1"], {
+      cwd: fx.projectRoot,
+      encoding: "utf8",
+    });
+    assert.equal(unknown.status, 1);
+    assert.equal(jobsDispatch(fx.projectRoot, fx.change, "JOB-missing-1").found, false);
+  } finally { fx.cleanup(); }
+});
+
+test("报告骨架不预填结论：verdict 留空，未填写时退回同一工作项重交", () => {
+  const fx = setupChange();
+  try {
+    const jobId = openCodeReviewer(fx.projectRoot, fx.change, fx.changeRoot);
+    const contract = jobsContract(fx.projectRoot, fx.change, jobId);
+    assert.equal((contract.report_skeleton as { verdict?: unknown }).verdict, null);
+    const packet = jobsPacket(fx.projectRoot, fx.change, jobId).packet as JobPacket;
+    const unfilled = { ...passingReport(packet, jobId, []), verdict: null };
+    const result = recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, jobId, JSON.stringify(unfilled));
+    assert.equal(result.result_kind, "retryable");
+    assert.match(result.message, /verdict/);
+    const filled = recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, jobId, JSON.stringify(passingReport(packet, jobId, [])));
+    assert.equal(filled.accepted, true, filled.message);
+  } finally { fx.cleanup(); }
+});
+
+test("非阻塞 finding 只有编号时退回重交，写清 description 后正常登记", () => {
+  const fx = setupChange();
+  try {
+    const jobId = openCodeReviewer(fx.projectRoot, fx.change, fx.changeRoot);
+    const packet = jobsPacket(fx.projectRoot, fx.change, jobId).packet as JobPacket;
+    const bare = { ...passingReport(packet, jobId, []), findings: [{ id: "F1" }] };
+    const rejected = recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, jobId, JSON.stringify(bare));
+    assert.equal(rejected.result_kind, "retryable");
+    assert.match(rejected.message, /F1/);
+    assert.equal(readEvents(fx.projectRoot, fx.change).some(event => event.event_type === "job_rejected"), false);
+
+    const described = {
+      ...passingReport(packet, jobId, []),
+      findings: [{ id: "F1", description: "HR 清除卡点时不触发当日重算" }],
+    };
+    const accepted = recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, jobId, JSON.stringify(described));
+    assert.equal(accepted.accepted, true, accepted.message);
   } finally { fx.cleanup(); }
 });

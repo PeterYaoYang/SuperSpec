@@ -2328,9 +2328,9 @@ test("code-reviewer：blocking finding 的 suggested_action 必须符合 packet 
     );
 
     assert.equal(rejected.accepted, false);
+    assert.equal(rejected.result_kind, "retryable");
     assert.match(rejected.message, /suggested_action 必须是 apply\|propose/);
-    const rejectedEvent = readEvents(fx.projectRoot, fx.change).findLast(e => e.event_type === "job_rejected");
-    assert.equal((rejectedEvent?.payload as { result_kind?: unknown }).result_kind, "non_actionable_report");
+    assert.equal(readEvents(fx.projectRoot, fx.change).some(e => e.event_type === "job_rejected"), false);
   } finally { fx.cleanup(); }
 });
 
@@ -2361,13 +2361,13 @@ test("code-reviewer：blocking finding id 必须是安全 token", () => {
     );
 
     assert.equal(rejected.accepted, false);
+    assert.equal(rejected.result_kind, "retryable");
     assert.match(rejected.message, /id 只能包含/);
-    const rejectedEvent = readEvents(fx.projectRoot, fx.change).findLast(e => e.event_type === "job_rejected");
-    assert.equal((rejectedEvent?.payload as { result_kind?: unknown }).result_kind, "non_actionable_report");
+    assert.equal(readEvents(fx.projectRoot, fx.change).some(e => e.event_type === "job_rejected"), false);
   } finally { fx.cleanup(); }
 });
 
-test("code-reviewer：fail 报告混入不可处理阻塞项时整体要求重出报告", () => {
+test("code-reviewer：fail 报告混入不可处理阻塞项时在同一工作项修正重交，其余发现不丢失", () => {
   const fx = setupApplyWithDoneTask();
   try {
     reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
@@ -2403,18 +2403,21 @@ test("code-reviewer：fail 报告混入不可处理阻塞项时整体要求重�
     );
 
     assert.equal(rejected.accepted, false);
-    assert.match(rejected.message, /包含无法处理的阻塞问题/);
+    assert.equal(rejected.result_kind, "retryable");
+    assert.match(rejected.message, /缺少 id/);
+    assert.equal(readEvents(fx.projectRoot, fx.change).some(e => e.event_type === "job_rejected"), false);
+
+    const corrected = submitCodeReviewerReport(
+      fx.projectRoot,
+      fx.change,
+      fx.changeRoot,
+      jobId,
+      codeReviewerReport(fx.projectRoot, fx.change, jobId, "fail", [{ ...invalidFinding, id: "CR-VALID-002" }, validFinding]),
+    );
+    assert.equal(corrected.result_kind, "review_failed");
     const rejectedEvent = readEvents(fx.projectRoot, fx.change).findLast(e => e.event_type === "job_rejected");
-    assert.equal((rejectedEvent?.payload as { result_kind?: unknown }).result_kind, "non_actionable_report");
-
-    const nextResult = next(fx.projectRoot, fx.change, fx.changeRoot);
-    assert.equal(nextResult.path, "next_command");
-    assert.match(nextResult.next_command, /review-ready/);
-
-    const retry = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
-    assert.equal(retry.outcome, "job_created");
-    const packet = jobsPacket(fx.projectRoot, fx.change, retry.created_jobs[0]);
-    assert.equal((packet.packet?.previous_rejection as { result_kind?: unknown })?.result_kind, "non_actionable_report");
+    const recordedIds = ((rejectedEvent?.payload as { findings?: Array<{ id?: unknown }> }).findings ?? []).map(finding => finding.id);
+    assert.deepEqual(recordedIds, ["CR-VALID-002", "CR-VALID-001"]);
   } finally { fx.cleanup(); }
 });
 
@@ -3867,7 +3870,7 @@ test("review-ready：verifier rejected 后创建新 job 带处理提示", () => 
     const reportPath = join(fx.projectRoot, "verifier-fail.json");
     writeFileSync(reportPath, JSON.stringify({
       role: "verifier",
-      findings: [{ severity: "high", message: "missing verification" }],
+      findings: [{ severity: "high", description: "missing verification" }],
       verdict: "fail",
       review_scope: { checked_paths: checkedPathsForJob(fx.projectRoot, fx.change, created.created_jobs[0]) },
       reviewer: { kind: "codex-subagent", id: "test-verifier" },
@@ -3875,7 +3878,7 @@ test("review-ready：verifier rejected 后创建新 job 带处理提示", () => 
     const rejected = recordJobSubmit(fx.projectRoot, fx.change, fx.changeRoot, created.created_jobs[0], reportPath);
     assert.equal(rejected.accepted, false);
     const rejectedEvent = readEvents(fx.projectRoot, fx.change).findLast(e => e.event_type === "job_rejected");
-    assert.deepEqual((rejectedEvent?.payload as { findings?: unknown }).findings, [{ severity: "high", message: "missing verification" }]);
+    assert.deepEqual((rejectedEvent?.payload as { findings?: unknown }).findings, [{ severity: "high", description: "missing verification" }]);
     assert.equal((rejectedEvent?.payload as { raw_kind?: unknown }).raw_kind, "review-reports");
     const rawLines = readFileSync(rawFile(fx.projectRoot, fx.change, "review-reports"), "utf8").trim().split("\n");
     assert.equal(JSON.parse(rawLines.at(-1) ?? "{}").verdict, "fail");
@@ -3884,7 +3887,7 @@ test("review-ready：verifier rejected 后创建新 job 带处理提示", () => 
     assert.equal(retry.outcome, "job_created");
     assert.match(String(retry.details?.advisory), /此前最终验证未通过/);
     const retryPacket = jobsPacket(fx.projectRoot, fx.change, retry.created_jobs[0]).packet;
-    assert.deepEqual(retryPacket?.previous_rejection?.findings, [{ severity: "high", message: "missing verification" }]);
+    assert.deepEqual(retryPacket?.previous_rejection?.findings, [{ severity: "high", description: "missing verification" }]);
   } finally { fx.cleanup(); }
 });
 
@@ -4566,4 +4569,48 @@ test("H3：verifier final gate accepted 后改文档 → stale → review-ready 
     assert.equal(t2.outcome, "job_created");
     assert.notEqual(t2.created_jobs[0], jobId, "应创建新 job（ID 不同）");
   } finally { rmSync(projectRoot, { recursive: true, force: true }); }
+});
+
+test("审查遗留意见：最终验证 pass 附带的非阻塞 finding 与 risks 在 accept 前后都透出", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    advanceApplyToReview(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    const created = reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.equal(created.outcome, "job_created");
+    const verifierId = created.created_jobs[0];
+    const submitted = recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, verifierId, JSON.stringify({
+      role: "verifier",
+      verdict: "pass",
+      evidence_refs: ["test:evidence"],
+      findings: [{ id: "FV1", description: "三个端到端场景没有自动化用例" }],
+      risks: ["日报每位员工多一次打卡记录查询"],
+      review_scope: { checked_paths: checkedPathsForJob(fx.projectRoot, fx.change, verifierId) },
+      reviewer: { kind: "codex-subagent", id: "test-verifier" },
+    }));
+    assert.equal(submitted.accepted, true, submitted.message);
+
+    const beforeAccept = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(beforeAccept.path, "next_command");
+    assert.match(beforeAccept.next_command, /transition accept/);
+    assert.deepEqual(beforeAccept.review_leftovers?.items.map(item => [item.role, item.kind, item.text]), [
+      ["verifier", "finding", "三个端到端场景没有自动化用例"],
+      ["verifier", "risk", "日报每位员工多一次打卡记录查询"],
+    ]);
+
+    assert.equal(accept(fx.projectRoot, fx.change, fx.changeRoot).to_state, "accepted");
+    const done = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(done.path, "done");
+    assert.deepEqual(done.review_leftovers?.items, beforeAccept.review_leftovers?.items);
+  } finally { fx.cleanup(); }
+});
+
+test("审查遗留意见：审查报告没有遗留时不输出该字段", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    advanceApplyToReview(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    acceptAfterFinalVerifier(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    const done = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(done.path, "done");
+    assert.equal("review_leftovers" in done, false);
+  } finally { fx.cleanup(); }
 });

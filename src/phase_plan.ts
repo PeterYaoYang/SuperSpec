@@ -88,6 +88,7 @@ import {
 } from "./phase_confirmation.ts";
 import { taskEvidenceReadiness } from "./task_evidence.ts";
 import { staleTestEvidenceMessage, testEvidenceFreshness, type TestRerunRequirement } from "./test_freshness.ts";
+import { reviewLeftovers } from "./review_leftovers.ts";
 import type {
   AcceptedMaterialFollowupContinuation,
   AskUser,
@@ -98,6 +99,7 @@ import type {
   OpenQuestionAnswerRecord,
   PlanningValidationProfile,
   ReviewFindingContext,
+  ReviewLeftovers,
   WorkflowArtifactKind,
   WorkflowModeSelectionAction,
   State,
@@ -171,6 +173,7 @@ export type NextStepPlan =
       reopen?: ReopenNextStep;
       /** 执行该转换只会创建这些角色的审查工作项，状态不会推进。 */
       createsReviewJobs?: JobRole[];
+      reviewLeftovers?: ReviewLeftovers;
     }
   | { kind: "review_rejected"; state: State; review_rejection: Record<string, unknown>; reason: string }
   | {
@@ -178,6 +181,7 @@ export type NextStepPlan =
       state: State;
       reason: string;
       continuation?: AcceptedMaterialFollowupContinuation;
+      reviewLeftovers?: ReviewLeftovers;
     };
 
 /** 从失败 finding 提取定位上下文：只回传 evidence（位置事实），不回传 description——那是审查建议叙事，不进执行上下文。 */
@@ -1533,11 +1537,13 @@ export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
         const driftNote = planDocsChanged === true
           ? "检测到 accepted 后计划材料已变化；当前完成结论仍对应 accepted 时冻结的版本。"
           : "";
+        const leftovers = reviewLeftovers(projectRoot, change, events);
         return {
           kind: "done",
           state: "accepted",
           reason: `${driftNote}审查已接受，流程完成；后续若使用者补充或修改需求、方案、验收或实现约束，按 continuation 自动回到 propose 后继续，不得要求使用者执行工作流命令`,
           continuation: acceptedMaterialFollowup(change, mode.risk, planDocsChanged),
+          ...(leftovers ? { reviewLeftovers: leftovers } : {}),
         };
       }
 
@@ -1841,7 +1847,14 @@ function planReviewNext(context: PhasePlanContext): NextStepPlan {
     }
   }
 
-  return { kind: "run_transition", state: "review", transition: "accept", reason: "审查完成，提交接受" };
+  const leftovers = reviewLeftovers(projectRoot, context.change, events);
+  return {
+    kind: "run_transition",
+    state: "review",
+    transition: "accept",
+    reason: "审查完成，提交接受",
+    ...(leftovers ? { reviewLeftovers: leftovers } : {}),
+  };
 }
 
 /** 进入 review 后首次创建、上一轮未通过与已通过但过期是三种不同处境；执行证据本身不需要重新登记。 */

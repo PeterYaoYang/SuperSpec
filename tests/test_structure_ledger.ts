@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { ensureChangeLayout, appendEvent, makeEvent, readEvents } from "../src/store.ts";
 import { next } from "../src/next.ts";
 import { proposeReady, reviewReady } from "../src/transition.ts";
-import { jobsPacket, recordJobSubmit, recordUserDecisionContent } from "../src/record.ts";
+import { jobsPacket, recordJobSubmit, recordJobSubmitContent, recordUserDecisionContent } from "../src/record.ts";
 import { applyPlanningBaseline } from "../src/phase_plan.ts";
 import { resolveApprovedRef } from "../src/approved_ref.ts";
 import { prepareCurrentPhaseConfirmation } from "./phase_confirmation_support.ts";
@@ -668,24 +668,63 @@ test("approved_refs：design.md#SC-001 可解析为 structure", () => {
   } finally { fx.cleanup(); }
 });
 
-test("code-reviewer：missing_approved 只引用 SC 不可执行", () => {
+test("approved_refs：裸 SC-ID、DEC-ID 与 design.md#DEC-ID 可解析，不存在的编号给出原因", () => {
+  const fx = setupV2ApplyWithLedger();
+  try {
+    writeFileSync(join(fx.changeRoot, "design.md"), designBody({
+      ledger: structureLedgerTable([{
+        id: "SC-001",
+        category: "新增公共类型",
+        change: "DemoVo",
+        basis: "proposal.md#What Changes",
+        decision: "DEC-001",
+      }]),
+      decSection: "## 待用户确认\n\n- [x] DEC-001 ok\n",
+    }));
+    const bareSc = resolveApprovedRef(fx.changeRoot, "SC-001");
+    assert.equal(bareSc.ok && bareSc.value.kind, "structure");
+    const bareDec = resolveApprovedRef(fx.changeRoot, "DEC-001");
+    assert.equal(bareDec.ok && bareDec.value.kind, "decision");
+    const anchoredDec = resolveApprovedRef(fx.changeRoot, "design.md#DEC-001");
+    assert.equal(anchoredDec.ok && anchoredDec.value.short, "DEC-001");
+    const missing = resolveApprovedRef(fx.changeRoot, "DEC-009");
+    assert.equal(missing.ok, false);
+    assert.match(missing.ok ? "" : missing.reason, /DEC-009/);
+  } finally { fx.cleanup(); }
+});
+
+test("code-reviewer：missing_approved 只引用 SC 不可执行，需修正后重交", () => {
   const fx = setupV2ApplyWithLedger();
   try {
     const jobId = openCodeReviewer(fx.projectRoot, fx.change, fx.changeRoot);
-    const rejected = submitFinding(fx.projectRoot, fx.change, fx.changeRoot, jobId, {
-      id: "CR-SC-001",
-      type: "implementation",
-      blocking: true,
-      claim_kind: "missing_approved",
-      approved_refs: ["design.md#SC-001"],
-      description: "missing structure",
-      evidence: "src/DemoVo.ts:1",
-      source_refs: ["src/DemoVo.ts:1"],
-      impact: "gap",
-      suggested_action: "apply",
-    });
+    const packet = jobsPacket(fx.projectRoot, fx.change, jobId);
+    const rejected = recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, jobId, JSON.stringify({
+      role: "code-reviewer",
+      verdict: "fail",
+      review_scope: {
+        job_id: jobId,
+        packet_digest: packet.packet?.packet_digest,
+        checked_paths: (packet.packet?.boundFiles ?? []).map(file => file.path),
+        checked_docs: ["design.md"],
+        unchecked: [],
+      },
+      findings: [{
+        id: "CR-SC-001",
+        type: "implementation",
+        blocking: true,
+        claim_kind: "missing_approved",
+        approved_refs: ["SC-001"],
+        description: "missing structure",
+        evidence: "src/DemoVo.ts:1",
+        source_refs: ["src/DemoVo.ts:1"],
+        impact: "gap",
+        suggested_action: "apply",
+      }],
+      reviewer: { kind: "codex-subagent", id: "structure-ledger-test" },
+    }));
     assert.equal(rejected.accepted, false);
-    const event = readEvents(fx.projectRoot, fx.change).findLast(item => item.event_type === "job_rejected");
-    assert.equal(payloadResultKind(event?.payload), "non_actionable_report");
+    assert.equal(rejected.result_kind, "retryable");
+    assert.match(rejected.message, /TEST 或 spec Requirement/);
+    assert.equal(readEvents(fx.projectRoot, fx.change).some(item => item.event_type === "job_rejected"), false);
   } finally { fx.cleanup(); }
 });

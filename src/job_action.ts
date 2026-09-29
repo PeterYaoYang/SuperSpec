@@ -10,12 +10,18 @@ export function jobPacketArgv(change: string, jobId: string): string[] {
   return ["superspec", "jobs", "packet", "--change", change, "--job", jobId];
 }
 
+export function jobDispatchArgv(change: string, jobId: string): string[] {
+  return ["superspec", "jobs", "dispatch", "--change", change, "--job", jobId];
+}
+
 export function requiredJobAction(change: string, job: Job): RequiredJobAction {
   return {
     job_id: job.job_id,
     role: job.role,
     packet_command: jobPacketCommand(change, job.job_id),
     packet_argv: jobPacketArgv(change, job.job_id),
+    dispatch_command: `superspec jobs dispatch --change "${change}" --job "${job.job_id}"`,
+    dispatch_argv: jobDispatchArgv(change, job.job_id),
   };
 }
 

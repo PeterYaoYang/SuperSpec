@@ -241,6 +241,11 @@ function readRoleTemplate(templateRoot: string, role: WorkflowRole): RoleTemplat
   };
 }
 
+/** 随当前版本发布的角色长 prompt 正文；外部审查 worker 没有安装角色时，由 jobs dispatch 拼进派发说明。 */
+export function workflowRolePrompt(role: WorkflowRole, templateRoot = defaultTemplateRoot()): string {
+  return splitFrontmatter(readFileSync(join(templateRoot, "prompts", `${role}.md`), "utf8")).body.trim();
+}
+
 /** Codex 的长 prompt 单独安装，需要显式加载；Markdown 宿主的长 prompt 已拼在同一正文里。 */
 function renderRoleSummary(role: RoleTemplate, style: "codex" | "markdown"): string {
   const taskBinding = style === "codex"

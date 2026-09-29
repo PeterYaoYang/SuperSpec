@@ -90,7 +90,7 @@ function recordPresentedQuestion(projectRoot: string, change: string, changeRoot
   }));
 }
 
-const REQUIRED_JOB_WAIT_INSTRUCTION = "派出工作项后，在当前回合内等待它返回结果，再重新运行 next；工作项尚未返回不是停止点。";
+const REQUIRED_JOB_WAIT_INSTRUCTION = "每个工作项用 dispatch_argv 输出的派发说明原样作为任务说明，交给新开的独立角色会话执行；需要补充的背景附在说明之后，写明是主流程陈述、未经核实。派出后在当前回合内等待它返回结果，再重新运行 next；工作项尚未返回不是停止点。";
 
 function requiredJobsOutput(state: State, change: string, jobs: Job[], reason: string): NextOutput {
   return {
@@ -175,6 +175,7 @@ function toNextOutput(change: string, plan: NextStepPlan): NextOutput {
         missing_inputs: [],
         ...(findingContext ? { finding_context: findingContext } : {}),
         ...(plan.createsReviewJobs ? { creates_review_jobs: plan.createsReviewJobs } : {}),
+        ...(plan.reviewLeftovers ? { review_leftovers: plan.reviewLeftovers } : {}),
       };
     }
     case "done":
@@ -183,6 +184,7 @@ function toNextOutput(change: string, plan: NextStepPlan): NextOutput {
         path: "done",
         reason: plan.reason,
         ...(plan.continuation ? { continuation: plan.continuation } : {}),
+        ...(plan.reviewLeftovers ? { review_leftovers: plan.reviewLeftovers } : {}),
       };
   }
 }
