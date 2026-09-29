@@ -342,6 +342,7 @@ test("propose_to_apply 把 design 的实现落点原样交给用户校准，没�
     const withoutPlacement = next(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(withoutPlacement.path, "ask_user");
     assert.doesNotMatch(withoutPlacement.ask_user.question, /DailyBasicInfoCalculator/);
+    assert.match(withoutPlacement.ask_user.question, /实现落点/);
   } finally { fx.cleanup(); }
 });
 

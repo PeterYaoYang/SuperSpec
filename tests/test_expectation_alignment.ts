@@ -744,9 +744,11 @@ test("执行依据模式：task-start 输出契约，test-run 不要求 task_str
       exit_code: 0,
       semantic_status: "expected_success",
     }));
-    assert.equal(lateEvidence.accepted, false);
-    assert.match(lateEvidence.message, /当前活跃任务尝试/);
-    assert.equal(readEvents(fx.projectRoot, fx.change).length, eventCountAfterComplete);
+    assert.equal(lateEvidence.accepted, true, lateEvidence.message);
+    const lateEvents = readEvents(fx.projectRoot, fx.change).slice(eventCountAfterComplete);
+    assert.deepEqual(lateEvents.map(event => [event.event_type, (event.payload as { rerun_after_completion?: unknown }).rerun_after_completion]), [
+      ["test_run_recorded", true],
+    ]);
   } finally {
     fx.cleanup();
   }

@@ -561,3 +561,14 @@ test("非阻塞 finding 只有编号时退回重交，写清 description 后正�
     assert.equal(accepted.accepted, true, accepted.message);
   } finally { fx.cleanup(); }
 });
+
+test("非阻塞 finding 的内容写在 issue 等同义字段时同样受理", () => {
+  const fx = setupChange();
+  try {
+    const jobId = openCodeReviewer(fx.projectRoot, fx.change, fx.changeRoot);
+    const packet = jobsPacket(fx.projectRoot, fx.change, jobId).packet as JobPacket;
+    const report = { ...passingReport(packet, jobId, []), findings: [{ id: "F1", issue: "HR 清除卡点时不触发当日重算" }] };
+    const accepted = recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, jobId, JSON.stringify(report));
+    assert.equal(accepted.accepted, true, accepted.message);
+  } finally { fx.cleanup(); }
+});

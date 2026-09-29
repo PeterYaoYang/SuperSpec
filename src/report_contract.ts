@@ -135,7 +135,7 @@ export function reportSchemaForJob(job: Job): ReportSchemaContract {
     fields["findings[blocking=true].claim_kind"] = { type: "string", required: true, values: CLAIM_KINDS };
     fields["findings[blocking=true].suggested_action"] = { type: "string", required: true, values: SUGGESTED_ACTIONS };
     fields["findings[blocking=true].source_refs"] = { type: "array", required: true, item: "path:line" };
-    fields["findings[blocking=true].approved_refs"] = { type: "array", item: "已批准锚点：TEST-ID、SC-ID、DEC-ID 或 文件#标题" };
+    fields["findings[blocking=true].approved_refs"] = { type: "array", required: true, item: "已批准锚点：TEST-ID、SC-ID、DEC-ID 或 文件#标题" };
     for (const field of ["description", "evidence", "impact"] as const) {
       fields[`findings[blocking=true].${field}`] = { type: "string", required: true };
     }

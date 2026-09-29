@@ -276,11 +276,10 @@ export interface JobPacketContext {
   stale_test_evidence?: StaleTestEvidence;
 }
 
-/** 测试证据登记早于当前代码的 TEST；不阻塞流程，交给审查者与使用者判断证据是否仍然够用。 */
+/** 当前代码没有对应的通过测试登记；不阻塞流程，交给审查者与使用者判断证据是否仍然够用。 */
 export interface StaleTestEvidence {
-  test_ids: string[];
-  task_ids: string[];
-  changed_paths: string[];
+  /** 最近一次通过的测试登记时间；此后代码又有改动。 */
+  last_green_at: string;
 }
 
 export type StaleTestEvidenceDelivery = StaleTestEvidence & { instruction: string };

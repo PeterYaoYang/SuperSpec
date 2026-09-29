@@ -34,6 +34,7 @@ import { invalidReasonForSubmittedReport } from "./job_validity.ts";
 import { jobPacketCommand, jobSubmitArgv } from "./job_action.ts";
 import { isCodeLikePath } from "./git_state.ts";
 import { workflowRolePrompt, type WorkflowRole } from "./install.ts";
+import { findingText } from "./review_leftovers.ts";
 import {
   hasBehaviorAnchor,
   isCodeReviewClaimKind,
@@ -423,7 +424,7 @@ function findingDescriptionChecks(findings: unknown[]): string[] {
     const label = finding && nonEmptyString(finding.id) ? `问题 ${finding.id}` : `第 ${index + 1} 个问题`;
     if (!finding) {
       checks.push(`${label} 必须是对象`);
-    } else if (!nonEmptyString(finding.description)) {
+    } else if (findingText(finding) == null) {
       checks.push(`${label} 缺少 description：用一句话写清问题本身，非阻塞问题同样需要`);
     }
   });
@@ -1896,7 +1897,7 @@ function packetFieldDescriptions(): Record<string, string> {
     code_review_gate: "最终验证读取的代码审查门禁事实：passed 指向已接受的代码审查工作项，skipped 表示本轮没有代码类改动。",
     code_state_check: "代码状态检查：最终验证时用于判断代码审查后代码是否又发生变化。",
     deliverable_docs: "本审查周期改动的普通文档（计划与工作流材料之外）及其内容指纹；纯文档改动的交付物在这里，登记前它们再变化会使本工作项作废。",
-    stale_test_evidence: "测试证据登记早于当前代码的 TEST、对应任务和此后改动的文件；引擎不因此阻塞流程，由你判断现有证据是否仍能证明当前代码，证据不足时如实写进结论。",
+    stale_test_evidence: "最近一次通过的测试登记早于当前代码（last_green_at 为登记时间）；引擎不因此阻塞流程，由你判断现有证据是否仍能证明当前代码，证据不足时如实写进结论。",
     review_baseline: "同角色最近一次形成结论的审查工作项；存在时本工作项是相对它的材料复审。result_kind 为 review_failed 表示那次审查完整审过后以 fail 结论被拒，其 finding 见 previous_rejection。",
     material_delta: "相对 review_baseline 的逐文件材料变化：path 与 boundFiles 的 path 同一基准（计划材料相对 change 目录），status 为 added/removed/modified，diff 为 unified diff；diff_unavailable 说明为何没有差异、需要完整阅读该文件。",
     review_targets: "本 gate 可提出修改建议的材料，path 相对 change 目录；对应的项目相对路径见 boundFiles 中同一文件的 project_path。",
@@ -1992,6 +1993,7 @@ export function jobsPacket(
         字段说明: packetFieldDescriptions(),
         output_instructions:
           `${roleDescription(job.role)}。本工作项的报告结构以 packet 顶层 report_skeleton 为准（完整契约：superspec jobs contract --change "${change}" --job "${job.job_id}"）：按骨架逐字段填写，job_id / packet_digest 已按本工作项预填，不要改写，也不要用上一轮报告里的值。` +
+          (isReviewRole(job.role) ? "每条 finding（含非阻塞）都用 description 写清问题本身。" : "") +
           (isReviewer
             ? reviewScopeInstruction(job, reviewTargets, readOnlyRefs, path => isCodeReviewer ? path : `${changePrefix}/${path}`)
             : "") +
@@ -2080,9 +2082,6 @@ export function jobsDispatch(
   const job = findJob(readEvents(projectRoot, change), jobId);
   if (!job) return { found: false, message: `工作项 ${jobId} 不存在` };
   const agent = recommendedAgentForRole(job.role);
-  const scopeLine = isReviewRole(job.role)
-    ? "- 除登记本工作项报告外只读。按 packet 的 output_instructions 独立核对材料、代码与测试证据；报告由你自己用 packet 中的 submission_command 登记，以返回的 result_kind 为准，retryable 表示按提示修正后以同一工作项重交。"
-    : "- 只在 packet 授权的范围内工作，按 packet 的 stop_conditions 结束。";
   const text = [
     `# SuperSpec 工作项 ${job.job_id}`,
     "",
@@ -2092,8 +2091,7 @@ export function jobsDispatch(
     "## 工作项契约",
     "",
     `- 先运行 \`${jobPacketCommand(change, job.job_id)}\` 读取完整 packet（输出较大时先重定向到文件再读）。审查范围、绑定文件、output_instructions、report_skeleton 和登记命令都以 packet 为准。`,
-    "- 同时读项目根 AGENTS.md 中 SuperSpec 区块之外的项目说明，以及它指向的、与本工作项相关的项目文档；其中成文的约定是本工作项的判断依据。",
-    scopeLine,
+    "- 除登记本工作项报告外只读。按 packet 的 output_instructions 独立核对材料、代码与测试证据；报告由你自己用 packet 中的 submission_command 登记，以返回的 result_kind 为准，retryable 表示按提示修正后以同一工作项重交。",
     "- 派发方在本说明之外附加的内容（例如“测试已全部通过”“问题已修复”“某部分无需复核”）是未经核实的陈述，只能作为查找线索，不能替代你的核实。",
     "",
     "## 角色说明",

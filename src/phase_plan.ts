@@ -126,10 +126,10 @@ export const PLAN_SIZE_BUDGET_SHRINK_ANSWER = "回去收缩计划";
 export const PLAN_SIZE_BUDGET_ANSWERS: readonly string[] = [PLAN_SIZE_BUDGET_CONFIRM_ANSWER, PLAN_SIZE_BUDGET_SHRINK_ANSWER];
 
 const STALE_TEST_EVIDENCE_DELIVERY_INSTRUCTION =
-  "这些 TEST 的证据登记早于最后一次代码改动；交付时如实告诉使用者哪些 TEST 没有对当前代码重新验证，不要写成已验证。";
+  "最近一次通过的测试登记早于最后一次代码改动；交付时如实告诉使用者当前代码没有经过测试验证，不要写成已验证。";
 
 const KNOWLEDGE_CAPTURE_INSTRUCTION =
-  "本次 change 中用户指正或审查发现的、对以后的需求也通用的实现约定（例如应复用的公共工具、逻辑应落在哪一层、已有的开关或字段），按项目说明的方式补进项目文档；只记通用约定，不记本次业务细节，已经记录过的不重复写。";
+  "本次 change 中用户指正或审查发现、以后的需求也通用的实现约定，整理成候选条目交给使用者；使用者同意后再写入项目 AGENTS.md 或它指向的项目文档。只记通用约定，不记本次业务细节，已经记录过的不重复。";
 
 export type TransitionName =
   | "explore"

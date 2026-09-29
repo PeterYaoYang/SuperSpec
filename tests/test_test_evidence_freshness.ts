@@ -192,7 +192,7 @@ function passFinalVerifier(fx: Fixture): void {
   submitPass(fx, verifier.created_jobs[0]);
 }
 
-test("测试证据新鲜度：任务完成后改代码不阻塞流程，代码审查 packet 标出证据早于当前代码的 TEST；主动重跑仍可登记", () => {
+test("测试证据新鲜度：任务完成后改代码不阻塞流程，代码审查 packet 说明最近一次通过的测试早于当前代码；对当前代码补登 GREEN 后不再提示", () => {
   const fx = setupApply();
   try {
     const attempts = completeAllTasks(fx);
@@ -203,46 +203,36 @@ test("测试证据新鲜度：任务完成后改代码不阻塞流程，代码�
     if (resume.path === "next_command") assert.match(resume.next_command, /transition review-ready/);
     const codeReview = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(codeReview.outcome, "job_created", codeReview.message);
-    assert.deepEqual(jobsPacket(fx.projectRoot, fx.change, codeReview.created_jobs[0]).packet?.stale_test_evidence, {
-      test_ids: ["TEST-001", "TEST-002"],
-      task_ids: ["TASK-001", "TASK-002"],
-      changed_paths: ["src/calc.ts"],
-    });
+    const stale = jobsPacket(fx.projectRoot, fx.change, codeReview.created_jobs[0]).packet?.stale_test_evidence;
+    assert.equal(typeof stale?.last_green_at, "string");
 
     assert.equal(testRun(fx, "TEST-001", attempts.first, "expected_failure").accepted, false);
     assert.equal(testRun(fx, "TEST-002", attempts.first, "expected_success").accepted, false);
     assert.equal(testRun(fx, "TEST-001", attempts.first, "expected_success").accepted, true);
-    assert.deepEqual(staleTestEvidence(fx.projectRoot, readEvents(fx.projectRoot, fx.change))?.test_ids, ["TEST-002"]);
+    assert.equal(staleTestEvidence(fx.projectRoot, readEvents(fx.projectRoot, fx.change)), null);
   } finally {
     fx.cleanup();
   }
 });
 
-test("测试证据新鲜度：后一个任务改动代码后，先完成任务的 TEST 标为证据过期，但不阻塞推进", () => {
+test("测试证据新鲜度：按顺序完成任务时，后一个任务的改动不让先完成任务的证据算作过期", () => {
   const fx = setupApply();
   try {
-    const attempts = completeAllTasks(fx);
-    assert.deepEqual(staleTestEvidence(fx.projectRoot, readEvents(fx.projectRoot, fx.change)), {
-      test_ids: ["TEST-001"],
-      task_ids: ["TASK-001"],
-      changed_paths: ["src/calc.ts"],
-    });
+    completeAllTasks(fx);
+    assert.equal(staleTestEvidence(fx.projectRoot, readEvents(fx.projectRoot, fx.change)), null);
     assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot).outcome, "job_created");
-
-    assert.equal(testRun(fx, "TEST-001", attempts.first, "expected_success").accepted, true);
-    assert.equal(staleTestEvidence(fx.projectRoot, readEvents(fx.projectRoot, fx.change)), null);
   } finally {
     fx.cleanup();
   }
 });
 
-test("测试证据新鲜度：代码内容未变时证据不算过期；提交改动和登记审查结论都不算代码变化", () => {
+test("测试证据新鲜度：代码内容未变时证据不算过期，已完成任务对当前代码补登不被拒绝；提交改动和登记审查结论都不算代码变化", () => {
   const fx = setupApply();
   try {
     const attempts = completeAllTasks(fx);
     assert.equal(testRun(fx, "TEST-001", attempts.first, "expected_success").accepted, true);
     assert.equal(staleTestEvidence(fx.projectRoot, readEvents(fx.projectRoot, fx.change)), null);
-    assert.equal(testRun(fx, "TEST-001", attempts.first, "expected_success").accepted, false);
+    assert.equal(testRun(fx, "TEST-001", attempts.first, "expected_success").accepted, true);
 
     git(fx.projectRoot, ["add", "-A"]);
     git(fx.projectRoot, ["commit", "-m", "implement calc"]);
@@ -278,14 +268,15 @@ test("测试证据新鲜度：最终验证后再改代码需要重新最终验�
     if (resume.path === "next_command") assert.match(resume.next_command, /transition review-ready/);
     const verifier = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(verifier.outcome, "job_created", verifier.message);
-    assert.deepEqual(jobsPacket(fx.projectRoot, fx.change, verifier.created_jobs[0]).packet?.stale_test_evidence?.test_ids, ["TEST-001", "TEST-002"]);
+    assert.equal(typeof jobsPacket(fx.projectRoot, fx.change, verifier.created_jobs[0]).packet?.stale_test_evidence?.last_green_at, "string");
     submitPass(fx, verifier.created_jobs[0]);
 
     const acceptStep = nextOutput(fx);
     assert.equal(acceptStep.path, "next_command");
     if (acceptStep.path === "next_command") {
       assert.match(acceptStep.next_command, /transition accept/);
-      assert.deepEqual(acceptStep.stale_test_evidence?.test_ids, ["TEST-001", "TEST-002"]);
+      assert.equal(typeof acceptStep.stale_test_evidence?.last_green_at, "string");
+      assert.equal(typeof acceptStep.stale_test_evidence?.instruction, "string");
     }
     assert.equal(accept(fx.projectRoot, fx.change, fx.changeRoot).to_state, "accepted");
   } finally {
@@ -334,7 +325,7 @@ function setupLegacyApplyDone(): Fixture {
   return { projectRoot, change, changeRoot, cleanup: () => rmSync(projectRoot, { recursive: true, force: true }) };
 }
 
-test("测试证据新鲜度：历史模式轮里的审查 Fix 完成后改代码，不要求按 attempt_id 补登记重跑", () => {
+test("测试证据新鲜度：历史模式轮里的审查 Fix 完成后改代码，只提示证据早于当前代码，不要求补登记", () => {
   const fx = setupLegacyApplyDone();
   try {
     const codeReview = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
@@ -390,62 +381,8 @@ test("测试证据新鲜度：历史模式轮里的审查 Fix 完成后改代码
 
     writeFileSync(join(fx.projectRoot, "src", "calc.ts"), `${ADD}// 负数与零\n`);
     assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot).to_state, "apply_done");
-    assert.equal(staleTestEvidence(fx.projectRoot, readEvents(fx.projectRoot, fx.change)), null);
+    assert.equal(typeof staleTestEvidence(fx.projectRoot, readEvents(fx.projectRoot, fx.change))?.last_green_at, "string");
     assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot).outcome, "job_created");
-  } finally {
-    fx.cleanup();
-  }
-});
-
-test("测试证据新鲜度：没有声明 TEST 的审查 Fix 证据过期时只列在 task_ids，不混进 test_ids", () => {
-  const fx = setupApply();
-  try {
-    completeAllTasks(fx);
-    const codeReview = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
-    const jobId = codeReview.created_jobs[0];
-    const packet = jobsPacket(fx.projectRoot, fx.change, jobId).packet;
-    assert.ok(packet);
-    const rejected = recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, jobId, JSON.stringify({
-      role: "code-reviewer",
-      verdict: "fail",
-      evidence_refs: ["src/calc.ts:1"],
-      review_scope: {
-        job_id: jobId,
-        packet_digest: packet.packet_digest,
-        checked_paths: packet.boundFiles.map(file => file.path),
-        checked_docs: ["proposal.md", "design.md", "tasks.md", ".superspec/artifacts/test-contract.md"],
-        unchecked: [],
-      },
-      findings: [{
-        id: "CR-001",
-        type: "implementation",
-        blocking: true,
-        description: "负数相减结果错误",
-        evidence: "src/calc.ts:2 负数输入结果错误",
-        source_refs: ["src/calc.ts:2"],
-        impact: "负数计算错误",
-        suggested_action: "apply",
-        claim_kind: "breaks_existing",
-        approved_refs: ["design.md#Calc"],
-      }],
-      reviewer: { kind: "codex-subagent", id: "freshness-code-reviewer" },
-    }));
-    assert.equal(rejected.result_kind, "review_failed", rejected.message);
-    assert.equal(reopen(fx.projectRoot, fx.change, fx.changeRoot, "apply", "fix CR-001", { reviewFix: `${jobId}#CR-001` }).to_state, "apply");
-
-    const fixTaskId = `REVIEW-FIX-${jobId}#CR-001`;
-    const started = taskStart(fx.projectRoot, fx.change, fx.changeRoot, fixTaskId);
-    assert.equal(started.outcome, "advanced", started.message);
-    const attemptId = String(started.details?.attempt_id);
-    assert.equal(testRun(fx, fixTaskId, attemptId, "expected_failure").accepted, true);
-    writeFileSync(join(fx.projectRoot, "src", "calc.ts"), `${ADD_SUB}// 负数\n`);
-    assert.equal(testRun(fx, fixTaskId, attemptId, "expected_success").accepted, true);
-    assert.equal(taskComplete(fx.projectRoot, fx.change, fx.changeRoot, fixTaskId).outcome, "advanced");
-
-    writeFileSync(join(fx.projectRoot, "src", "calc.ts"), `${ADD_SUB}// 负数与零\n`);
-    const stale = staleTestEvidence(fx.projectRoot, readEvents(fx.projectRoot, fx.change));
-    assert.ok(stale?.task_ids.includes(fixTaskId), JSON.stringify(stale));
-    assert.equal(stale?.test_ids.includes(fixTaskId), false, JSON.stringify(stale));
   } finally {
     fx.cleanup();
   }

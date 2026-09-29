@@ -6,7 +6,7 @@ import { sha256Text, ensureChangeLayout, appendEvent, makeEvent, withLock, appen
 import { tasksStructureDigest as formatDigest } from "./format.ts";
 import { RecordInputDecodingError, readRecordInputFile } from "./record_input.ts";
 import { currentCodeStateFingerprint } from "./code_review.ts";
-import { completedAttemptGreenPlan, testEvidenceFreshness, type CompletedAttemptGreenPlan } from "./test_freshness.ts";
+import { completedAttemptGreenPlan, type CompletedAttemptGreenPlan } from "./test_freshness.ts";
 import { GREEN_ONLY_NO_TDD_REASON, type Event, type TaskAttempt, type TestRun } from "./types.ts";
 
 /** tasks.md 结构指纹（委托给 format.ts 统一实现） */
@@ -32,13 +32,13 @@ function recordTestRunLoaded(
   const events = readEvents(projectRoot, change);
   const attemptRecord = typeof tr.attempt_id === "string" ? attemptById(events, tr.attempt_id) : null;
   const activeAttempt = attemptRecord?.state === "active" ? attemptRecord.attempt : null;
-  // 任务完成后代码又被修改时，需要对当前代码重跑已完成尝试的 GREEN；有活跃尝试时证据仍归当前尝试。
+  // 已完成尝试可以补登对当前代码重跑的 GREEN；有活跃尝试时证据仍归当前尝试。
   const rerunPlan = attemptRecord?.state === "completed" && attemptRecord.attempt.contract_mode === true && !activeAttemptExists(events)
     ? completedAttemptGreenPlan(attemptRecord.attempt)
     : null;
   const rerunAttempt = rerunPlan ? attemptRecord!.attempt : null;
   if (rerunAttempt && rerunPlan) {
-    const rerunCheck = validatePostCompletionRerunInput(projectRoot, events, tr, rerunAttempt, rerunPlan);
+    const rerunCheck = validatePostCompletionRerunInput(tr, rerunAttempt, rerunPlan);
     if (!rerunCheck.ok) return { accepted: false, message: rerunCheck.message };
   } else {
     if (attemptRecord?.attempt.contract_mode === true && attemptRecord.state !== "active") {
@@ -126,8 +126,6 @@ function activeAttemptExists(events: Event[]): boolean {
 }
 
 function validatePostCompletionRerunInput(
-  projectRoot: string,
-  events: Event[],
   tr: Partial<TestRun>,
   attempt: TaskAttempt,
   plan: CompletedAttemptGreenPlan,
@@ -137,13 +135,6 @@ function validatePostCompletionRerunInput(
   }
   if (plan.test_ids.length > 0 && !plan.test_ids.includes(tr.test_id)) {
     return { ok: false, message: `测试 ID（test_id=${tr.test_id}）不属于任务 ${attempt.task_id} 契约声明的测试列表` };
-  }
-  const freshness = testEvidenceFreshness(projectRoot, events);
-  const required = !freshness.fresh && freshness.reruns.some(req =>
-    plan.test_ids.length > 0 ? req.test_id === tr.test_id : req.attempt_id === attempt.attempt_id
-  );
-  if (!required) {
-    return { ok: false, message: `任务 ${attempt.task_id} 已完成，已登记的证据仍对应当前代码，无需补登记；契约测试证据只能登记到当前活跃任务尝试（attempt_id）` };
   }
   if (tr.semantic_status === "expected_failure") {
     return { ok: false, message: `任务 ${attempt.task_id} 已完成；完成后只登记对当前代码重跑的 GREEN，不再登记 RED（expected_failure）` };

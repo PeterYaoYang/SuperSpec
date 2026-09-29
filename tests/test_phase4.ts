@@ -4706,6 +4706,45 @@ test("计划修正轮：历史上有非执行依据模式的 Apply 轮时不检�
   } finally { fx.cleanup(); }
 });
 
+test("审查遗留意见：未通过轮次提出、后续通过报告不再重复的非阻塞意见在交付时仍然透出", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    advanceApplyToReview(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    const first = reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.equal(first.outcome, "job_created");
+    const failed = recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, first.created_jobs[0], JSON.stringify({
+      role: "verifier",
+      verdict: "fail",
+      evidence_refs: ["test:evidence"],
+      findings: [
+        { id: "FV1", blocking: true, description: "验收证据缺失" },
+        { id: "FV2", blocking: false, description: "HR 清除卡点时不触发当日重算" },
+      ],
+      review_scope: { checked_paths: checkedPathsForJob(fx.projectRoot, fx.change, first.created_jobs[0]) },
+      reviewer: { kind: "codex-subagent", id: "test-verifier" },
+    }));
+    assert.equal(failed.result_kind, "review_failed", failed.message);
+
+    const second = reviewReady(fx.projectRoot, fx.change, fx.changeRoot, "normal");
+    assert.equal(second.outcome, "job_created", second.message);
+    const passed = recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, second.created_jobs[0], JSON.stringify({
+      role: "verifier",
+      verdict: "pass",
+      evidence_refs: ["test:evidence"],
+      findings: [],
+      review_scope: { checked_paths: checkedPathsForJob(fx.projectRoot, fx.change, second.created_jobs[0]) },
+      reviewer: { kind: "codex-subagent", id: "test-verifier" },
+    }));
+    assert.equal(passed.accepted, true, passed.message);
+
+    const beforeAccept = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(beforeAccept.path, "next_command");
+    assert.deepEqual(beforeAccept.review_leftovers?.items.map(item => [item.job_id, item.id, item.text]), [
+      [first.created_jobs[0], "FV2", "HR 清除卡点时不触发当日重算"],
+    ]);
+  } finally { fx.cleanup(); }
+});
+
 test("审查遗留意见：审查报告没有遗留时不输出该字段", () => {
   const fx = setupApplyWithDoneTask();
   try {
