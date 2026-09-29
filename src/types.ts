@@ -627,6 +627,13 @@ export interface ReviewLeftovers {
   instruction: string;
 }
 
+/** accepted 后本 change 已审查代码的变化；不阻塞流程，给出自测修复与回到计划两条出口。 */
+export interface PostAcceptCodeChanges {
+  paths: string[];
+  instruction: string;
+  self_test_fix_argv_template: string[];
+}
+
 export type NextOutput = {
   state: State;
 } & Partial<WorkflowModeStatus> & (
@@ -647,7 +654,13 @@ export type NextOutput = {
   | { path: "mode_selection_required"; selection: WorkflowModeSelectionAction; reason: string }
   | { path: "ask_user"; ask_user: AskUser; reason: string }
   | { path: "review_rejected"; review_rejection: Record<string, unknown>; reason: string }
-  | { path: "done"; reason: string; continuation?: AcceptedMaterialFollowupContinuation; review_leftovers?: ReviewLeftovers }
+  | {
+      path: "done";
+      reason: string;
+      continuation?: AcceptedMaterialFollowupContinuation;
+      review_leftovers?: ReviewLeftovers;
+      post_accept_code_changes?: PostAcceptCodeChanges;
+    }
 );
 
 /**

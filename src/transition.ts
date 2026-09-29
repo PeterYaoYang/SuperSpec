@@ -54,11 +54,12 @@ import {
   taskExecutionIndexForReview,
   codeReviewFindingNeedsUserDecision,
   isReviewFixCapReached,
+  unresolvedImplementationFinding,
 } from "./code_review.ts";
 import { taskEvidenceReadiness } from "./task_evidence.ts";
 import { staleTestEvidenceMessage, testEvidenceFreshness } from "./test_freshness.ts";
 import { invalidReasonForSnapshot } from "./job_validity.ts";
-import { materialManifest as materialManifestForBound, storeMaterialBlobs } from "./material_snapshot.ts";
+import { materialManifest as materialManifestForBound, storeMaterialBlobs, storedMaterialBlob } from "./material_snapshot.ts";
 import {
   adoptedContractForTask,
   findTaskInLines,
@@ -70,6 +71,7 @@ import {
 import { approvedRefTestIds, isCodeReviewClaimKind, reviewFixReason } from "./approved_ref.ts";
 import {
   applyRequirementModeForCurrentRound,
+  applyPlanningBaseline,
   applyPlanningDocsChangedSinceBaseline,
   applyToReviewAutoAdvance,
   latestApplyPlanningBaseline,
@@ -720,6 +722,14 @@ function evaluateApplyDoneCodeReviewGate(input: {
     }
     if (latest?.state === "rejected" && latest.result_kind === "review_failed") {
       const staleReason = codeReviewJobStaleReason(input.projectRoot, latest.job, currentWorkingPaths, input.events);
+      const unresolvedFix = unresolvedImplementationFinding(input.projectRoot, input.events);
+      if (staleReason && unresolvedFix) {
+        // 审查后先改了代码也要经修复任务闭环：直接重开全量审查会丢掉按问题登记的修复与验证。
+        return {
+          skip: true,
+          message: `代码审查问题 ${unresolvedFix} 尚未通过修复任务闭环；审查后代码已有改动（${staleReason}）。请执行 next，按返回的 --review-fix 创建修复任务承接这些改动并重新证明相关 TEST`,
+        };
+      }
       if (staleReason) {
         const { job, scanReason } = createCodeReviewerJob(input.change, input.projectRoot, input.changeRoot, input.events);
         return {
@@ -1414,6 +1424,25 @@ function applyPlanningMaterialsChanged(changeRoot: string, events: Event[]): boo
   return baseline != null && applyPlanningDocsChangedSinceBaseline(changeRoot, baseline);
 }
 
+/** 计划冻结挡下修复时给出可操作的出路：哪些材料变了、开始实现时的版本在哪、两种处理方式。 */
+function applyPlanningMaterialsChangedMessage(
+  projectRoot: string,
+  change: string,
+  changeRoot: string,
+  events: Event[],
+  blocked: string,
+): string {
+  const baseline = latestApplyPlanningBaseline(events) ?? {};
+  const current = applyPlanningBaseline(changeRoot);
+  const changed = Object.entries(baseline)
+    .filter(([path, digest]) => current[path] !== digest)
+    .map(([path, digest]) => {
+      const snapshot = path.endsWith("/") ? null : storedMaterialBlob(projectRoot, change, digest);
+      return snapshot ? `${path}（开始实现时的版本：${relative(projectRoot, snapshot)}）` : path;
+    });
+  return `计划材料自开始实现后已变化：${changed.join("、")}，${blocked}。只是记录实现修正、不改变已批准行为时，先把这些材料恢复到开始实现时的内容，完成修复后再补记录；改变了已批准行为、验收或方案时，reopen --to propose，并在 tasks.md 新增承接代码改动的待办任务`;
+}
+
 /**
  * self-test-fix 由使用者明确指定已完成的父 task；它可以修复早于当前
  * Apply round 的实现问题。普通 Apply 仍只消费当前轮完成事件，这个查询
@@ -1564,7 +1593,7 @@ export function reopen(
         // 通常为空；即使残留过期的工作项，也会被 apply_done 侧的新鲜度过滤与重建消化，不构成死锁。
         if (snapshot.state !== "apply_done") return { skip: true, message: `当前状态 ${snapshot.state}，不能通过代码审查修复回到实现阶段` };
         if (applyPlanningMaterialsChanged(changeRoot, events)) {
-          return { skip: true, message: "计划材料已变化，不能作为纯实现问题回到 Apply；请 reopen --to propose" };
+          return { skip: true, message: applyPlanningMaterialsChangedMessage(projectRoot, change, changeRoot, events, "不能作为纯实现问题回到 Apply") };
         }
         const ref = parseCodeReviewFindingRef(opts.reviewFix);
         if (!ref) return { skip: true, message: "--review-fix 必须是 <job_id>#<finding_id>" };
@@ -1605,7 +1634,7 @@ export function reopen(
 
         const parentTaskId = opts.selfTestFix.trim();
         if (applyPlanningMaterialsChanged(changeRoot, events)) {
-          return { skip: true, message: "计划材料已变化，不能作为纯实现问题创建 self-test 修复；请 reopen --to propose" };
+          return { skip: true, message: applyPlanningMaterialsChangedMessage(projectRoot, change, changeRoot, events, "不能作为纯实现问题创建自测修复") };
         }
         const parentTask = parseTasksMd(readFileSync(join(changeRoot, "tasks.md"), "utf8"))
           .find(task => task.taskId === parentTaskId);
@@ -1728,7 +1757,7 @@ export function reopen(
         return { skip: true, message: `当前状态 ${snapshot.state}，不能 reopen 到 apply` };
       }
       if (applyPlanningMaterialsChanged(changeRoot, events)) {
-        return { skip: true, message: "计划材料已变化，不能直接回到 Apply；请 reopen --to propose" };
+        return { skip: true, message: applyPlanningMaterialsChangedMessage(projectRoot, change, changeRoot, events, "不能直接回到 Apply") };
       }
 
       const pending = pendingTaskStatusForApply(changeRoot, events).pending;

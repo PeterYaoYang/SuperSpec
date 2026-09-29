@@ -1002,6 +1002,26 @@ export function latestCodeReviewFailedStatus(events: Event[]): CodeReviewFailedS
   return { terminal, findings, unresolved, dismissed };
 }
 
+/**
+ * 最近一次 fail 代码审查里应先走修复任务的实现问题编号。
+ *
+ * 只在这次审查之后还没有任何 --review-fix 被创建时返回：已经进入修复流程后，
+ * 修复带来的代码变化照旧让审查过期并重审，不会为同一轮审查反复创建修复任务。
+ */
+export function unresolvedImplementationFinding(projectRoot: string, events: Event[]): string | null {
+  const status = latestCodeReviewFailedStatus(events);
+  const first = status?.unresolved[0];
+  if (!status || !first?.id || first.type !== "implementation") return null;
+  const terminalIndex = events.findIndex(ev => ev.event_id === status.terminal.event.event_id);
+  const fixPrefix = `${status.terminal.job.job_id}#`;
+  const fixStarted = events.slice(terminalIndex + 1).some(ev =>
+    ev.event_type === "transition_commit" &&
+    String((ev.payload as { review_fix_of?: unknown }).review_fix_of ?? "").startsWith(fixPrefix)
+  );
+  if (fixStarted || isReviewFixCapReached(projectRoot, events)) return null;
+  return first.id;
+}
+
 export function dismissedCodeReviewSummary(status: CodeReviewFailedStatus): string {
   const details = status.dismissed
     .map(item => `${item.id}：${item.decision?.reason || "主流程已驳回该问题"}`)
@@ -1149,6 +1169,27 @@ function findJobInEvents(events: Event[], jobId: string): Job | null {
     if (job) return job;
   }
   return null;
+}
+
+/**
+ * 本 change 已通过代码审查的文件在最后一次被审过之后又变化的路径（含删除）。
+ *
+ * 只比对审过的文件内容，不看 HEAD 与仓库其他文件：提交本身不算变化，别的需求改了
+ * 无关文件也不会算到本 change 头上。
+ */
+export function reviewedCodeDrift(projectRoot: string, events: Event[]): string[] {
+  const reviewed = new Map<string, string>();
+  for (const ev of events) {
+    if (ev.event_type !== "job_accepted") continue;
+    const job = findJobInEvents(events, String((ev.payload as { job_id?: unknown }).job_id ?? ""));
+    if (!job || !isCodeReviewerJob(job)) continue;
+    for (const bound of job.boundFiles) reviewed.set(bound.path, bound.sha);
+  }
+  const drifted: string[] = [];
+  for (const [path, sha] of reviewed) {
+    if ((codeFileContentSha(projectRoot, path) ?? "sha256:missing") !== sha) drifted.push(path);
+  }
+  return drifted.sort();
 }
 
 function latestApplyDoneToReviewGatePayload(events: Event[]): { decision: "passed" | "skipped"; job_id?: string; current_head?: string | null; head?: string | null } | null {

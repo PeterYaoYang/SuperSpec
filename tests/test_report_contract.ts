@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { ensureChangeLayout, appendEvent, makeEvent, readEvents } from "../src/store.ts";
-import { reviewReady, reopen } from "../src/transition.ts";
+import { accept, proposeReady, reviewReady, reopen } from "../src/transition.ts";
 import { jobsContract, jobsDispatch, jobsList, jobsPacket, recordJobSubmit, recordJobSubmitContent } from "../src/record.ts";
 import { next } from "../src/next.ts";
 import { workflowRolePrompt } from "../src/install.ts";
@@ -487,6 +487,132 @@ test("报告骨架不预填结论：verdict 留空，未填写时退回同一工
     assert.match(result.message, /verdict/);
     const filled = recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, jobId, JSON.stringify(passingReport(packet, jobId, [])));
     assert.equal(filled.accepted, true, filled.message);
+  } finally { fx.cleanup(); }
+});
+
+function acceptThroughVerifier(fx: { projectRoot: string; change: string; changeRoot: string }): void {
+  const jobId = openCodeReviewer(fx.projectRoot, fx.change, fx.changeRoot);
+  const packet = jobsPacket(fx.projectRoot, fx.change, jobId).packet as JobPacket;
+  const reviewed = recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, jobId, JSON.stringify(passingReport(packet, jobId, [])));
+  assert.equal(reviewed.accepted, true, reviewed.message);
+  assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot).outcome, "advanced");
+  const verifier = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+  assert.equal(verifier.outcome, "job_created", verifier.message ?? "");
+  const verifierId = verifier.created_jobs[0];
+  const skeleton = jobsPacket(fx.projectRoot, fx.change, verifierId).packet?.report_skeleton as { review_scope?: unknown };
+  const verified = recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, verifierId, JSON.stringify({
+    role: "verifier",
+    verdict: "pass",
+    evidence_refs: ["test:evidence"],
+    findings: [],
+    review_scope: skeleton.review_scope,
+  }));
+  assert.equal(verified.accepted, true, verified.message);
+  assert.equal(accept(fx.projectRoot, fx.change, fx.changeRoot).to_state, "accepted");
+}
+
+test("accepted 后本 change 已审查的代码变化：done 给出自测修复出口，未变化时不输出", () => {
+  const fx = setupChange();
+  try {
+    acceptThroughVerifier(fx);
+    const clean = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(clean.path, "done");
+    assert.equal("post_accept_code_changes" in clean, false);
+
+    writeFileSync(join(fx.projectRoot, "src", "example.ts"), "export const value = 2;\n");
+    const drifted = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(drifted.path, "done");
+    assert.deepEqual(drifted.post_accept_code_changes?.paths, ["src/example.ts"]);
+    assert.ok(drifted.post_accept_code_changes?.self_test_fix_argv_template.includes("--self-test-fix"));
+  } finally { fx.cleanup(); }
+});
+
+test("计划修正轮：已审查代码在审查通过后变化且没有待办任务时，要求新增承接这些改动的任务", () => {
+  const fx = setupChange();
+  try {
+    acceptThroughVerifier(fx);
+    writeFileSync(join(fx.projectRoot, "src", "example.ts"), "export const value = 2;\n");
+    assert.equal(reopen(fx.projectRoot, fx.change, fx.changeRoot, "propose", "用户指正实现问题").to_state, "propose");
+    writeFileSync(join(fx.changeRoot, "design.md"), "# 设计\n\n## 设计目标\ncollection\n\n## 非目标\n- 不加锁\n\n补充实现修正记录\n");
+
+    const blocked = proposeReady(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(blocked.events_written, 0);
+    assert.match(blocked.message, /src\/example\.ts/);
+
+    writeFileSync(join(fx.changeRoot, "tasks.md"), [
+      "# Tasks", "",
+      "- [x] TASK-001 Done",
+      "  执行依据:",
+      "  - 测试: TEST-001",
+      "  - 设计: design.md#设计目标",
+      "  - 来源: proposal.md#What Changes",
+      "  - 验收: 已完成",
+      "  - 边界: 不改无关代码",
+      "- [ ] TASK-002 承接用户指正的实现修正",
+      "  执行依据:",
+      "  - 测试: TEST-001",
+      "  - 设计: design.md#设计目标",
+      "  - 来源: proposal.md#What Changes",
+      "  - 验收: 修正后行为与已批准计划一致",
+      "  - 边界: 只改被指正的实现",
+      "",
+    ].join("\n"));
+    const withTask = proposeReady(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.doesNotMatch(withTask.message ?? "", /src\/example\.ts/);
+  } finally { fx.cleanup(); }
+});
+
+test("自测修复被计划冻结挡下时，指出变化的材料与两条出路", () => {
+  const fx = setupChange();
+  try {
+    acceptThroughVerifier(fx);
+    writeFileSync(join(fx.changeRoot, "design.md"), "# 设计\n\n## 设计目标\ncollection\n\n## 非目标\n- 不加锁\n\n实现期修正记录\n");
+    const blocked = reopen(fx.projectRoot, fx.change, fx.changeRoot, "apply", "恢复已批准的判定落点", {
+      selfTestFix: "TASK-001",
+    });
+    assert.equal(blocked.events_written, 0);
+    assert.match(blocked.message ?? "", /design\.md/);
+    assert.match(blocked.message ?? "", /reopen --to propose/);
+  } finally { fx.cleanup(); }
+});
+
+test("代码审查 fail 后先改了代码：next 仍先走 --review-fix，review-ready 不重开全量审查", () => {
+  const fx = setupChange();
+  try {
+    const jobId = openCodeReviewer(fx.projectRoot, fx.change, fx.changeRoot);
+    const packet = jobsPacket(fx.projectRoot, fx.change, jobId).packet as JobPacket;
+    const failed = recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, jobId, JSON.stringify({
+      ...passingReport(packet, jobId, []),
+      verdict: "fail",
+      findings: [{
+        id: "CR-FIX-001",
+        blocking: true,
+        type: "implementation",
+        claim_kind: "missing_approved",
+        approved_refs: ["TEST-001"],
+        description: "清除卡点时没有触发当日重算",
+        evidence: "src/example.ts:1",
+        source_refs: ["src/example.ts:1"],
+        impact: "有效性与配对结果不一致",
+        suggested_action: "apply",
+      }],
+    }));
+    assert.equal(failed.result_kind, "review_failed");
+
+    writeFileSync(join(fx.projectRoot, "src", "example.ts"), "export const value = 2;\n");
+    const routed = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(routed.path, "next_command");
+    assert.match(routed.next_command, /--review-fix \S*#CR-FIX-001/);
+    const direct = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(direct.events_written, 0);
+    assert.match(direct.message ?? "", /--review-fix/);
+
+    const reopened = reopen(fx.projectRoot, fx.change, fx.changeRoot, "apply", "修复代码审查问题 CR-FIX-001", {
+      reviewFix: `${jobId}#CR-FIX-001`,
+    });
+    assert.equal(reopened.to_state, "apply", reopened.message);
+    const afterFix = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.doesNotMatch(afterFix.path === "next_command" ? afterFix.next_command : "", /--review-fix/);
   } finally { fx.cleanup(); }
 });
 

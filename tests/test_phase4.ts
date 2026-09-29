@@ -4604,6 +4604,57 @@ test("审查遗留意见：最终验证 pass 附带的非阻塞 finding 与 risk
   } finally { fx.cleanup(); }
 });
 
+function setupContractApplyWithCompletedTask(): { projectRoot: string; change: string; changeRoot: string; cleanup: () => void } {
+  const projectRoot = mkdtempSync(join(tmpdir(), "superspec-p4-contract-"));
+  const change = "test-change";
+  const changeRoot = join(projectRoot, "openspec", "changes", change);
+  mkdirSync(join(changeRoot, ".superspec", "artifacts"), { recursive: true });
+  writeFileSync(join(changeRoot, "tasks.md"), "# Tasks\n\n- [x] TASK-001 Done\n");
+  writeFileSync(join(changeRoot, "proposal.md"), "# P\n");
+  writeFileSync(join(changeRoot, "design.md"), "# D\n\n## 结构变更清单\n\n无\n");
+  writeFileSync(join(changeRoot, ".superspec", "artifacts", "discovery.md"), "# D\n");
+  writeFileSync(join(changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n");
+  ensureChangeLayout(projectRoot, change);
+  for (const [t, f, to] of [
+    ["init", "init", "init"], ["explore", "init", "explore"], ["propose", "explore", "propose"],
+    ["propose-ready", "propose", "propose_ready"], ["start-apply", "propose_ready", "apply"],
+  ] as const) {
+    appendEvent(projectRoot, change, makeEvent(change, "transition_commit", {
+      transition: t, from_state: f, to_state: to,
+      outcome: "advanced", created_job_ids: [], reason: t,
+      ...(t === "start-apply" ? { apply_planning_baseline: applyPlanningBaseline(changeRoot), apply_contract_mode: true } : {}),
+    }, { transitionId: `T-${t}`, idempotencyKey: `${t}-key` }));
+  }
+  appendEvent(projectRoot, change, makeEvent(change, "task_completed", { task_id: "TASK-001", attempt_id: "ATT-TASK-001-1" }));
+  return { projectRoot, change, changeRoot, cleanup: () => rmSync(projectRoot, { recursive: true, force: true }) };
+}
+
+test("计划修正轮：执行依据模式下已勾选却没有完成记录的任务被退回待办", () => {
+  const fx = setupContractApplyWithCompletedTask();
+  try {
+    assert.equal(reopen(fx.projectRoot, fx.change, fx.changeRoot, "propose", "补记实现期修正").to_state, "propose");
+    writeFileSync(join(fx.changeRoot, "tasks.md"), "# Tasks\n\n- [x] TASK-001 Done\n- [x] TASK-002 实现期修正（手工补记）\n");
+    const blocked = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    assert.equal(blocked.events_written, 0);
+    assert.match(blocked.message ?? "", /TASK-002 已勾选但没有执行记录/);
+    assert.doesNotMatch(blocked.message ?? "", /TASK-001 已勾选/);
+
+    writeFileSync(join(fx.changeRoot, "tasks.md"), "# Tasks\n\n- [x] TASK-001 Done\n- [ ] TASK-002 实现期修正\n");
+    const pendingTask = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    assert.doesNotMatch(pendingTask.message ?? "", /已勾选但没有执行记录/);
+  } finally { fx.cleanup(); }
+});
+
+test("计划修正轮：历史上有非执行依据模式的 Apply 轮时不检查勾选记录", () => {
+  const fx = setupApplyWithDoneTask();
+  try {
+    assert.equal(reopen(fx.projectRoot, fx.change, fx.changeRoot, "propose", "补记实现期修正").to_state, "propose");
+    writeFileSync(join(fx.changeRoot, "tasks.md"), "# Tasks\n\n- [x] TASK-001 Done\n- [x] TASK-002 旧流程勾选\n");
+    const result = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
+    assert.doesNotMatch(result.message ?? "", /已勾选但没有执行记录/);
+  } finally { fx.cleanup(); }
+});
+
 test("审查遗留意见：审查报告没有遗留时不输出该字段", () => {
   const fx = setupApplyWithDoneTask();
   try {

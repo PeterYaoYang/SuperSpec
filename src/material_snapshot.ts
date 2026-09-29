@@ -15,6 +15,12 @@ function blobPath(projectRoot: string, change: string, sha: string): string {
   return join(changeDir(projectRoot, change), "material-blobs", `${sha.replace(/^sha256:/, "")}.md`);
 }
 
+/** 按内容指纹找到已保存的材料正文；没有保存过时返回 null。 */
+export function storedMaterialBlob(projectRoot: string, change: string, sha: string): string | null {
+  const path = blobPath(projectRoot, change, sha);
+  return existsSync(path) ? path : null;
+}
+
 /** 绑定路径展开为逐文件指纹；以 / 结尾的目录绑定展开为其中的 .md 文件，与目录聚合指纹同口径。 */
 export function materialManifest(changeRoot: string, boundPaths: string[]): MaterialFileRef[] {
   const files: MaterialFileRef[] = [];

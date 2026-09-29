@@ -77,7 +77,9 @@ import {
   isReviewFixCapReached,
   latestCodeReviewFailedStatus,
   requiresFinalVerifierForCurrentReview,
+  reviewedCodeDrift,
   scanCodeChangesForReview,
+  unresolvedImplementationFinding,
 } from "./code_review.ts";
 import {
   latestAcceptedPhaseDecision,
@@ -98,6 +100,7 @@ import type {
   JobRole,
   OpenQuestionAnswerRecord,
   PlanningValidationProfile,
+  PostAcceptCodeChanges,
   ReviewFindingContext,
   ReviewLeftovers,
   WorkflowArtifactKind,
@@ -182,6 +185,7 @@ export type NextStepPlan =
       reason: string;
       continuation?: AcceptedMaterialFollowupContinuation;
       reviewLeftovers?: ReviewLeftovers;
+      postAcceptCodeChanges?: PostAcceptCodeChanges;
     };
 
 /** 从失败 finding 提取定位上下文：只回传 evidence（位置事实），不回传 description——那是审查建议叙事，不进执行上下文。 */
@@ -742,6 +746,7 @@ function validatePlanningPreflight(
     if (openSpecError) errors.push(openSpecError);
   }
   errors.push(...proposeReferenceErrors(changeRoot, events));
+  errors.push(...postApplyRepairErrors(projectRoot, changeRoot, events));
 
   return {
     error: errors.length > 0 ? [...new Set(errors)].join("；") : null,
@@ -1174,10 +1179,8 @@ export function pendingTaskStatusForApply(changeRoot: string, events: Event[]): 
   };
 }
 
-function isPostApplyPlanOnlyRepair(changeRoot: string, events: Event[]): boolean {
-  // Propose 返工发生在新 Apply round 之前，旧 round 的 task_completed 不能覆盖
-  // 当前计划明确重新打开的 checkbox；这里以当前 tasks.md 为准。
-  if (pendingTaskIds(changeRoot).length > 0) return false;
+/** 当前 Propose 轮来自 Apply 之后的回退（apply / apply_done / review / accepted → propose）。 */
+function isPostApplyProposeRound(events: Event[]): boolean {
   const roundId = currentProposeRoundId(events);
   const roundEvent = events.find(event => event.event_id === roundId);
   if (roundEvent?.event_type !== "transition_commit") return false;
@@ -1189,6 +1192,50 @@ function isPostApplyPlanOnlyRepair(changeRoot: string, events: Event[]): boolean
   return payload.transition === "reopen"
     && payload.reopen_target === "propose"
     && ["apply", "apply_done", "review", "accepted"].includes(String(payload.reopen_source));
+}
+
+function isPostApplyPlanOnlyRepair(changeRoot: string, events: Event[]): boolean {
+  // Propose 返工发生在新 Apply round 之前，旧 round 的 task_completed 不能覆盖
+  // 当前计划明确重新打开的 checkbox；这里以当前 tasks.md 为准。
+  if (pendingTaskIds(changeRoot).length > 0) return false;
+  return isPostApplyProposeRound(events);
+}
+
+/**
+ * Apply 之后回到 Propose 时的任务闭环预检。
+ *
+ * 每轮 Apply 都按执行依据模式执行时，task 只能经 task-complete 勾选，已勾选却从未完成的
+ * task 是手工补登；计划修正轮没有待办 task 时，Apply 会被跳过，已审代码此后的变化就没有
+ * 任务和测试证据承接。
+ */
+function postApplyRepairErrors(projectRoot: string, changeRoot: string, events: Event[]): string[] {
+  const tasksPath = join(changeRoot, "tasks.md");
+  if (!existsSync(tasksPath)) return [];
+  const tasks = parseTasksMd(readFileSync(tasksPath, "utf8"));
+  const errors: string[] = [];
+  const startApplies = events.filter(ev =>
+    ev.event_type === "transition_commit" &&
+    (ev.payload as { transition?: unknown; to_state?: unknown }).transition === "start-apply" &&
+    (ev.payload as { to_state?: unknown }).to_state === "apply"
+  );
+  const allContractRounds = startApplies.length > 0 &&
+    startApplies.every(ev => (ev.payload as { apply_contract_mode?: unknown }).apply_contract_mode === true);
+  if (allContractRounds) {
+    const completed = new Set(events
+      .filter(ev => ev.event_type === "task_completed")
+      .map(ev => String((ev.payload as { task_id?: unknown }).task_id ?? "")));
+    const unexecuted = tasks.filter(task => task.done && !completed.has(task.taskId)).map(task => task.taskId);
+    if (unexecuted.length > 0) {
+      errors.push(`tasks.md 中的 ${unexecuted.join("、")} 已勾选但没有执行记录；新增或需要重做的任务保持未完成（- [ ]），由工作流按 task-start / task-complete 执行并登记证据`);
+    }
+  }
+  if (isPostApplyProposeRound(events) && tasks.every(task => task.done)) {
+    const drifted = reviewedCodeDrift(projectRoot, events);
+    if (drifted.length > 0) {
+      errors.push(`本 change 已审查的代码在上次审查通过后有变化（${drifted.join("、")}），本轮计划没有待办任务，这些改动会跳过 Apply、没有任务和测试证据承接；请在 tasks.md 新增承接这些改动的待办任务（- [ ]，含执行依据），或撤回这些改动`);
+    }
+  }
+  return errors;
 }
 
 export function formatPendingTaskMessage(ids: string[], action: string): string {
@@ -1203,6 +1250,17 @@ function nextArgv(change: string, _risk: ReviewRisk): string[] {
     "--change",
     change,
   ];
+}
+
+function postAcceptCodeChanges(change: string, paths: string[]): PostAcceptCodeChanges {
+  return {
+    paths,
+    instruction: "这些改动属于本 change 的实现问题、不改变已批准行为和验收时，先不要改计划材料，用 self_test_fix_argv_template 指定关联的已完成任务回到 Apply 修复并登记验证；需要改变已批准行为、验收或方案时，按 continuation 回到 propose，并在 tasks.md 新增承接这些改动的待办任务。改动属于其他需求时与本 change 无关，可以忽略。",
+    self_test_fix_argv_template: [
+      "superspec", "transition", "reopen", "--change", change,
+      "--to", "apply", "--self-test-fix", "{{task}}", "--reason", "{{reason}}",
+    ],
+  };
 }
 
 function acceptedMaterialFollowup(
@@ -1537,13 +1595,18 @@ export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
         const driftNote = planDocsChanged === true
           ? "检测到 accepted 后计划材料已变化；当前完成结论仍对应 accepted 时冻结的版本。"
           : "";
+        const codeDrift = reviewedCodeDrift(projectRoot, events);
+        const codeDriftNote = codeDrift.length > 0
+          ? `检测到 accepted 后本 change 已审查的代码有 ${codeDrift.length} 个文件变化，这些改动不在已通过的审查与验证结论里，处理方式见 post_accept_code_changes。`
+          : "";
         const leftovers = reviewLeftovers(projectRoot, change, events);
         return {
           kind: "done",
           state: "accepted",
-          reason: `${driftNote}审查已接受，流程完成；后续若使用者补充或修改需求、方案、验收或实现约束，按 continuation 自动回到 propose 后继续，不得要求使用者执行工作流命令`,
+          reason: `${driftNote}${codeDriftNote}审查已接受，流程完成；后续若使用者补充或修改需求、方案、验收或实现约束，按 continuation 自动回到 propose 后继续，不得要求使用者执行工作流命令`,
           continuation: acceptedMaterialFollowup(change, mode.risk, planDocsChanged),
           ...(leftovers ? { reviewLeftovers: leftovers } : {}),
+          ...(codeDrift.length > 0 ? { postAcceptCodeChanges: postAcceptCodeChanges(change, codeDrift) } : {}),
         };
       }
 
@@ -1638,6 +1701,34 @@ function staleTestEvidenceStep(state: State, projectRoot: string, events: Event[
   };
 }
 
+function reviewFixBeforeRerun(context: PhasePlanContext): NextStepPlan | null {
+  const { projectRoot, events, snapshot } = context;
+  if (blockingJobsForApplyDone(projectRoot, events, snapshot).length > 0) return null;
+  const findingId = unresolvedImplementationFinding(projectRoot, events);
+  const status = findingId ? latestCodeReviewFailedStatus(events) : null;
+  const pending = status?.unresolved.find(item => item.id === findingId);
+  if (!status || !pending) return null;
+  const staleReason = codeReviewJobStaleReason(
+    projectRoot, status.terminal.job, currentCodeReviewWorkingPaths(projectRoot, events), events,
+  );
+  return {
+    kind: "run_transition",
+    state: "apply_done",
+    transition: "reopen",
+    reopen: {
+      to: "apply",
+      reason: "review_fix",
+      jobId: status.terminal.job.job_id,
+      findingId: pending.id,
+      reopenReason: `修复代码审查问题 ${pending.id}`,
+      findingContext: reviewFindingContext(pending.finding),
+    },
+    reason: staleReason
+      ? `代码审查问题 ${pending.id} 尚未通过修复任务闭环，审查后代码已有改动；按问题创建修复任务承接这些改动并重新证明相关 TEST`
+      : `代码审查发现纯代码实现问题 ${pending.id}，回到实现阶段修复`,
+  };
+}
+
 function planApplyDoneNext(context: PhasePlanContext): NextStepPlan {
   const { change, changeRoot, events, mode, snapshot } = context;
   const pendingTasks = pendingTaskStatusForApply(changeRoot, events).pending;
@@ -1650,6 +1741,10 @@ function planApplyDoneNext(context: PhasePlanContext): NextStepPlan {
       reason: `发现未完成任务 ${pendingTasks[0]}，回到执行阶段`,
     };
   }
+  // 审查 fail 后还没走过修复任务时先回到修复：修完再统一重跑已完成任务的 TEST，
+  // 审查后先改了代码也不能绕过按问题登记的修复与验证。
+  const fixFirst = reviewFixBeforeRerun(context);
+  if (fixFirst) return fixFirst;
   const staleEvidence = staleTestEvidenceStep("apply_done", context.projectRoot, events);
   if (staleEvidence) return staleEvidence;
 
