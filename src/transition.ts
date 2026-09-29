@@ -56,7 +56,7 @@ import {
   isReviewFixCapReached,
 } from "./code_review.ts";
 import { taskEvidenceReadiness } from "./task_evidence.ts";
-import { staleTestEvidenceMessage, testEvidenceFreshness } from "./test_freshness.ts";
+import { staleTestEvidence } from "./test_freshness.ts";
 import { invalidReasonForSnapshot } from "./job_validity.ts";
 import { materialManifest as materialManifestForBound, storeMaterialBlobs, storedMaterialBlob } from "./material_snapshot.ts";
 import {
@@ -442,7 +442,11 @@ function createCodeReviewerJob(
 ): { job: Job; scanReason: string } {
   const scan = scanCodeChangesForReview(projectRoot, events);
   const boundFiles = codeReviewBoundFiles(projectRoot, scan.paths);
-  const packetContext = codeReviewPacketContext(changeRoot, projectRoot, scan.scope!, events);
+  const stale = staleTestEvidence(projectRoot, events);
+  const packetContext = {
+    ...codeReviewPacketContext(changeRoot, projectRoot, scan.scope!, events),
+    ...(stale ? { stale_test_evidence: stale } : {}),
+  };
   const facts = collectCodeReviewGateFacts(events);
   const latestRejected = facts.latestRejected;
   const reviewFailedStatus = latestCodeReviewFailedStatus(events);
@@ -787,6 +791,7 @@ function createFinalVerifierJob(
   const boundFiles = reviewBoundFiles(changeRoot);
   const codeReviewGate = latestCodeReviewGateEvidence(events);
   const taskExecutionIndex = taskExecutionIndexForReview(projectRoot, events);
+  const stale = staleTestEvidence(projectRoot, events);
   const packetContext = {
     code_state_check: computeCodeStateCheck(projectRoot, events),
     deliverable_docs: computeDeliverableDocs(projectRoot, events),
@@ -794,6 +799,7 @@ function createFinalVerifierJob(
     task_execution_index: taskExecutionIndex.entries,
     task_execution_index_scope: taskExecutionIndex.scope,
     ...(codeReviewGate ? { code_review_gate: codeReviewGate } : {}),
+    ...(stale ? { stale_test_evidence: stale } : {}),
   };
   const previousRejection = latestReviewHistoryForGateRole(events, REVIEW_FINAL_VERIFIER_GATE, "verifier");
   return {
@@ -1804,10 +1810,6 @@ export function reviewReady(projectRoot: string, change: string, changeRoot: str
           reason: `所有任务完成；审查策略=${policy.review_risk}`,
           commitPayload: policyPayload,
         };
-      }
-      if (snapshot.state === "apply_done" || snapshot.state === "review") {
-        const freshness = testEvidenceFreshness(projectRoot, events);
-        if (!freshness.fresh) return { skip: true, message: staleTestEvidenceMessage(freshness) };
       }
       if (snapshot.state === "apply_done") {
         const blockingJobs = blockingJobsForApplyDone(projectRoot, events, snapshot);

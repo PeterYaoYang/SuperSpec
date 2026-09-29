@@ -246,6 +246,33 @@ test("计划规模预算：确认规模合理后进入 propose-ready", () => {
   } finally { fx.cleanup(); }
 });
 
+test("计划规模预算：用户确认过的规模不再重复询问，回到计划或规模缩小都不问，规模变大才再问", () => {
+  const fx = setupProposeBudget({ taskCount: 12 });
+  try {
+    const ask = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(ask.path, "ask_user");
+    if (ask.path !== "ask_user") throw new Error("expected budget ask");
+    assert.equal(recordUserDecisionContent(fx.projectRoot, fx.change, JSON.stringify({
+      scope: ask.ask_user.scope,
+      answer: PLAN_SIZE_BUDGET_CONFIRM_ANSWER,
+    })).accepted, true);
+
+    appendEvent(fx.projectRoot, fx.change, makeEvent(fx.change, "transition_commit", {
+      transition: "reopen", from_state: "propose", to_state: "propose", reopen_target: "propose",
+      outcome: "advanced", created_job_ids: [], reason: "新一轮计划",
+      planning_validation_version: 2,
+      planning_validation_profile: { version: 2, openspec: { mode: "disabled" }, design: { schema_version: 2 } },
+    }, { transitionId: "T-reopen-propose", idempotencyKey: "reopen-propose-key" }));
+    assert.equal(next(fx.projectRoot, fx.change, fx.changeRoot).path, "next_command");
+
+    writeFileSync(join(fx.changeRoot, "tasks.md"), makeTaskLines(11));
+    assert.equal(next(fx.projectRoot, fx.change, fx.changeRoot).path, "next_command");
+
+    writeFileSync(join(fx.changeRoot, "tasks.md"), makeTaskLines(13));
+    assert.equal(next(fx.projectRoot, fx.change, fx.changeRoot).path, "ask_user");
+  } finally { fx.cleanup(); }
+});
+
 test("计划规模预算：答复不是给定选项原文时登记被拒，next 仍在同一问题；原文答复后推进", () => {
   const fx = setupProposeBudget({ taskCount: 11 });
   try {

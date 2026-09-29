@@ -88,7 +88,7 @@ import {
   type PhaseBoundary,
 } from "./phase_confirmation.ts";
 import { taskEvidenceReadiness } from "./task_evidence.ts";
-import { staleTestEvidenceMessage, testEvidenceFreshness, type TestRerunRequirement } from "./test_freshness.ts";
+import { staleTestEvidence } from "./test_freshness.ts";
 import { reviewLeftovers } from "./review_leftovers.ts";
 import type {
   AcceptedMaterialFollowupContinuation,
@@ -102,6 +102,7 @@ import type {
   PostAcceptCodeChanges,
   ReviewFindingContext,
   ReviewLeftovers,
+  StaleTestEvidence,
   WorkflowArtifactKind,
   WorkflowModeSelectionAction,
   State,
@@ -123,6 +124,9 @@ export const PLAN_SIZE_BUDGET_SCOPE_PREFIX = "plan_size_budget:";
 export const PLAN_SIZE_BUDGET_CONFIRM_ANSWER = "确认规模合理，继续审查";
 export const PLAN_SIZE_BUDGET_SHRINK_ANSWER = "回去收缩计划";
 export const PLAN_SIZE_BUDGET_ANSWERS: readonly string[] = [PLAN_SIZE_BUDGET_CONFIRM_ANSWER, PLAN_SIZE_BUDGET_SHRINK_ANSWER];
+
+const STALE_TEST_EVIDENCE_DELIVERY_INSTRUCTION =
+  "这些 TEST 的证据登记早于最后一次代码改动；交付时如实告诉使用者哪些 TEST 没有对当前代码重新验证，不要写成已验证。";
 
 export type TransitionName =
   | "explore"
@@ -163,7 +167,6 @@ export type NextStepPlan =
     }
   | { kind: "ask_user"; state: State; ask: AskUser; reason: string }
   | { kind: "material_update_required"; state: State; errors: string[]; reason: string }
-  | { kind: "test_rerun_required"; state: State; reruns: TestRerunRequirement[]; changedPaths: string[]; reason: string }
   | { kind: "mode_selection_required"; state: State; selection: WorkflowModeSelectionAction; reason: string }
   | {
       kind: "run_transition";
@@ -176,6 +179,7 @@ export type NextStepPlan =
       /** 执行该转换只会创建这些角色的审查工作项，状态不会推进。 */
       createsReviewJobs?: JobRole[];
       reviewLeftovers?: ReviewLeftovers;
+      staleTestEvidence?: StaleTestEvidence & { instruction: string };
     }
   | { kind: "review_rejected"; state: State; review_rejection: Record<string, unknown>; reason: string }
   | {
@@ -957,6 +961,23 @@ export function currentPlanSizeBudgetScope(changeRoot: string, events: Event[]):
   return planSizeBudgetScope(currentProposeRoundId(events), countNonFixPlanTasks(changeRoot), countPlanTestEntries(changeRoot));
 }
 
+export function currentPlanSize(changeRoot: string): { tasks: number; tests: number } {
+  if (!existsSync(join(changeRoot, "tasks.md"))) return { tasks: 0, tests: countPlanTestEntries(changeRoot) };
+  return { tasks: countNonFixPlanTasks(changeRoot), tests: countPlanTestEntries(changeRoot) };
+}
+
+/** 本 change 里用户已确认过不小于当前规模的计划（跨 Propose 轮）；reopen 与规模缩小都不需要再问。 */
+function confirmedPlanSizeCovers(events: Event[], taskCount: number, testCount: number): boolean {
+  return events.some(ev => {
+    if (ev.event_type !== "user_decision_recorded") return false;
+    const payload = ev.payload as { scope?: unknown; answer?: unknown; accepted?: unknown; plan_size?: { tasks?: unknown; tests?: unknown } };
+    if (payload.accepted === false || typeof payload.scope !== "string" || !payload.scope.startsWith(PLAN_SIZE_BUDGET_SCOPE_PREFIX)) return false;
+    if (typeof payload.answer !== "string" || payload.answer.trim() !== PLAN_SIZE_BUDGET_CONFIRM_ANSWER) return false;
+    const size = payload.plan_size;
+    return typeof size?.tasks === "number" && typeof size.tests === "number" && size.tasks >= taskCount && size.tests >= testCount;
+  });
+}
+
 function isOverPlanSizeBudget(budget: WorkflowBudget, taskCount: number, testCount: number): boolean {
   const overTasks = budget.tasks !== null && taskCount > budget.tasks;
   const overTests = budget.tests !== null && testCount > budget.tests;
@@ -1003,6 +1024,7 @@ function planSizeBudgetSkipReason(
   if (answer === PLAN_SIZE_BUDGET_SHRINK_ANSWER) {
     return `计划规模仍超过预算（${planSizeBudgetOverageMessage(budget, taskCount, testCount)}），请收缩 tasks 或 test-contract 后重试`;
   }
+  if (confirmedPlanSizeCovers(events, taskCount, testCount)) return null;
   return `计划规模超过预算（${planSizeBudgetOverageMessage(budget, taskCount, testCount)}），需要先确认规模或收缩计划`;
 }
 
@@ -1017,6 +1039,7 @@ function planSizeBudgetNextStep(context: PhasePlanContext): NextStepPlan | null 
   const scope = planSizeBudgetScope(currentProposeRoundId(events), taskCount, testCount);
   const answer = latestPlanSizeBudgetAnswer(events, scope);
   if (answer === PLAN_SIZE_BUDGET_CONFIRM_ANSWER) return null;
+  if (answer !== PLAN_SIZE_BUDGET_SHRINK_ANSWER && confirmedPlanSizeCovers(events, taskCount, testCount)) return null;
   if (answer === PLAN_SIZE_BUDGET_SHRINK_ANSWER) {
     return {
       kind: "material_update_required",
@@ -1674,18 +1697,6 @@ export function blockingJobsForApplyDone(
   );
 }
 
-function staleTestEvidenceStep(state: State, projectRoot: string, events: Event[]): NextStepPlan | null {
-  const freshness = testEvidenceFreshness(projectRoot, events);
-  if (freshness.fresh) return null;
-  return {
-    kind: "test_rerun_required",
-    state,
-    reruns: freshness.reruns,
-    changedPaths: freshness.changed_paths,
-    reason: staleTestEvidenceMessage(freshness),
-  };
-}
-
 function planApplyDoneNext(context: PhasePlanContext): NextStepPlan {
   const { change, changeRoot, events, mode, snapshot } = context;
   const pendingTasks = pendingTaskStatusForApply(changeRoot, events).pending;
@@ -1698,9 +1709,6 @@ function planApplyDoneNext(context: PhasePlanContext): NextStepPlan {
       reason: `发现未完成任务 ${pendingTasks[0]}，回到执行阶段`,
     };
   }
-  const staleEvidence = staleTestEvidenceStep("apply_done", context.projectRoot, events);
-  if (staleEvidence) return staleEvidence;
-
   const facts = collectCodeReviewGateFacts(events);
   const currentWorkingPaths = currentCodeReviewWorkingPaths(context.projectRoot, events);
   const relevantOpenJobs = blockingJobsForApplyDone(context.projectRoot, events, snapshot);
@@ -1862,9 +1870,6 @@ function planReviewNext(context: PhasePlanContext): NextStepPlan {
       reason: `发现未完成任务 ${pending[0]}，回到执行阶段`,
     };
   }
-  const staleEvidence = staleTestEvidenceStep("review", projectRoot, events);
-  if (staleEvidence) return staleEvidence;
-
   const reviewVerifierJobs = snapshot.open_jobs.filter(isReviewReadyVerifier);
   if (reviewVerifierJobs.length > 0) {
     return requiredJobs("review", reviewVerifierJobs, `有 ${reviewVerifierJobs.length} 个待完成最终验证工作项`);
@@ -1896,12 +1901,14 @@ function planReviewNext(context: PhasePlanContext): NextStepPlan {
   }
 
   const leftovers = reviewLeftovers(projectRoot, context.change, events);
+  const stale = staleTestEvidence(projectRoot, events);
   return {
     kind: "run_transition",
     state: "review",
     transition: "accept",
     reason: "审查完成，提交接受",
     ...(leftovers ? { reviewLeftovers: leftovers } : {}),
+    ...(stale ? { staleTestEvidence: { ...stale, instruction: STALE_TEST_EVIDENCE_DELIVERY_INSTRUCTION } } : {}),
   };
 }
 
@@ -2151,8 +2158,6 @@ function planAcceptTransition(context: TransitionPlanContext): TransitionDecisio
 
   const policy = readReviewPolicyFromEvents(events);
   if (!policy) return { kind: "skip", message: "缺少审查策略，请先运行 review-ready" };
-  const freshness = testEvidenceFreshness(projectRoot, events);
-  if (!freshness.fresh) return { kind: "skip", message: staleTestEvidenceMessage(freshness) };
 
   if (requiresFinalVerifierForCurrentReview(events) || policy.requires_verifier) {
     const currentEvidenceDigest = reviewEvidenceDigest(events);

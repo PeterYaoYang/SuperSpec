@@ -1,7 +1,7 @@
 // SuperSpec 流程引擎 — 测试证据新鲜度：任务完成后代码又有变化时，已登记的 GREEN 不再证明当前代码
 
 import { currentCodeStateFingerprint, type CodeStateFingerprint } from "./code_review.ts";
-import type { EffectiveEvidencePlan, Event, Ref, TaskAttempt, TestEvidenceAction } from "./types.ts";
+import type { EffectiveEvidencePlan, Event, Ref, StaleTestEvidence, TaskAttempt } from "./types.ts";
 
 type GreenStatus = EffectiveEvidencePlan["accepted_green_statuses"][number];
 
@@ -133,26 +133,18 @@ export function testEvidenceFreshness(projectRoot: string, events: Event[]): Tes
   };
 }
 
-export function staleTestEvidenceMessage(freshness: Extract<TestEvidenceFreshness, { fresh: false }>): string {
-  const paths = freshness.changed_paths.length > 0 ? `（${freshness.changed_paths.join(", ")}）` : "";
-  const tests = freshness.reruns.map(req => req.test_id).join(", ");
-  return `任务 ${freshness.baseline_task_ids.join(", ")} 完成后代码又有变化${paths}，已登记的测试证据不再对应当前代码；` +
-    `请对当前代码重新运行并登记 ${tests} 的 GREEN（next 返回登记模板）后再继续`;
-}
-
-export function testRerunActions(change: string, reruns: TestRerunRequirement[]): TestEvidenceAction[] {
-  return reruns.map(req => ({
-    kind: "test_run" as const,
-    test_id: req.test_id,
-    record_argv: ["superspec", "record", "test-run", "--change", change, "--input", "-"],
-    record_input: {
-      test_id: req.test_id,
-      attempt_id: req.attempt_id,
-      command: null,
-      cwd: null,
-      exit_code: null,
-      semantic_status: req.semantic_status,
-    },
-    required_fields: ["command", "cwd", "exit_code"],
-  }));
+/**
+ * 证据登记早于当前代码的 TEST 与相关改动文件。
+ *
+ * 测试结果由执行者自报时，要求逐条重登只会产生没有信息量的登记；这里只把事实交给
+ * 审查者和使用者判断，不阻塞流程。
+ */
+export function staleTestEvidence(projectRoot: string, events: Event[]): StaleTestEvidence | null {
+  const freshness = testEvidenceFreshness(projectRoot, events);
+  if (freshness.fresh) return null;
+  return {
+    test_ids: [...new Set(freshness.reruns.map(req => req.test_id))],
+    task_ids: freshness.baseline_task_ids,
+    changed_paths: freshness.changed_paths,
+  };
 }

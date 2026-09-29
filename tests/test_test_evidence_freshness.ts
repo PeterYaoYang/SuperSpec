@@ -10,6 +10,7 @@ import { rebuildSnapshot } from "../src/sync.ts";
 import { next } from "../src/next.ts";
 import { jobsPacket, recordJobSubmitContent } from "../src/record.ts";
 import { recordTestRunContent } from "../src/task.ts";
+import { staleTestEvidence } from "../src/test_freshness.ts";
 import { accept, reopen, reviewReady, taskComplete, taskStart } from "../src/transition.ts";
 import { applyPlanningBaseline } from "../src/phase_plan.ts";
 import type { NextCommandOutput } from "../src/types.ts";
@@ -191,95 +192,74 @@ function passFinalVerifier(fx: Fixture): void {
   submitPass(fx, verifier.created_jobs[0]);
 }
 
-test("测试证据新鲜度：任务完成后改代码，next 要求按模板重跑已完成任务的 TEST，review-ready 在补齐前不推进", () => {
+test("测试证据新鲜度：任务完成后改代码不阻塞流程，代码审查 packet 标出证据早于当前代码的 TEST；主动重跑仍可登记", () => {
   const fx = setupApply();
   try {
     const attempts = completeAllTasks(fx);
     writeFileSync(join(fx.projectRoot, "src", "calc.ts"), `${ADD_SUB}export const mul = (a: number, b: number) => a * b;\n`);
 
-    const stale = nextOutput(fx);
-    assert.equal(stale.path, "test_rerun_required");
-    assert.equal(stale.stop_allowed, false);
-    if (stale.path !== "test_rerun_required") return;
-    assert.deepEqual(stale.changed_paths, ["src/calc.ts"]);
-    assert.deepEqual(
-      stale.test_reruns.map(action => [action.test_id, action.record_input.attempt_id, action.record_input.semantic_status]),
-      [["TEST-001", attempts.first, "expected_success"], ["TEST-002", attempts.second, "expected_success"]],
-    );
-
-    const eventsBefore = readEvents(fx.projectRoot, fx.change).length;
-    const blocked = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
-    assert.equal(blocked.events_written, 0);
-    assert.equal(blocked.to_state, "apply_done");
-    assert.equal(readEvents(fx.projectRoot, fx.change).length, eventsBefore);
+    const resume = nextOutput(fx);
+    assert.equal(resume.path, "next_command");
+    if (resume.path === "next_command") assert.match(resume.next_command, /transition review-ready/);
+    const codeReview = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(codeReview.outcome, "job_created", codeReview.message);
+    assert.deepEqual(jobsPacket(fx.projectRoot, fx.change, codeReview.created_jobs[0]).packet?.stale_test_evidence, {
+      test_ids: ["TEST-001", "TEST-002"],
+      task_ids: ["TASK-001", "TASK-002"],
+      changed_paths: ["src/calc.ts"],
+    });
 
     assert.equal(testRun(fx, "TEST-001", attempts.first, "expected_failure").accepted, false);
     assert.equal(testRun(fx, "TEST-002", attempts.first, "expected_success").accepted, false);
-
-    const firstRerun = stale.test_reruns[0].record_input;
-    assert.equal(recordTestRunContent(fx.projectRoot, fx.change, JSON.stringify({
-      ...firstRerun,
-      command: "node --test TEST-001",
-      cwd: fx.projectRoot,
-      exit_code: 0,
-    })).accepted, true);
-    const partial = nextOutput(fx);
-    assert.equal(partial.path, "test_rerun_required");
-    if (partial.path === "test_rerun_required") {
-      assert.deepEqual(partial.test_reruns.map(action => action.test_id), ["TEST-002"]);
-    }
-    assert.equal(testRun(fx, "TEST-001", attempts.first, "expected_success").accepted, false);
-
-    assert.equal(testRun(fx, "TEST-002", attempts.second, "expected_success").accepted, true);
-    assert.notEqual(nextOutput(fx).path, "test_rerun_required");
-    const codeReview = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
-    assert.equal(codeReview.outcome, "job_created", codeReview.message);
+    assert.equal(testRun(fx, "TEST-001", attempts.first, "expected_success").accepted, true);
+    assert.deepEqual(staleTestEvidence(fx.projectRoot, readEvents(fx.projectRoot, fx.change))?.test_ids, ["TEST-002"]);
   } finally {
     fx.cleanup();
   }
 });
 
-test("测试证据新鲜度：后一个任务改动代码后，先完成任务的 TEST 也要对当前代码重跑", () => {
+test("测试证据新鲜度：后一个任务改动代码后，先完成任务的 TEST 标为证据过期，但不阻塞推进", () => {
   const fx = setupApply();
   try {
     const attempts = completeAllTasks(fx);
-    const stale = nextOutput(fx);
-    assert.equal(stale.path, "test_rerun_required");
-    if (stale.path !== "test_rerun_required") return;
-    assert.deepEqual(stale.test_reruns.map(action => [action.test_id, action.record_input.attempt_id]), [["TEST-001", attempts.first]]);
-    assert.deepEqual(stale.changed_paths, ["src/calc.ts"]);
-    assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot).events_written, 0);
-
-    assert.equal(testRun(fx, "TEST-001", attempts.first, "expected_success").accepted, true);
-    assert.notEqual(nextOutput(fx).path, "test_rerun_required");
+    assert.deepEqual(staleTestEvidence(fx.projectRoot, readEvents(fx.projectRoot, fx.change)), {
+      test_ids: ["TEST-001"],
+      task_ids: ["TASK-001"],
+      changed_paths: ["src/calc.ts"],
+    });
     assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot).outcome, "job_created");
+
+    assert.equal(testRun(fx, "TEST-001", attempts.first, "expected_success").accepted, true);
+    assert.equal(staleTestEvidence(fx.projectRoot, readEvents(fx.projectRoot, fx.change)), null);
   } finally {
     fx.cleanup();
   }
 });
 
-test("测试证据新鲜度：代码内容未变时不要求重跑；提交改动和登记审查结论都不算代码变化", () => {
+test("测试证据新鲜度：代码内容未变时证据不算过期；提交改动和登记审查结论都不算代码变化", () => {
   const fx = setupApply();
   try {
     const attempts = completeAllTasks(fx);
     assert.equal(testRun(fx, "TEST-001", attempts.first, "expected_success").accepted, true);
-    assert.notEqual(nextOutput(fx).path, "test_rerun_required");
+    assert.equal(staleTestEvidence(fx.projectRoot, readEvents(fx.projectRoot, fx.change)), null);
     assert.equal(testRun(fx, "TEST-001", attempts.first, "expected_success").accepted, false);
 
     git(fx.projectRoot, ["add", "-A"]);
     git(fx.projectRoot, ["commit", "-m", "implement calc"]);
-    assert.notEqual(nextOutput(fx).path, "test_rerun_required");
+    assert.equal(staleTestEvidence(fx.projectRoot, readEvents(fx.projectRoot, fx.change)), null);
 
     advanceApplyDoneToReview(fx);
-    assert.notEqual(nextOutput(fx).path, "test_rerun_required");
+    assert.equal(staleTestEvidence(fx.projectRoot, readEvents(fx.projectRoot, fx.change)), null);
     passFinalVerifier(fx);
+    const acceptStep = nextOutput(fx);
+    assert.equal(acceptStep.path === "next_command" && "stale_test_evidence" in acceptStep, false);
     assert.equal(accept(fx.projectRoot, fx.change, fx.changeRoot).to_state, "accepted");
   } finally {
     fx.cleanup();
   }
 });
 
-test("测试证据新鲜度：最终验证通过后再改代码，accept 被阻止；重跑登记后重新最终验证才能接受", () => {
+test("测试证据新鲜度：最终验证后再改代码需要重新最终验证，证据过期不阻塞接受但会在交付时列出", () => {
   const fx = setupApply();
   try {
     const attempts = completeAllTasks(fx);
@@ -291,20 +271,21 @@ test("测试证据新鲜度：最终验证通过后再改代码，accept 被阻�
     const blocked = accept(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(blocked.events_written, 0);
     assert.equal(blocked.to_state, "review");
-    assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot).events_written, 0);
 
-    const stale = nextOutput(fx);
-    assert.equal(stale.path, "test_rerun_required");
-    if (stale.path === "test_rerun_required") {
-      assert.deepEqual(stale.test_reruns.map(action => action.test_id), ["TEST-001", "TEST-002"]);
+    const resume = nextOutput(fx);
+    assert.equal(resume.path, "next_command");
+    if (resume.path === "next_command") assert.match(resume.next_command, /transition review-ready/);
+    const verifier = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(verifier.outcome, "job_created", verifier.message);
+    assert.deepEqual(jobsPacket(fx.projectRoot, fx.change, verifier.created_jobs[0]).packet?.stale_test_evidence?.test_ids, ["TEST-001", "TEST-002"]);
+    submitPass(fx, verifier.created_jobs[0]);
+
+    const acceptStep = nextOutput(fx);
+    assert.equal(acceptStep.path, "next_command");
+    if (acceptStep.path === "next_command") {
+      assert.match(acceptStep.next_command, /transition accept/);
+      assert.deepEqual(acceptStep.stale_test_evidence?.test_ids, ["TEST-001", "TEST-002"]);
     }
-    assert.equal(testRun(fx, "TEST-001", attempts.first, "expected_success").accepted, true);
-    assert.equal(testRun(fx, "TEST-002", attempts.second, "expected_success").accepted, true);
-
-    const afterRerun = nextOutput(fx);
-    assert.equal(afterRerun.path, "next_command");
-    if (afterRerun.path === "next_command") assert.match(afterRerun.next_command, /transition review-ready/);
-    passFinalVerifier(fx);
     assert.equal(accept(fx.projectRoot, fx.change, fx.changeRoot).to_state, "accepted");
   } finally {
     fx.cleanup();
@@ -408,7 +389,7 @@ test("测试证据新鲜度：历史模式轮里的审查 Fix 完成后改代码
 
     writeFileSync(join(fx.projectRoot, "src", "calc.ts"), `${ADD}// 负数与零\n`);
     assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot).to_state, "apply_done");
-    assert.notEqual(nextOutput(fx).path, "test_rerun_required");
+    assert.equal(staleTestEvidence(fx.projectRoot, readEvents(fx.projectRoot, fx.change)), null);
     assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot).outcome, "job_created");
   } finally {
     fx.cleanup();

@@ -8,7 +8,7 @@ import {
 } from "./store.ts";
 import { rebuildSnapshot } from "./sync.ts";
 import { CHANGE_MATERIAL_RELATIVE_PATHS, changeMaterialProjectPath, changeRoot as openspecChangeRoot } from "./openspec.ts";
-import { currentPlanSizeBudgetScope, PLAN_SIZE_BUDGET_ANSWERS, PLAN_SIZE_BUDGET_SCOPE_PREFIX } from "./phase_plan.ts";
+import { currentPlanSize, currentPlanSizeBudgetScope, PLAN_SIZE_BUDGET_ANSWERS, PLAN_SIZE_BUDGET_SCOPE_PREFIX } from "./phase_plan.ts";
 import { latestWorkflowModeSelection, workflowModeSelectionError, workflowModeUpgradePending } from "./workflow_config.ts";
 import {
   isPhaseConfirmationScope,
@@ -1709,6 +1709,10 @@ function recordUserDecisionLoaded(
       ...(followup ? { followup } : {}),
       ...(earlierAnswers.length > 0 ? { earlier_answers: earlierAnswers } : {}),
     } : {}),
+    // 记下被确认的规模：之后规模不超过它就不再重复询问。
+    ...(decision.scope.startsWith(PLAN_SIZE_BUDGET_SCOPE_PREFIX)
+      ? { plan_size: currentPlanSize(openspecChangeRoot(projectRoot, change)) }
+      : {}),
   };
   const rawRef = appendRawRecord(projectRoot, change, "user-decisions", normalizedDecision);
   const event = makeEvent(change, "user_decision_recorded", {
@@ -1892,6 +1896,7 @@ function packetFieldDescriptions(): Record<string, string> {
     code_review_gate: "最终验证读取的代码审查门禁事实：passed 指向已接受的代码审查工作项，skipped 表示本轮没有代码类改动。",
     code_state_check: "代码状态检查：最终验证时用于判断代码审查后代码是否又发生变化。",
     deliverable_docs: "本审查周期改动的普通文档（计划与工作流材料之外）及其内容指纹；纯文档改动的交付物在这里，登记前它们再变化会使本工作项作废。",
+    stale_test_evidence: "测试证据登记早于当前代码的 TEST、对应任务和此后改动的文件；引擎不因此阻塞流程，由你判断现有证据是否仍能证明当前代码，证据不足时如实写进结论。",
     review_baseline: "同角色最近一次形成结论的审查工作项；存在时本工作项是相对它的材料复审。result_kind 为 review_failed 表示那次审查完整审过后以 fail 结论被拒，其 finding 见 previous_rejection。",
     material_delta: "相对 review_baseline 的逐文件材料变化：path 与 boundFiles 的 path 同一基准（计划材料相对 change 目录），status 为 added/removed/modified，diff 为 unified diff；diff_unavailable 说明为何没有差异、需要完整阅读该文件。",
     review_targets: "本 gate 可提出修改建议的材料，path 相对 change 目录；对应的项目相对路径见 boundFiles 中同一文件的 project_path。",
@@ -1955,6 +1960,7 @@ export function jobsPacket(
         ...(packetContext?.structure_ledger ? { structure_ledger: packetContext.structure_ledger } : {}),
         ...(packetContext?.code_state_check ? { code_state_check: packetContext.code_state_check } : {}),
         ...(packetContext?.deliverable_docs ? { deliverable_docs: packetContext.deliverable_docs } : {}),
+        ...(packetContext?.stale_test_evidence ? { stale_test_evidence: packetContext.stale_test_evidence } : {}),
         ...(job.review_baseline
           ? {
               review_baseline: {

@@ -8,7 +8,6 @@ import { requiredJobActions } from "./job_action.ts";
 import type { AskUser, Event, Job, NextCommandOutput, NextOutput, State } from "./types.ts";
 import type { ReviewRisk } from "./review.ts";
 import { planNextStep, type NextStepPlan } from "./phase_plan.ts";
-import { testRerunActions } from "./test_freshness.ts";
 import {
   workflowModeStatus,
   workflowRiskForChange,
@@ -142,15 +141,6 @@ function toNextOutput(change: string, plan: NextStepPlan): NextOutput {
         resume: { argv: ["superspec", "transition", "next", "--change", change] },
         reason: plan.reason,
       };
-    case "test_rerun_required":
-      return {
-        state: plan.state,
-        path: "test_rerun_required",
-        test_reruns: testRerunActions(change, plan.reruns),
-        changed_paths: plan.changedPaths,
-        resume: { argv: ["superspec", "transition", "next", "--change", change] },
-        reason: plan.reason,
-      };
     case "mode_selection_required":
       return {
         state: plan.state,
@@ -176,6 +166,7 @@ function toNextOutput(change: string, plan: NextStepPlan): NextOutput {
         ...(findingContext ? { finding_context: findingContext } : {}),
         ...(plan.createsReviewJobs ? { creates_review_jobs: plan.createsReviewJobs } : {}),
         ...(plan.reviewLeftovers ? { review_leftovers: plan.reviewLeftovers } : {}),
+        ...(plan.staleTestEvidence ? { stale_test_evidence: plan.staleTestEvidence } : {}),
       };
     }
     case "done":

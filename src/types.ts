@@ -273,6 +273,14 @@ export interface JobPacketContext {
   structure_ledger?: StructureChangeLedger;
   code_state_check?: CodeStateCheck;
   deliverable_docs?: DirtyFileFingerprint[];
+  stale_test_evidence?: StaleTestEvidence;
+}
+
+/** 测试证据登记早于当前代码的 TEST；不阻塞流程，交给审查者与使用者判断证据是否仍然够用。 */
+export interface StaleTestEvidence {
+  test_ids: string[];
+  task_ids: string[];
+  changed_paths: string[];
 }
 
 export interface JobPacket {
@@ -296,6 +304,7 @@ export interface JobPacket {
   structure_ledger?: StructureChangeLedger;
   code_state_check?: CodeStateCheck;
   deliverable_docs?: DirtyFileFingerprint[];
+  stale_test_evidence?: StaleTestEvidence;
   review_baseline?: Pick<ReviewBaseline, "job_id" | "result_kind">;
   material_delta?: MaterialDeltaEntry[];
   previous_review_evidence?: PreviousReviewEvidence;
@@ -646,11 +655,11 @@ export type NextOutput = {
       /** 执行 next_command 只会创建这些角色的审查工作项，状态不会推进。 */
       creates_review_jobs?: JobRole[];
       review_leftovers?: ReviewLeftovers;
+      stale_test_evidence?: StaleTestEvidence & { instruction: string };
     }
   | { path: "required_job"; required_jobs: RequiredJobAction[]; instruction?: string; reason: string }
   | { path: "artifact_required"; artifact: RequiredWorkflowArtifact; resume: ArtifactRequiredResume; reason: string }
   | { path: "material_update_required"; errors: string[]; resume: MaterialUpdateRequiredResume; reason: string }
-  | { path: "test_rerun_required"; test_reruns: TestEvidenceAction[]; changed_paths: string[]; resume: { argv: string[] }; reason: string }
   | { path: "mode_selection_required"; selection: WorkflowModeSelectionAction; reason: string }
   | { path: "ask_user"; ask_user: AskUser; reason: string }
   | { path: "review_rejected"; review_rejection: Record<string, unknown>; reason: string }
