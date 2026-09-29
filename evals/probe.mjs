@@ -24,6 +24,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { DEFAULT_WORKER_HOST_ID, getWorkerHost, hostIdentity, recordedWorkerHost, registeredWorkerHostIds, workerHostDefaultsText } from "./hosts/index.mjs";
 import { getJudgeHost, judgeIdentity, registeredJudgeHostIds } from "./judges/index.mjs";
+import { judgeTimeoutError, spawnJudge } from "./judges/runtime.mjs";
 import { createInterruptController, createTempDirRegistry, processAlive, sweepStaleTempDirs } from "./lib/interrupt.mjs";
 import { currentEvaluatorDigest, isRecoveredSessionPath } from "./lib/provenance.mjs";
 import { createDirectorSpawner } from "./lib/spawn.mjs";
@@ -264,11 +265,17 @@ function gate(status, evidence, detail, evidenceLevel = status === "unavailable"
   return { status, evidence, evidence_level: evidenceLevel, ...(detail ? { detail } : {}) };
 }
 
-// 评测侧中断时工作流本就到不了目标状态；eventIntegrity 只在目标状态不符时返回 fail，完整性问题仍是 unavailable。
-function evaluatorCutoffStateGate(stateGate) {
-  return stateGate?.status === "fail"
-    ? gate("unavailable", stateGate.evidence, `${stateGate.detail}; target state not reachable after evaluator-side stop`)
-    : stateGate;
+// 评测侧中断时工作流本就到不了目标状态，也来不及产出最终产物；这两类 fail 只说明运行被截断，
+// 不能算作工作流失败。eventIntegrity 只在目标状态不符时返回 fail，完整性问题仍是 unavailable。
+function evaluatorCutoffGate(resultGate, consequence) {
+  return resultGate?.status === "fail"
+    ? gate("unavailable", resultGate.evidence, `${resultGate.detail}; ${consequence} after evaluator-side stop`)
+    : resultGate;
+}
+
+function applyEvaluatorCutoff(gates) {
+  gates.state = evaluatorCutoffGate(gates.state, "target state not reachable");
+  gates.artifact = evaluatorCutoffGate(gates.artifact, "final artifacts not produced");
 }
 
 function workerProcessStatus(codes, timeouts, timeoutRecoveries, label = "Worker") {
@@ -927,14 +934,17 @@ async function aiSimulatedUserReply({ turn, scenario, nextOutput, workerMessage,
   const rejected = [];
   let raw = null;
   let problem = null;
+  let timedOut = false;
   let modelEvidence = null;
   // 答复不合规时带着问题重试一次；仍不合规就作为评测侧停止封存证据，不能让一次格式错误中断整场运行。
+  // 超时说明模型根本没有给出答复，重试时原样重发，不能把 Provider 挂起说成模型输出不合规。
   for (const attempt of [1, 2]) {
     const suffix = attempt === 1 ? "" : "-retry";
     modelEvidence = `evidence/user-turn-${turn}${suffix}.jsonl`;
-    const prompt = attempt === 1
+    const prompt = attempt === 1 || timedOut
       ? basePrompt
       : `${basePrompt}\n\n你上一次的输出不符合要求：${problem}。请按要求重新输出。`;
+    timedOut = false;
     try {
       const { json } = await judge.run({
         turn,
@@ -951,7 +961,9 @@ async function aiSimulatedUserReply({ turn, scenario, nextOutput, workerMessage,
           : null);
     } catch (error) {
       raw = null;
-      problem = `输出无法作为 JSON 答复解析（${error instanceof Error ? error.message.split("\n")[0] : String(error)}）`;
+      const detail = error instanceof Error ? error.message.split("\n")[0] : String(error);
+      timedOut = error?.name === "JudgeTimeoutError";
+      problem = timedOut ? `模拟用户未在时限内给出答复（${detail}）` : `输出无法作为 JSON 答复解析（${detail}）`;
     }
     if (problem == null) break;
     rejected.push({ model_evidence: modelEvidence, problem });
@@ -959,7 +971,7 @@ async function aiSimulatedUserReply({ turn, scenario, nextOutput, workerMessage,
   if (problem != null) {
     return {
       action: "simulated_user_invalid",
-      reason: `simulated user turn ${turn} reply stayed invalid after one retry: ${problem}`,
+      reason: `simulated user turn ${turn} ${timedOut ? "timed out" : "reply stayed invalid"} after one retry: ${problem}`,
       question: String(nextOutput.ask_user.question ?? ""),
       scope: String(nextOutput.ask_user.scope ?? ""),
       source: "ai_user",
@@ -1705,11 +1717,14 @@ function requiredFileContentErrors(root, assertions) {
     const check = safeRegularWithin(absolute, root);
     if (!check.ok) return [`${relativePath}: unavailable for content validation`];
     const content = readFileSync(absolute, "utf8");
+    // 单词片段（如格式名 CSV/JSON）表达的是“提到了这个名称”，大小写不改变语义；带符号的片段仍按字面匹配。
+    const isWordFragment = fragment => /^[A-Za-z0-9]+$/.test(fragment);
     return requiredFragments.filter(fragment => {
       if (content.includes(fragment)) return false;
+      if (isWordFragment(fragment)) return !content.toLowerCase().includes(fragment.toLowerCase());
       if (!fragment.includes("<format>")) return true;
       const formats = requiredFragments
-        .filter(candidate => /^[A-Za-z0-9]+$/.test(candidate) && content.toLowerCase().includes(candidate.toLowerCase()))
+        .filter(candidate => isWordFragment(candidate) && content.toLowerCase().includes(candidate.toLowerCase()))
         .map(candidate => candidate.toLowerCase());
       return formats.length === 0 || !formats.every(format => content.includes(fragment.replaceAll("<format>", format)));
     }).map(fragment => `${relativePath}: missing ${JSON.stringify(fragment)}`);
@@ -2153,6 +2168,19 @@ async function validateFaultMappings() {
   });
   if (expandedPathErrors.length !== 0) throw new Error(`expanded format paths should satisfy the placeholder contract: ${expandedPathErrors.join("; ")}`);
   outcomes.push({ name: "artifact-format-placeholder-expansion", result: true });
+  writeFileSync(join(contentRoot, "docs", "export.md"), "Use `--format <csv|json>`:\n- `csv` — comma-separated values\n- `json` — JSON\nDefault: ./output/report.csv or ./output/report.json; pass --output to override.\n");
+  const lowercaseFormatErrors = requiredFileContentErrors(contentRoot, {
+    required_file_contains: { "docs/export.md": ["CSV", "JSON", "./output/report.<format>", "--output"] },
+  });
+  writeFileSync(join(contentRoot, "docs", "export.md"), "Use `--format csv`; writes ./output/report.csv. Pass --OUTPUT to override.\n");
+  const missingFormatErrors = requiredFileContentErrors(contentRoot, {
+    required_file_contains: { "docs/export.md": ["CSV", "JSON", "--output"] },
+  });
+  if (lowercaseFormatErrors.length !== 0
+    || missingFormatErrors.join("; ") !== "docs/export.md: missing \"JSON\"; docs/export.md: missing \"--output\"") {
+    throw new Error(`word fragments must match case-insensitively while symbol fragments stay literal: ${[...lowercaseFormatErrors, ...missingFormatErrors].join("; ")}`);
+  }
+  outcomes.push({ name: "artifact-word-fragment-case-insensitive", result: true });
   const resumeTraceOne = join(fixtureRoot, "resume-turn-1.jsonl");
   const resumeTraceTwo = join(fixtureRoot, "resume-turn-2.jsonl");
   writeFileSync(resumeTraceOne, [
@@ -2530,6 +2558,17 @@ async function validateFaultMappings() {
   }
   outcomes.push({ name: "ai-simulated-user-reply-normalization", result: true });
 
+  const timeoutRetried = await replyOf(phaseAsk, [judgeTimeoutError("simulated user turn 1"), { action: "reply", answer: "确认开始实现", reason: "" }]);
+  const stillTimedOut = await replyOf(phaseAsk, [judgeTimeoutError("simulated user turn 1"), judgeTimeoutError("simulated user turn 1")]);
+  const timeoutThenInvalid = await replyOf(phaseAsk, [judgeTimeoutError("simulated user turn 1"), { action: "reply", answer: "", reason: "" }]);
+  if (timeoutRetried.result.action !== "reply" || timeoutRetried.prompts[1] !== timeoutRetried.prompts[0]
+    || !timeoutRetried.result.rejected_replies?.[0]?.problem.startsWith("模拟用户未在时限内给出答复")
+    || stillTimedOut.result.action !== "simulated_user_invalid" || !stillTimedOut.result.reason.includes("timed out after one retry")
+    || timeoutThenInvalid.result.action !== "simulated_user_invalid" || !timeoutThenInvalid.result.reason.includes("reply stayed invalid after one retry")) {
+    throw new Error("a timed-out simulated user must be retried with the unchanged prompt and reported as a timeout, not as an invalid reply");
+  }
+  outcomes.push({ name: "ai-simulated-user-timeout-not-invalid-reply", result: true });
+
   const timedOutStop = workerExitStop(3, { code: 143, timedOut: true }, 1_800_000);
   const crashedStop = workerExitStop(2, { code: 1, timedOut: false }, 1_800_000);
   if (timedOutStop.action !== "worker_turn_timeout" || timedOutStop.after_worker_turn !== 3
@@ -2831,20 +2870,22 @@ async function validateFaultMappings() {
   outcomes.push({ name: "event-integrity-mismatches-unavailable", result: true });
 
   const cutoffEvents = { present: true, malformed: 0, records: [transitionEvent] };
-  const cutoffState = evaluatorCutoffStateGate(gate(eventIntegrity(cutoffEvents, goodSnapshot, "accepted").status, [], "state"));
-  const cutoffCapability = finalizeCapability({
-    limitations: [],
-    gates: {
-      ...Object.fromEntries(CORE_GATES.map(name => [name, gate("pass", [])])),
-      state: cutoffState,
-      stop_boundary: gate("unavailable", [], "cut off"),
-    },
-  });
-  if (cutoffState.status !== "unavailable" || cutoffCapability.scenario_result !== "INVALID"
-    || evaluatorCutoffStateGate(gate("pass", [])).status !== "pass") {
-    throw new Error("an evaluator-side stop must turn an unreached target state into INVALID, not a workflow failure");
+  const cutoffGates = {
+    ...Object.fromEntries(CORE_GATES.map(name => [name, gate("pass", [])])),
+    state: gate(eventIntegrity(cutoffEvents, goodSnapshot, "accepted").status, [], "state"),
+    artifact: gate("fail", [], "artifact invalid: required artifact unavailable"),
+    stop_boundary: gate("unavailable", [], "cut off"),
+  };
+  applyEvaluatorCutoff(cutoffGates);
+  const cutoffCapability = finalizeCapability({ limitations: [], gates: cutoffGates });
+  const untouchedGates = { state: gate("pass", []), artifact: gate("pass", []) };
+  applyEvaluatorCutoff(untouchedGates);
+  if (cutoffGates.state.status !== "unavailable" || cutoffGates.artifact.status !== "unavailable"
+    || cutoffCapability.scenario_result !== "INVALID"
+    || untouchedGates.state.status !== "pass" || untouchedGates.artifact.status !== "pass") {
+    throw new Error("an evaluator-side stop must turn an unreached target state or unfinished artifacts into INVALID, not a workflow failure");
   }
-  outcomes.push({ name: "evaluator-cutoff-state-invalid", result: true });
+  outcomes.push({ name: "evaluator-cutoff-invalid", result: true });
 
   const hidden = classifyAuthenticity({
     direct: [{ kind: "direct", argv: required[0], executable_allowed: true }],
@@ -3368,6 +3409,14 @@ async function validateFaultMappings() {
   rmSync(fixtureRoot, { recursive: true, force: true });
   if (existsSync(fixtureRoot)) throw new Error("fixture cleanup failed");
   outcomes.push({ name: "timeout-and-cleanup", result: true });
+
+  const judgeTimed = await spawnJudge(process.execPath, ["-e", "process.on('SIGTERM',()=>process.exit(0));setInterval(()=>{},1000)"], {
+    cwd: tmpdir(), env: process.env, prompt: "", active: new Set(), timeoutMs: 300,
+  });
+  if (!judgeTimed.timedOut || judgeTimed.code !== 0) {
+    throw new Error("a judge killed by its timeout must be reported as timed out even when it exits 0 on SIGTERM");
+  }
+  outcomes.push({ name: "judge-timeout-observable", result: true });
 
   const interruptRoot = mkdtempSync(join(tmpdir(), "superspec-interrupt-case-"));
   const interruptLog = join(interruptRoot, "interrupt-actions.jsonl");
@@ -4080,10 +4129,10 @@ async function regradeExistingRun(inputRunDir) {
       capability.gates.stop_boundary = gate("fail", stopEvidence, `recorded Worker executed forbidden SuperSpec commands: ${commandPolicyAudit.violations.map(item => item.family).join(", ")}`, "direct");
     } else if (effectiveStop?.action === "simulated_user_invalid") {
       capability.gates.stop_boundary = gate("unavailable", stopEvidence, `recorded run stopped on an evaluator-side simulated user failure: ${effectiveStop.reason}`);
-      capability.gates.state = evaluatorCutoffStateGate(capability.gates.state);
+      applyEvaluatorCutoff(capability.gates);
     } else if (effectiveStop?.action === "worker_turn_timeout") {
       capability.gates.stop_boundary = gate("unavailable", stopEvidence, `recorded run was cut off by the evaluator turn limit before a stop boundary: ${effectiveStop.reason}`);
-      capability.gates.state = evaluatorCutoffStateGate(capability.gates.state);
+      applyEvaluatorCutoff(capability.gates);
     } else if (["budget_exhausted", "invalid_execution"].includes(effectiveStop?.action)) {
       capability.gates.stop_boundary = gate("fail", stopEvidence, effectiveStop.reason, "direct");
     } else if (integrity?.status === "unavailable" || events.malformed > 0 || !authenticity.sequence.ok || !sameThread || !(finalOutput || runnerObservedTerminal(effectiveStop)) || !effectiveStop) {
@@ -5467,10 +5516,10 @@ async function main() {
         capability.gates.stop_boundary = gate("fail", stopEvidence, `recorded Worker executed forbidden SuperSpec commands: ${commandPolicyAudit.violations.map(item => item.family).join(", ")}`, "direct");
       } else if (dynamicStop?.action === "simulated_user_invalid") {
         capability.gates.stop_boundary = gate("unavailable", stopEvidence, `run stopped on an evaluator-side simulated user failure: ${dynamicStop.reason}`);
-        capability.gates.state = evaluatorCutoffStateGate(capability.gates.state);
+        applyEvaluatorCutoff(capability.gates);
       } else if (dynamicStop?.action === "worker_turn_timeout") {
         capability.gates.stop_boundary = gate("unavailable", stopEvidence, `run was cut off by the evaluator turn limit before a stop boundary: ${dynamicStop.reason}`);
-        capability.gates.state = evaluatorCutoffStateGate(capability.gates.state);
+        applyEvaluatorCutoff(capability.gates);
       } else if (["budget_exhausted", "invalid_execution"].includes(dynamicStop?.action)) {
         capability.gates.stop_boundary = gate("fail", stopEvidence, dynamicStop.reason, "direct");
       } else if (integrity?.status === "unavailable" || events.malformed > 0 || !authenticity.sequence.ok || !sameThread || !finalTracePath || !(finalOutput || runnerObservedTerminal(dynamicStop)) || !dynamicStop) {

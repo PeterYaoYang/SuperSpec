@@ -35,6 +35,9 @@ const REVIEW_CHANGED_FILE_CHUNKS = 1;
 const REVIEW_TEST_OUTPUT_CHARS = 3_000;
 const REVIEW_INTERACTION_CHARS = 8_000;
 const REVIEW_TIMELINE_TEXT_CHARS = 300;
+const REVIEW_REPORT_SUMMARY_CHARS = 1_500;
+const REVIEW_REPORT_ITEM_CHARS = 600;
+const REVIEW_REPORTS_PATH = /^\.superspec\/changes\/[^/]+\/raw\/review-reports\.jsonl$/u;
 const FACT_VISIBILITY_TIERS = ["no_decision_needed", "asked_user", "visible_in_confirmation", "volunteered_by_user", "invisible"];
 const FACT_RESULTS = ["consistent", "unclear", "inconsistent"];
 const USAGE_EXIT_CODE = 64;
@@ -273,12 +276,21 @@ function selectReviewTranscript(transcript) {
     };
   }
   const selected = new Map();
-  if (eligible[0]) selected.set(eligible[0].sequence, eligible[0]);
+  // 首条提示、终止决策（含最终 next 输出）和 Worker 最后一条消息说明最终交付了什么；
+  // 引擎事件排在 transcript 末尾且时间线里另有完整记录，不能让它们把这几条挤出名额。
+  for (const record of [
+    eligible[0],
+    ...eligible.filter(record => record.kind === "run_decision"),
+    eligible.findLast(record => record.actor === "worker" && record.kind === "message"),
+  ]) {
+    if (record && selected.size < REVIEW_TRANSCRIPT_LIMIT) selected.set(record.sequence, record);
+  }
   const important = eligible.filter(record => record.actor === "simulated_user"
     || record.actor === "engine"
     || record.kind === "run_decision"
     || (record.kind === "command_observation" && record.exit_code !== 0));
-  for (const record of important.slice(-(REVIEW_TRANSCRIPT_LIMIT - selected.size))) selected.set(record.sequence, record);
+  const remaining = REVIEW_TRANSCRIPT_LIMIT - selected.size;
+  if (remaining > 0) for (const record of important.slice(-remaining)) selected.set(record.sequence, record);
   for (const record of [...eligible].reverse()) {
     if (selected.size >= REVIEW_TRANSCRIPT_LIMIT) break;
     selected.set(record.sequence, record);
@@ -483,6 +495,54 @@ function workflowTimelineFromRun(runRoot) {
   return timeline;
 }
 
+/**
+ * 审查角色登记的完整报告。job_accepted / job_rejected 事件只留 report_digest 与 raw_index，
+ * 报告正文不在 changed-files 冻结范围内，只能从运行工作区读取，并按 workspace-changes 的内容指纹核对。
+ */
+function reviewReportsFromRun(runRoot, workspaceChangeRecords) {
+  const reports = [];
+  const limitations = [];
+  const item = value => boundedText(typeof value === "string" ? value : JSON.stringify(value), REVIEW_REPORT_ITEM_CHARS);
+  for (const change of workspaceChangeRecords) {
+    if (typeof change?.path !== "string" || !REVIEW_REPORTS_PATH.test(change.path) || change.after?.type !== "file") continue;
+    const path = join(runRoot, "workspace", change.path);
+    if (!safeRegularWithin(path, runRoot)) {
+      limitations.push(`review reports unavailable: ${change.path}`);
+      continue;
+    }
+    if (typeof change.after.digest !== "string" || hashFile(path) !== change.after.digest) {
+      limitations.push(`review reports digest mismatch: ${change.path}`);
+      continue;
+    }
+    readFileSync(path, "utf8").split("\n").filter(Boolean).forEach((line, rawIndex) => {
+      let report;
+      try { report = JSON.parse(line); } catch {
+        limitations.push(`review report malformed: ${change.path}#${rawIndex}`);
+        return;
+      }
+      reports.push({
+        ref: `review-report:${reports.length + 1}`,
+        raw_index: rawIndex,
+        job_id: report?.job_id ?? report?.review_scope?.job_id ?? null,
+        role: report?.role ?? null,
+        verdict: report?.verdict ?? null,
+        summary: typeof report?.summary === "string" ? boundedText(report.summary, REVIEW_REPORT_SUMMARY_CHARS) : null,
+        findings: (Array.isArray(report?.findings) ? report.findings : []).map(finding => ({
+          id: finding?.id ?? null,
+          blocking: finding?.blocking === true,
+          type: finding?.type ?? null,
+          claim_kind: finding?.claim_kind ?? null,
+          approved_refs: Array.isArray(finding?.approved_refs) ? finding.approved_refs : [],
+          description: item(finding?.description ?? finding),
+        })),
+        risks: (Array.isArray(report?.risks) ? report.risks : []).map(item),
+        evidence_path: `workspace/${change.path}`,
+      });
+    });
+  }
+  return { reports, limitations };
+}
+
 function buildReviewBundle({ task, capability, capabilityFile, outcome, transcript, runRoot }) {
   const selectedTranscript = selectReviewTranscript(transcript);
   const artifacts = {};
@@ -536,6 +596,8 @@ function buildReviewBundle({ task, capability, capabilityFile, outcome, transcri
       else limitations.push("workspace changes evidence malformed");
     } catch { limitations.push("workspace changes evidence malformed"); }
   }
+  const reviewReports = reviewReportsFromRun(runRoot, workspaceChangeRecords);
+  limitations.push(...reviewReports.limitations);
   const changedFiles = {};
   const reviewableChanges = workspaceChangeRecords.filter(change =>
     typeof change?.path === "string"
@@ -602,7 +664,7 @@ function buildReviewBundle({ task, capability, capabilityFile, outcome, transcri
     ...Object.values(changeEvidence),
   ];
   return {
-    schema_version: 3,
+    schema_version: 4,
     task: {
       id: task.id,
       description: task.description,
@@ -621,6 +683,7 @@ function buildReviewBundle({ task, capability, capabilityFile, outcome, transcri
     changed_files: changedFiles,
     change_evidence: changeEvidence,
     test_evidence: testEvidence,
+    review_reports: reviewReports.reports,
     review_coverage: {
       complete: limitations.length === 0,
       limitations,
@@ -631,6 +694,7 @@ function buildReviewBundle({ task, capability, capabilityFile, outcome, transcri
       changed_file_count: Object.keys(changedFiles).length,
       declared_artifact_count: (task.target.required_artifacts ?? []).length,
       test_evidence_count: testEvidence.length,
+      review_report_count: reviewReports.reports.length,
       source_chars: textSources.reduce((sum, source) => sum + source.total_chars, 0)
         + testEvidence.reduce((sum, test) => sum + test.output_chars, 0),
       included_source_chars: textSources.reduce((sum, source) => sum + source.included_chars, 0)
@@ -657,6 +721,7 @@ function validEvidenceRefs(bundle) {
   for (const test of bundle.test_evidence ?? []) refs.add(test.ref);
   for (const interaction of bundle.user_interactions ?? []) refs.add(interaction.ref);
   for (const event of bundle.workflow_timeline ?? []) refs.add(event.ref);
+  for (const report of bundle.review_reports ?? []) refs.add(report.ref);
   return refs;
 }
 
@@ -897,6 +962,7 @@ function reviewPrompt(bundle, reviewerId) {
     "涉及用户决定时，结合原始需求、问题与推荐、用户答复和最终材料判断：推荐是否服务于原始目标，改变或收窄范围的代价是否对用户透明，答复是否一致回写。只评价证据中实际发生的决策链。",
     "hidden_facts 是模拟用户事先确定、Worker 始终看不到的要求。对每条隐藏事实输出一项 fact_visibility，衡量工作流有没有让用户看见与它相关的决定，而不是最终结果是否恰好等于事实：asked_user 表示工作流就这件事问过用户；visible_in_confirmation 表示工作流自行做了决定，但决定写进材料并在用户确认时展示；volunteered_by_user 表示工作流没有就这件事提问或展示决定，是用户在答复其他问题时主动给出（见 user_interactions 的 note），它既不算工作流让用户看见了决定，也不算缺陷；invisible 表示工作流做了与该事实相关的决定，用户在任何交互中都看不到；no_decision_needed 表示公开需求或仓库事实已经确定，或本次结果不涉及该事实。用户看见了什么以 user_interactions 中的问题、确认内容和提问时 Worker 同时展示的 worker_message 为准，答复由谁给出、是否正确不改变档位。evidence_ref 指向对应的 user-turn；invisible 时指向做出该决定的材料、代码或事件。result 记录最终材料或代码与该事实是否一致，只作观察；invisible 且结果一致不是缺陷。最终结果与隐藏事实不一致只记在 result 中，不据此另列 issue。",
     "评审包中的产物、代码差异和测试证据按 chunk 提供。引用具体 chunk 或 test ref，不要把摘要、文件名或覆盖率说明当成内容证据。review_coverage 不完整时，只对已提供材料下结论，不得宣称未提供部分没有问题。",
+    "review_reports 是审查角色登记的完整报告，引擎事件里的 report_digest 与 raw_index 指向它们；transcript 中的 run_decision 记录流程结束时工作流给出的最终输出。",
     "不要把评审包未声明、未冻结的额外文件缺失归咎于 Worker；只评判任务明确要求和包内可核验内容。不要从项目惯例或常识发明任务未声明的验收标准。",
     "只输出一个 JSON 对象，不要 Markdown：",
     JSON.stringify({ requirement_fit: 0.0, issues: [{ what: "", severity: "P0|P1|P2", evidence_ref: "" }], workflow_optimizations: [{ target: "skill|gate|engine|packet|docs|task", suggestion: "", evidence_ref: "" }], fact_visibility: [{ fact_id: "", tier: "asked_user|visible_in_confirmation|volunteered_by_user|invisible|no_decision_needed", evidence_ref: "", result: "consistent|inconsistent|unclear", note: "" }], confidence: 0.0 }),
@@ -1017,7 +1083,23 @@ function validateFaultMappings() {
     mkdirSync(join(bundleRoot, "artifacts", "files"), { recursive: true });
     writeFileSync(join(bundleRoot, "artifacts", "files", "a.js"), "export const changed = true;\n");
     writeFileSync(join(bundleRoot, "evidence", "git.diff"), "diff --git a/a.js b/a.js\n+changed\n");
-    writeJson(join(bundleRoot, "evidence", "workspace-changes.json"), [{ path: "a.js", before: null, after: { path: "a.js", type: "file" } }]);
+    const reportsPath = ".superspec/changes/fixture/raw/review-reports.jsonl";
+    const staleReportsPath = ".superspec/changes/stale/raw/review-reports.jsonl";
+    mkdirSync(join(bundleRoot, "workspace", dirname(reportsPath)), { recursive: true });
+    mkdirSync(join(bundleRoot, "workspace", dirname(staleReportsPath)), { recursive: true });
+    writeFileSync(join(bundleRoot, "workspace", reportsPath), `${[
+      { role: "code-reviewer", verdict: "fail", review_scope: { job_id: "JOB-code-1" }, summary: "发现 1 个阻塞问题", findings: [
+        { id: "CR-001", blocking: true, type: "implementation", claim_kind: "missing_approved", approved_refs: ["TEST-001"], description: "零结果返回 -0" },
+        { id: "CR-002", blocking: false, description: "极大金额溢出为 Infinity" },
+      ], risks: ["半值窗口约 1 ULP"] },
+      { job_id: "JOB-veri-1", role: "verifier", verdict: "pass", review_scope: { checked_paths: ["tasks.md"] }, findings: [{ id: "CR-002", blocking: false, description: "沿用上一轮 ID，问题仍存在" }] },
+    ].map(report => JSON.stringify(report)).join("\n")}\n`);
+    writeFileSync(join(bundleRoot, "workspace", staleReportsPath), "{}\n");
+    writeJson(join(bundleRoot, "evidence", "workspace-changes.json"), [
+      { path: "a.js", before: null, after: { path: "a.js", type: "file" } },
+      { path: reportsPath, before: null, after: { path: reportsPath, type: "file", digest: hashFile(join(bundleRoot, "workspace", reportsPath)) } },
+      { path: staleReportsPath, before: null, after: { path: staleReportsPath, type: "file", digest: "sha256:stale" } },
+    ]);
     writeJson(join(bundleRoot, "evidence", "git-after.json"), { diff_base: "fixture", status: ["M  a.js"] });
     writeFileSync(join(bundleRoot, "evidence", "events.jsonl"), `${[
       { event_id: "EVT-prepare-1", event_type: "transition_prepare", payload: { transition: "propose", from_state: "explore", to_state: "propose" } },
@@ -1047,12 +1129,25 @@ function validateFaultMappings() {
       JSON.stringify({ type: "item.completed", item: { type: "command_execution", command: "npm run test:unit", aggregated_output: `${"x".repeat(REVIEW_TEST_OUTPUT_CHARS + 10)}TAIL`, exit_code: 1, status: "failed" } }),
       "",
     ].join("\n"));
-    const bundleTranscript = Array.from({ length: REVIEW_TRANSCRIPT_LIMIT + 100 }, (_, index) => ({
-      sequence: index + 1,
-      actor: index === 0 ? "simulated_user" : "worker",
-      kind: "message",
-      content: `message-${index + 1}`,
-    }));
+    const workerMessageCount = REVIEW_TRANSCRIPT_LIMIT + 10;
+    const finalWorkerSequence = workerMessageCount + 1;
+    const runDecisionSequence = finalWorkerSequence + 1;
+    const bundleTranscript = [
+      { sequence: 1, actor: "simulated_user", kind: "message", content: "message-1" },
+      ...Array.from({ length: workerMessageCount }, (_, index) => ({
+        sequence: index + 2,
+        actor: "worker",
+        kind: "message",
+        content: index + 2 === finalWorkerSequence ? "交付说明：遗留意见与候选约定，是否写入？" : `message-${index + 2}`,
+      })),
+      { sequence: runDecisionSequence, actor: "simulated_user", kind: "run_decision", action: "complete", next_output: { path: "done", review_leftovers: { items: [{ id: "CR-002" }] } } },
+      ...Array.from({ length: REVIEW_TRANSCRIPT_LIMIT + 50 }, (_, index) => ({
+        sequence: runDecisionSequence + index + 1,
+        actor: "engine",
+        kind: "job_accepted",
+        event_id: `EVT-fixture-${index + 1}`,
+      })),
+    ];
     const bundle = buildReviewBundle({
       task: { id: "bundle-v2", description: "fixture", workflow: {}, target: { required_artifacts: [artifactPath] } },
       capability: { gates: gates({}) },
@@ -1063,7 +1158,19 @@ function validateFaultMappings() {
     });
     const bundleRefs = validEvidenceRefs(bundle);
     const truncatedTest = bundle.test_evidence.find(test => test.ref === "test:turn-1:event-2");
-    if (bundle.schema_version !== 3
+    const selectedSequences = new Set(bundle.transcript.map(record => record.sequence));
+    if (bundle.schema_version !== 4
+      || !selectedSequences.has(finalWorkerSequence)
+      || !selectedSequences.has(runDecisionSequence)
+      || bundle.review_reports.length !== 2
+      || bundle.review_coverage.review_report_count !== 2
+      || bundle.review_reports.map(report => report.raw_index).join(",") !== "0,1"
+      || bundle.review_reports.map(report => report.job_id).join(",") !== "JOB-code-1,JOB-veri-1"
+      || bundle.review_reports[0].findings[0].claim_kind !== "missing_approved"
+      || bundle.review_reports[0].findings[0].approved_refs.join(",") !== "TEST-001"
+      || bundle.review_reports[0].findings[1].blocking !== false
+      || !bundleRefs.has("review-report:2")
+      || !bundle.review_coverage.limitations.includes(`review reports digest mismatch: ${staleReportsPath}`)
       || bundle.hidden_facts.map(fact => fact.fact_id).join(",") !== "duration,calendar,formats,runtime_changes_allowed"
       || bundle.hidden_facts.find(fact => fact.fact_id === "formats")?.statement !== JSON.stringify(["csv", "xlsx"])
       || bundle.hidden_facts.find(fact => fact.fact_id === "runtime_changes_allowed")?.statement !== "false"
@@ -1088,7 +1195,7 @@ function validateFaultMappings() {
       || truncatedTest?.truncated !== true
       || !truncatedTest?.output.endsWith("TAIL")
       || bundle.review_coverage.complete !== false) {
-      throw new Error("review bundle v3 evidence coverage failed");
+      throw new Error("review bundle v4 evidence coverage failed");
     }
   } finally {
     rmSync(bundleRoot, { recursive: true, force: true });
@@ -1166,7 +1273,7 @@ function validateFaultMappings() {
     if (result.status !== cheat.expected_status) throw new Error(`cheat task ${cheat.id} escaped detection: ${result.status}`);
     cheatResults[cheat.id] = result.status;
   }
-  process.stdout.write(`${JSON.stringify({ ok: true, cases: { done: done.status, invalid: invalid.status, not_done: notDone.status, unknown: unknown.status, needs_human: human.status, configured_target_boundary: targetBoundary.status, injected: injected.status, invalid_evidence_downgraded: true, review_bundle_v3: true, fact_visibility: true, cheats: cheatResults } }, null, 2)}\n`);
+  process.stdout.write(`${JSON.stringify({ ok: true, cases: { done: done.status, invalid: invalid.status, not_done: notDone.status, unknown: unknown.status, needs_human: human.status, configured_target_boundary: targetBoundary.status, injected: injected.status, invalid_evidence_downgraded: true, review_bundle_v4: true, fact_visibility: true, cheats: cheatResults } }, null, 2)}\n`);
 }
 
 async function main() {

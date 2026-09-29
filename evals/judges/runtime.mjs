@@ -55,7 +55,9 @@ export function spawnJudge(executable, args, { cwd, env, prompt, active, timeout
     const stdout = [];
     const stderr = [];
     let killTimer = null;
+    let timedOut = false;
     const timeout = setTimeout(() => {
+      timedOut = true;
       killProcessTree(child, "SIGTERM");
       killTimer = setTimeout(() => killProcessTree(child, "SIGKILL"), 2_000);
     }, timeoutMs);
@@ -67,7 +69,7 @@ export function spawnJudge(executable, args, { cwd, env, prompt, active, timeout
       clearTimeout(timeout);
       if (killTimer) clearTimeout(killTimer);
       active.delete(child);
-      resolvePromise({ code, stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8") });
+      resolvePromise({ code, timedOut, stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8") });
     });
   });
 }
@@ -86,6 +88,16 @@ export function judgeFailureDetail(parseTrace) {
     }
     return detail;
   };
+}
+
+/**
+ * Provider 流挂起时 judge 进程会被超时终止，部分宿主收到 SIGTERM 后仍以 0 退出、trace 里只有开始事件；
+ * 不能再把它当成“答复格式不对”，否则失败原因会指向模型输出而不是 Provider。
+ */
+export function judgeTimeoutError(label, timeoutMs = JUDGE_TIMEOUT_MS) {
+  const error = new Error(`${label} timed out after ${timeoutMs} ms without completing a reply`);
+  error.name = "JudgeTimeoutError";
+  return error;
 }
 
 export function isTransientJudgeFailure(stdout, stderr) {

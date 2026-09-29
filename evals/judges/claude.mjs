@@ -19,6 +19,7 @@ import {
   isTransientJudgeFailure,
   judgeFailureDetail,
   judgeSessionIds,
+  judgeTimeoutError,
   killProcessTree,
   lastAgentMessageJson,
   removeDirs,
@@ -90,6 +91,10 @@ function createReviewerRunner({ provider, registry = null }) {
         const attemptSuffix = attempt === 1 ? ".attempt-1" : "";
         writeFileSync(`${tracePath}${attemptSuffix}`, result.stdout, { mode: 0o600 });
         writeFileSync(`${stderrPath}${attemptSuffix}`, result.stderr, { mode: 0o600 });
+        if (result.timedOut) {
+          if (attempt === 2) throw judgeTimeoutError(`reviewer ${id} (attempt ${attempt})`);
+          continue;
+        }
         if (result.code === 0) {
           if (attempt === 1) {
             writeFileSync(tracePath, result.stdout, { mode: 0o600 });
@@ -139,6 +144,7 @@ function createSimulatedUserRunner({ executable, spawnDirector, pathValue, syste
         stdin: prompt,
         timeoutMs: JUDGE_TIMEOUT_MS,
       });
+      if (result.timedOut) throw judgeTimeoutError(`simulated user turn ${turn}`);
       if (result.code !== 0) throw new Error(`simulated user turn ${turn} exited ${result.code}: ${result.stderr.trim()}`);
       return { json: lastAgentMessageJson(parseClaudeTrace(tracePath), "simulated user did not return parseable JSON"), tracePath, stderrPath, attempts: 1 };
     } finally {

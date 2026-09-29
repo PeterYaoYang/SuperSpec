@@ -59,7 +59,7 @@ node evals/arena.mjs --validate-faults
 npm run eval:m2:validate
 ```
 
-它们验证硬结果映射、证据密封、篡改检测、动态用户边界、Review Bundle v3 和隐藏事实分档。负向部分是确定性门禁映射自校验，不宣称已经执行真实 Worker 作弊场景。
+它们验证硬结果映射、证据密封、篡改检测、动态用户边界、Review Bundle v4 和隐藏事实分档。负向部分是确定性门禁映射自校验，不宣称已经执行真实 Worker 作弊场景。
 
 ### 2. 运行一个 Probe
 
@@ -319,11 +319,11 @@ Probe 的核心门禁包括：
 
 真实性判定只接受 Codex JSONL 中直接观察到的已完成命令。命令必须使用受控 PATH 解析的 `superspec`，或者运行本地 shim/realpath。自然语言自报、伪造的命令文本、任意 shell 串联和无法确认执行身份的调用都不算证据。
 
-## Review Bundle v3
+## Review Bundle v4
 
 M2 会为两名 Reviewer 生成 `review-bundle.json`，其中包含：
 
-- 初始 effective Prompt 和关键对话；
+- 初始 effective Prompt 和关键对话；关键对话有条数上限，但流程结束时工作流给出的最终输出（`run_decision`）和 Worker 的最后一条消息始终保留；
 - 场景的隐藏事实（`simulated_user.known_facts`，非字符串的值按 JSON 文本提供），只提供给 Reviewer，Worker 运行时看不到；
 - 用户在每个交互边界实际看到的问题、提问时 Worker 同时展示的内容（`worker_message`）、可选答复、答复内容和答复来源（策略层还是 AI 模拟用户）；
 - 完整的状态事件时间线，不受关键对话条数上限影响；
@@ -333,6 +333,7 @@ M2 会为两名 Reviewer 生成 `review-bundle.json`，其中包含：
 - 相对 fixture baseline 的 Git diff；
 - 工作区变化与最终 Git 状态；
 - 工作流正式登记的测试证据，以及 Worker 真实执行的测试、构建、lint、typecheck 和 `git diff --check` 输出；
+- 审查角色登记的完整报告（`review_reports`：结论、finding 及其 `claim_kind`/`approved_refs`、摘要和风险）；引擎事件只保留报告指纹，正文从运行工作区读取并按 `workspace-changes.json` 的内容指纹核对；
 - 材料摘要、长度、截断和缺失说明。
 
 长产物和 diff 使用头尾分块，引用格式类似：
@@ -345,6 +346,7 @@ test:turn-4:event-27
 transcript:18
 engine_event:<event-id>
 user-turn:<n>
+review-report:<n>
 ```
 
 Reviewer 的每条问题或优化建议必须引用有效证据。找不到引用的条目会被降权。`review_coverage` 不完整时，Reviewer 只能评价已提供内容，不得宣称遗漏部分没有问题。
