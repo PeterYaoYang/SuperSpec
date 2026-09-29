@@ -17,17 +17,68 @@ export function tasksStructureDigestOf(changeRoot: string): string | null {
   return formatDigest(content, sha256Text);
 }
 
+type TestRunInput = Partial<TestRun> & { test_ids?: unknown };
+
+/**
+ * 一次登记覆盖的 TEST。test_ids 只用于 GREEN：同一条命令以 0 退出能证明它覆盖的每个 TEST 都通过，
+ * 非 0 退出只能说明至少一个失败，不能替每个 TEST 证明 RED。
+ */
+function testIdsForRecord(tr: TestRunInput): { ok: true; testIds: (string | undefined)[] } | { ok: false; message: string } {
+  if (tr.test_ids === undefined) return { ok: true, testIds: [tr.test_id] };
+  if (tr.test_id !== undefined) return { ok: false, message: "测试 ID（test_id）与测试 ID 列表（test_ids）只能提供一个" };
+  if (!Array.isArray(tr.test_ids) || tr.test_ids.length === 0 || tr.test_ids.some(id => typeof id !== "string" || id.trim() === "")) {
+    return { ok: false, message: "测试 ID 列表（test_ids）必须是非空字符串组成的非空数组" };
+  }
+  if (tr.semantic_status !== "expected_success" && tr.semantic_status !== "characterization_pass") {
+    return { ok: false, message: "测试 ID 列表（test_ids）只用于 GREEN（expected_success 或 characterization_pass）；RED 请逐个 TEST 登记" };
+  }
+  if (tr.exit_code !== 0) {
+    return { ok: false, message: "用测试 ID 列表（test_ids）登记 GREEN 要求退出码（exit_code）为 0" };
+  }
+  return { ok: true, testIds: [...new Set((tr.test_ids as string[]).map(id => id.trim()))] };
+}
+
+function testRunTargetProblem(
+  tr: Partial<TestRun>,
+  events: Event[],
+  attemptRecord: { attempt: TaskAttempt; state: "active" | "completed" | "abandoned" } | null,
+  activeAttempt: TaskAttempt | null,
+  rerunAttempt: TaskAttempt | null,
+  rerunPlan: CompletedAttemptGreenPlan | null,
+): string | null {
+  if (rerunAttempt && rerunPlan) {
+    const rerunCheck = validatePostCompletionRerunInput(tr, rerunAttempt, rerunPlan);
+    return rerunCheck.ok ? null : rerunCheck.message;
+  }
+  if (attemptRecord?.attempt.contract_mode === true && attemptRecord.state !== "active") {
+    return "契约测试证据只能登记到当前活跃任务尝试（attempt_id）";
+  }
+  if (!activeAttempt && activeContractAttemptExists(events)) {
+    return "契约测试证据必须带当前活跃任务尝试 ID（attempt_id）";
+  }
+  if (activeAttempt?.contract_mode === true) {
+    const contractCheck = validateContractTestRunInput(tr, activeAttempt);
+    return contractCheck.ok ? null : contractCheck.message;
+  }
+  if (!tr.test_id || !tr.task_structure_digest) {
+    return "缺少测试 ID（test_id）或历史任务结构指纹（task_structure_digest）";
+  }
+  return null;
+}
+
 function recordTestRunLoaded(
   projectRoot: string,
   change: string,
   content: string,
 ): { accepted: boolean; message: string } {
-  let tr: Partial<TestRun>;
+  let tr: TestRunInput;
   try {
     tr = JSON.parse(content);
   } catch {
     return { accepted: false, message: "无效 JSON" };
   }
+  const targets = testIdsForRecord(tr);
+  if (!targets.ok) return { accepted: false, message: targets.message };
 
   const events = readEvents(projectRoot, change);
   const attemptRecord = typeof tr.attempt_id === "string" ? attemptById(events, tr.attempt_id) : null;
@@ -37,22 +88,10 @@ function recordTestRunLoaded(
     ? completedAttemptGreenPlan(attemptRecord.attempt)
     : null;
   const rerunAttempt = rerunPlan ? attemptRecord!.attempt : null;
-  if (rerunAttempt && rerunPlan) {
-    const rerunCheck = validatePostCompletionRerunInput(tr, rerunAttempt, rerunPlan);
-    if (!rerunCheck.ok) return { accepted: false, message: rerunCheck.message };
-  } else {
-    if (attemptRecord?.attempt.contract_mode === true && attemptRecord.state !== "active") {
-      return { accepted: false, message: "契约测试证据只能登记到当前活跃任务尝试（attempt_id）" };
-    }
-    if (!activeAttempt && activeContractAttemptExists(events)) {
-      return { accepted: false, message: "契约测试证据必须带当前活跃任务尝试 ID（attempt_id）" };
-    }
-    if (activeAttempt?.contract_mode === true) {
-      const contractCheck = validateContractTestRunInput(tr, activeAttempt);
-      if (!contractCheck.ok) return { accepted: false, message: contractCheck.message };
-    } else if (!tr.test_id || !tr.task_structure_digest) {
-      return { accepted: false, message: "缺少测试 ID（test_id）或历史任务结构指纹（task_structure_digest）" };
-    }
+  // 任一 TEST 不通过校验就整批拒收，不留下部分登记。
+  for (const testId of targets.testIds) {
+    const problem = testRunTargetProblem({ ...tr, test_id: testId }, events, attemptRecord, activeAttempt, rerunAttempt, rerunPlan);
+    if (problem) return { accepted: false, message: targets.testIds.length > 1 ? `${testId}：${problem}` : problem };
   }
 
   let coversTaskIds: string[] | undefined;
@@ -72,27 +111,30 @@ function recordTestRunLoaded(
     coversTaskIds = [...new Set(coversTaskIds)].sort();
   }
 
-  const normalizedTestRun = {
-    test_id: tr.test_id,
-    task_structure_digest: tr.task_structure_digest ?? (activeAttempt ?? rerunAttempt)?.task_structure_digest ?? "",
-    attempt_id: tr.attempt_id ?? null,
-    ...(coversTaskIds ? { covers_task_ids: coversTaskIds } : {}),
-    command: tr.command ?? "",
-    cwd: tr.cwd ?? "",
-    exit_code: tr.exit_code ?? -1,
-    semantic_status: tr.semantic_status ?? "unknown",
-    target_fingerprint: tr.target_fingerprint ?? null,
-    raw_log_ref: tr.raw_log_ref ?? null,
-  };
-  const rawRef = appendRawRecord(projectRoot, change, "test-runs", normalizedTestRun);
-  const event = makeEvent(change, "test_run_recorded", {
-    ...normalizedTestRun,
-    code_state_digest: currentCodeStateFingerprint(projectRoot, events).digest,
-    ...(rerunAttempt ? { rerun_after_completion: true } : {}),
-    ...rawRef,
-  });
-  appendEvent(projectRoot, change, event);
-  return { accepted: true, message: `测试运行已登记：测试 ID（test_id）=${tr.test_id}` };
+  // 多个 TEST 仍逐个写成独立证据，下游按 test_id 读取证据的判定无需区分登记方式。
+  const codeStateDigest = currentCodeStateFingerprint(projectRoot, events).digest;
+  for (const testId of targets.testIds) {
+    const normalizedTestRun = {
+      test_id: testId,
+      task_structure_digest: tr.task_structure_digest ?? (activeAttempt ?? rerunAttempt)?.task_structure_digest ?? "",
+      attempt_id: tr.attempt_id ?? null,
+      ...(coversTaskIds ? { covers_task_ids: coversTaskIds } : {}),
+      command: tr.command ?? "",
+      cwd: tr.cwd ?? "",
+      exit_code: tr.exit_code ?? -1,
+      semantic_status: tr.semantic_status ?? "unknown",
+      target_fingerprint: tr.target_fingerprint ?? null,
+      raw_log_ref: tr.raw_log_ref ?? null,
+    };
+    const rawRef = appendRawRecord(projectRoot, change, "test-runs", normalizedTestRun);
+    appendEvent(projectRoot, change, makeEvent(change, "test_run_recorded", {
+      ...normalizedTestRun,
+      code_state_digest: codeStateDigest,
+      ...(rerunAttempt ? { rerun_after_completion: true } : {}),
+      ...rawRef,
+    }));
+  }
+  return { accepted: true, message: `测试运行已登记：测试 ID（test_id）=${targets.testIds.join("、")}` };
 }
 
 function attemptById(events: Event[], attemptId: string): { attempt: TaskAttempt; state: "active" | "completed" | "abandoned" } | null {

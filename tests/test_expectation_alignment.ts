@@ -137,12 +137,12 @@ function expectedEvidenceActions(
   testIds: string[],
   statuses: Array<"expected_failure" | "expected_success" | "characterization_pass">,
 ) {
-  return testIds.flatMap(testId => statuses.map(semanticStatus => ({
+  const action = (target: { test_id: string } | { test_ids: string[] }, semanticStatus: (typeof statuses)[number]) => ({
     kind: "test_run",
-    test_id: testId,
+    ...target,
     record_argv: ["superspec", "record", "test-run", "--change", change, "--input", "-"],
     record_input: {
-      test_id: testId,
+      ...target,
       attempt_id: attemptId,
       command: null,
       cwd: null,
@@ -150,7 +150,10 @@ function expectedEvidenceActions(
       semantic_status: semanticStatus,
     },
     required_fields: ["command", "cwd", "exit_code"],
-  })));
+  });
+  return statuses.flatMap(semanticStatus => semanticStatus === "expected_failure"
+    ? testIds.map(testId => action({ test_id: testId }, semanticStatus))
+    : [action(testIds.length === 1 ? { test_id: testIds[0] } : { test_ids: testIds }, semanticStatus)]);
 }
 
 test("推进校验：propose-ready 和 start-apply 都拒绝执行依据模式下缺执行依据的普通 TDD task", () => {
@@ -1029,7 +1032,7 @@ test("normal/minimal 的普通 task 与审查修复都由 task-start 编译为 G
   }
 });
 
-test("task-start 为多个 TEST 返回逐项 RED/GREEN 提交动作", () => {
+test("task-start 为多个 TEST 返回逐项 RED、合并 GREEN 的提交动作", () => {
   const fx = setupChange([
     "# Tasks",
     "",
@@ -1062,6 +1065,63 @@ test("task-start 为多个 TEST 返回逐项 RED/GREEN 提交动作", () => {
         ["expected_failure", "expected_success"],
       ),
     );
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("record test-run：一条通过命令覆盖的多个 TEST 用 test_ids 一次登记 GREEN，拒收时不留部分登记", () => {
+  const fx = setupChange([
+    "# Tasks",
+    "",
+    "- [ ] TASK-001 Implement two behaviors",
+    "  执行依据:",
+    "  - 测试: test-contract.md#TEST-001；test-contract.md#TEST-002",
+    "  - 设计: design.md#Route",
+    "  - 来源: proposal.md#Impact",
+    "  - 验收: 两个行为均可独立验证",
+    "  - 边界: 不改持久化",
+    "",
+  ].join("\n"), [
+    "# Test Contract",
+    "",
+    "| test_id | scenario |",
+    "|---|---|",
+    "| TEST-001 | first behavior works |",
+    "| TEST-002 | second behavior works |",
+    "",
+  ].join("\n"), "normal");
+  try {
+    assert.equal(startApplyConfirmed(fx.projectRoot, fx.change, fx.changeRoot, "normal").to_state, "apply");
+    const started = taskStart(fx.projectRoot, fx.change, fx.changeRoot, "TASK-001");
+    const attemptId = String(started.details?.attempt_id);
+    assert.deepEqual(
+      started.details?.evidence_actions,
+      expectedEvidenceActions(fx.change, attemptId, ["TEST-001", "TEST-002"], ["expected_success"]),
+    );
+    const record = (input: Record<string, unknown>) => recordTestRunContent(fx.projectRoot, fx.change, JSON.stringify({
+      attempt_id: attemptId,
+      command: "npm test",
+      cwd: fx.projectRoot,
+      exit_code: 0,
+      semantic_status: "expected_success",
+      ...input,
+    }));
+    const recordedTestIds = () => readEvents(fx.projectRoot, fx.change)
+      .filter(event => event.event_type === "test_run_recorded")
+      .map(event => (event.payload as { test_id?: string }).test_id);
+
+    assert.equal(record({ test_ids: ["TEST-001", "TEST-999"] }).accepted, false);
+    assert.equal(record({ test_ids: ["TEST-001", "TEST-002"], semantic_status: "expected_failure", exit_code: 1 }).accepted, false);
+    assert.equal(record({ test_ids: ["TEST-001", "TEST-002"], exit_code: 1 }).accepted, false);
+    assert.equal(record({ test_id: "TEST-001", test_ids: ["TEST-002"] }).accepted, false);
+    assert.deepEqual(recordedTestIds(), []);
+    assert.equal(taskComplete(fx.projectRoot, fx.change, fx.changeRoot, "TASK-001").events_written, 0);
+
+    assert.equal(record({ test_ids: ["TEST-001", "TEST-002"] }).accepted, true);
+    assert.deepEqual(recordedTestIds(), ["TEST-001", "TEST-002"]);
+    assert.ok(taskComplete(fx.projectRoot, fx.change, fx.changeRoot, "TASK-001").events_written > 0);
+    assert.ok(readEvents(fx.projectRoot, fx.change).some(event => event.event_type === "task_completed"));
   } finally {
     fx.cleanup();
   }

@@ -738,9 +738,11 @@ Explore / Propose 待确认问题的答复还不足以确定这件事时，加�
     return `用法：superspec record test-run --change <C> --input <F|->
 
 登记测试证据；--input - 表示从 stdin 读取。输入需包含 test_id、task_structure_digest、command、cwd、exit_code 和 semantic_status。
+同一条命令以 0 退出、覆盖多个 TEST 的 GREEN 可以用 test_ids 代替 test_id 一次登记；RED 须逐个 TEST 登记。
 
 示例：
   printf '%s' '{"test_id":"TEST-001","task_structure_digest":"sha256:<digest>","command":"npm test","cwd":"<project>","exit_code":0,"semantic_status":"expected_success"}' | superspec record test-run --change <C> --input -
+  printf '%s' '{"test_ids":["TEST-001","TEST-002"],"attempt_id":"<attempt>","command":"npm test","cwd":"<project>","exit_code":0,"semantic_status":"expected_success"}' | superspec record test-run --change <C> --input -
 `;
   }
   if (command === "record" && subcommand === "workflow-mode") {

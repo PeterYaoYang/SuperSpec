@@ -602,12 +602,13 @@ export interface MaterialUpdateRequiredResume {
   argv: string[];
 }
 
-export interface TestEvidenceAction {
+/** 一条登记覆盖的 TEST：单个 test_id，或同一条通过命令覆盖的多个 test_ids（仅 GREEN）。 */
+export type TestEvidenceTarget = { test_id: string } | { test_ids: string[] };
+
+export type TestEvidenceAction = TestEvidenceTarget & {
   kind: "test_run";
-  test_id: string;
   record_argv: string[];
-  record_input: {
-    test_id: string;
+  record_input: TestEvidenceTarget & {
     attempt_id: string;
     command: null;
     cwd: null;
@@ -615,7 +616,7 @@ export interface TestEvidenceAction {
     semantic_status: "expected_failure" | "expected_success" | "characterization_pass";
   };
   required_fields: Array<"command" | "cwd" | "exit_code">;
-}
+};
 
 /** review-fix 计划附带的原始审查问题上下文；仅供定位代码，不是实现授权。 */
 export interface ReviewFindingContext {

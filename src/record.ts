@@ -1880,7 +1880,7 @@ function packetFieldDescriptions(): Record<string, string> {
     task_execution_index_scope: "任务执行索引的收录范围：since_event_id 之后完成的任务（代码审查为本审查周期，最终验证为本次验收周期；null 表示全部历史），加上被这些任务中的修复任务通过 parent_task_id 关联而带入的更早任务（carried_task_ids）；tasks.md 中更早完成的任务已在此前的代码审查放行或 change 验收中闭环，不因未出现在索引中而视为缺少证据。",
     contract: "任务启动时的执行依据快照：tests/design/source/acceptance/guard 分别对应 测试/设计/来源/验收/边界；null 表示历史任务没有执行依据。",
     required_evidence: "task-start 结合冻结策略编译并写入 attempt 的有效证据要求：test_ids、red_required、green_required 和允许的 GREEN 语义状态；null 表示历史任务按旧记录回放。",
-    changed_paths: "与某个任务（task）或代码状态检查相关的改动文件。",
+    changed_paths: "与某个任务（task）或代码状态检查相关的代码类改动文件；README 等普通文档的改动不计入，为空不代表任务没有改动，最终验证的文档交付物见 deliverable_docs。",
     changed_paths_partial_reason: "该任务（task）的提交段 diff 失败原因；存在时 changed_paths 只包含工作区对比结果，归属可能不完整。",
     unattributed_paths: "代码审查范围中暂时无法归属到某个任务（task）的文件。",
     added_code_paths: "相对本次代码审查基点新建的代码文件，供判断是否服务已批准行为。",

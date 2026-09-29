@@ -105,7 +105,7 @@ import {
   workflowModeUpgradePending,
   workflowRiskForChange,
 } from "./workflow_config.ts";
-import type { CodeReviewScope, Event, Snapshot, State, Job, JobRole, TransitionResult, Ref, TaskAttempt, BoundarySnapshot, EffectiveEvidencePlan, ExecutionPolicy, FixDescriptor, ReviewPreviousRejection, TestEvidenceAction, RequiredWorkflowArtifact } from "./types.ts";
+import type { CodeReviewScope, Event, Snapshot, State, Job, JobRole, TransitionResult, Ref, TaskAttempt, BoundarySnapshot, EffectiveEvidencePlan, ExecutionPolicy, FixDescriptor, ReviewPreviousRejection, TestEvidenceAction, TestEvidenceTarget, RequiredWorkflowArtifact } from "./types.ts";
 
 let transitionSeq = 0;
 function newTransitionId(): string { return `T-${Date.now()}-${++transitionSeq}`; }
@@ -336,16 +336,15 @@ function evidenceActionsForAttempt(
   required: EffectiveEvidencePlan,
 ): TestEvidenceAction[] {
   const testIds = required.test_ids.length > 0 ? required.test_ids : [fallbackTestId];
-  const statuses: TestEvidenceAction["record_input"]["semantic_status"][] = [];
-  if (required.red_required) statuses.push("expected_failure");
-  if (required.green_required) statuses.push(required.accepted_green_statuses[0] ?? "expected_success");
-
-  return testIds.flatMap(testId => statuses.map(semanticStatus => ({
-    kind: "test_run" as const,
-    test_id: testId,
+  const action = (
+    target: TestEvidenceTarget,
+    semanticStatus: TestEvidenceAction["record_input"]["semantic_status"],
+  ): TestEvidenceAction => ({
+    kind: "test_run",
+    ...target,
     record_argv: ["superspec", "record", "test-run", "--change", change, "--input", "-"],
     record_input: {
-      test_id: testId,
+      ...target,
       attempt_id: attemptId,
       command: null,
       cwd: null,
@@ -353,7 +352,17 @@ function evidenceActionsForAttempt(
       semantic_status: semanticStatus,
     },
     required_fields: ["command", "cwd", "exit_code"],
-  })));
+  });
+
+  const actions: TestEvidenceAction[] = [];
+  if (required.red_required) actions.push(...testIds.map(testId => action({ test_id: testId }, "expected_failure")));
+  if (required.green_required) {
+    // 一条命令以 0 退出能证明它覆盖的每个 TEST 都通过，GREEN 可以合并登记；
+    // 非 0 退出只说明至少一个失败，RED 仍须逐个 TEST 登记。
+    const green = required.accepted_green_statuses[0] ?? "expected_success";
+    actions.push(action(testIds.length === 1 ? { test_id: testIds[0] } : { test_ids: testIds }, green));
+  }
+  return actions;
 }
 
 function hasRejectedReviewReadyVerifier(events: Event[]): boolean {
