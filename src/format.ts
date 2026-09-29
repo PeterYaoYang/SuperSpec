@@ -435,6 +435,16 @@ export function deferredItemReferences(designContent: string, id: string): Defer
 }
 
 /** design.md“非目标”段落的条目；供阶段确认展示，不校验内容。 */
+const DESIGN_IMPLEMENTATION_PLACEMENT_HEADINGS = ["实现落点"] as const;
+
+/** design 的「实现落点」正文（去掉模板注释）；没有这一节时返回 null。 */
+export function designImplementationPlacement(designContent: string): string | null {
+  const body = sectionBodyByHeadings(designContent, DESIGN_IMPLEMENTATION_PLACEMENT_HEADINGS);
+  if (body == null) return null;
+  const text = body.replace(/<!--[\s\S]*?-->/g, "").trim();
+  return text === "" ? null : text;
+}
+
 export function designNonGoals(designContent: string): string[] {
   const body = sectionBodyByHeadings(designContent, DESIGN_NON_GOAL_HEADINGS);
   if (body == null) return [];

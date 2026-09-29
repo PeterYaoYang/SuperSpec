@@ -315,6 +315,29 @@ test("propose_to_apply 对单个行为 task 也展示摘要", () => {
   } finally { fx.cleanup(); }
 });
 
+test("propose_to_apply 把 design 的实现落点原样交给用户校准，没写时如实说明", () => {
+  const fx = setupApply(false);
+  try {
+    writeFileSync(join(fx.changeRoot, "tasks.md"), "# Tasks\n\n- [ ] TASK-001 更新单个说明\n");
+    const placement = [
+      "- 判定逻辑落在 DailyBasicInfoCalculator，Service 只组装参数",
+      "- 复用：DateUtil.getOneDayMinute、分组开关 personalActual",
+      "- 新增：无",
+    ].join("\n");
+    const designPath = join(fx.changeRoot, "design.md");
+    const originalDesign = readFileSync(designPath, "utf8");
+    writeFileSync(designPath, `${originalDesign.trimEnd()}\n\n## 实现落点\n${placement}\n`);
+    const withPlacement = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(withPlacement.path, "ask_user");
+    assert.ok(withPlacement.ask_user.question.includes(placement));
+
+    writeFileSync(designPath, originalDesign);
+    const withoutPlacement = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(withoutPlacement.path, "ask_user");
+    assert.doesNotMatch(withoutPlacement.ask_user.question, /DailyBasicInfoCalculator/);
+  } finally { fx.cleanup(); }
+});
+
 test("propose_to_apply 对单个极简 task 也展示默认摘要", () => {
   const fx = setupApply(false);
   try {

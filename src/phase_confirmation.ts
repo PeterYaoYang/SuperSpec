@@ -7,6 +7,7 @@ import { changeRoot as openspecChangeRoot } from "./openspec.ts";
 import { findLatestEvent, sha256Text } from "./store.ts";
 import {
   deferredItemReferences,
+  designImplementationPlacement,
   designNonGoals,
   formatStructureChangeLedgerSummary,
   parseDiscoveryDeferredItems,
@@ -121,9 +122,22 @@ function proposeTaskDeliverySummary(changeRoot: string): string | null {
   const ledgerSummary = designContent != null
     ? formatStructureChangeLedgerSummary(parseStructureChangeLedger(designContent))
     : null;
-  return [taskSummary, ledgerSummary, nonGoalSummary(designContent), deferredItemSummary(changeRoot, designContent)]
+  return [
+    taskSummary,
+    implementationPlacementSummary(designContent),
+    ledgerSummary,
+    nonGoalSummary(designContent),
+    deferredItemSummary(changeRoot, designContent),
+  ]
     .filter((part): part is string => part != null)
     .join("\n\n");
+}
+
+/** 进入实现前让用户校准实现思路：逻辑落在哪、复用什么、新增什么；计划没写时如实说明。 */
+function implementationPlacementSummary(designContent: string | null): string | null {
+  if (designContent == null) return null;
+  const placement = designImplementationPlacement(designContent);
+  return placement == null ? "实现落点：计划未说明" : `实现落点\n\n${placement}`;
 }
 
 function nonGoalSummary(designContent: string | null): string | null {

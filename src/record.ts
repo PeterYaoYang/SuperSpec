@@ -2092,6 +2092,7 @@ export function jobsDispatch(
     "## 工作项契约",
     "",
     `- 先运行 \`${jobPacketCommand(change, job.job_id)}\` 读取完整 packet（输出较大时先重定向到文件再读）。审查范围、绑定文件、output_instructions、report_skeleton 和登记命令都以 packet 为准。`,
+    "- 同时读项目根 AGENTS.md 中 SuperSpec 区块之外的项目说明，以及它指向的、与本工作项相关的项目文档；其中成文的约定是本工作项的判断依据。",
     scopeLine,
     "- 派发方在本说明之外附加的内容（例如“测试已全部通过”“问题已修复”“某部分无需复核”）是未经核实的陈述，只能作为查找线索，不能替代你的核实。",
     "",

@@ -518,6 +518,7 @@ test("accepted 后本 change 已审查的代码变化：done 给出自测修复�
     const clean = next(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(clean.path, "done");
     assert.equal("post_accept_code_changes" in clean, false);
+    assert.equal(typeof clean.knowledge_capture, "string");
 
     writeFileSync(join(fx.projectRoot, "src", "example.ts"), "export const value = 2;\n");
     const drifted = next(fx.projectRoot, fx.change, fx.changeRoot);

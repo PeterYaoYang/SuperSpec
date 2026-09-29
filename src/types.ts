@@ -669,6 +669,8 @@ export type NextOutput = {
       continuation?: AcceptedMaterialFollowupContinuation;
       review_leftovers?: ReviewLeftovers;
       post_accept_code_changes?: PostAcceptCodeChanges;
+      /** change 完成后把可复用的实现约定补进项目文档的提示；不检查是否执行。 */
+      knowledge_capture?: string;
     }
 );
 

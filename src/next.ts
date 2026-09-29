@@ -177,6 +177,7 @@ function toNextOutput(change: string, plan: NextStepPlan): NextOutput {
         ...(plan.continuation ? { continuation: plan.continuation } : {}),
         ...(plan.reviewLeftovers ? { review_leftovers: plan.reviewLeftovers } : {}),
         ...(plan.postAcceptCodeChanges ? { post_accept_code_changes: plan.postAcceptCodeChanges } : {}),
+        ...(plan.knowledgeCapture ? { knowledge_capture: plan.knowledgeCapture } : {}),
       };
   }
 }

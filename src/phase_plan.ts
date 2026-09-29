@@ -128,6 +128,9 @@ export const PLAN_SIZE_BUDGET_ANSWERS: readonly string[] = [PLAN_SIZE_BUDGET_CON
 const STALE_TEST_EVIDENCE_DELIVERY_INSTRUCTION =
   "这些 TEST 的证据登记早于最后一次代码改动；交付时如实告诉使用者哪些 TEST 没有对当前代码重新验证，不要写成已验证。";
 
+const KNOWLEDGE_CAPTURE_INSTRUCTION =
+  "本次 change 中用户指正或审查发现的、对以后的需求也通用的实现约定（例如应复用的公共工具、逻辑应落在哪一层、已有的开关或字段），按项目说明的方式补进项目文档；只记通用约定，不记本次业务细节，已经记录过的不重复写。";
+
 export type TransitionName =
   | "explore"
   | "propose-ready"
@@ -189,6 +192,7 @@ export type NextStepPlan =
       continuation?: AcceptedMaterialFollowupContinuation;
       reviewLeftovers?: ReviewLeftovers;
       postAcceptCodeChanges?: PostAcceptCodeChanges;
+      knowledgeCapture?: string;
     };
 
 /** 从失败 finding 提取定位上下文：只回传 evidence（位置事实），不回传 description——那是审查建议叙事，不进执行上下文。 */
@@ -1615,6 +1619,7 @@ export function planNextStep(context: PhasePlanContext): NextStepPlan | null {
           continuation: acceptedMaterialFollowup(change, mode.risk, planDocsChanged),
           ...(leftovers ? { reviewLeftovers: leftovers } : {}),
           ...(codeDrift.length > 0 ? { postAcceptCodeChanges: postAcceptCodeChanges(change, codeDrift) } : {}),
+          knowledgeCapture: KNOWLEDGE_CAPTURE_INSTRUCTION,
         };
       }
 
