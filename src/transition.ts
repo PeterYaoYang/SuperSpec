@@ -54,7 +54,6 @@ import {
   taskExecutionIndexForReview,
   codeReviewFindingNeedsUserDecision,
   isReviewFixCapReached,
-  unresolvedImplementationFinding,
 } from "./code_review.ts";
 import { taskEvidenceReadiness } from "./task_evidence.ts";
 import { staleTestEvidenceMessage, testEvidenceFreshness } from "./test_freshness.ts";
@@ -722,14 +721,6 @@ function evaluateApplyDoneCodeReviewGate(input: {
     }
     if (latest?.state === "rejected" && latest.result_kind === "review_failed") {
       const staleReason = codeReviewJobStaleReason(input.projectRoot, latest.job, currentWorkingPaths, input.events);
-      const unresolvedFix = unresolvedImplementationFinding(input.projectRoot, input.events);
-      if (staleReason && unresolvedFix) {
-        // 审查后先改了代码也要经修复任务闭环：直接重开全量审查会丢掉按问题登记的修复与验证。
-        return {
-          skip: true,
-          message: `代码审查问题 ${unresolvedFix} 尚未通过修复任务闭环；审查后代码已有改动（${staleReason}）。请执行 next，按返回的 --review-fix 创建修复任务承接这些改动并重新证明相关 TEST`,
-        };
-      }
       if (staleReason) {
         const { job, scanReason } = createCodeReviewerJob(input.change, input.projectRoot, input.changeRoot, input.events);
         return {

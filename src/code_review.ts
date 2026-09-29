@@ -1002,26 +1002,6 @@ export function latestCodeReviewFailedStatus(events: Event[]): CodeReviewFailedS
   return { terminal, findings, unresolved, dismissed };
 }
 
-/**
- * 最近一次 fail 代码审查里应先走修复任务的实现问题编号。
- *
- * 只在这次审查之后还没有任何 --review-fix 被创建时返回：已经进入修复流程后，
- * 修复带来的代码变化照旧让审查过期并重审，不会为同一轮审查反复创建修复任务。
- */
-export function unresolvedImplementationFinding(projectRoot: string, events: Event[]): string | null {
-  const status = latestCodeReviewFailedStatus(events);
-  const first = status?.unresolved[0];
-  if (!status || !first?.id || first.type !== "implementation") return null;
-  const terminalIndex = events.findIndex(ev => ev.event_id === status.terminal.event.event_id);
-  const fixPrefix = `${status.terminal.job.job_id}#`;
-  const fixStarted = events.slice(terminalIndex + 1).some(ev =>
-    ev.event_type === "transition_commit" &&
-    String((ev.payload as { review_fix_of?: unknown }).review_fix_of ?? "").startsWith(fixPrefix)
-  );
-  if (fixStarted || isReviewFixCapReached(projectRoot, events)) return null;
-  return first.id;
-}
-
 export function dismissedCodeReviewSummary(status: CodeReviewFailedStatus): string {
   const details = status.dismissed
     .map(item => `${item.id}：${item.decision?.reason || "主流程已驳回该问题"}`)
