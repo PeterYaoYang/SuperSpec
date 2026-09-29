@@ -1173,6 +1173,5 @@ async function main(argv: string[]): Promise<number> {
   }
 }
 
-// 入口：只设置退出码、让进程自然退出。stdout 接管道时写入是异步的，
-// 直接 process.exit 会截断未写完的输出（大 packet / jobs list 超过 64KB 时出现）。
+// 入口：只设置退出码、让进程自然退出。stdout 接管道时写入是异步的，直接 process.exit 会截断未写完的输出。
 main(process.argv.slice(2)).then(exitCode => { process.exitCode = exitCode; });

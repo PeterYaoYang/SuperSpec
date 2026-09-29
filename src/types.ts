@@ -283,6 +283,8 @@ export interface StaleTestEvidence {
   changed_paths: string[];
 }
 
+export type StaleTestEvidenceDelivery = StaleTestEvidence & { instruction: string };
+
 export interface JobPacket {
   job_id: string;
   role: JobRole;
@@ -655,7 +657,7 @@ export type NextOutput = {
       /** 执行 next_command 只会创建这些角色的审查工作项，状态不会推进。 */
       creates_review_jobs?: JobRole[];
       review_leftovers?: ReviewLeftovers;
-      stale_test_evidence?: StaleTestEvidence & { instruction: string };
+      stale_test_evidence?: StaleTestEvidenceDelivery;
     }
   | { path: "required_job"; required_jobs: RequiredJobAction[]; instruction?: string; reason: string }
   | { path: "artifact_required"; artifact: RequiredWorkflowArtifact; resume: ArtifactRequiredResume; reason: string }

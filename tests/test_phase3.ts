@@ -331,6 +331,13 @@ test("propose_to_apply 把 design 的实现落点原样交给用户校准，没�
     assert.equal(withPlacement.path, "ask_user");
     assert.ok(withPlacement.ask_user.question.includes(placement));
 
+    const numberedWithSubsections = `## 5. 实现落点（按模块）\n\n### 计算层\n${placement}\n\n## 风险\n\n- 不进入确认摘要的风险描述\n`;
+    writeFileSync(designPath, `${originalDesign.trimEnd()}\n\n${numberedWithSubsections}`);
+    const numbered = next(fx.projectRoot, fx.change, fx.changeRoot);
+    assert.equal(numbered.path, "ask_user");
+    assert.ok(numbered.ask_user.question.includes(placement));
+    assert.doesNotMatch(numbered.ask_user.question, /不进入确认摘要的风险描述/);
+
     writeFileSync(designPath, originalDesign);
     const withoutPlacement = next(fx.projectRoot, fx.change, fx.changeRoot);
     assert.equal(withoutPlacement.path, "ask_user");

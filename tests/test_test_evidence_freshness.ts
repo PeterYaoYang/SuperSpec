@@ -252,7 +252,8 @@ test("测试证据新鲜度：代码内容未变时证据不算过期；提交�
     assert.equal(staleTestEvidence(fx.projectRoot, readEvents(fx.projectRoot, fx.change)), null);
     passFinalVerifier(fx);
     const acceptStep = nextOutput(fx);
-    assert.equal(acceptStep.path === "next_command" && "stale_test_evidence" in acceptStep, false);
+    assert.equal(acceptStep.path, "next_command");
+    assert.equal("stale_test_evidence" in acceptStep, false);
     assert.equal(accept(fx.projectRoot, fx.change, fx.changeRoot).to_state, "accepted");
   } finally {
     fx.cleanup();
@@ -391,6 +392,60 @@ test("测试证据新鲜度：历史模式轮里的审查 Fix 完成后改代码
     assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot).to_state, "apply_done");
     assert.equal(staleTestEvidence(fx.projectRoot, readEvents(fx.projectRoot, fx.change)), null);
     assert.equal(reviewReady(fx.projectRoot, fx.change, fx.changeRoot).outcome, "job_created");
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("测试证据新鲜度：没有声明 TEST 的审查 Fix 证据过期时只列在 task_ids，不混进 test_ids", () => {
+  const fx = setupApply();
+  try {
+    completeAllTasks(fx);
+    const codeReview = reviewReady(fx.projectRoot, fx.change, fx.changeRoot);
+    const jobId = codeReview.created_jobs[0];
+    const packet = jobsPacket(fx.projectRoot, fx.change, jobId).packet;
+    assert.ok(packet);
+    const rejected = recordJobSubmitContent(fx.projectRoot, fx.change, fx.changeRoot, jobId, JSON.stringify({
+      role: "code-reviewer",
+      verdict: "fail",
+      evidence_refs: ["src/calc.ts:1"],
+      review_scope: {
+        job_id: jobId,
+        packet_digest: packet.packet_digest,
+        checked_paths: packet.boundFiles.map(file => file.path),
+        checked_docs: ["proposal.md", "design.md", "tasks.md", ".superspec/artifacts/test-contract.md"],
+        unchecked: [],
+      },
+      findings: [{
+        id: "CR-001",
+        type: "implementation",
+        blocking: true,
+        description: "负数相减结果错误",
+        evidence: "src/calc.ts:2 负数输入结果错误",
+        source_refs: ["src/calc.ts:2"],
+        impact: "负数计算错误",
+        suggested_action: "apply",
+        claim_kind: "breaks_existing",
+        approved_refs: ["design.md#Calc"],
+      }],
+      reviewer: { kind: "codex-subagent", id: "freshness-code-reviewer" },
+    }));
+    assert.equal(rejected.result_kind, "review_failed", rejected.message);
+    assert.equal(reopen(fx.projectRoot, fx.change, fx.changeRoot, "apply", "fix CR-001", { reviewFix: `${jobId}#CR-001` }).to_state, "apply");
+
+    const fixTaskId = `REVIEW-FIX-${jobId}#CR-001`;
+    const started = taskStart(fx.projectRoot, fx.change, fx.changeRoot, fixTaskId);
+    assert.equal(started.outcome, "advanced", started.message);
+    const attemptId = String(started.details?.attempt_id);
+    assert.equal(testRun(fx, fixTaskId, attemptId, "expected_failure").accepted, true);
+    writeFileSync(join(fx.projectRoot, "src", "calc.ts"), `${ADD_SUB}// 负数\n`);
+    assert.equal(testRun(fx, fixTaskId, attemptId, "expected_success").accepted, true);
+    assert.equal(taskComplete(fx.projectRoot, fx.change, fx.changeRoot, fixTaskId).outcome, "advanced");
+
+    writeFileSync(join(fx.projectRoot, "src", "calc.ts"), `${ADD_SUB}// 负数与零\n`);
+    const stale = staleTestEvidence(fx.projectRoot, readEvents(fx.projectRoot, fx.change));
+    assert.ok(stale?.task_ids.includes(fixTaskId), JSON.stringify(stale));
+    assert.equal(stale?.test_ids.includes(fixTaskId), false, JSON.stringify(stale));
   } finally {
     fx.cleanup();
   }

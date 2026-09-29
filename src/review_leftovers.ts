@@ -5,6 +5,7 @@ import { readRawRecord, type RawRecordRef } from "./store.ts";
 import type { Event, Job, JobRole, ReviewJobGateId, ReviewLeftoverItem, ReviewLeftovers } from "./types.ts";
 
 const LEFTOVER_GATES: ReviewJobGateId[] = ["review.code_review", "review.final_verifier"];
+// 要求 description 之前登记的报告用过其他字段名写问题内容。
 const TEXT_FIELDS = ["description", "issue", "claim", "summary", "risk", "text"] as const;
 
 const REVIEW_LEFTOVERS_INSTRUCTION =

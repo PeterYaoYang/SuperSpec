@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { ensureChangeLayout, appendEvent, makeEvent, readEvents } from "../src/store.ts";
 import { next } from "../src/next.ts";
 import { proposeReady, reviewReady } from "../src/transition.ts";
-import { jobsPacket, recordJobSubmit, recordJobSubmitContent, recordUserDecisionContent } from "../src/record.ts";
+import { jobsPacket, recordJobSubmitContent, recordUserDecisionContent } from "../src/record.ts";
 import { applyPlanningBaseline } from "../src/phase_plan.ts";
 import { resolveApprovedRef } from "../src/approved_ref.ts";
 import { prepareCurrentPhaseConfirmation } from "./phase_confirmation_support.ts";
@@ -215,38 +215,6 @@ function setupV2ApplyWithLedger(): ReturnType<typeof setupV1Apply> {
     }, { transitionId: `T-${t}`, idempotencyKey: `${t}-key` }));
   }
   return fx;
-}
-
-function submitFinding(
-  projectRoot: string,
-  change: string,
-  changeRoot: string,
-  jobId: string,
-  finding: Record<string, unknown>,
-) {
-  const packet = jobsPacket(projectRoot, change, jobId);
-  const reportPath = join(projectRoot, `${jobId}.report.json`);
-  writeFileSync(reportPath, JSON.stringify({
-    role: "code-reviewer",
-    verdict: "fail",
-    review_scope: {
-      job_id: jobId,
-      packet_digest: packet.packet?.packet_digest,
-      checked_paths: (packet.packet?.boundFiles ?? []).map(file => file.path),
-      checked_docs: ["design.md"],
-      unchecked: [],
-    },
-    findings: [finding],
-    reviewer: { kind: "codex-subagent", id: "structure-ledger-test" },
-  }));
-  return recordJobSubmit(projectRoot, change, changeRoot, jobId, reportPath);
-}
-
-function payloadResultKind(payload: unknown): unknown {
-  if (payload && typeof payload === "object" && "result_kind" in payload) {
-    return payload.result_kind;
-  }
-  return undefined;
 }
 
 function openCodeReviewer(projectRoot: string, change: string, changeRoot: string): string {

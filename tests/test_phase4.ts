@@ -4629,29 +4629,80 @@ function setupContractApplyWithCompletedTask(): { projectRoot: string; change: s
   return { projectRoot, change, changeRoot, cleanup: () => rmSync(projectRoot, { recursive: true, force: true }) };
 }
 
+function documentationTasks(tasks: { id: string; checked: boolean }[]): string {
+  return ["# Tasks", "", ...tasks.flatMap(task => [
+    `- [${task.checked ? "x" : " "}] ${task.id} 文档任务`,
+    "  执行依据:",
+    "  - 测试:",
+    "  - 设计: design.md#D",
+    "  - 来源: proposal.md#P",
+    "  - 验收: 文档内容可追溯",
+    "  - 边界: 不改实现代码",
+    "",
+  ])].join("\n");
+}
+
 test("计划修正轮：执行依据模式下已勾选却没有完成记录的任务被退回待办", () => {
   const fx = setupContractApplyWithCompletedTask();
   try {
     assert.equal(reopen(fx.projectRoot, fx.change, fx.changeRoot, "propose", "补记实现期修正").to_state, "propose");
-    writeFileSync(join(fx.changeRoot, "tasks.md"), "# Tasks\n\n- [x] TASK-001 Done\n- [x] TASK-002 实现期修正（手工补记）\n");
+    writeFileSync(join(fx.changeRoot, "tasks.md"), documentationTasks([{ id: "TASK-001", checked: true }, { id: "TASK-002", checked: true }]));
     const blocked = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
     assert.equal(blocked.events_written, 0);
     assert.match(blocked.message ?? "", /TASK-002 已勾选但没有执行记录/);
     assert.doesNotMatch(blocked.message ?? "", /TASK-001 已勾选/);
 
-    writeFileSync(join(fx.changeRoot, "tasks.md"), "# Tasks\n\n- [x] TASK-001 Done\n- [ ] TASK-002 实现期修正\n");
+    writeFileSync(join(fx.changeRoot, "tasks.md"), documentationTasks([{ id: "TASK-001", checked: true }, { id: "TASK-002", checked: false }]));
     const pendingTask = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
-    assert.doesNotMatch(pendingTask.message ?? "", /已勾选但没有执行记录/);
+    assert.notEqual(pendingTask.events_written, 0, pendingTask.message);
   } finally { fx.cleanup(); }
+});
+
+test("首次进入 Apply 前：执行依据模式计划里已勾选的任务同样要求执行记录", () => {
+  const projectRoot = mkdtempSync(join(tmpdir(), "superspec-p4-first-round-"));
+  const change = "test-change";
+  const changeRoot = join(projectRoot, "openspec", "changes", change);
+  try {
+    mkdirSync(join(changeRoot, ".superspec", "artifacts"), { recursive: true });
+    writeFileSync(join(changeRoot, "proposal.md"), "# P\n");
+    writeFileSync(join(changeRoot, "design.md"), "# D\n\n## 结构变更清单\n\n无\n");
+    writeFileSync(join(changeRoot, ".superspec", "artifacts", "discovery.md"), "# D\n");
+    writeFileSync(join(changeRoot, ".superspec", "artifacts", "test-contract.md"), "# TC\n\n| test_id | scenario |\n|---|---|\n| TEST-001 | 说明可查询 |\n");
+    ensureChangeLayout(projectRoot, change);
+    for (const [t, f, to] of [["init", "init", "init"], ["explore", "init", "explore"], ["propose", "explore", "propose"]] as const) {
+      appendEvent(projectRoot, change, makeEvent(change, "transition_commit", {
+        transition: t, from_state: f, to_state: to, outcome: "advanced", created_job_ids: [], reason: t,
+      }, { transitionId: `T-${t}`, idempotencyKey: `${t}-key` }));
+    }
+    const tasks = (checked: boolean) => [
+      "# Tasks", "",
+      `- [${checked ? "x" : " "}] TASK-001 更新说明 tdd_required:true`,
+      "  执行依据:",
+      "  - 测试: test-contract.md#TEST-001",
+      "  - 设计: design.md#D",
+      "  - 来源: proposal.md#P",
+      "  - 验收: 说明可查询",
+      "  - 边界: 不改其他模块",
+      "",
+    ].join("\n");
+    writeFileSync(join(changeRoot, "tasks.md"), tasks(true));
+    const blocked = proposeReady(projectRoot, change, changeRoot, "minimal");
+    assert.equal(blocked.events_written, 0);
+    assert.match(blocked.message ?? "", /TASK-001 已勾选但没有执行记录/);
+
+    writeFileSync(join(changeRoot, "tasks.md"), tasks(false));
+    const ready = proposeReady(projectRoot, change, changeRoot, "minimal");
+    assert.notEqual(ready.events_written, 0, ready.message);
+  } finally { rmSync(projectRoot, { recursive: true, force: true }); }
 });
 
 test("计划修正轮：历史上有非执行依据模式的 Apply 轮时不检查勾选记录", () => {
   const fx = setupApplyWithDoneTask();
   try {
     assert.equal(reopen(fx.projectRoot, fx.change, fx.changeRoot, "propose", "补记实现期修正").to_state, "propose");
-    writeFileSync(join(fx.changeRoot, "tasks.md"), "# Tasks\n\n- [x] TASK-001 Done\n- [x] TASK-002 旧流程勾选\n");
+    writeFileSync(join(fx.changeRoot, "tasks.md"), documentationTasks([{ id: "TASK-001", checked: true }, { id: "TASK-002", checked: true }]));
     const result = proposeReady(fx.projectRoot, fx.change, fx.changeRoot, "minimal");
-    assert.doesNotMatch(result.message ?? "", /已勾选但没有执行记录/);
+    assert.notEqual(result.events_written, 0, result.message);
   } finally { fx.cleanup(); }
 });
 

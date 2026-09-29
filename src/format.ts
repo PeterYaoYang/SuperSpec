@@ -434,17 +434,25 @@ export function deferredItemReferences(designContent: string, id: string): Defer
     .map(({ reference }) => reference);
 }
 
-/** design.md“非目标”段落的条目；供阶段确认展示，不校验内容。 */
-const DESIGN_IMPLEMENTATION_PLACEMENT_HEADINGS = ["实现落点"] as const;
-
-/** design 的「实现落点」正文（去掉模板注释）；没有这一节时返回 null。 */
+/**
+ * design 的「实现落点」正文（去掉模板注释）；没有这一节时返回 null。
+ * 标题允许带编号或补充说明，正文包含其下的子标题，到同级或更高级标题为止。
+ */
 export function designImplementationPlacement(designContent: string): string | null {
-  const body = sectionBodyByHeadings(designContent, DESIGN_IMPLEMENTATION_PLACEMENT_HEADINGS);
-  if (body == null) return null;
+  const lines = designContent.split(/\r?\n/);
+  const start = lines.findIndex(line => /^#{1,6}\s+(?:[\d.、]+\s*)?实现落点/.test(line));
+  if (start < 0) return null;
+  const level = /^#+/.exec(lines[start])![0].length;
+  const endOffset = lines.slice(start + 1).findIndex(line => {
+    const heading = /^(#{1,6})\s+/.exec(line);
+    return heading != null && heading[1].length <= level;
+  });
+  const body = lines.slice(start + 1, endOffset < 0 ? undefined : start + 1 + endOffset).join("\n");
   const text = body.replace(/<!--[\s\S]*?-->/g, "").trim();
   return text === "" ? null : text;
 }
 
+/** design.md“非目标”段落的条目；供阶段确认展示，不校验内容。 */
 export function designNonGoals(designContent: string): string[] {
   const body = sectionBodyByHeadings(designContent, DESIGN_NON_GOAL_HEADINGS);
   if (body == null) return [];

@@ -176,9 +176,9 @@ test("mode 在 propose-ready 冻结：配置变 strict 不重审也不漂移 App
     mkdirSync(join(changeRoot, ".superspec", "artifacts"), { recursive: true });
     writeFileSync(join(changeRoot, "proposal.md"), "# Proposal\n");
     writeFileSync(join(changeRoot, "design.md"), "# Design\n");
-    writeFileSync(join(changeRoot, "tasks.md"), [
+    const tasksMd = (checked: boolean) => [
       "# Tasks", "",
-      "- [x] TASK-001 Documentation update",
+      `- [${checked ? "x" : " "}] TASK-001 Documentation update`,
       "  执行依据:",
       "  - 测试:",
       "  - 设计: design.md#Design",
@@ -186,7 +186,8 @@ test("mode 在 propose-ready 冻结：配置变 strict 不重审也不漂移 App
       "  - 验收: 文档与计划一致",
       "  - 边界: 不改实现代码",
       "",
-    ].join("\n"));
+    ].join("\n");
+    writeFileSync(join(changeRoot, "tasks.md"), tasksMd(false));
     writeFileSync(join(changeRoot, ".superspec", "artifacts", "discovery.md"), "# Discovery\n");
     writeFileSync(join(changeRoot, ".superspec", "artifacts", "test-contract.md"), "# Test Contract\n");
     ensureChangeLayout(projectRoot, change);
@@ -253,6 +254,7 @@ test("mode 在 propose-ready 冻结：配置变 strict 不重审也不漂移 App
       requires_verifier: true,
     });
 
+    writeFileSync(join(changeRoot, "tasks.md"), tasksMd(true));
     const applyDone = reviewReady(projectRoot, change, changeRoot);
     assert.equal(applyDone.to_state, "apply_done");
   } finally {

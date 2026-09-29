@@ -102,7 +102,7 @@ import type {
   PostAcceptCodeChanges,
   ReviewFindingContext,
   ReviewLeftovers,
-  StaleTestEvidence,
+  StaleTestEvidenceDelivery,
   WorkflowArtifactKind,
   WorkflowModeSelectionAction,
   State,
@@ -182,7 +182,7 @@ export type NextStepPlan =
       /** 执行该转换只会创建这些角色的审查工作项，状态不会推进。 */
       createsReviewJobs?: JobRole[];
       reviewLeftovers?: ReviewLeftovers;
-      staleTestEvidence?: StaleTestEvidence & { instruction: string };
+      staleTestEvidence?: StaleTestEvidenceDelivery;
     }
   | { kind: "review_rejected"; state: State; review_rejection: Record<string, unknown>; reason: string }
   | {
@@ -753,7 +753,7 @@ function validatePlanningPreflight(
     if (openSpecError) errors.push(openSpecError);
   }
   errors.push(...proposeReferenceErrors(changeRoot, events));
-  errors.push(...uncompletedCheckedTaskErrors(changeRoot, events));
+  errors.push(...uncompletedCheckedTaskErrors(changeRoot, events, executionRequirementPlan.mode));
 
   return {
     error: errors.length > 0 ? [...new Set(errors)].join("；") : null,
@@ -962,12 +962,13 @@ function countPlanTestEntries(changeRoot: string): number {
 /** 当前计划规模对应的确认 scope；规模变化后旧 scope 的答复不再适用。 */
 export function currentPlanSizeBudgetScope(changeRoot: string, events: Event[]): string | null {
   if (!existsSync(join(changeRoot, "tasks.md"))) return null;
-  return planSizeBudgetScope(currentProposeRoundId(events), countNonFixPlanTasks(changeRoot), countPlanTestEntries(changeRoot));
+  const size = currentPlanSize(changeRoot);
+  return planSizeBudgetScope(currentProposeRoundId(events), size.tasks, size.tests);
 }
 
 export function currentPlanSize(changeRoot: string): { tasks: number; tests: number } {
-  if (!existsSync(join(changeRoot, "tasks.md"))) return { tasks: 0, tests: countPlanTestEntries(changeRoot) };
-  return { tasks: countNonFixPlanTasks(changeRoot), tests: countPlanTestEntries(changeRoot) };
+  const tasks = existsSync(join(changeRoot, "tasks.md")) ? countNonFixPlanTasks(changeRoot) : 0;
+  return { tasks, tests: countPlanTestEntries(changeRoot) };
 }
 
 /** 本 change 里用户已确认过不小于当前规模的计划（跨 Propose 轮）；reopen 与规模缩小都不需要再问。 */
@@ -1043,7 +1044,6 @@ function planSizeBudgetNextStep(context: PhasePlanContext): NextStepPlan | null 
   const scope = planSizeBudgetScope(currentProposeRoundId(events), taskCount, testCount);
   const answer = latestPlanSizeBudgetAnswer(events, scope);
   if (answer === PLAN_SIZE_BUDGET_CONFIRM_ANSWER) return null;
-  if (answer !== PLAN_SIZE_BUDGET_SHRINK_ANSWER && confirmedPlanSizeCovers(events, taskCount, testCount)) return null;
   if (answer === PLAN_SIZE_BUDGET_SHRINK_ANSWER) {
     return {
       kind: "material_update_required",
@@ -1052,6 +1052,7 @@ function planSizeBudgetNextStep(context: PhasePlanContext): NextStepPlan | null 
       reason: "已选择收缩计划但规模未变化",
     };
   }
+  if (confirmedPlanSizeCovers(events, taskCount, testCount)) return null;
 
   const overage = planSizeBudgetOverageMessage(budget, taskCount, testCount);
   const question = `当前计划规模为 ${overage}。请确认是否按此规模继续进入审查，或先回去收缩 tasks / test-contract。`;
@@ -1225,20 +1226,18 @@ function isPostApplyPlanOnlyRepair(changeRoot: string, events: Event[]): boolean
 /**
  * 已勾选任务必须有执行记录。
  *
- * 每轮 Apply 都按执行依据模式执行时，task 只能经 task-complete 勾选；已勾选却从未完成的
- * task 是手工补登，记录与事实不一致。
+ * 本轮与此前每轮 Apply 都按执行依据模式执行时，task 只能经 task-complete 勾选；已勾选却从未
+ * 完成的 task 是手工补登，记录与事实不一致。
  */
-function uncompletedCheckedTaskErrors(changeRoot: string, events: Event[]): string[] {
+function uncompletedCheckedTaskErrors(changeRoot: string, events: Event[], contractMode: boolean): string[] {
   const tasksPath = join(changeRoot, "tasks.md");
-  if (!existsSync(tasksPath)) return [];
+  if (!contractMode || !existsSync(tasksPath)) return [];
   const startApplies = events.filter(ev =>
     ev.event_type === "transition_commit" &&
     (ev.payload as { transition?: unknown; to_state?: unknown }).transition === "start-apply" &&
     (ev.payload as { to_state?: unknown }).to_state === "apply"
   );
-  const allContractRounds = startApplies.length > 0 &&
-    startApplies.every(ev => (ev.payload as { apply_contract_mode?: unknown }).apply_contract_mode === true);
-  if (!allContractRounds) return [];
+  if (!startApplies.every(ev => (ev.payload as { apply_contract_mode?: unknown }).apply_contract_mode === true)) return [];
   const completed = new Set(events
     .filter(ev => ev.event_type === "task_completed")
     .map(ev => String((ev.payload as { task_id?: unknown }).task_id ?? "")));

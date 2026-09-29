@@ -12,10 +12,12 @@ export interface CompletedAttemptGreenPlan {
 }
 
 export interface TestRerunRequirement {
+  /** 任务没有声明 TEST 时按尝试整体要求，这里填任务 ID，并以 attempt_level 标明。 */
   test_id: string;
   attempt_id: string;
   task_id: string;
   semantic_status: GreenStatus;
+  attempt_level?: true;
 }
 
 export type TestEvidenceFreshness =
@@ -68,7 +70,8 @@ function changedPaths(before: Ref[], after: Ref[]): string[] {
 
 /**
  * 当前 Apply round 中，某个已完成尝试完成之后代码又有变化（包括后续任务的改动）时，它声明的每个 TEST
- * 都需要一次对当前代码登记的 GREEN。task_completed 没有代码状态或不属于同一审查周期时无法比较，视为新鲜。
+ * 的已登记 GREEN 都早于当前代码，对当前代码补登一次 GREEN 才重新算作新鲜。task_completed 没有代码状态
+ * 或不属于同一审查周期时无法比较，视为新鲜。
  */
 export function testEvidenceFreshness(projectRoot: string, events: Event[]): TestEvidenceFreshness {
   const roundEvents = events.slice(Math.max(0, events.findLastIndex(isStartApplyCommit)));
@@ -104,7 +107,7 @@ export function testEvidenceFreshness(projectRoot: string, events: Event[]): Tes
       task_id: attempt.task_id,
       semantic_status: plan.accepted_green_statuses[0] ?? "expected_success",
     });
-    if (plan.test_ids.length === 0) attemptLevel.push(requirement(attempt.task_id));
+    if (plan.test_ids.length === 0) attemptLevel.push({ ...requirement(attempt.task_id), attempt_level: true });
     for (const testId of plan.test_ids) byTest.set(testId, requirement(testId));
   }
 
@@ -133,17 +136,12 @@ export function testEvidenceFreshness(projectRoot: string, events: Event[]): Tes
   };
 }
 
-/**
- * 证据登记早于当前代码的 TEST 与相关改动文件。
- *
- * 测试结果由执行者自报时，要求逐条重登只会产生没有信息量的登记；这里只把事实交给
- * 审查者和使用者判断，不阻塞流程。
- */
+/** 证据登记早于当前代码的 TEST、对应任务与相关改动文件；只提供事实，不阻塞流程。 */
 export function staleTestEvidence(projectRoot: string, events: Event[]): StaleTestEvidence | null {
   const freshness = testEvidenceFreshness(projectRoot, events);
   if (freshness.fresh) return null;
   return {
-    test_ids: [...new Set(freshness.reruns.map(req => req.test_id))],
+    test_ids: [...new Set(freshness.reruns.filter(req => !req.attempt_level).map(req => req.test_id))],
     task_ids: freshness.baseline_task_ids,
     changed_paths: freshness.changed_paths,
   };
